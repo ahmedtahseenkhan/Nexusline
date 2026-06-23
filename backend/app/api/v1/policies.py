@@ -1,0 +1,228 @@
+"""Policy Management API — repository, publish, and acknowledgment tracking."""
+from __future__ import annotations
+
+import uuid
+from datetime import date
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
+
+from app.core.deps import CurrentUser, DbSession, require
+from app.models.enums import PolicyStatus
+from app.models.policy import Policy, PolicyAcknowledgment, PolicyReview
+
+
+def _loads():
+    return (
+        selectinload(Policy.related),
+        selectinload(Policy.controls),
+        selectinload(Policy.requirements),
+        selectinload(Policy.risks),
+        selectinload(Policy.reviews),
+        selectinload(Policy.acknowledgments),
+        selectinload(Policy.label),
+    )
+from app.schemas.common import Page
+from app.schemas.policy import (
+    PolicyAcknowledgmentRead,
+    PolicyCreate,
+    PolicyRead,
+    PolicyReviewComplete,
+    PolicyReviewCreate,
+    PolicyReviewRead,
+    PolicyUpdate,
+)
+from app.services import audit
+from app.services.risk_scoring import next_review_date
+
+router = APIRouter(prefix="/policies", tags=["policies"])
+
+
+async def _load(db, policy_id: uuid.UUID) -> Policy:
+    obj = await db.scalar(
+        select(Policy).where(Policy.id == policy_id, Policy.deleted.is_(False))
+        .options(*_loads()).execution_options(populate_existing=True)
+    )
+    if obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Policy not found")
+    return obj
+
+
+async def _load_related(db, ids):
+    if not ids:
+        return []
+    return list((await db.scalars(select(Policy).where(Policy.id.in_(ids)))).all())
+
+
+async def _next_ref(db) -> str:
+    count = await db.scalar(select(func.count()).select_from(Policy)) or 0
+    return f"POL-{count + 1:03d}"
+
+
+@router.get("", response_model=Page[PolicyRead], dependencies=[Depends(require("policy:read"))])
+async def list_policies(
+    db: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[PolicyRead]:
+    stmt = select(Policy).where(Policy.deleted.is_(False))
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (
+        await db.scalars(stmt.options(*_loads()).order_by(Policy.reference).limit(limit).offset(offset))
+    ).all()
+    return Page(
+        items=[PolicyRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
+    )
+
+
+@router.post(
+    "",
+    response_model=PolicyRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require("policy:write"))],
+)
+async def create_policy(body: PolicyCreate, db: DbSession, user: CurrentUser) -> PolicyRead:
+    data = body.model_dump()
+    related_ids = data.pop("related_ids", [])
+    obj = Policy(tenant_id=user.tenant_id, **data)
+    obj.related = await _load_related(db, related_ids)
+    obj.reference = await _next_ref(db)
+    obj.next_review_date = next_review_date(obj.review_frequency)
+    db.add(obj)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="create", entity_type="policy", entity_id=obj.id,
+        summary=f"Created policy {obj.reference}: {obj.title}",
+    )
+    return PolicyRead.model_validate(await _load(db, obj.id))
+
+
+@router.get("/{policy_id}", response_model=PolicyRead, dependencies=[Depends(require("policy:read"))])
+async def get_policy(policy_id: uuid.UUID, db: DbSession) -> PolicyRead:
+    return PolicyRead.model_validate(await _load(db, policy_id))
+
+
+@router.patch(
+    "/{policy_id}", response_model=PolicyRead, dependencies=[Depends(require("policy:write"))]
+)
+async def update_policy(
+    policy_id: uuid.UUID, body: PolicyUpdate, db: DbSession
+) -> PolicyRead:
+    obj = await _load(db, policy_id)
+    data = body.model_dump(exclude_unset=True)
+    related_ids = data.pop("related_ids", None)
+    for field, value in data.items():
+        setattr(obj, field, value)
+    if related_ids is not None:
+        obj.related = await _load_related(db, related_ids)
+    if "review_frequency" in data:
+        obj.next_review_date = next_review_date(obj.review_frequency)
+    await db.flush()
+    return PolicyRead.model_validate(await _load(db, obj.id))
+
+
+@router.post(
+    "/{policy_id}/publish",
+    response_model=PolicyRead,
+    dependencies=[Depends(require("policy:write"))],
+    summary="Publish a policy",
+)
+async def publish_policy(policy_id: uuid.UUID, db: DbSession, user: CurrentUser) -> PolicyRead:
+    obj = await _load(db, policy_id)
+    obj.status = PolicyStatus.published
+    obj.published_at = date.today()
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="publish", entity_type="policy", entity_id=obj.id,
+        summary=f"Published policy {obj.reference}",
+    )
+    return PolicyRead.model_validate(await _load(db, obj.id))
+
+
+@router.post(
+    "/{policy_id}/acknowledge",
+    response_model=PolicyAcknowledgmentRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require("policy:read"))],
+    summary="Acknowledge a policy as the current user",
+)
+async def acknowledge_policy(
+    policy_id: uuid.UUID, db: DbSession, user: CurrentUser
+) -> PolicyAcknowledgmentRead:
+    await _load(db, policy_id)
+    existing = await db.scalar(
+        select(PolicyAcknowledgment).where(
+            PolicyAcknowledgment.policy_id == policy_id,
+            PolicyAcknowledgment.user_id == user.id,
+        )
+    )
+    if existing is not None:
+        return PolicyAcknowledgmentRead.model_validate(existing)
+    ack = PolicyAcknowledgment(
+        tenant_id=user.tenant_id, policy_id=policy_id, user_id=user.id, user_email=user.email
+    )
+    db.add(ack)
+    await db.flush()
+    await db.refresh(ack)
+    return PolicyAcknowledgmentRead.model_validate(ack)
+
+
+@router.delete(
+    "/{policy_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require("policy:write"))],
+)
+async def delete_policy(policy_id: uuid.UUID, db: DbSession) -> None:
+    from datetime import datetime, timezone
+
+    obj = await _load(db, policy_id)
+    obj.deleted = True
+    obj.deleted_date = datetime.now(timezone.utc)
+
+
+# ----------------------------------------------------------------- review cycle
+@router.get(
+    "/{policy_id}/reviews", response_model=list[PolicyReviewRead],
+    dependencies=[Depends(require("policy:read"))],
+)
+async def list_policy_reviews(policy_id: uuid.UUID, db: DbSession) -> list[PolicyReviewRead]:
+    obj = await _load(db, policy_id)
+    return [PolicyReviewRead.model_validate(r) for r in obj.reviews]
+
+
+@router.post(
+    "/{policy_id}/reviews", response_model=PolicyRead, status_code=201,
+    dependencies=[Depends(require("policy:write"))],
+)
+async def schedule_policy_review(policy_id: uuid.UUID, body: PolicyReviewCreate, db: DbSession) -> PolicyRead:
+    obj = await _load(db, policy_id)
+    db.add(PolicyReview(tenant_id=obj.tenant_id, policy_id=obj.id, planned_date=body.planned_date,
+                        reviewer=body.reviewer, comments=body.comments))
+    obj.next_review_date = body.planned_date
+    await db.flush()
+    return PolicyRead.model_validate(await _load(db, obj.id))
+
+
+@router.post(
+    "/{policy_id}/reviews/{review_id}/complete", response_model=PolicyRead,
+    dependencies=[Depends(require("policy:write"))],
+)
+async def complete_policy_review(
+    policy_id: uuid.UUID, review_id: uuid.UUID, body: PolicyReviewComplete, db: DbSession, user: CurrentUser
+) -> PolicyRead:
+    obj = await _load(db, policy_id)
+    review = await db.scalar(select(PolicyReview).where(PolicyReview.id == review_id, PolicyReview.policy_id == policy_id))
+    if review is None:
+        raise HTTPException(status_code=404, detail="Review not found")
+    today = date.today()
+    review.actual_review_date = today
+    if body.comments:
+        review.comments = body.comments
+    obj.last_review_date = today
+    obj.next_review_date = next_review_date(obj.review_frequency, today)
+    await audit.record(db, actor=user, action="review", entity_type="policy", entity_id=obj.id,
+                       summary=f"Reviewed policy {obj.reference}")
+    await db.flush()
+    return PolicyRead.model_validate(await _load(db, obj.id))

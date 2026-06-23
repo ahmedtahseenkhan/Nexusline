@@ -1,0 +1,170 @@
+"""Awareness Training API — program/quiz builder, participant assignment, quiz scoring."""
+from __future__ import annotations
+
+import uuid
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func, select
+
+from app.core.deps import CurrentUser, DbSession, require
+from app.models.awareness import (
+    AwarenessOption,
+    AwarenessProgram,
+    AwarenessQuestion,
+    TrainingRecord,
+)
+from app.models.enums import TrainingStatus
+from app.schemas.awareness import (
+    ParticipantCreate,
+    ProgramCreate,
+    ProgramRead,
+    ProgramSummary,
+    ProgramUpdate,
+    QuizSubmit,
+)
+from app.services import audit
+from app.services.risk_scoring import next_review_date
+
+router = APIRouter(prefix="/awareness-programs", tags=["awareness"])
+
+
+async def _load(db, program_id: uuid.UUID) -> AwarenessProgram:
+    obj = await db.scalar(select(AwarenessProgram).where(AwarenessProgram.id == program_id))
+    if obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Program not found")
+    return obj
+
+
+async def _fresh(db, program_id: uuid.UUID) -> AwarenessProgram:
+    return await db.scalar(
+        select(AwarenessProgram).where(AwarenessProgram.id == program_id).execution_options(populate_existing=True)
+    )
+
+
+async def _next_ref(db) -> str:
+    count = await db.scalar(select(func.count()).select_from(AwarenessProgram)) or 0
+    return f"AW-{count + 1:03d}"
+
+
+@router.get("", response_model=list[ProgramSummary], dependencies=[Depends(require("awareness:read"))])
+async def list_programs(db: DbSession) -> list[ProgramSummary]:
+    rows = (await db.scalars(
+        select(AwarenessProgram).where(AwarenessProgram.deleted.is_(False)).order_by(AwarenessProgram.name)
+    )).all()
+    return [ProgramSummary.model_validate(r) for r in rows]
+
+
+@router.post("", response_model=ProgramRead, status_code=201, dependencies=[Depends(require("awareness:write"))])
+async def create_program(body: ProgramCreate, db: DbSession, user: CurrentUser) -> ProgramRead:
+    data = body.model_dump(exclude={"questions"})
+    program = AwarenessProgram(tenant_id=user.tenant_id, **data)
+    program.reference = await _next_ref(db)
+    program.next_due_date = next_review_date(program.frequency)
+    for i, qc in enumerate(body.questions):
+        q = AwarenessQuestion(tenant_id=user.tenant_id, text=qc.text, order_index=qc.order_index or i)
+        q.options = [
+            AwarenessOption(
+                tenant_id=user.tenant_id, label=o.label, is_correct=o.is_correct, order_index=o.order_index or j
+            )
+            for j, o in enumerate(qc.options)
+        ]
+        program.questions.append(q)
+    db.add(program)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="create", entity_type="awareness_program", entity_id=program.id,
+        summary=f"Created awareness program {program.reference}: {program.name}",
+    )
+    return ProgramRead.model_validate(await _load(db, program.id))
+
+
+@router.get("/{program_id}", response_model=ProgramRead, dependencies=[Depends(require("awareness:read"))])
+async def get_program(program_id: uuid.UUID, db: DbSession) -> ProgramRead:
+    return ProgramRead.model_validate(await _load(db, program_id))
+
+
+@router.patch("/{program_id}", response_model=ProgramRead, dependencies=[Depends(require("awareness:write"))])
+async def update_program(program_id: uuid.UUID, body: ProgramUpdate, db: DbSession) -> ProgramRead:
+    program = await _load(db, program_id)
+    data = body.model_dump(exclude_unset=True)
+    for f, v in data.items():
+        setattr(program, f, v)
+    if "frequency" in data:
+        program.next_due_date = next_review_date(program.frequency)
+    await db.flush()
+    return ProgramRead.model_validate(await _fresh(db, program.id))
+
+
+@router.delete("/{program_id}", status_code=204, dependencies=[Depends(require("awareness:write"))])
+async def delete_program(program_id: uuid.UUID, db: DbSession) -> None:
+    from datetime import datetime, timezone
+
+    obj = await _load(db, program_id)
+    obj.deleted = True
+    obj.deleted_date = datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------- participants
+@router.post(
+    "/{program_id}/participants",
+    response_model=ProgramRead,
+    status_code=201,
+    dependencies=[Depends(require("awareness:write"))],
+)
+async def add_participant(program_id: uuid.UUID, body: ParticipantCreate, db: DbSession, user: CurrentUser) -> ProgramRead:
+    await _load(db, program_id)
+    db.add(TrainingRecord(tenant_id=user.tenant_id, program_id=program_id, **body.model_dump()))
+    await db.flush()
+    return ProgramRead.model_validate(await _fresh(db, program_id))
+
+
+@router.post(
+    "/{program_id}/participants/{participant_id}/quiz",
+    response_model=ProgramRead,
+    dependencies=[Depends(require("awareness:write"))],
+    summary="Submit a participant's quiz answers; auto-scores and marks completed",
+)
+async def submit_quiz(
+    program_id: uuid.UUID, participant_id: uuid.UUID, body: QuizSubmit, db: DbSession
+) -> ProgramRead:
+    program = await _load(db, program_id)
+    record = await db.scalar(
+        select(TrainingRecord).where(
+            TrainingRecord.id == participant_id, TrainingRecord.program_id == program_id
+        )
+    )
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
+
+    questions = program.questions
+    if not questions:
+        raise HTTPException(status_code=400, detail="Program has no questions")
+    correct_option = {q.id: next((o.id for o in q.options if o.is_correct), None) for q in questions}
+
+    correct = 0
+    for q in questions:
+        chosen = body.answers.get(q.id)
+        if chosen is not None and chosen == correct_option[q.id]:
+            correct += 1
+    record.score = round(100 * correct / len(questions))
+    record.status = TrainingStatus.completed
+    record.completed_at = date.today()
+    await db.flush()
+    return ProgramRead.model_validate(await _fresh(db, program_id))
+
+
+@router.delete(
+    "/{program_id}/participants/{participant_id}",
+    status_code=204,
+    dependencies=[Depends(require("awareness:write"))],
+)
+async def delete_participant(program_id: uuid.UUID, participant_id: uuid.UUID, db: DbSession) -> None:
+    record = await db.scalar(
+        select(TrainingRecord).where(
+            TrainingRecord.id == participant_id, TrainingRecord.program_id == program_id
+        )
+    )
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
+    await db.delete(record)

@@ -1,0 +1,42 @@
+"""Threat & Vulnerability catalogs — reusable libraries linked to risks
+(threat exploits vulnerability → risk)."""
+from __future__ import annotations
+
+from sqlalchemy import Column, ForeignKey, String, Table, Text, Uuid
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
+
+risk_threats = Table(
+    "risk_threats",
+    Base.metadata,
+    Column("risk_id", Uuid, ForeignKey("risks.id", ondelete="CASCADE"), primary_key=True),
+    Column("threat_id", Uuid, ForeignKey("threats.id", ondelete="CASCADE"), primary_key=True),
+)
+risk_vulnerabilities = Table(
+    "risk_vulnerabilities",
+    Base.metadata,
+    Column("risk_id", Uuid, ForeignKey("risks.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "vulnerability_id",
+        Uuid,
+        ForeignKey("vulnerabilities.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+
+
+class Threat(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    __tablename__ = "threats"
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(120), default="", index=True)
+
+
+class Vulnerability(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    __tablename__ = "vulnerabilities"
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(120), default="", index=True)

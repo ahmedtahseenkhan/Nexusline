@@ -1,0 +1,160 @@
+"""Cross-module alert scanner — computes due/overdue/gap alerts across every module
+and reconciles them into the ``notifications`` table (dedup + auto-resolve)."""
+from __future__ import annotations
+
+from datetime import date
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.access_review import AccessReview
+from app.models.approval import ApprovalRequest
+from app.models.attestation import Attestation
+from app.models.awareness import AwarenessProgram
+from app.models.continuity import ContinuityPlan
+from app.models.control import Control
+from app.models.enums import (
+    AccessReviewStatus,
+    ApprovalStatus,
+    ExceptionStatus,
+    NotificationCategory,
+    ProjectStatus,
+)
+from app.models.exception import ExceptionRecord
+from app.models.goal import Goal
+from app.models.notification import Notification
+from app.models.policy import Policy
+from app.models.privacy import ProcessingActivity
+from app.models.project import Project
+from app.models.risk import Risk
+from app.services.risk_scoring import effective_score
+from app.services.risk_settings import get_or_create_settings
+
+_W = NotificationCategory.warning
+_C = NotificationCategory.critical
+_I = NotificationCategory.info
+
+
+async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
+    today = date.today()
+    alerts: list[dict] = []
+
+    def add(key, title, body, category, etype, eid, link):
+        alerts.append(
+            {
+                "dedup_key": key,
+                "title": title,
+                "body": body,
+                "category": category,
+                "entity_type": etype,
+                "entity_id": eid,
+                "link": link,
+            }
+        )
+
+    settings = await get_or_create_settings(db, tenant_id)
+    for r in (await db.scalars(select(Risk))).all():
+        if r.next_review_date and r.next_review_date < today:
+            add(f"risk-review:{r.id}", f"Risk review overdue: {r.reference}",
+                f"{r.title} — review was due {r.next_review_date}", _W, "risk", r.id, "/risks")
+        eff = effective_score(r.inherent_score, r.residual_score)
+        if eff is not None and eff > settings.tolerance_score:
+            add(f"risk-breach:{r.id}", f"Risk above tolerance: {r.reference}",
+                f"{r.title} — score {eff} exceeds tolerance {settings.tolerance_score}", _C, "risk", r.id, "/risks")
+
+    for c in (await db.scalars(select(Control))).all():
+        if c.next_audit_date and c.next_audit_date < today:
+            add(f"control-audit:{c.id}", f"Control audit overdue: {c.reference or c.name}",
+                f"Audit was due {c.next_audit_date}", _W, "control", c.id, "/controls")
+        if c.next_maintenance_date and c.next_maintenance_date < today:
+            add(f"control-maint:{c.id}", f"Control maintenance overdue: {c.reference or c.name}",
+                f"Maintenance was due {c.next_maintenance_date}", _W, "control", c.id, "/controls")
+
+    for e in (await db.scalars(select(ExceptionRecord))).all():
+        if e.status == ExceptionStatus.approved and e.expires_at and e.expires_at < today:
+            add(f"exc-expired:{e.id}", f"Exception expired: {e.reference}",
+                f"{e.title} expired {e.expires_at}", _C, "exception", e.id, "/exceptions")
+
+    for g in (await db.scalars(select(Goal))).all():
+        if g.next_audit_date and g.next_audit_date < today:
+            add(f"goal-audit:{g.id}", f"Goal audit overdue: {g.reference}",
+                f"{g.name} — audit was due {g.next_audit_date}", _W, "goal", g.id, "/goals")
+
+    for p in (await db.scalars(select(ContinuityPlan))).all():
+        if p.next_test_date and p.next_test_date < today:
+            add(f"bcp-test:{p.id}", f"Continuity test overdue: {p.reference}",
+                f"{p.name} — test was due {p.next_test_date}", _W, "continuity_plan", p.id, "/continuity")
+
+    for ar in (await db.scalars(select(AccessReview))).all():
+        if ar.due_date and ar.due_date < today and ar.status != AccessReviewStatus.completed:
+            add(f"ar-overdue:{ar.id}", f"Access review overdue: {ar.reference}",
+                f"{ar.name} — due {ar.due_date}", _W, "access_review", ar.id, "/access-reviews")
+
+    for ra in (await db.scalars(select(ProcessingActivity))).all():
+        if ra.has_transfer_gap:
+            add(f"ropa-transfer:{ra.id}", f"Transfer gap: {ra.reference}",
+                f"{ra.name} — cross-border transfer without a safeguard", _C, "processing_activity", ra.id, "/privacy")
+        if ra.dpia_outstanding:
+            add(f"ropa-dpia:{ra.id}", f"DPIA outstanding: {ra.reference}",
+                f"{ra.name} — DPIA required but not completed", _W, "processing_activity", ra.id, "/privacy")
+
+    for pol in (await db.scalars(select(Policy))).all():
+        if pol.next_review_date and pol.next_review_date < today:
+            add(f"policy-review:{pol.id}", f"Policy review overdue: {pol.reference}",
+                f"{pol.title} — review was due {pol.next_review_date}", _W, "policy", pol.id, "/policies")
+
+    for aw in (await db.scalars(select(AwarenessProgram))).all():
+        if aw.next_due_date and aw.next_due_date < today:
+            add(f"aw-due:{aw.id}", f"Awareness training due: {aw.reference}",
+                f"{aw.name} — due {aw.next_due_date}", _I, "awareness_program", aw.id, "/awareness")
+
+    for pr in (await db.scalars(select(Project))).all():
+        if pr.deadline and pr.deadline < today and pr.status != ProjectStatus.completed:
+            add(f"proj-overdue:{pr.id}", f"Project overdue: {pr.reference}",
+                f"{pr.title} — deadline {pr.deadline}", _W, "project", pr.id, "/projects")
+
+    # Overdue attestations — keep only the latest attestation per record, alert if past due.
+    latest_att: dict[tuple[str, object], Attestation] = {}
+    for att in (await db.scalars(select(Attestation).order_by(Attestation.attested_at))).all():
+        latest_att[(att.entity_type, att.entity_id)] = att  # ordered asc -> ends on latest
+    for (etype, eid), att in latest_att.items():
+        if att.next_due and att.next_due < today:
+            add(f"attest-overdue:{etype}:{eid}", f"Attestation overdue: {etype}",
+                f"{etype} review was due {att.next_due} (last by {att.attested_by_email or 'n/a'})",
+                _W, etype, eid, "")
+
+    for ap in (await db.scalars(select(ApprovalRequest))).all():
+        if ap.status == ApprovalStatus.pending:
+            overdue = ap.due_date is not None and ap.due_date < today
+            add(f"approval-pending:{ap.id}",
+                f"Approval {'overdue' if overdue else 'pending'}: {ap.reference}",
+                f"{ap.title} — awaiting {ap.approver or 'a decision'}",
+                _W if overdue else _I, "approval", ap.id, "/approvals")
+
+    return alerts
+
+
+async def refresh(db: AsyncSession, tenant_id) -> None:
+    """Reconcile current alerts into the notifications table (add new, delete resolved)."""
+    alerts = await scan_alerts(db, tenant_id)
+    existing = {n.dedup_key: n for n in (await db.scalars(select(Notification))).all()}
+    current_keys = {a["dedup_key"] for a in alerts}
+
+    for a in alerts:
+        if a["dedup_key"] not in existing:
+            db.add(
+                Notification(
+                    tenant_id=tenant_id,
+                    title=a["title"],
+                    body=a["body"],
+                    category=a["category"],
+                    entity_type=a["entity_type"],
+                    entity_id=a["entity_id"],
+                    link=a["link"],
+                    dedup_key=a["dedup_key"],
+                )
+            )
+    for key, n in existing.items():
+        if key not in current_keys:
+            await db.delete(n)
+    await db.flush()

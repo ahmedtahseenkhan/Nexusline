@@ -1,0 +1,79 @@
+"""Aggregate all v1 routers."""
+from fastapi import APIRouter
+
+from app.api.v1 import (
+    access_reviews,
+    approvals,
+    assessments,
+    attestations,
+    assets,
+    audit,
+    versions,
+    auth,
+    awareness,
+    collab,
+    compliance,
+    continuity,
+    controls,
+    custom_fields,
+    dashboard,
+    evidence,
+    exceptions,
+    filters,
+    goals,
+    incidents,
+    notifications,
+    organization,
+    policies,
+    privacy,
+    projects,
+    reports,
+    risk_program,
+    risks,
+    sso,
+    status_rules,
+    threats,
+    users,
+    vendors,
+    webhooks,
+)
+
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(auth.router)
+api_router.include_router(sso.router)
+api_router.include_router(dashboard.router)
+api_router.include_router(risks.router)
+api_router.include_router(risk_program.router)
+api_router.include_router(threats.router)
+api_router.include_router(controls.router)
+api_router.include_router(assets.router)
+api_router.include_router(assets.labels_router)
+api_router.include_router(assets.media_types_router)
+api_router.include_router(assets.class_router)
+api_router.include_router(compliance.router)
+api_router.include_router(evidence.router)
+api_router.include_router(exceptions.router)
+api_router.include_router(projects.router)
+api_router.include_router(goals.router)
+api_router.include_router(continuity.router)
+api_router.include_router(privacy.router)
+api_router.include_router(access_reviews.router)
+api_router.include_router(awareness.router)
+api_router.include_router(notifications.router)
+api_router.include_router(approvals.router)
+api_router.include_router(custom_fields.router)
+api_router.include_router(reports.router)
+api_router.include_router(collab.router)
+api_router.include_router(webhooks.router)
+api_router.include_router(status_rules.router)
+api_router.include_router(attestations.router)
+api_router.include_router(filters.router)
+api_router.include_router(incidents.router)
+api_router.include_router(policies.router)
+api_router.include_router(vendors.router)
+api_router.include_router(vendors.types_router)
+api_router.include_router(assessments.router)
+api_router.include_router(organization.router)
+api_router.include_router(audit.router)
+api_router.include_router(versions.router)
+api_router.include_router(users.router)
