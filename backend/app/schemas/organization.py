@@ -23,6 +23,7 @@ class BusinessUnitBase(BaseModel):
     location: str = ""
     parent_id: uuid.UUID | None = None
     workflow_status: WorkflowState = WorkflowState.draft
+    workflow_owner: str = ""
 
 
 class BusinessUnitCreate(BusinessUnitBase):
@@ -37,6 +38,7 @@ class BusinessUnitUpdate(BaseModel):
     location: str | None = None
     parent_id: uuid.UUID | None = None
     workflow_status: WorkflowState | None = None
+    workflow_owner: str | None = None
     legal_ids: list[uuid.UUID] | None = None
 
 
@@ -54,14 +56,15 @@ class ProcessBase(BaseModel):
     business_unit_id: uuid.UUID | None = None
     owner: str = ""
     criticality: Criticality = Criticality.medium
-    rto_hours: int | None = Field(default=None, ge=0)
-    rpo_hours: int | None = Field(default=None, ge=0)
-    rpd_hours: int | None = Field(default=None, ge=0)
+    rto_hours: int | None = Field(default=None, ge=0)  # recovery time objective (hours)
+    rpo_hours: int | None = Field(default=None, ge=0)  # recovery point objective (hours)
+    rpd_hours: int | None = Field(default=None, ge=0)  # max tolerable downtime (hours)
     workflow_status: WorkflowState = WorkflowState.draft
+    workflow_owner: str = ""
 
 
 class ProcessCreate(ProcessBase):
-    pass
+    asset_ids: list[uuid.UUID] = []
 
 
 class ProcessUpdate(BaseModel):
@@ -74,12 +77,15 @@ class ProcessUpdate(BaseModel):
     rpo_hours: int | None = Field(default=None, ge=0)
     rpd_hours: int | None = Field(default=None, ge=0)
     workflow_status: WorkflowState | None = None
+    workflow_owner: str | None = None
+    asset_ids: list[uuid.UUID] | None = None
 
 
 class ProcessRead(ProcessBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     business_unit: Ref | None = None
+    assets: list[Ref] = []
 
 
 # ------------------------------------------------------------------------- Legal
@@ -89,13 +95,15 @@ class LegalBase(BaseModel):
     category: str = ""
     jurisdiction: str = ""
     reference: str = ""
-    countries: str = ""
+    countries: str = ""  # CSV of applicable countries
     risk_magnifier: float = Field(default=1.0, ge=0)
     workflow_status: WorkflowState = WorkflowState.draft
+    workflow_owner: str = ""
 
 
 class LegalCreate(LegalBase):
-    pass
+    business_unit_ids: list[uuid.UUID] = []
+    asset_ids: list[uuid.UUID] = []
 
 
 class LegalUpdate(BaseModel):
@@ -107,9 +115,13 @@ class LegalUpdate(BaseModel):
     countries: str | None = None
     risk_magnifier: float | None = Field(default=None, ge=0)
     workflow_status: WorkflowState | None = None
+    workflow_owner: str | None = None
+    business_unit_ids: list[uuid.UUID] | None = None
+    asset_ids: list[uuid.UUID] | None = None
 
 
 class LegalRead(LegalBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     business_units: list[Ref] = []
+    assets: list[Ref] = []

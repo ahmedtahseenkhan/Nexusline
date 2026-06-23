@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.base import WorkflowState
 from app.models.enums import GoalAuditResult, GoalStatus, ReviewFrequency
 
 
@@ -48,9 +49,12 @@ class GoalBase(BaseModel):
     audit_metric: str = ""
     success_criteria: str = ""
     audit_frequency: ReviewFrequency = ReviewFrequency.annual
+    workflow_status: WorkflowState = WorkflowState.draft
+    workflow_owner: str = ""
 
 
 class GoalCreate(GoalBase):
+    next_audit_date: date | None = None
     risk_ids: list[uuid.UUID] = Field(default_factory=list)
     project_ids: list[uuid.UUID] = Field(default_factory=list)
     policy_ids: list[uuid.UUID] = Field(default_factory=list)
@@ -64,6 +68,9 @@ class GoalUpdate(BaseModel):
     audit_metric: str | None = None
     success_criteria: str | None = None
     audit_frequency: ReviewFrequency | None = None
+    workflow_status: WorkflowState | None = None
+    workflow_owner: str | None = None
+    next_audit_date: date | None = None
     risk_ids: list[uuid.UUID] | None = None
     project_ids: list[uuid.UUID] | None = None
     policy_ids: list[uuid.UUID] | None = None

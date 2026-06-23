@@ -89,6 +89,7 @@ const NAV: Section[] = [
       { href: "/custom-fields", label: "Custom Fields", icon: <IconLayers /> },
       { href: "/status-rules", label: "Status Rules", icon: <IconGauge /> },
       { href: "/filters", label: "Saved Filters", icon: <IconCompliance /> },
+      { href: "/data-io", label: "Import / Export", icon: <IconActivity /> },
       { href: "/webhooks", label: "Webhooks", icon: <IconActivity /> },
       { href: "/sso-settings", label: "SSO", icon: <IconShield /> },
       { href: "/settings", label: "Settings", icon: <IconSettings /> },

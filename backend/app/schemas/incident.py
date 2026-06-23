@@ -60,6 +60,8 @@ class IncidentBase(BaseModel):
 class IncidentCreate(IncidentBase):
     control_ids: list[uuid.UUID] = Field(default_factory=list)
     vendor_ids: list[uuid.UUID] = Field(default_factory=list)
+    asset_ids: list[uuid.UUID] = Field(default_factory=list)
+    risk_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
 class IncidentUpdate(BaseModel):
@@ -81,6 +83,8 @@ class IncidentUpdate(BaseModel):
     resolved_at: date | None = None
     control_ids: list[uuid.UUID] | None = None
     vendor_ids: list[uuid.UUID] | None = None
+    asset_ids: list[uuid.UUID] | None = None
+    risk_ids: list[uuid.UUID] | None = None
 
 
 class IncidentRead(IncidentBase):

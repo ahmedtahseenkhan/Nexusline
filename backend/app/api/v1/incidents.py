@@ -6,13 +6,15 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.models.asset import assets_incidents
 from app.models.control import Control
 from app.models.enums import IncidentStatus, Severity, StageStatus
 from app.models.incident import DEFAULT_STAGES, Incident, IncidentStage
+from app.models.risk import risk_incidents
 from app.models.vendor import Vendor
 from app.schemas.common import Page
 from app.schemas.incident import (
@@ -25,6 +27,8 @@ from app.schemas.incident import (
 from app.services import audit
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
+
+_KEEP = object()  # sentinel: field absent from request -> leave the link table untouched
 
 
 def _loads():
@@ -50,6 +54,24 @@ async def _resolve(db, model, ids):
     if not ids:
         return []
     return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
+
+
+async def _set_assoc(db, table, self_col: str, other_col: str, self_id, other_ids) -> None:
+    """Replace the rows in a 2-column association table for ``self_id`` with ``other_ids``.
+
+    Incident.assets/risks are ``viewonly=True`` reverse views (the writable side lives on
+    Asset/Risk), so direct assignment is ignored — we manage the join tables here instead.
+    """
+    if other_ids is _KEEP or other_ids is None:
+        return
+    await db.execute(delete(table).where(table.c[self_col] == self_id))
+    if other_ids:
+        await db.execute(insert(table), [{self_col: self_id, other_col: oid} for oid in other_ids])
+
+
+async def _flush_assoc(db, incident_id, asset_ids, risk_ids) -> None:
+    await _set_assoc(db, assets_incidents, "incident_id", "asset_id", incident_id, asset_ids)
+    await _set_assoc(db, risk_incidents, "incident_id", "risk_id", incident_id, risk_ids)
 
 
 async def _fresh(db, incident_id: uuid.UUID) -> Incident:
@@ -107,6 +129,8 @@ async def create_incident(body: IncidentCreate, db: DbSession, user: CurrentUser
     data = body.model_dump()
     control_ids = data.pop("control_ids", [])
     vendor_ids = data.pop("vendor_ids", [])
+    asset_ids = data.pop("asset_ids", [])
+    risk_ids = data.pop("risk_ids", [])
     obj = Incident(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db)
     obj.controls = await _resolve(db, Control, control_ids)
@@ -116,6 +140,8 @@ async def create_incident(body: IncidentCreate, db: DbSession, user: CurrentUser
         for i, name in enumerate(DEFAULT_STAGES)
     ]
     db.add(obj)
+    await db.flush()
+    await _flush_assoc(db, obj.id, asset_ids, risk_ids)
     await db.flush()
     await audit.record(
         db, actor=user, action="create", entity_type="incident", entity_id=obj.id,
@@ -139,12 +165,16 @@ async def update_incident(
     data = body.model_dump(exclude_unset=True)
     control_ids = data.pop("control_ids", None)
     vendor_ids = data.pop("vendor_ids", None)
+    asset_ids = data.pop("asset_ids", _KEEP)
+    risk_ids = data.pop("risk_ids", _KEEP)
     for field, value in data.items():
         setattr(obj, field, value)
     if control_ids is not None:
         obj.controls = await _resolve(db, Control, control_ids)
     if vendor_ids is not None:
         obj.vendors = await _resolve(db, Vendor, vendor_ids)
+    await db.flush()
+    await _flush_assoc(db, obj.id, asset_ids, risk_ids)
     await db.flush()
     await audit.record(
         db, actor=user, action="update", entity_type="incident", entity_id=obj.id,

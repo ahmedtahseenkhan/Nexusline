@@ -17,6 +17,7 @@ from app.models.awareness import (
 from app.models.enums import TrainingStatus
 from app.schemas.awareness import (
     ParticipantCreate,
+    ParticipantUpdate,
     ProgramCreate,
     ProgramRead,
     ProgramSummary,
@@ -55,21 +56,28 @@ async def list_programs(db: DbSession) -> list[ProgramSummary]:
     return [ProgramSummary.model_validate(r) for r in rows]
 
 
+def _build_questions(tenant_id, question_specs) -> list[AwarenessQuestion]:
+    """Materialize quiz question/option ORM objects from create-shaped specs."""
+    out: list[AwarenessQuestion] = []
+    for i, qc in enumerate(question_specs):
+        q = AwarenessQuestion(tenant_id=tenant_id, text=qc.text, order_index=qc.order_index or i)
+        q.options = [
+            AwarenessOption(
+                tenant_id=tenant_id, label=o.label, is_correct=o.is_correct, order_index=o.order_index or j
+            )
+            for j, o in enumerate(qc.options)
+        ]
+        out.append(q)
+    return out
+
+
 @router.post("", response_model=ProgramRead, status_code=201, dependencies=[Depends(require("awareness:write"))])
 async def create_program(body: ProgramCreate, db: DbSession, user: CurrentUser) -> ProgramRead:
     data = body.model_dump(exclude={"questions"})
     program = AwarenessProgram(tenant_id=user.tenant_id, **data)
     program.reference = await _next_ref(db)
     program.next_due_date = next_review_date(program.frequency)
-    for i, qc in enumerate(body.questions):
-        q = AwarenessQuestion(tenant_id=user.tenant_id, text=qc.text, order_index=qc.order_index or i)
-        q.options = [
-            AwarenessOption(
-                tenant_id=user.tenant_id, label=o.label, is_correct=o.is_correct, order_index=o.order_index or j
-            )
-            for j, o in enumerate(qc.options)
-        ]
-        program.questions.append(q)
+    program.questions = _build_questions(user.tenant_id, body.questions)
     db.add(program)
     await db.flush()
     await audit.record(
@@ -85,9 +93,16 @@ async def get_program(program_id: uuid.UUID, db: DbSession) -> ProgramRead:
 
 
 @router.patch("/{program_id}", response_model=ProgramRead, dependencies=[Depends(require("awareness:write"))])
-async def update_program(program_id: uuid.UUID, body: ProgramUpdate, db: DbSession) -> ProgramRead:
+async def update_program(
+    program_id: uuid.UUID, body: ProgramUpdate, db: DbSession, user: CurrentUser
+) -> ProgramRead:
     program = await _load(db, program_id)
     data = body.model_dump(exclude_unset=True)
+    # When `questions` is supplied, fully replace the quiz (delete-orphan cascade handles removals).
+    if "questions" in data:
+        data.pop("questions")
+        if body.questions is not None:
+            program.questions = _build_questions(program.tenant_id, body.questions)
     for f, v in data.items():
         setattr(program, f, v)
     if "frequency" in data:
@@ -115,6 +130,28 @@ async def delete_program(program_id: uuid.UUID, db: DbSession) -> None:
 async def add_participant(program_id: uuid.UUID, body: ParticipantCreate, db: DbSession, user: CurrentUser) -> ProgramRead:
     await _load(db, program_id)
     db.add(TrainingRecord(tenant_id=user.tenant_id, program_id=program_id, **body.model_dump()))
+    await db.flush()
+    return ProgramRead.model_validate(await _fresh(db, program_id))
+
+
+@router.patch(
+    "/{program_id}/participants/{participant_id}",
+    response_model=ProgramRead,
+    dependencies=[Depends(require("awareness:write"))],
+    summary="Edit a training record (status / score / completion date)",
+)
+async def update_participant(
+    program_id: uuid.UUID, participant_id: uuid.UUID, body: ParticipantUpdate, db: DbSession
+) -> ProgramRead:
+    record = await db.scalar(
+        select(TrainingRecord).where(
+            TrainingRecord.id == participant_id, TrainingRecord.program_id == program_id
+        )
+    )
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
+    for f, v in body.model_dump(exclude_unset=True).items():
+        setattr(record, f, v)
     await db.flush()
     return ProgramRead.model_validate(await _fresh(db, program_id))
 

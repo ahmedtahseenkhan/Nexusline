@@ -18,6 +18,16 @@ class ItemCreate(BaseModel):
     username: str = Field(min_length=1, max_length=200)
     display_name: str = ""
     access: str = ""
+    comment: str = ""
+
+
+class ItemUpdate(BaseModel):
+    """Edit a line item's identity/access fields (decisions go through ItemDecision)."""
+
+    username: str | None = Field(default=None, min_length=1, max_length=200)
+    display_name: str | None = None
+    access: str | None = None
+    comment: str | None = None
 
 
 class ItemDecision(BaseModel):

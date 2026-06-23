@@ -12,17 +12,26 @@ from app.models.compliance import Requirement
 from app.models.control import Control
 from app.models.evidence import Evidence
 from app.schemas.common import Page
-from app.schemas.evidence import EvidenceCreate, EvidenceRead
+from app.schemas.evidence import EvidenceCreate, EvidenceRead, EvidenceUpdate
 from app.services import audit
 
 router = APIRouter(tags=["evidence"])
 
 
 async def _evidence_or_404(db, evidence_id: uuid.UUID) -> Evidence:
-    obj = await db.scalar(select(Evidence).where(Evidence.id == evidence_id))
+    obj = await db.scalar(
+        select(Evidence).where(Evidence.id == evidence_id).execution_options(populate_existing=True)
+    )
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence not found")
     return obj
+
+
+async def _control_or_400(db, control_id: uuid.UUID) -> Control:
+    control = await db.get(Control, control_id)
+    if control is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown control")
+    return control
 
 
 @router.get("/evidence", response_model=Page[EvidenceRead], dependencies=[Depends(require("control:read"))])
@@ -47,9 +56,7 @@ async def list_evidence(
     dependencies=[Depends(require("control:write"))],
 )
 async def create_evidence(body: EvidenceCreate, db: DbSession, user: CurrentUser) -> EvidenceRead:
-    control = await db.get(Control, body.control_id)
-    if control is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown control")
+    control = await _control_or_400(db, body.control_id)
     obj = Evidence(tenant_id=user.tenant_id, **body.model_dump())
     db.add(obj)
     await db.flush()
@@ -59,6 +66,37 @@ async def create_evidence(body: EvidenceCreate, db: DbSession, user: CurrentUser
     )
     obj = await _evidence_or_404(db, obj.id)
     return EvidenceRead.model_validate(obj)
+
+
+@router.get(
+    "/evidence/{evidence_id}",
+    response_model=EvidenceRead,
+    dependencies=[Depends(require("control:read"))],
+)
+async def get_evidence(evidence_id: uuid.UUID, db: DbSession) -> EvidenceRead:
+    return EvidenceRead.model_validate(await _evidence_or_404(db, evidence_id))
+
+
+@router.patch(
+    "/evidence/{evidence_id}",
+    response_model=EvidenceRead,
+    dependencies=[Depends(require("control:write"))],
+)
+async def update_evidence(
+    evidence_id: uuid.UUID, body: EvidenceUpdate, db: DbSession, user: CurrentUser
+) -> EvidenceRead:
+    obj = await _evidence_or_404(db, evidence_id)
+    data = body.model_dump(exclude_unset=True)
+    if "control_id" in data and data["control_id"] is not None:
+        await _control_or_400(db, data["control_id"])
+    for field, value in data.items():
+        setattr(obj, field, value)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="update", entity_type="evidence", entity_id=obj.id,
+        summary=f"Updated evidence '{obj.title}'",
+    )
+    return EvidenceRead.model_validate(await _evidence_or_404(db, obj.id))
 
 
 @router.get(

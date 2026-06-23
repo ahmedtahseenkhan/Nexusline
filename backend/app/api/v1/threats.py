@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
-from app.models.threat import Threat, Vulnerability
+from app.models.threat import (
+    Threat,
+    Vulnerability,
+    risk_threats,
+    risk_vulnerabilities,
+)
 from app.schemas.common import Page
 from app.schemas.threat import (
     ThreatCreate,
@@ -29,6 +34,20 @@ async def _get(db, model, obj_id, name):
     return obj
 
 
+async def _usage_counts(db, assoc, fk_col):
+    """Return {entity_id: number-of-risks-referencing-it} from an association table."""
+    rows = await db.execute(
+        select(fk_col, func.count()).select_from(assoc).group_by(fk_col)
+    )
+    return {row[0]: row[1] for row in rows.all()}
+
+
+def _read(schema, obj, counts):
+    data = schema.model_validate(obj)
+    data.used_by_risks_count = counts.get(obj.id, 0)
+    return data
+
+
 # ------------------------------------------------------------------- threats
 @router.get("/threats", response_model=Page[ThreatRead], dependencies=[Depends(require("risk:read"))])
 async def list_threats(
@@ -38,7 +57,20 @@ async def list_threats(
 ) -> Page[ThreatRead]:
     total = await db.scalar(select(func.count()).select_from(Threat)) or 0
     rows = (await db.scalars(select(Threat).order_by(Threat.name).limit(limit).offset(offset))).all()
-    return Page(items=[ThreatRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    counts = await _usage_counts(db, risk_threats, risk_threats.c.threat_id)
+    return Page(
+        items=[_read(ThreatRead, r, counts) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/threats/{obj_id}", response_model=ThreatRead, dependencies=[Depends(require("risk:read"))])
+async def get_threat(obj_id: uuid.UUID, db: DbSession) -> ThreatRead:
+    obj = await _get(db, Threat, obj_id, "Threat")
+    counts = await _usage_counts(db, risk_threats, risk_threats.c.threat_id)
+    return _read(ThreatRead, obj, counts)
 
 
 @router.post("/threats", response_model=ThreatRead, status_code=201, dependencies=[Depends(require("risk:write"))])
@@ -47,7 +79,7 @@ async def create_threat(body: ThreatCreate, db: DbSession, user: CurrentUser) ->
     db.add(obj)
     await db.flush()
     await db.refresh(obj)
-    return ThreatRead.model_validate(obj)
+    return ThreatRead.model_validate(obj)  # brand-new → used_by_risks_count defaults to 0
 
 
 @router.patch("/threats/{obj_id}", response_model=ThreatRead, dependencies=[Depends(require("risk:write"))])
@@ -57,7 +89,8 @@ async def update_threat(obj_id: uuid.UUID, body: ThreatUpdate, db: DbSession) ->
         setattr(obj, f, v)
     await db.flush()
     await db.refresh(obj)
-    return ThreatRead.model_validate(obj)
+    counts = await _usage_counts(db, risk_threats, risk_threats.c.threat_id)
+    return _read(ThreatRead, obj, counts)
 
 
 @router.delete("/threats/{obj_id}", status_code=204, dependencies=[Depends(require("risk:write"))])
@@ -78,7 +111,24 @@ async def list_vulnerabilities(
     rows = (
         await db.scalars(select(Vulnerability).order_by(Vulnerability.name).limit(limit).offset(offset))
     ).all()
-    return Page(items=[VulnerabilityRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    counts = await _usage_counts(db, risk_vulnerabilities, risk_vulnerabilities.c.vulnerability_id)
+    return Page(
+        items=[_read(VulnerabilityRead, r, counts) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/vulnerabilities/{obj_id}",
+    response_model=VulnerabilityRead,
+    dependencies=[Depends(require("risk:read"))],
+)
+async def get_vulnerability(obj_id: uuid.UUID, db: DbSession) -> VulnerabilityRead:
+    obj = await _get(db, Vulnerability, obj_id, "Vulnerability")
+    counts = await _usage_counts(db, risk_vulnerabilities, risk_vulnerabilities.c.vulnerability_id)
+    return _read(VulnerabilityRead, obj, counts)
 
 
 @router.post(
@@ -89,7 +139,7 @@ async def create_vulnerability(body: VulnerabilityCreate, db: DbSession, user: C
     db.add(obj)
     await db.flush()
     await db.refresh(obj)
-    return VulnerabilityRead.model_validate(obj)
+    return VulnerabilityRead.model_validate(obj)  # brand-new → used_by_risks_count defaults to 0
 
 
 @router.patch(
@@ -101,7 +151,8 @@ async def update_vulnerability(obj_id: uuid.UUID, body: VulnerabilityUpdate, db:
         setattr(obj, f, v)
     await db.flush()
     await db.refresh(obj)
-    return VulnerabilityRead.model_validate(obj)
+    counts = await _usage_counts(db, risk_vulnerabilities, risk_vulnerabilities.c.vulnerability_id)
+    return _read(VulnerabilityRead, obj, counts)
 
 
 @router.delete("/vulnerabilities/{obj_id}", status_code=204, dependencies=[Depends(require("risk:write"))])

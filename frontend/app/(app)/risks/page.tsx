@@ -1,104 +1,237 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, type CatalogItem, type Risk, type RiskSetting, type StatusLabel } from "@/lib/api";
-import { Badge, Severity, StatusBadge } from "@/components/badges";
+import { useEffect, useMemo, useState } from "react";
+import { api, apiCall, type RiskSetting, type StatusLabel } from "@/lib/api";
+import FormModal from "@/components/FormModal";
+import RichText from "@/components/RichText";
+import { Field, TextInput, TextArea, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
+import { Badge, Severity } from "@/components/badges";
 import { IconGauge, IconPlus, IconRisk } from "@/components/icons";
 
-function ChipPicker({
-  label,
-  items,
-  selected,
-  toggle,
-}: {
-  label: string;
-  items: CatalogItem[];
-  selected: Set<string>;
-  toggle: (id: string) => void;
-}) {
-  return (
-    <div>
-      <label className="label">{label}</label>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {items.map((i) => {
-          const on = selected.has(i.id);
-          return (
-            <button
-              type="button"
-              key={i.id}
-              onClick={() => toggle(i.id)}
-              className={`badge ${on ? "info" : "neutral"}`}
-              style={{ cursor: "pointer", border: on ? "1px solid var(--primary)" : "1px solid var(--border)" }}
-            >
-              {i.name}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
+// --------------------------------------------------------------- inline types
+type Ref = { id: string; reference?: string; title?: string; name?: string };
 
-function money(n: number | null) {
+type RiskRow = {
+  id: string;
+  reference: string;
+  title: string;
+  description: string;
+  category: string;
+  status: string;
+  owner_id: string | null;
+
+  inherent_likelihood: number;
+  inherent_impact: number;
+  inherent_score: number | null;
+  residual_likelihood: number | null;
+  residual_impact: number | null;
+  residual_score: number | null;
+  inherent_severity: string | null;
+  residual_severity: string | null;
+
+  annual_loss_frequency: number | null;
+  single_loss_expectancy: number | null;
+  annual_loss_expectancy: number | null;
+
+  treatment_strategy: string | null;
+  treatment_description: string;
+  treatment_owner: string;
+  treatment_deadline: string | null;
+  treatment_cost: number | null;
+
+  review_frequency: string;
+  last_review_date: string | null;
+  next_review_date: string | null;
+  expired_reviews: number;
+  workflow_status: string;
+  workflow_owner: string;
+
+  assets: Ref[];
+  controls: Ref[];
+  threats: Ref[];
+  vulnerabilities: Ref[];
+  policies: Ref[];
+  incidents: Ref[];
+};
+
+type Page<T> = { items: T[] };
+type Named = { id: string; name?: string; reference?: string; title?: string };
+type UserRow = { id: string; email: string; full_name: string };
+
+// --------------------------------------------------------------- option helpers
+const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
+
+const STATUS = opts(["draft", "assessed", "treatment_planned", "treatment_in_progress", "accepted", "closed"]);
+const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+const STRATEGY = opts(["mitigate", "accept", "transfer", "avoid"]);
+const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
+const SCALE: Option[] = [1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: String(n) }));
+
+const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
+  closed: "low",
+  accepted: "info",
+  treatment_in_progress: "medium",
+  treatment_planned: "medium",
+  assessed: "info",
+  draft: "neutral",
+};
+
+function money(n: number | null | undefined) {
   if (!n) return "—";
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
   return `$${n.toFixed(0)}`;
 }
 
-function appetite(risk: Risk, s: RiskSetting | null) {
+function isOverdue(d: string | null): boolean {
+  if (!d) return false;
+  return new Date(d) < new Date(new Date().toDateString());
+}
+
+function appetite(r: RiskRow, s: RiskSetting | null) {
   if (!s) return null;
-  const score = risk.residual_score ?? risk.inherent_score;
+  const score = r.residual_score ?? r.inherent_score;
   if (score == null) return null;
   if (score <= s.appetite_score) return { label: "within appetite", tone: "low" as const };
   if (score <= s.tolerance_score) return { label: "elevated", tone: "medium" as const };
   return { label: "breach", tone: "critical" as const };
 }
 
+// --------------------------------------------------------------- form state
+type FormState = {
+  title: string;
+  description: string;
+  category: string;
+  status: string;
+  workflow_status: string;
+  workflow_owner: string;
+  owner_id: string;
+  inherent_likelihood: number | "";
+  inherent_impact: number | "";
+  residual_likelihood: string;
+  residual_impact: string;
+  annual_loss_frequency: number | "";
+  single_loss_expectancy: number | "";
+  treatment_strategy: string;
+  treatment_description: string;
+  treatment_owner: string;
+  treatment_deadline: string;
+  treatment_cost: number | "";
+  review_frequency: string;
+  asset_ids: string[];
+  control_ids: string[];
+  threat_ids: string[];
+  vulnerability_ids: string[];
+  policy_ids: string[];
+  incident_ids: string[];
+};
+
+const BLANK: FormState = {
+  title: "", description: "", category: "", status: "draft",
+  workflow_status: "draft", workflow_owner: "", owner_id: "",
+  inherent_likelihood: 3, inherent_impact: 3,
+  residual_likelihood: "", residual_impact: "",
+  annual_loss_frequency: "", single_loss_expectancy: "",
+  treatment_strategy: "", treatment_description: "", treatment_owner: "",
+  treatment_deadline: "", treatment_cost: "", review_frequency: "annual",
+  asset_ids: [], control_ids: [], threat_ids: [], vulnerability_ids: [], policy_ids: [], incident_ids: [],
+};
+
+function fromRisk(r: RiskRow): FormState {
+  return {
+    title: r.title,
+    description: r.description || "",
+    category: r.category || "",
+    status: r.status,
+    workflow_status: r.workflow_status,
+    workflow_owner: r.workflow_owner || "",
+    owner_id: r.owner_id || "",
+    inherent_likelihood: r.inherent_likelihood,
+    inherent_impact: r.inherent_impact,
+    residual_likelihood: r.residual_likelihood ? String(r.residual_likelihood) : "",
+    residual_impact: r.residual_impact ? String(r.residual_impact) : "",
+    annual_loss_frequency: r.annual_loss_frequency ?? "",
+    single_loss_expectancy: r.single_loss_expectancy ?? "",
+    treatment_strategy: r.treatment_strategy || "",
+    treatment_description: r.treatment_description || "",
+    treatment_owner: r.treatment_owner || "",
+    treatment_deadline: r.treatment_deadline || "",
+    treatment_cost: r.treatment_cost ?? "",
+    review_frequency: r.review_frequency,
+    asset_ids: r.assets.map((x) => x.id),
+    control_ids: r.controls.map((x) => x.id),
+    threat_ids: r.threats.map((x) => x.id),
+    vulnerability_ids: r.vulnerabilities.map((x) => x.id),
+    policy_ids: r.policies.map((x) => x.id),
+    incident_ids: r.incidents.map((x) => x.id),
+  };
+}
+
+function toPayload(f: FormState): Record<string, unknown> {
+  const num = (v: number | "") => (v === "" ? null : Number(v));
+  const scale = (v: string) => (v === "" ? null : Number(v));
+  return {
+    title: f.title,
+    description: f.description,
+    category: f.category,
+    status: f.status,
+    workflow_status: f.workflow_status,
+    workflow_owner: f.workflow_owner,
+    owner_id: f.owner_id || null,
+    inherent_likelihood: f.inherent_likelihood === "" ? 1 : Number(f.inherent_likelihood),
+    inherent_impact: f.inherent_impact === "" ? 1 : Number(f.inherent_impact),
+    residual_likelihood: scale(f.residual_likelihood),
+    residual_impact: scale(f.residual_impact),
+    annual_loss_frequency: num(f.annual_loss_frequency),
+    single_loss_expectancy: num(f.single_loss_expectancy),
+    treatment_strategy: f.treatment_strategy || null,
+    treatment_description: f.treatment_description,
+    treatment_owner: f.treatment_owner,
+    treatment_deadline: f.treatment_deadline || null,
+    treatment_cost: num(f.treatment_cost),
+    review_frequency: f.review_frequency,
+    asset_ids: f.asset_ids,
+    control_ids: f.control_ids,
+    threat_ids: f.threat_ids,
+    vulnerability_ids: f.vulnerability_ids,
+    policy_ids: f.policy_ids,
+    incident_ids: f.incident_ids,
+  };
+}
+
+// --------------------------------------------------------------- page
 export default function RisksPage() {
-  const [risks, setRisks] = useState<Risk[]>([]);
+  const [risks, setRisks] = useState<RiskRow[]>([]);
   const [labels, setLabels] = useState<Record<string, StatusLabel[]>>({});
   const [settings, setSettings] = useState<RiskSetting | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showForm, setShowForm] = useState(false);
+
+  // option sources for link pickers
+  const [assets, setAssets] = useState<Named[]>([]);
+  const [controls, setControls] = useState<Named[]>([]);
+  const [threats, setThreats] = useState<Named[]>([]);
+  const [vulns, setVulns] = useState<Named[]>([]);
+  const [policies, setPolicies] = useState<Named[]>([]);
+  const [incidents, setIncidents] = useState<Named[]>([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
+
+  // appetite editor
   const [showSettings, setShowSettings] = useState(false);
-
-  const [title, setTitle] = useState("");
-  const [category, setCategory] = useState("Information Security");
-  const [likelihood, setLikelihood] = useState(3);
-  const [impact, setImpact] = useState(3);
-  const [alf, setAlf] = useState("");
-  const [sle, setSle] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const [threats, setThreats] = useState<CatalogItem[]>([]);
-  const [vulns, setVulns] = useState<CatalogItem[]>([]);
-  const [selThreats, setSelThreats] = useState<Set<string>>(new Set());
-  const [selVulns, setSelVulns] = useState<Set<string>>(new Set());
-
   const [appetiteScore, setAppetiteScore] = useState(6);
   const [toleranceScore, setToleranceScore] = useState(12);
 
-  function toggle(set: Set<string>, setter: (s: Set<string>) => void, id: string) {
-    const next = new Set(set);
-    next.has(id) ? next.delete(id) : next.add(id);
-    setter(next);
-  }
+  // form modal
+  const [editing, setEditing] = useState<RiskRow | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [f, setF] = useState<FormState>(BLANK);
+  const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   async function load() {
     try {
-      const [r, s, t, v] = await Promise.all([
-        api.risks(),
-        api.riskSettings(),
-        api.threatCatalog(),
-        api.vulnerabilityCatalog(),
-      ]);
-      setThreats(t.items);
-      setVulns(v.items);
+      const r = await apiCall<Page<RiskRow>>("GET", "/risks?limit=200");
       setRisks(r.items);
-      setSettings(s);
-      setAppetiteScore(s.appetite_score);
-      setToleranceScore(s.tolerance_score);
       if (r.items.length) {
         api.evaluateStatus("risk", r.items.map((x) => x.id)).then(setLabels).catch(() => {});
       }
@@ -109,34 +242,57 @@ export default function RisksPage() {
 
   useEffect(() => {
     load();
+    api.riskSettings().then((s) => {
+      setSettings(s);
+      setAppetiteScore(s.appetite_score);
+      setToleranceScore(s.tolerance_score);
+    }).catch(() => {});
+    apiCall<Page<Named>>("GET", "/assets?limit=200").then((r) => setAssets(r.items)).catch(() => {});
+    apiCall<Page<Named>>("GET", "/controls?limit=200").then((r) => setControls(r.items)).catch(() => {});
+    apiCall<Page<Named>>("GET", "/threats?limit=500").then((r) => setThreats(r.items)).catch(() => {});
+    apiCall<Page<Named>>("GET", "/vulnerabilities?limit=500").then((r) => setVulns(r.items)).catch(() => {});
+    apiCall<Page<Named>>("GET", "/policies?limit=200").then((r) => setPolicies(r.items)).catch(() => {});
+    apiCall<Page<Named>>("GET", "/incidents?limit=200").then((r) => setIncidents(r.items)).catch(() => {});
+    apiCall<Page<UserRow>>("GET", "/users?limit=200").then((r) => setUsers(r.items)).catch(() => {});
   }, []);
 
-  async function createRisk(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
+  function openNew() {
+    setEditing(null);
+    setF(BLANK);
     setError(null);
+    setShowForm(true);
+  }
+  function openEdit(r: RiskRow) {
+    setEditing(r);
+    setF(fromRisk(r));
+    setError(null);
+    setShowForm(true);
+  }
+
+  async function save() {
+    setError(null);
+    setSaving(true);
     try {
-      await api.createRisk({
-        title,
-        category,
-        inherent_likelihood: likelihood,
-        inherent_impact: impact,
-        annual_loss_frequency: alf ? Number(alf) : null,
-        single_loss_expectancy: sle ? Number(sle) : null,
-        threat_ids: [...selThreats],
-        vulnerability_ids: [...selVulns],
-      });
+      const payload = toPayload(f);
+      if (editing) await apiCall("PATCH", `/risks/${editing.id}`, payload);
+      else await apiCall("POST", "/risks", payload);
       setShowForm(false);
-      setTitle("");
-      setAlf("");
-      setSle("");
-      setSelThreats(new Set());
-      setSelVulns(new Set());
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create risk");
+      setError(e instanceof Error ? e.message : "Failed to save risk");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function remove(r: RiskRow) {
+    if (!window.confirm(`Archive risk ${r.reference}? This soft-deletes it from the register.`)) return;
+    setError(null);
+    try {
+      await apiCall("DELETE", `/risks/${r.id}`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete risk");
     }
   }
 
@@ -144,33 +300,207 @@ export default function RisksPage() {
     e.preventDefault();
     setError(null);
     try {
-      const s = await api.updateRiskSettings({
-        appetite_score: appetiteScore,
-        tolerance_score: toleranceScore,
-      });
+      const s = await api.updateRiskSettings({ appetite_score: appetiteScore, tolerance_score: toleranceScore });
       setSettings(s);
       setShowSettings(false);
-      await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save settings");
     }
   }
+
+  // option lists
+  const named = (rows: Named[]): Option[] =>
+    rows.map((x) => ({ value: x.id, label: x.name || x.title || x.reference || x.id, sub: x.reference }));
+  const assetOpts = useMemo(() => named(assets), [assets]);
+  const controlOpts = useMemo(() => named(controls), [controls]);
+  const threatOpts = useMemo(() => named(threats), [threats]);
+  const vulnOpts = useMemo(() => named(vulns), [vulns]);
+  const policyOpts = useMemo(() => named(policies), [policies]);
+  const incidentOpts = useMemo(() => named(incidents), [incidents]);
+  const userOpts = useMemo<Option[]>(
+    () => users.map((u) => ({ value: u.id, label: u.full_name || u.email, sub: u.email })),
+    [users],
+  );
+
+  const userName = (id: string | null) => {
+    if (!id) return "—";
+    const u = users.find((x) => x.id === id);
+    return u ? u.full_name || u.email : "—";
+  };
+  const linkCount = (r: RiskRow) =>
+    r.assets.length + r.controls.length + r.threats.length + r.vulnerabilities.length + r.policies.length + r.incidents.length;
+
+  // computed previews
+  const inhScore = f.inherent_likelihood === "" || f.inherent_impact === "" ? null : Number(f.inherent_likelihood) * Number(f.inherent_impact);
+  const resScore = f.residual_likelihood === "" || f.residual_impact === "" ? null : Number(f.residual_likelihood) * Number(f.residual_impact);
+  const alePreview =
+    f.annual_loss_frequency === "" || f.single_loss_expectancy === ""
+      ? null
+      : Number(f.annual_loss_frequency) * Number(f.single_loss_expectancy);
+
+  // --------------------------------------------------------------- tabs
+  const generalTab = (
+    <>
+      <Field label="Title" required help="A short statement of the risk, e.g. 'Phishing leads to credential theft'.">
+        <TextInput value={f.title} onChange={(v) => set("title", v)} placeholder="Phishing leads to credential theft" required />
+      </Field>
+      <Field label="Description">
+        <TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="Threat / vulnerability context and what could go wrong." />
+      </Field>
+      <div className="field-row">
+        <Field label="Category">
+          <TextInput value={f.category} onChange={(v) => set("category", v)} placeholder="Information Security" />
+        </Field>
+        <Field label="Risk Owner" help="The user accountable for this risk.">
+          <Select value={f.owner_id} onChange={(v) => set("owner_id", v)} options={userOpts} placeholder="Unassigned" />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Status">
+          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
+        </Field>
+        <Field label="Workflow">
+          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
+        </Field>
+        <Field label="Workflow Owner">
+          <TextInput value={f.workflow_owner} onChange={(v) => set("workflow_owner", v)} placeholder="Approver" />
+        </Field>
+      </div>
+    </>
+  );
+
+  const assessmentTab = (
+    <>
+      <Field label="Inherent Risk" help="Likelihood × Impact before any controls are considered (1–5 scale).">
+        <div className="field-row">
+          <Select value={String(f.inherent_likelihood)} onChange={(v) => set("inherent_likelihood", v === "" ? "" : Number(v))} options={SCALE} placeholder="Likelihood" />
+          <Select value={String(f.inherent_impact)} onChange={(v) => set("inherent_impact", v === "" ? "" : Number(v))} options={SCALE} placeholder="Impact" />
+          <div className="field" style={{ margin: 0 }}>
+            <label>Score</label>
+            <div style={{ paddingTop: 4 }}>
+              {inhScore != null ? <Badge tone="neutral" plain>{inhScore}</Badge> : <span className="muted">—</span>}
+            </div>
+          </div>
+        </div>
+      </Field>
+      <Field label="Residual Risk" help="Likelihood × Impact after controls. Leave blank until assessed.">
+        <div className="field-row">
+          <Select value={f.residual_likelihood} onChange={(v) => set("residual_likelihood", v)} options={SCALE} placeholder="Likelihood" />
+          <Select value={f.residual_impact} onChange={(v) => set("residual_impact", v)} options={SCALE} placeholder="Impact" />
+          <div className="field" style={{ margin: 0 }}>
+            <label>Score</label>
+            <div style={{ paddingTop: 4 }}>
+              {resScore != null ? <Badge tone="neutral" plain>{resScore}</Badge> : <span className="muted">—</span>}
+            </div>
+          </div>
+        </div>
+      </Field>
+
+      <Field label="Quantitative (FAIR)" help="Annual Loss Expectancy = loss events / year × $ per event. Optional.">
+        <div className="field-row">
+          <div className="field" style={{ margin: 0 }}>
+            <label>Loss events / year (ALF)</label>
+            <NumberInput value={f.annual_loss_frequency} onChange={(v) => set("annual_loss_frequency", v)} min={0} step={0.1} placeholder="0.5" />
+          </div>
+          <div className="field" style={{ margin: 0 }}>
+            <label>$ per event (SLE)</label>
+            <NumberInput value={f.single_loss_expectancy} onChange={(v) => set("single_loss_expectancy", v)} min={0} step={1000} placeholder="200000" />
+          </div>
+          <div className="field" style={{ margin: 0 }}>
+            <label>Exposure (ALE)</label>
+            <div style={{ paddingTop: 4 }}>
+              {alePreview != null ? <Badge tone="info" plain>{money(alePreview)}</Badge> : <span className="muted">—</span>}
+            </div>
+          </div>
+        </div>
+      </Field>
+
+      <div className="field-row">
+        <Field label="Treatment Strategy">
+          <Select value={f.treatment_strategy} onChange={(v) => set("treatment_strategy", v)} options={STRATEGY} placeholder="Not decided" />
+        </Field>
+        <Field label="Treatment Owner">
+          <TextInput value={f.treatment_owner} onChange={(v) => set("treatment_owner", v)} placeholder="Responsible person" />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Treatment Deadline">
+          <TextInput value={f.treatment_deadline} onChange={(v) => set("treatment_deadline", v)} type="date" />
+        </Field>
+        <Field label="Treatment Cost ($)">
+          <NumberInput value={f.treatment_cost} onChange={(v) => set("treatment_cost", v)} min={0} step={1000} placeholder="50000" />
+        </Field>
+      </div>
+      <Field label="Treatment Plan">
+        <RichText value={f.treatment_description} onChange={(v) => set("treatment_description", v)} placeholder="Describe the treatment plan, mitigating actions and milestones…" />
+      </Field>
+    </>
+  );
+
+  const linksTab = (
+    <>
+      <Field label="Assets" help="Assets exposed to or affected by this risk.">
+        <MultiSelect value={f.asset_ids} onChange={(v) => set("asset_ids", v)} options={assetOpts} />
+      </Field>
+      <Field label="Controls" help="Controls that mitigate this risk (reduce residual likelihood/impact).">
+        <MultiSelect value={f.control_ids} onChange={(v) => set("control_ids", v)} options={controlOpts} />
+      </Field>
+      <Field label="Threats" help="Threats from the catalog that could trigger this risk.">
+        <MultiSelect value={f.threat_ids} onChange={(v) => set("threat_ids", v)} options={threatOpts} />
+      </Field>
+      <Field label="Vulnerabilities" help="Weaknesses a threat could exploit.">
+        <MultiSelect value={f.vulnerability_ids} onChange={(v) => set("vulnerability_ids", v)} options={vulnOpts} />
+      </Field>
+      <Field label="Policies" help="Policies that govern or address this risk.">
+        <MultiSelect value={f.policy_ids} onChange={(v) => set("policy_ids", v)} options={policyOpts} />
+      </Field>
+      <Field label="Incidents" help="Incidents that materialised from this risk.">
+        <MultiSelect value={f.incident_ids} onChange={(v) => set("incident_ids", v)} options={incidentOpts} />
+      </Field>
+    </>
+  );
+
+  const reviewTab = (
+    <>
+      <Field label="Review Frequency" help="How often this risk should be re-assessed. The next review date is scheduled automatically.">
+        <Select value={f.review_frequency} onChange={(v) => set("review_frequency", v)} options={FREQ} />
+      </Field>
+      {editing && (
+        <div className="field-row">
+          <Field label="Last Review">
+            <TextInput value={editing.last_review_date || "—"} onChange={() => {}} />
+          </Field>
+          <Field label="Next Review">
+            <TextInput value={editing.next_review_date || "—"} onChange={() => {}} />
+          </Field>
+          <Field label="Expired Reviews">
+            <TextInput value={String(editing.expired_reviews)} onChange={() => {}} />
+          </Field>
+        </div>
+      )}
+      {editing && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          Review dates are managed by the register. Use the dedicated review action to mark this risk reviewed and reschedule.
+        </p>
+      )}
+    </>
+  );
 
   return (
     <>
       <div className="page-head row-between">
         <div>
           <h1>Risk Register</h1>
-          <p>Identify, score and treat risks — qualitative and quantitative (FAIR).</p>
+          <p>Identify, score and treat risks — qualitative (5×5) and quantitative (FAIR), with controls, threats and review cycles.</p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn secondary" onClick={() => setShowSettings((v) => !v)}>
             <IconGauge width={16} height={16} />
             Appetite
           </button>
-          <button className="btn" onClick={() => setShowForm((v) => !v)}>
+          <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} />
-            {showForm ? "Close" : "New risk"}
+            Add risk
           </button>
         </div>
       </div>
@@ -202,50 +532,6 @@ export default function RisksPage() {
         </div>
       )}
 
-      {showForm && (
-        <form className="card card-pad" style={{ marginBottom: 18 }} onSubmit={createRisk}>
-          <label className="label">Title</label>
-          <input className="input" value={title} required onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Phishing leads to credential theft" />
-          <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-            <div style={{ flex: "1 1 200px" }}>
-              <label className="label">Category</label>
-              <input className="input" value={category} onChange={(e) => setCategory(e.target.value)} />
-            </div>
-            <div style={{ width: 130 }}>
-              <label className="label">Likelihood</label>
-              <input className="input" type="number" min={1} max={5} value={likelihood} onChange={(e) => setLikelihood(Number(e.target.value))} />
-            </div>
-            <div style={{ width: 130 }}>
-              <label className="label">Impact</label>
-              <input className="input" type="number" min={1} max={5} value={impact} onChange={(e) => setImpact(Number(e.target.value))} />
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-            <div style={{ flex: "1 1 200px" }}>
-              <label className="label">Loss events / year (FAIR, optional)</label>
-              <input className="input" type="number" step="0.1" min={0} value={alf} onChange={(e) => setAlf(e.target.value)} placeholder="0.5" />
-            </div>
-            <div style={{ flex: "1 1 200px" }}>
-              <label className="label">$ per event (SLE, optional)</label>
-              <input className="input" type="number" step="1000" min={0} value={sle} onChange={(e) => setSle(e.target.value)} placeholder="200000" />
-            </div>
-          </div>
-          {threats.length > 0 && (
-            <div style={{ marginTop: 4 }}>
-              <ChipPicker label="Threats" items={threats} selected={selThreats} toggle={(id) => toggle(selThreats, setSelThreats, id)} />
-            </div>
-          )}
-          {vulns.length > 0 && (
-            <div style={{ marginTop: 10 }}>
-              <ChipPicker label="Vulnerabilities" items={vulns} selected={selVulns} toggle={(id) => toggle(selVulns, setSelVulns, id)} />
-            </div>
-          )}
-          <button className="btn" style={{ marginTop: 16 }} disabled={saving}>
-            {saving ? "Saving…" : "Create risk"}
-          </button>
-        </form>
-      )}
-
       <div className="card">
         <div className="card-head">
           <h3>All risks</h3>
@@ -257,23 +543,27 @@ export default function RisksPage() {
               <tr>
                 <th>Ref</th>
                 <th>Title</th>
-                <th>Status</th>
+                <th>Category</th>
                 <th>Inherent</th>
                 <th>Residual</th>
                 <th>Appetite</th>
-                <th>Exposure (ALE)</th>
-                <th>Controls</th>
-                <th>Status Rules</th>
+                <th>Status</th>
+                <th>Owner</th>
+                <th>Exposure</th>
+                <th>Links</th>
+                <th>Review</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {risks.map((r) => {
                 const a = appetite(r, settings);
+                const overdue = isOverdue(r.next_review_date);
                 return (
-                  <tr key={r.id}>
+                  <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => openEdit(r)}>
                     <td className="ref">{r.reference}</td>
                     <td className="cell-title">{r.title}</td>
-                    <td><StatusBadge value={r.status} /></td>
+                    <td className="muted">{r.category || "—"}</td>
                     <td>
                       <Severity value={r.inherent_severity} />{" "}
                       <span className="muted">({r.inherent_score ?? "—"})</span>
@@ -283,14 +573,18 @@ export default function RisksPage() {
                       <span className="muted">({r.residual_score ?? "—"})</span>
                     </td>
                     <td>{a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>}</td>
+                    <td><Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge></td>
+                    <td className="muted">{userName(r.owner_id)}</td>
                     <td className="muted">{money(r.annual_loss_expectancy)}</td>
-                    <td className="muted">{r.controls.length}</td>
+                    <td className="muted">{linkCount(r) || "—"}</td>
                     <td>
-                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                        {(labels[r.id] || []).map((l) => (
-                          <span key={l.label} style={{ background: `${l.color}1a`, color: l.color, border: `1px solid ${l.color}55`, borderRadius: 99, padding: "1px 8px", fontSize: 11, fontWeight: 600 }}>{l.label}</span>
-                        ))}
-                        {(!labels[r.id] || labels[r.id].length === 0) && <span className="muted">—</span>}
+                      {overdue
+                        ? <Badge tone="high">Overdue</Badge>
+                        : <span className="muted">{r.next_review_date || "—"}</span>}
+                    </td>
+                    <td>
+                      <div onClick={(e) => e.stopPropagation()}>
+                        <button className="btn secondary sm" onClick={() => remove(r)}>Delete</button>
                       </div>
                     </td>
                   </tr>
@@ -298,7 +592,7 @@ export default function RisksPage() {
               })}
               {risks.length === 0 && (
                 <tr>
-                  <td colSpan={9}>
+                  <td colSpan={12}>
                     <div className="empty">
                       <span className="ico"><IconRisk width={24} height={24} /></span>
                       <h3>No risks yet</h3>
@@ -311,6 +605,24 @@ export default function RisksPage() {
           </table>
         </div>
       </div>
+
+      {showForm && (
+        <FormModal
+          title={editing ? `Edit risk — ${editing.reference}` : "Add item (Risk Register)"}
+          wide
+          tabs={[
+            { id: "general", label: "General", content: generalTab, required: true },
+            { id: "assessment", label: "Assessment", content: assessmentTab },
+            { id: "links", label: "Links & Relations", content: linksTab },
+            { id: "review", label: "Review", content: reviewTab },
+          ]}
+          onClose={() => setShowForm(false)}
+          onSave={save}
+          saving={saving}
+          error={error}
+          saveLabel={editing ? "Save changes" : "Create risk"}
+        />
+      )}
     </>
   );
 }

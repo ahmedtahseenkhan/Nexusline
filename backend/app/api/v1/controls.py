@@ -6,10 +6,13 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, insert, select
+from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.models.compliance import requirement_controls
 from app.models.control import Control, ControlAudit, ControlMaintenance
+from app.models.risk import Risk, risk_controls
 from app.schemas.common import Page
 from app.schemas.control import (
     ControlAuditCreate,
@@ -26,10 +29,19 @@ from app.services.risk_scoring import next_review_date
 router = APIRouter(prefix="/controls", tags=["controls"])
 
 
+def _loads():
+    # policies/requirements are lazy="selectin" already, but eager-load explicitly so a
+    # populate_existing refresh re-reads them after we rewrite the join tables.
+    return (
+        selectinload(Control.policies),
+        selectinload(Control.requirements),
+    )
+
+
 async def _get_or_404(db, control_id: uuid.UUID) -> Control:
     control = await db.scalar(
         select(Control).where(Control.id == control_id, Control.deleted.is_(False))
-        .execution_options(populate_existing=True)
+        .options(*_loads()).execution_options(populate_existing=True)
     )
     if control is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Control not found")
@@ -44,10 +56,52 @@ async def _load_policies(db, ids):
     return list((await db.scalars(select(Policy).where(Policy.id.in_(ids)))).all())
 
 
-async def _fresh(db, control_id: uuid.UUID) -> Control:
-    return await db.scalar(
-        select(Control).where(Control.id == control_id).execution_options(populate_existing=True)
+async def _attach_risks(db, control: Control) -> Control:
+    """`Control` has no ORM `risks` relationship (the writable side lives on `Risk.controls`,
+    via the `risk_controls` join). Query the linked risks and stash them on a transient
+    attribute so `ControlRead.risks` can serialise them."""
+    rows = (
+        await db.scalars(
+            select(Risk)
+            .join(risk_controls, risk_controls.c.risk_id == Risk.id)
+            .where(risk_controls.c.control_id == control.id, Risk.deleted.is_(False))
+            .order_by(Risk.reference)
+        )
+    ).all()
+    control.risks = list(rows)
+    return control
+
+
+_KEEP = object()  # sentinel: field absent from request -> leave the join table untouched
+
+
+async def _set_assoc(db, table, self_col: str, other_col: str, self_id, other_ids) -> None:
+    """Replace the rows in a 2-column association table for `self_id` with `other_ids`.
+
+    Used for relationships that are viewonly from the control side: `requirements`
+    (writable side on Requirement) and `risks` (writable side on Risk). We manage the
+    join tables directly, exactly like policies.py does for its reverse views.
+    """
+    if other_ids is _KEEP or other_ids is None:
+        return
+    await db.execute(delete(table).where(table.c[self_col] == self_id))
+    if other_ids:
+        await db.execute(insert(table), [{self_col: self_id, other_col: oid} for oid in other_ids])
+
+
+async def _flush_assoc(db, control_id, stash: dict) -> None:
+    await _set_assoc(
+        db, requirement_controls, "control_id", "requirement_id", control_id, stash["requirements"]
     )
+    await _set_assoc(db, risk_controls, "control_id", "risk_id", control_id, stash["risks"])
+
+
+async def _fresh(db, control_id: uuid.UUID) -> Control:
+    control = await db.scalar(
+        select(Control).where(Control.id == control_id)
+        .options(*_loads()).execution_options(populate_existing=True)
+    )
+    return await _attach_risks(db, control)
 
 
 @router.get("", response_model=Page[ControlRead], dependencies=[Depends(require("control:read"))])
@@ -59,8 +113,10 @@ async def list_controls(
     stmt = select(Control).where(Control.deleted.is_(False))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (
-        await db.scalars(stmt.order_by(Control.name).limit(limit).offset(offset))
+        await db.scalars(stmt.options(*_loads()).order_by(Control.name).limit(limit).offset(offset))
     ).all()
+    for control in rows:
+        await _attach_risks(db, control)
     return Page(
         items=[ControlRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
     )
@@ -75,12 +131,22 @@ async def list_controls(
 async def create_control(body: ControlCreate, db: DbSession, user: CurrentUser) -> ControlRead:
     data = body.model_dump()
     policy_ids = data.pop("policy_ids", [])
+    stash = {"requirements": data.pop("requirement_ids", []), "risks": data.pop("risk_ids", [])}
+    explicit_audit = data.pop("next_audit_date", None)
+    explicit_maint = data.pop("next_maintenance_date", None)
     control = Control(tenant_id=user.tenant_id, **data)
     control.policies = await _load_policies(db, policy_ids)
-    control.next_audit_date = next_review_date(control.audit_frequency)
-    control.next_maintenance_date = next_review_date(control.maintenance_frequency)
+    # Honour an explicit schedule date, otherwise derive it from the frequency.
+    control.next_audit_date = explicit_audit or next_review_date(control.audit_frequency)
+    control.next_maintenance_date = explicit_maint or next_review_date(control.maintenance_frequency)
     db.add(control)
     await db.flush()
+    await _flush_assoc(db, control.id, stash)
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="create", entity_type="control", entity_id=control.id,
+        summary=f"Created control {control.reference or control.name}",
+    )
     return ControlRead.model_validate(await _fresh(db, control.id))
 
 
@@ -88,27 +154,46 @@ async def create_control(body: ControlCreate, db: DbSession, user: CurrentUser) 
     "/{control_id}", response_model=ControlRead, dependencies=[Depends(require("control:read"))]
 )
 async def get_control(control_id: uuid.UUID, db: DbSession) -> ControlRead:
-    return ControlRead.model_validate(await _get_or_404(db, control_id))
+    return ControlRead.model_validate(await _attach_risks(db, await _get_or_404(db, control_id)))
 
 
 @router.patch(
     "/{control_id}", response_model=ControlRead, dependencies=[Depends(require("control:write"))]
 )
-async def update_control(control_id: uuid.UUID, body: ControlUpdate, db: DbSession) -> ControlRead:
+async def update_control(
+    control_id: uuid.UUID, body: ControlUpdate, db: DbSession, user: CurrentUser
+) -> ControlRead:
     control = await _get_or_404(db, control_id)
     data = body.model_dump(exclude_unset=True)
     policy_ids = data.pop("policy_ids", None)
+    stash = {
+        "requirements": data.pop("requirement_ids", _KEEP),
+        "risks": data.pop("risk_ids", _KEEP),
+    }
+    explicit_audit = data.pop("next_audit_date", _KEEP)
+    explicit_maint = data.pop("next_maintenance_date", _KEEP)
     for field, value in data.items():
         setattr(control, field, value)
     if policy_ids is not None:
         control.policies = await _load_policies(db, policy_ids)
-    if "audit_frequency" in data:
+    # Explicit schedule date wins; else recompute when the frequency changed.
+    if explicit_audit is not _KEEP:
+        control.next_audit_date = explicit_audit
+    elif "audit_frequency" in data:
         control.next_audit_date = next_review_date(control.audit_frequency, control.last_audit_date)
-    if "maintenance_frequency" in data:
+    if explicit_maint is not _KEEP:
+        control.next_maintenance_date = explicit_maint
+    elif "maintenance_frequency" in data:
         control.next_maintenance_date = next_review_date(
             control.maintenance_frequency, control.last_maintenance_date
         )
     await db.flush()
+    await _flush_assoc(db, control.id, stash)
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="control", entity_id=control.id,
+        summary=f"Updated control {control.reference or control.name}",
+    )
     return ControlRead.model_validate(await _fresh(db, control.id))
 
 

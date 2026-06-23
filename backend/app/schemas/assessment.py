@@ -14,6 +14,12 @@ class VendorRef(BaseModel):
     name: str
 
 
+class QuestionnaireRef(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    name: str
+
+
 # ------------------------------------------------------------ questionnaire builder
 class OptionCreate(BaseModel):
     label: str = Field(min_length=1, max_length=255)
@@ -52,6 +58,15 @@ class QuestionnaireCreate(BaseModel):
     questions: list[QuestionCreate] = Field(default_factory=list)
 
 
+class QuestionnaireUpdate(BaseModel):
+    """Partial update for a questionnaire template. When ``questions`` is provided
+    the whole question/option tree is replaced (builder semantics)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    questions: list[QuestionCreate] | None = None
+
+
 class QuestionnaireSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -71,6 +86,19 @@ class AssessmentCreate(BaseModel):
     vendor_id: uuid.UUID | None = None
     questionnaire_id: uuid.UUID
     due_date: date | None = None
+    status: VendorAssessmentStatus | None = None
+    review_notes: str = ""
+
+
+class AssessmentUpdate(BaseModel):
+    """Partial update for the assessment header (only sent fields are applied)."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    vendor_id: uuid.UUID | None = None
+    questionnaire_id: uuid.UUID | None = None
+    due_date: date | None = None
+    status: VendorAssessmentStatus | None = None
+    review_notes: str | None = None
 
 
 class AnswerSubmit(BaseModel):
@@ -96,6 +124,17 @@ class FindingCreate(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     description: str = ""
     severity: Severity = Severity.medium
+    status: FindingStatus = FindingStatus.open
+    deadline: date | None = None
+
+
+class FindingUpdate(BaseModel):
+    """Partial update for a finding (edit any field, including reopen/close)."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    severity: Severity | None = None
+    status: FindingStatus | None = None
     deadline: date | None = None
 
 
@@ -141,10 +180,15 @@ class AssessmentSummary(BaseModel):
     id: uuid.UUID
     title: str
     vendor: VendorRef | None = None
+    questionnaire: QuestionnaireRef | None = None
+    questionnaire_id: uuid.UUID
     status: VendorAssessmentStatus
     due_date: date | None
+    submitted_at: date | None = None
     question_count: int
     answered_count: int
+    max_score: float = 0.0
+    total_score: float = 0.0
     score_pct: float
     open_findings: int
     created_at: datetime

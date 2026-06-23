@@ -35,6 +35,9 @@ class PolicyBase(BaseModel):
 
 class PolicyCreate(PolicyBase):
     related_ids: list[uuid.UUID] = []
+    controls_ids: list[uuid.UUID] = []
+    requirements_ids: list[uuid.UUID] = []
+    risks_ids: list[uuid.UUID] = []
 
 
 class PolicyUpdate(BaseModel):
@@ -52,6 +55,9 @@ class PolicyUpdate(BaseModel):
     use_attachments: bool | None = None
     review_frequency: ReviewFrequency | None = None
     related_ids: list[uuid.UUID] | None = None
+    controls_ids: list[uuid.UUID] | None = None
+    requirements_ids: list[uuid.UUID] | None = None
+    risks_ids: list[uuid.UUID] | None = None
 
 
 class PolicyReviewCreate(BaseModel):

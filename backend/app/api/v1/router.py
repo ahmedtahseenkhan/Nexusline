@@ -17,6 +17,7 @@ from app.api.v1 import (
     controls,
     custom_fields,
     dashboard,
+    dataio,
     evidence,
     exceptions,
     filters,
@@ -77,3 +78,4 @@ api_router.include_router(organization.router)
 api_router.include_router(audit.router)
 api_router.include_router(versions.router)
 api_router.include_router(users.router)
+api_router.include_router(dataio.router)

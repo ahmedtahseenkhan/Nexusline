@@ -6,9 +6,10 @@ from datetime import date
 from typing import Annotated, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, delete, func, insert, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.models.asset import Asset, assets_exceptions
 from app.models.compliance import Requirement
 from app.models.control import Control
 from app.models.enums import ExceptionStatus, ExceptionType
@@ -51,6 +52,12 @@ async def _resolve(db, model, ids: Sequence[uuid.UUID]) -> list:
 
 
 async def _apply_links(db, obj: ExceptionRecord, body) -> None:
+    """Apply the four writable M2M relationships via plain assignment.
+
+    Safe to call pre-flush in CREATE (object PENDING) and post-load in UPDATE.
+    Assets are handled separately by ``_flush_assets`` because ``ExceptionRecord.assets``
+    is a ``viewonly`` reverse view (writable side lives on ``Asset.exceptions``).
+    """
     data = body if isinstance(body, dict) else body.model_dump(exclude_unset=True)
     if "risk_ids" in data and data["risk_ids"] is not None:
         obj.risks = await _resolve(db, Risk, data["risk_ids"])
@@ -60,6 +67,21 @@ async def _apply_links(db, obj: ExceptionRecord, body) -> None:
         obj.requirements = await _resolve(db, Requirement, data["requirement_ids"])
     if "control_ids" in data and data["control_ids"] is not None:
         obj.controls = await _resolve(db, Control, data["control_ids"])
+
+
+async def _flush_assets(db, exc_id: uuid.UUID, body) -> None:
+    """Write the viewonly ``assets`` link by managing the ``assets_exceptions`` join
+    table directly. Must run after the exception row has an id (post-flush)."""
+    data = body if isinstance(body, dict) else body.model_dump(exclude_unset=True)
+    if "asset_ids" not in data or data["asset_ids"] is None:
+        return
+    await _resolve(db, Asset, data["asset_ids"])  # validate ids exist
+    await db.execute(delete(assets_exceptions).where(assets_exceptions.c.exception_id == exc_id))
+    if data["asset_ids"]:
+        await db.execute(
+            insert(assets_exceptions),
+            [{"exception_id": exc_id, "asset_id": aid} for aid in data["asset_ids"]],
+        )
 
 
 async def _next_ref(db) -> str:
@@ -89,11 +111,15 @@ async def list_exceptions(
 
 @router.post("", response_model=ExceptionRead, status_code=201, dependencies=[Depends(require("exception:write"))])
 async def create_exception(body: ExceptionCreate, db: DbSession, user: CurrentUser) -> ExceptionRead:
-    data = body.model_dump(exclude={"risk_ids", "policy_ids", "requirement_ids", "control_ids"})
+    data = body.model_dump(
+        exclude={"risk_ids", "policy_ids", "requirement_ids", "control_ids", "asset_ids"}
+    )
     obj = ExceptionRecord(tenant_id=user.tenant_id, requested_by=user.id, **data)
     obj.reference = await _next_ref(db)
-    await _apply_links(db, obj, body)
+    await _apply_links(db, obj, body)  # writable M2M, PENDING/pre-flush is fine
     db.add(obj)
+    await db.flush()
+    await _flush_assets(db, obj.id, body)  # viewonly assets: needs obj.id
     await db.flush()
     await audit.record(
         db, actor=user, action="create", entity_type="exception", entity_id=obj.id,
@@ -111,9 +137,14 @@ async def get_exception(exc_id: uuid.UUID, db: DbSession) -> ExceptionRead:
 async def update_exception(exc_id: uuid.UUID, body: ExceptionUpdate, db: DbSession) -> ExceptionRead:
     obj = await _load(db, exc_id)
     await _apply_links(db, obj, body)
-    data = body.model_dump(exclude_unset=True, exclude={"risk_ids", "policy_ids", "requirement_ids", "control_ids"})
+    data = body.model_dump(
+        exclude_unset=True,
+        exclude={"risk_ids", "policy_ids", "requirement_ids", "control_ids", "asset_ids"},
+    )
     for f, v in data.items():
         setattr(obj, f, v)
+    await db.flush()
+    await _flush_assets(db, obj.id, body)
     await db.flush()
     return ExceptionRead.model_validate(await _load(db, obj.id))
 

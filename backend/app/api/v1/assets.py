@@ -12,7 +12,7 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
@@ -29,6 +29,7 @@ from app.models.exception import ExceptionRecord
 from app.models.incident import Incident
 from app.models.compliance import Requirement
 from app.models.organization import Legal, Process
+from app.models.risk import risk_assets
 from app.schemas.asset import (
     AssetClassificationCreate,
     AssetClassificationRead,
@@ -152,13 +153,37 @@ async def _load_many(db, model, ids):
     return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
 
 
-async def _apply_relations(db, asset: Asset, data: dict) -> None:
+async def _set_risk_links(db, asset_id, risk_ids) -> None:
+    """Replace the asset's rows in the risk_assets join table.
+
+    Asset.risks is a viewonly reverse view (the writable side lives on Risk.assets),
+    so we manage the association table directly — like policies._set_assoc.
+    """
+    if risk_ids is None:
+        return
+    await db.execute(delete(risk_assets).where(risk_assets.c.asset_id == asset_id))
+    if risk_ids:
+        await db.execute(
+            insert(risk_assets), [{"asset_id": asset_id, "risk_id": rid} for rid in risk_ids]
+        )
+
+
+async def _apply_orm_relations(db, asset: Asset, data: dict) -> None:
+    """Assign writable M2M relationships. Call while the asset is PENDING (pre-flush)
+    or already eager-loaded, else async lazy-load fires MissingGreenlet."""
     for rel, (model, field) in _REL.items():
         if field in data and data[field] is not None:
             setattr(asset, rel, await _load_many(db, model, data[field]))
     if data.get("related_ids") is not None:
         related = await _load_many(db, Asset, [i for i in data["related_ids"] if i != asset.id])
         asset.related_assets = related
+
+
+async def _apply_relations(db, asset: Asset, data: dict) -> None:
+    """Update path: asset is already eager-loaded, so ORM assignment is safe here."""
+    await _apply_orm_relations(db, asset, data)
+    if "risk_ids" in data:
+        await _set_risk_links(db, asset.id, data["risk_ids"])
 
 
 @router.get("", response_model=Page[AssetRead], dependencies=[Depends(require("asset:read"))])
@@ -189,9 +214,11 @@ async def create_asset(body: AssetCreate, db: DbSession, user: CurrentUser) -> A
     if data.get("next_review_date") is None:
         data["next_review_date"] = next_review_date(body.review_frequency, date.today())
     asset = Asset(tenant_id=user.tenant_id, **data)
+    await _apply_orm_relations(db, asset, rel_data)  # assign while PENDING (no lazy-load)
     db.add(asset)
     await db.flush()
-    await _apply_relations(db, asset, rel_data)
+    if "risk_ids" in rel_data:  # viewonly reverse view -> direct join-table write, needs id
+        await _set_risk_links(db, asset.id, rel_data["risk_ids"])
     await db.flush()
     await audit.record(db, actor=user, action="create", entity_type="asset", entity_id=asset.id,
                        summary=f"Created asset {asset.name}")

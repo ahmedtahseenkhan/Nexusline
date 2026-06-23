@@ -45,7 +45,13 @@ class ControlBase(BaseModel):
 
 
 class ControlCreate(ControlBase):
+    # Optional explicit schedule overrides (otherwise derived from the frequency).
+    next_audit_date: date | None = None
+    next_maintenance_date: date | None = None
+    # Relationship inputs.
     policy_ids: list[uuid.UUID] = []
+    requirement_ids: list[uuid.UUID] = []
+    risk_ids: list[uuid.UUID] = []
 
 
 class ControlUpdate(BaseModel):
@@ -66,8 +72,12 @@ class ControlUpdate(BaseModel):
     audit_frequency: ReviewFrequency | None = None
     audit_metric: str | None = None
     audit_success_criteria: str | None = None
+    next_audit_date: date | None = None
     maintenance_frequency: ReviewFrequency | None = None
+    next_maintenance_date: date | None = None
     policy_ids: list[uuid.UUID] | None = None
+    requirement_ids: list[uuid.UUID] | None = None
+    risk_ids: list[uuid.UUID] | None = None
 
 
 class ControlRead(ControlBase):
@@ -85,6 +95,7 @@ class ControlRead(ControlBase):
     is_maintenance_overdue: bool = False
     policies: list[ControlLinkRef] = []
     requirements: list[ControlLinkRef] = []
+    risks: list[ControlLinkRef] = []
 
 
 class ControlRef(BaseModel):

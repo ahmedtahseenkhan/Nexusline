@@ -31,10 +31,12 @@ class ExceptionBase(BaseModel):
 
 
 class ExceptionCreate(ExceptionBase):
+    closure_date: date | None = None
     risk_ids: list[uuid.UUID] = Field(default_factory=list)
     policy_ids: list[uuid.UUID] = Field(default_factory=list)
     requirement_ids: list[uuid.UUID] = Field(default_factory=list)
     control_ids: list[uuid.UUID] = Field(default_factory=list)
+    asset_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
 class ExceptionUpdate(BaseModel):
@@ -45,13 +47,16 @@ class ExceptionUpdate(BaseModel):
     rationale: str | None = None
     compensating_controls: str | None = None
     business_owner: str | None = None
+    status: ExceptionStatus | None = None  # manual override; /decision & /close are the primary path
     workflow_status: WorkflowState | None = None
     start_date: date | None = None
     expires_at: date | None = None
+    closure_date: date | None = None
     risk_ids: list[uuid.UUID] | None = None
     policy_ids: list[uuid.UUID] | None = None
     requirement_ids: list[uuid.UUID] | None = None
     control_ids: list[uuid.UUID] | None = None
+    asset_ids: list[uuid.UUID] | None = None
 
 
 class ExceptionDecision(BaseModel):

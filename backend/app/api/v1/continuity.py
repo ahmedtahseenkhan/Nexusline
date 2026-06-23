@@ -16,8 +16,11 @@ from app.schemas.continuity import (
     PlanRead,
     PlanUpdate,
     TaskCreate,
+    TaskRead,
     TaskUpdate,
     TestCreate,
+    TestRead,
+    TestUpdate,
 )
 from app.services import audit
 from app.services.risk_scoring import next_review_date
@@ -55,6 +58,17 @@ async def _task_or_404(db, plan_id, task_id) -> ContinuityTask:
     )
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    return obj
+
+
+async def _test_or_404(db, plan_id, test_id) -> ContinuityTest:
+    obj = await db.scalar(
+        select(ContinuityTest).where(
+            ContinuityTest.id == test_id, ContinuityTest.plan_id == plan_id
+        )
+    )
+    if obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
     return obj
 
 
@@ -113,6 +127,14 @@ async def delete_plan(plan_id: uuid.UUID, db: DbSession) -> None:
 
 
 # ----------------------------------------------------------------- 5W tasks
+@router.get(
+    "/{plan_id}/tasks", response_model=list[TaskRead], dependencies=[Depends(require("bcp:read"))]
+)
+async def list_tasks(plan_id: uuid.UUID, db: DbSession) -> list[TaskRead]:
+    plan = await _load(db, plan_id)
+    return [TaskRead.model_validate(t) for t in plan.tasks]
+
+
 @router.post("/{plan_id}/tasks", response_model=PlanRead, status_code=201, dependencies=[Depends(require("bcp:write"))])
 async def add_task(plan_id: uuid.UUID, body: TaskCreate, db: DbSession, user: CurrentUser) -> PlanRead:
     await _load(db, plan_id)
@@ -155,3 +177,29 @@ async def record_test(plan_id: uuid.UUID, body: TestCreate, db: DbSession, user:
         summary=f"Recorded {body.result.value} continuity test for {plan.reference}",
     )
     return PlanRead.model_validate(await _fresh(db, plan_id))
+
+
+@router.get(
+    "/{plan_id}/tests", response_model=list[TestRead], dependencies=[Depends(require("bcp:read"))]
+)
+async def list_tests(plan_id: uuid.UUID, db: DbSession) -> list[TestRead]:
+    plan = await _load(db, plan_id)
+    return [TestRead.model_validate(t) for t in plan.tests]
+
+
+@router.patch(
+    "/{plan_id}/tests/{test_id}", response_model=PlanRead, dependencies=[Depends(require("bcp:write"))]
+)
+async def update_test(plan_id: uuid.UUID, test_id: uuid.UUID, body: TestUpdate, db: DbSession) -> PlanRead:
+    test = await _test_or_404(db, plan_id, test_id)
+    for f, v in body.model_dump(exclude_unset=True).items():
+        setattr(test, f, v)
+    await db.flush()
+    return PlanRead.model_validate(await _fresh(db, plan_id))
+
+
+@router.delete(
+    "/{plan_id}/tests/{test_id}", status_code=204, dependencies=[Depends(require("bcp:write"))]
+)
+async def delete_test(plan_id: uuid.UUID, test_id: uuid.UUID, db: DbSession) -> None:
+    await db.delete(await _test_or_404(db, plan_id, test_id))

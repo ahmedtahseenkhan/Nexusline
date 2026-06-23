@@ -41,6 +41,17 @@ class QuestionRead(BaseModel):
 class ParticipantCreate(BaseModel):
     participant_name: str = Field(min_length=1, max_length=200)
     participant_email: str = ""
+    status: TrainingStatus = TrainingStatus.assigned
+    score: int | None = Field(default=None, ge=0, le=100)
+    completed_at: date | None = None
+
+
+class ParticipantUpdate(BaseModel):
+    participant_name: str | None = Field(default=None, min_length=1, max_length=200)
+    participant_email: str | None = None
+    status: TrainingStatus | None = None
+    score: int | None = Field(default=None, ge=0, le=100)
+    completed_at: date | None = None
 
 
 class QuizSubmit(BaseModel):
@@ -81,6 +92,8 @@ class ProgramUpdate(BaseModel):
     passing_score: int | None = Field(default=None, ge=0, le=100)
     frequency: ReviewFrequency | None = None
     due_date: date | None = None
+    # When provided, fully replaces the program's quiz (questions + options).
+    questions: list[QuestionCreate] | None = None
 
 
 class ProgramSummary(BaseModel):
@@ -88,8 +101,11 @@ class ProgramSummary(BaseModel):
     id: uuid.UUID
     reference: str
     name: str
+    description: str
     status: AwarenessStatus
     passing_score: int
+    frequency: ReviewFrequency
+    due_date: date | None
     next_due_date: date | None
     question_count: int
     participant_count: int
@@ -100,10 +116,7 @@ class ProgramSummary(BaseModel):
 
 
 class ProgramRead(ProgramSummary):
-    description: str
     content: str
-    frequency: ReviewFrequency
-    due_date: date | None
     questions: list[QuestionRead] = []
     participants: list[ParticipantRead] = []
     created_at: datetime

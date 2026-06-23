@@ -32,8 +32,12 @@ class RiskBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     description: str = ""
     category: str = ""
+    status: RiskStatus = RiskStatus.draft
     inherent_likelihood: int = _Scale
     inherent_impact: int = _Scale
+    # Residual scoring (after controls) — optional on create, set on assessment too
+    residual_likelihood: int | None = Field(default=None, ge=1, le=5)
+    residual_impact: int | None = Field(default=None, ge=1, le=5)
     treatment_strategy: TreatmentStrategy | None = None
     treatment_description: str = ""
     treatment_owner: str = ""
@@ -41,6 +45,7 @@ class RiskBase(BaseModel):
     treatment_cost: float | None = Field(default=None, ge=0)
     review_frequency: ReviewFrequency = ReviewFrequency.annual
     workflow_status: WorkflowState = WorkflowState.draft
+    workflow_owner: str = ""
     owner_id: uuid.UUID | None = None
     # Quantitative (FAIR): events/year and $ per event
     annual_loss_frequency: float | None = Field(default=None, ge=0)
@@ -72,6 +77,7 @@ class RiskUpdate(BaseModel):
     treatment_cost: float | None = Field(default=None, ge=0)
     review_frequency: ReviewFrequency | None = None
     workflow_status: WorkflowState | None = None
+    workflow_owner: str | None = None
     owner_id: uuid.UUID | None = None
     annual_loss_frequency: float | None = Field(default=None, ge=0)
     single_loss_expectancy: float | None = Field(default=None, ge=0)
@@ -145,6 +151,7 @@ class RiskRead(BaseModel):
     next_review_date: date | None
     expired_reviews: int
     workflow_status: WorkflowState
+    workflow_owner: str
 
     assets: list[AssetRef] = []
     controls: list[ControlRef] = []

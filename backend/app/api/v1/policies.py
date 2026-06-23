@@ -6,12 +6,15 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.models.compliance import requirement_policies
+from app.models.control import control_policies
 from app.models.enums import PolicyStatus
 from app.models.policy import Policy, PolicyAcknowledgment, PolicyReview
+from app.models.risk import risk_policies
 
 
 def _loads():
@@ -56,6 +59,41 @@ async def _load_related(db, ids):
     return list((await db.scalars(select(Policy).where(Policy.id.in_(ids)))).all())
 
 
+_KEEP = object()  # sentinel: field absent from request -> leave untouched
+
+
+async def _set_assoc(db, table, self_col: str, other_col: str, self_id, other_ids) -> None:
+    """Replace the rows in a 2-column association table for `self_id` with `other_ids`.
+
+    Policy.controls/requirements/risks are viewonly reverse views (the writable side
+    lives on Control/Requirement/Risk), so we manage the join tables directly.
+    """
+    if other_ids is _KEEP or other_ids is None:
+        return
+    await db.execute(delete(table).where(table.c[self_col] == self_id))
+    if other_ids:
+        await db.execute(insert(table), [{self_col: self_id, other_col: oid} for oid in other_ids])
+
+
+async def _apply_related(db, obj, data: dict) -> dict:
+    """Assign the writable self-ref `related` (pre-flush ok) and stash the viewonly
+    cross-links for `_flush_assoc` to write once the policy has an id."""
+    related_ids = data.pop("related_ids", _KEEP)
+    if related_ids is not _KEEP and related_ids is not None:
+        obj.related = await _load_related(db, related_ids)
+    return {
+        "controls": data.pop("controls_ids", _KEEP),
+        "requirements": data.pop("requirements_ids", _KEEP),
+        "risks": data.pop("risks_ids", _KEEP),
+    }
+
+
+async def _flush_assoc(db, policy_id, stash: dict) -> None:
+    await _set_assoc(db, control_policies, "policy_id", "control_id", policy_id, stash["controls"])
+    await _set_assoc(db, requirement_policies, "policy_id", "requirement_id", policy_id, stash["requirements"])
+    await _set_assoc(db, risk_policies, "policy_id", "risk_id", policy_id, stash["risks"])
+
+
 async def _next_ref(db) -> str:
     count = await db.scalar(select(func.count()).select_from(Policy)) or 0
     return f"POL-{count + 1:03d}"
@@ -85,12 +123,15 @@ async def list_policies(
 )
 async def create_policy(body: PolicyCreate, db: DbSession, user: CurrentUser) -> PolicyRead:
     data = body.model_dump()
-    related_ids = data.pop("related_ids", [])
-    obj = Policy(tenant_id=user.tenant_id, **data)
-    obj.related = await _load_related(db, related_ids)
+    obj = Policy(tenant_id=user.tenant_id)
+    stash = await _apply_related(db, obj, data)
+    for field, value in data.items():
+        setattr(obj, field, value)
     obj.reference = await _next_ref(db)
     obj.next_review_date = next_review_date(obj.review_frequency)
     db.add(obj)
+    await db.flush()
+    await _flush_assoc(db, obj.id, stash)
     await db.flush()
     await audit.record(
         db, actor=user, action="create", entity_type="policy", entity_id=obj.id,
@@ -108,18 +149,22 @@ async def get_policy(policy_id: uuid.UUID, db: DbSession) -> PolicyRead:
     "/{policy_id}", response_model=PolicyRead, dependencies=[Depends(require("policy:write"))]
 )
 async def update_policy(
-    policy_id: uuid.UUID, body: PolicyUpdate, db: DbSession
+    policy_id: uuid.UUID, body: PolicyUpdate, db: DbSession, user: CurrentUser
 ) -> PolicyRead:
     obj = await _load(db, policy_id)
     data = body.model_dump(exclude_unset=True)
-    related_ids = data.pop("related_ids", None)
+    stash = await _apply_related(db, obj, data)
     for field, value in data.items():
         setattr(obj, field, value)
-    if related_ids is not None:
-        obj.related = await _load_related(db, related_ids)
     if "review_frequency" in data:
         obj.next_review_date = next_review_date(obj.review_frequency)
     await db.flush()
+    await _flush_assoc(db, obj.id, stash)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="update", entity_type="policy", entity_id=obj.id,
+        summary=f"Updated policy {obj.reference}: {obj.title}",
+    )
     return PolicyRead.model_validate(await _load(db, obj.id))
 
 

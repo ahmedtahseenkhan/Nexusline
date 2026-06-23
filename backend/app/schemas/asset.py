@@ -128,6 +128,9 @@ class AssetWrite(BaseModel):
     incident_ids: list[uuid.UUID] = []
     exception_ids: list[uuid.UUID] = []
     related_ids: list[uuid.UUID] = []
+    # Asset.risks is a viewonly reverse view (the writable side lives on Risk.assets);
+    # the API writes the risk_assets join table directly when this is provided.
+    risk_ids: list[uuid.UUID] = []
 
 
 class AssetCreate(AssetWrite):
@@ -157,6 +160,7 @@ class AssetUpdate(BaseModel):
     incident_ids: list[uuid.UUID] | None = None
     exception_ids: list[uuid.UUID] | None = None
     related_ids: list[uuid.UUID] | None = None
+    risk_ids: list[uuid.UUID] | None = None
 
 
 class AssetRead(BaseModel):

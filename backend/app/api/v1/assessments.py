@@ -23,10 +23,13 @@ from app.schemas.assessment import (
     AssessmentCreate,
     AssessmentRead,
     AssessmentSummary,
+    AssessmentUpdate,
     FindingCreate,
+    FindingUpdate,
     QuestionnaireCreate,
     QuestionnaireRead,
     QuestionnaireSummary,
+    QuestionnaireUpdate,
     SubmitAnswers,
 )
 from app.services import audit
@@ -52,6 +55,33 @@ async def _load_questionnaire(db, qid: uuid.UUID) -> Questionnaire:
     return obj
 
 
+async def _fresh_questionnaire(db, qid: uuid.UUID) -> Questionnaire:
+    """Re-read after a mutation, refreshing the identity-mapped instance + children."""
+    return await db.scalar(
+        select(Questionnaire).where(Questionnaire.id == qid).execution_options(populate_existing=True)
+    )
+
+
+def _build_questions(tenant_id, questions) -> list[Question]:
+    """Materialise the question/option tree from the builder payload."""
+    built: list[Question] = []
+    for i, qc in enumerate(questions):
+        question = Question(
+            tenant_id=tenant_id,
+            text=qc.text,
+            guidance=qc.guidance,
+            order_index=qc.order_index or i,
+        )
+        question.options = [
+            QuestionOption(
+                tenant_id=tenant_id, label=o.label, score=o.score, order_index=o.order_index or j
+            )
+            for j, o in enumerate(qc.options)
+        ]
+        built.append(question)
+    return built
+
+
 @router.post(
     "/questionnaires",
     response_model=QuestionnaireRead,
@@ -62,23 +92,40 @@ async def create_questionnaire(
     body: QuestionnaireCreate, db: DbSession, user: CurrentUser
 ) -> QuestionnaireRead:
     q = Questionnaire(tenant_id=user.tenant_id, name=body.name, description=body.description)
-    for i, qc in enumerate(body.questions):
-        question = Question(
-            tenant_id=user.tenant_id,
-            text=qc.text,
-            guidance=qc.guidance,
-            order_index=qc.order_index or i,
-        )
-        question.options = [
-            QuestionOption(
-                tenant_id=user.tenant_id, label=o.label, score=o.score, order_index=o.order_index or j
-            )
-            for j, o in enumerate(qc.options)
-        ]
-        q.questions.append(question)
+    q.questions = _build_questions(user.tenant_id, body.questions)
     db.add(q)
     await db.flush()
+    await audit.record(
+        db, actor=user, action="create", entity_type="questionnaire", entity_id=q.id,
+        summary=f"Created questionnaire '{q.name}'",
+    )
     return QuestionnaireRead.model_validate(await _load_questionnaire(db, q.id))
+
+
+@router.patch(
+    "/questionnaires/{qid}",
+    response_model=QuestionnaireRead,
+    dependencies=[Depends(require("assessment:write"))],
+    summary="Update a questionnaire; sending `questions` replaces the whole question tree",
+)
+async def update_questionnaire(
+    qid: uuid.UUID, body: QuestionnaireUpdate, db: DbSession, user: CurrentUser
+) -> QuestionnaireRead:
+    obj = await _load_questionnaire(db, qid)
+    data = body.model_dump(exclude_unset=True)
+    if "name" in data:
+        obj.name = data["name"]
+    if "description" in data:
+        obj.description = data["description"]
+    if body.questions is not None:
+        # cascade="all, delete-orphan" removes the old questions/options on reassign
+        obj.questions = _build_questions(user.tenant_id, body.questions)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="update", entity_type="questionnaire", entity_id=obj.id,
+        summary=f"Updated questionnaire '{obj.name}'",
+    )
+    return QuestionnaireRead.model_validate(await _fresh_questionnaire(db, obj.id))
 
 
 @router.get(
@@ -136,8 +183,9 @@ async def create_assessment(body: AssessmentCreate, db: DbSession, user: Current
         vendor_id=body.vendor_id,
         questionnaire_id=body.questionnaire_id,
         due_date=body.due_date,
+        review_notes=body.review_notes,
         access_hash=secrets.token_urlsafe(24),
-        status=VendorAssessmentStatus.draft,
+        status=body.status or VendorAssessmentStatus.draft,
     )
     db.add(obj)
     await db.flush()
@@ -155,6 +203,30 @@ async def create_assessment(body: AssessmentCreate, db: DbSession, user: Current
 )
 async def get_assessment(aid: uuid.UUID, db: DbSession) -> AssessmentRead:
     return AssessmentRead.model_validate(await _load(db, aid))
+
+
+@router.patch(
+    "/assessments/{aid}",
+    response_model=AssessmentRead,
+    dependencies=[Depends(require("assessment:write"))],
+    summary="Update the assessment header (title, vendor, questionnaire, due date, status, notes)",
+)
+async def update_assessment(
+    aid: uuid.UUID, body: AssessmentUpdate, db: DbSession, user: CurrentUser
+) -> AssessmentRead:
+    obj = await _load(db, aid)
+    data = body.model_dump(exclude_unset=True)
+    # validate a re-pointed questionnaire belongs to this tenant
+    if data.get("questionnaire_id") is not None:
+        await _load_questionnaire(db, data["questionnaire_id"])
+    for field, value in data.items():
+        setattr(obj, field, value)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="update", entity_type="assessment", entity_id=obj.id,
+        summary=f"Updated vendor assessment '{obj.title}'",
+    )
+    return AssessmentRead.model_validate(await _fresh(db, aid))
 
 
 @router.post(
@@ -220,12 +292,7 @@ async def add_finding(
     return AssessmentRead.model_validate(await _fresh(db, aid))
 
 
-@router.post(
-    "/assessments/{aid}/findings/{fid}/close",
-    response_model=AssessmentRead,
-    dependencies=[Depends(require("assessment:write"))],
-)
-async def close_finding(aid: uuid.UUID, fid: uuid.UUID, db: DbSession) -> AssessmentRead:
+async def _load_finding(db, aid: uuid.UUID, fid: uuid.UUID) -> AssessmentFinding:
     finding = await db.scalar(
         select(AssessmentFinding).where(
             AssessmentFinding.id == fid, AssessmentFinding.assessment_id == aid
@@ -233,6 +300,32 @@ async def close_finding(aid: uuid.UUID, fid: uuid.UUID, db: DbSession) -> Assess
     )
     if finding is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
+    return finding
+
+
+@router.patch(
+    "/assessments/{aid}/findings/{fid}",
+    response_model=AssessmentRead,
+    dependencies=[Depends(require("assessment:write"))],
+    summary="Edit a finding (title, description, severity, status, deadline)",
+)
+async def update_finding(
+    aid: uuid.UUID, fid: uuid.UUID, body: FindingUpdate, db: DbSession
+) -> AssessmentRead:
+    finding = await _load_finding(db, aid, fid)
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(finding, field, value)
+    await db.flush()
+    return AssessmentRead.model_validate(await _fresh(db, aid))
+
+
+@router.post(
+    "/assessments/{aid}/findings/{fid}/close",
+    response_model=AssessmentRead,
+    dependencies=[Depends(require("assessment:write"))],
+)
+async def close_finding(aid: uuid.UUID, fid: uuid.UUID, db: DbSession) -> AssessmentRead:
+    finding = await _load_finding(db, aid, fid)
     finding.status = FindingStatus.closed
     await db.flush()
     return AssessmentRead.model_validate(await _fresh(db, aid))

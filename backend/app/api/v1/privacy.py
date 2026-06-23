@@ -6,6 +6,7 @@ from typing import Annotated, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Select, func, select
+from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.asset import Asset
@@ -20,10 +21,23 @@ from app.services import audit
 router = APIRouter(prefix="/processing-activities", tags=["privacy"])
 
 
+def _loads():
+    """Eager-load every relationship RopaRead serialises so model_validate never
+    triggers a lazy IO load outside the async greenlet."""
+    return (
+        selectinload(ProcessingActivity.business_unit),
+        selectinload(ProcessingActivity.assets),
+        selectinload(ProcessingActivity.risks),
+        selectinload(ProcessingActivity.processes),
+        selectinload(ProcessingActivity.policies),
+    )
+
+
 async def _load(db, ropa_id: uuid.UUID) -> ProcessingActivity:
     obj = await db.scalar(
         select(ProcessingActivity)
         .where(ProcessingActivity.id == ropa_id, ProcessingActivity.deleted.is_(False))
+        .options(*_loads())
         .execution_options(populate_existing=True)
     )
     if obj is None:
@@ -84,8 +98,11 @@ async def create_ropa(body: RopaCreate, db: DbSession, user: CurrentUser) -> Rop
     data = body.model_dump(exclude=_links)
     obj = ProcessingActivity(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db)
-    await _apply_links(db, obj, body.model_dump())
     db.add(obj)
+    # Assign relationships while the row is PENDING (pre-flush) — these are writable
+    # (non-viewonly) selectin relationships, so plain assignment writes the join rows
+    # on flush without a MissingGreenlet lazy-load.
+    await _apply_links(db, obj, body.model_dump())
     await db.flush()
     await audit.record(
         db, actor=user, action="create", entity_type="processing_activity", entity_id=obj.id,

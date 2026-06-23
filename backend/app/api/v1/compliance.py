@@ -246,7 +246,20 @@ async def create_requirement(
     req.policies = await _resolve_any(db, Policy, body.policy_ids)
     db.add(req)
     await db.flush()
-    return RequirementRead.model_validate(await _load_requirement(db, req.id))
+    loaded = await _load_requirement(db, req.id)
+    await _attach_counts(db, [loaded])
+    return RequirementRead.model_validate(loaded)
+
+
+@router.get(
+    "/requirements/{requirement_id}",
+    response_model=RequirementRead,
+    dependencies=[Depends(require("compliance:read"))],
+)
+async def get_requirement(requirement_id: uuid.UUID, db: DbSession) -> RequirementRead:
+    req = await _load_requirement(db, requirement_id)
+    await _attach_counts(db, [req])
+    return RequirementRead.model_validate(req)
 
 
 @router.patch(
@@ -274,7 +287,9 @@ async def update_requirement(
     for field, value in data.items():
         setattr(req, field, value)
     await db.flush()
-    return RequirementRead.model_validate(await _load_requirement(db, req.id))
+    loaded = await _load_requirement(db, req.id)
+    await _attach_counts(db, [loaded])
+    return RequirementRead.model_validate(loaded)
 
 
 @router.put(

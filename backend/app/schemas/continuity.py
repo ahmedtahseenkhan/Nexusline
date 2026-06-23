@@ -53,6 +53,14 @@ class TestCreate(BaseModel):
     tester: str = ""
 
 
+class TestUpdate(BaseModel):
+    result: TestResult | None = None
+    planned_date: date | None = None
+    conducted_date: date | None = None
+    result_description: str | None = None
+    tester: str | None = None
+
+
 class TestRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID

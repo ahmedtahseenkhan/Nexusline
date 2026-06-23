@@ -14,6 +14,7 @@ from app.models.enums import AccessDecision, AccessReviewStatus
 from app.schemas.access_review import (
     ItemCreate,
     ItemDecision,
+    ItemUpdate,
     ReviewCreate,
     ReviewRead,
     ReviewUpdate,
@@ -128,6 +129,18 @@ async def decide_item(
     item.comment = body.comment
     item.decided_by = user.email
     item.decided_at = date.today() if body.decision != AccessDecision.pending else None
+    await db.flush()
+    return ReviewRead.model_validate(await _fresh(db, review_id))
+
+
+@router.put("/{review_id}/items/{item_id}", response_model=ReviewRead, dependencies=[Depends(require("review:write"))])
+async def update_item(
+    review_id: uuid.UUID, item_id: uuid.UUID, body: ItemUpdate, db: DbSession
+) -> ReviewRead:
+    """Edit a line item's username / display name / access / comment (not its decision)."""
+    item = await _item_or_404(db, review_id, item_id)
+    for f, v in body.model_dump(exclude_unset=True).items():
+        setattr(item, f, v)
     await db.flush()
     return ReviewRead.model_validate(await _fresh(db, review_id))
 

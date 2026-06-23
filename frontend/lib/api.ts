@@ -40,6 +40,18 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
+/** Generic typed request helper for module pages that don't need bespoke client methods. */
+export function apiCall<T>(
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  return request<T>(path, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
 export interface LoginResponse {
   access_token: string;
   token_type: string;
@@ -849,17 +861,39 @@ export interface Incident {
   stages: IncidentStage[];
 }
 
+export interface PolicyLink {
+  id: string;
+  reference?: string;
+  title?: string;
+  name?: string;
+}
+
 export interface Policy {
   id: string;
   reference: string;
   title: string;
+  summary: string;
+  body: string;
+  url: string;
   category: string;
+  document_type: string;
   version: string;
   status: string;
+  workflow_status: string;
   owner: string;
+  label_id: string | null;
+  use_attachments: boolean;
+  review_frequency: string;
   next_review_date: string | null;
+  last_review_date: string | null;
   published_at: string | null;
+  expired_reviews: number;
+  is_review_overdue: boolean;
   acknowledgment_count: number;
+  related: PolicyLink[];
+  controls: PolicyLink[];
+  requirements: PolicyLink[];
+  risks: PolicyLink[];
 }
 
 export interface Vendor {
@@ -999,8 +1033,13 @@ export const api = {
   updateIncidentStage: (id: string, stageId: string, payload: Record<string, unknown>) =>
     request<Incident>(`/incidents/${id}/stages/${stageId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   policies: () => request<Page<Policy>>("/policies?limit=200"),
+  policy: (id: string) => request<Policy>(`/policies/${id}`),
   createPolicy: (payload: Record<string, unknown>) =>
     request<Policy>("/policies", { method: "POST", body: JSON.stringify(payload) }),
+  updatePolicy: (id: string, payload: Record<string, unknown>) =>
+    request<Policy>(`/policies/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deletePolicy: (id: string) =>
+    request<unknown>(`/policies/${id}`, { method: "DELETE" }),
   acknowledgePolicy: (id: string) =>
     request<unknown>(`/policies/${id}/acknowledge`, { method: "POST" }),
   vendors: () => request<Page<Vendor>>("/vendors?limit=200"),

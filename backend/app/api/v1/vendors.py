@@ -93,7 +93,9 @@ async def get_vendor(vendor_id: uuid.UUID, db: DbSession) -> VendorRead:
 
 
 @router.patch("/{vendor_id}", response_model=VendorRead, dependencies=[Depends(require("vendor:write"))])
-async def update_vendor(vendor_id: uuid.UUID, body: VendorUpdate, db: DbSession) -> VendorRead:
+async def update_vendor(
+    vendor_id: uuid.UUID, body: VendorUpdate, db: DbSession, user: CurrentUser
+) -> VendorRead:
     obj = await _load(db, vendor_id)
     data = body.model_dump(exclude_unset=True)
     risk_ids = data.pop("risk_ids", None)
@@ -105,6 +107,10 @@ async def update_vendor(vendor_id: uuid.UUID, body: VendorUpdate, db: DbSession)
     if asset_ids is not None:
         obj.assets = await _resolve(db, Asset, asset_ids)
     await db.flush()
+    await audit.record(
+        db, actor=user, action="update", entity_type="vendor", entity_id=obj.id,
+        summary=f"Updated vendor {obj.name}",
+    )
     return VendorRead.model_validate(await _load(db, obj.id))
 
 
