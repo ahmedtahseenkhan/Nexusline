@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus, IconUsers } from "@/components/icons";
@@ -429,9 +430,12 @@ export default function AccessReviewsPage() {
           <h1>Access Reviews</h1>
           <p>Periodic access certification campaigns — certify (keep or revoke) each account&apos;s access per system.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add review
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="access-reviews" label="Access Reviews" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add review
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

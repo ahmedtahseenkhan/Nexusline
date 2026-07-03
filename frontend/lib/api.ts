@@ -16,6 +16,32 @@ export function clearToken() {
   window.localStorage.removeItem(TOKEN_KEY);
 }
 
+/** Turn a FastAPI/Pydantic error `detail` into a readable message.
+ *  A 422 returns `detail` as an array of {loc, msg, type}; render it as
+ *  "Title is required" / "Field: message" instead of raw JSON. */
+function formatDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const cap = (s: string) => s.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+    const parts = detail
+      .map((e) => {
+        if (!e || typeof e !== "object") return "";
+        const loc = Array.isArray((e as { loc?: unknown[] }).loc)
+          ? (e as { loc: unknown[] }).loc.filter((p) => p !== "body" && p !== "query" && p !== "path")
+          : [];
+        const field = loc.length ? String(loc[loc.length - 1]) : "";
+        const label = field ? cap(field) : "";
+        const type = (e as { type?: string }).type || "";
+        const msg = (e as { msg?: string }).msg || "invalid value";
+        if (type === "missing" || type.startsWith("string_too_short")) return `${label || "This field"} is required`;
+        return label ? `${label}: ${msg}` : msg;
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join("; ");
+  }
+  return fallback;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const res = await fetch(`${API_BASE}/api/v1${path}`, {
@@ -27,14 +53,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     },
   });
   if (!res.ok) {
-    let detail = res.statusText;
+    let message = res.statusText;
     try {
       const body = await res.json();
-      detail = body.detail || detail;
+      message = formatDetail(body.detail, res.statusText);
     } catch {
       /* ignore */
     }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    throw new Error(message);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -52,11 +78,106 @@ export function apiCall<T>(
   });
 }
 
+/** Upload a binary file via multipart/form-data (browser sets the boundary). */
+export async function uploadMultipart<T>(path: string, file: File): Promise<T> {
+  const token = getToken();
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/api/v1${path}`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const b = await res.json();
+      message = formatDetail(b.detail, res.statusText);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+/** Fetch a protected file with the bearer token and trigger a browser download. */
+export async function downloadBlob(path: string, filename: string): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/api/v1${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(`Download failed (${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "download";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export interface LoginResponse {
   access_token: string;
   token_type: string;
   expires_in: number;
   user: { id: string; email: string; full_name: string; roles: { name: string }[] };
+}
+export interface LoginResult {
+  mfa_required: boolean;
+  challenge_token: string | null;
+  access_token: string | null;
+  token_type: string;
+  expires_in: number | null;
+  user: LoginResponse["user"] | null;
+}
+export interface MfaSetup {
+  secret: string;
+  otpauth_uri: string;
+}
+export interface LicenseInfo {
+  valid: boolean;
+  status: string;
+  licensed_to: string;
+  plan: string;
+  seats: number;
+  features: string[];
+  issued: string;
+  expires: string;
+  deployment: string;
+  message: string;
+}
+export interface SystemInfo {
+  app_version: string;
+  deployment_mode: string;
+  environment: string;
+  feature_flags: Record<string, boolean>;
+  license: LicenseInfo;
+}
+export interface SystemHealth {
+  status: string;
+  checks: Record<string, { ok: boolean } & Record<string, unknown>>;
+}
+export interface BackupItem {
+  filename: string;
+  size_bytes: number;
+  created_at: string;
+}
+export interface LdapConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  use_ssl: boolean;
+  start_tls: boolean;
+  bind_dn: string;
+  base_dn: string;
+  user_filter: string;
+  email_attribute: string;
+  name_attribute: string;
+  default_role: string;
+  bind_password_set: boolean;
 }
 
 export interface Risk {
@@ -392,6 +513,8 @@ export interface Me {
   email: string;
   full_name: string;
   roles: { name: string }[];
+  mfa_enabled?: boolean;
+  auth_source?: string;
 }
 
 export interface Notification {
@@ -410,6 +533,12 @@ export interface NotificationList {
   unseen_count: number;
 }
 
+export interface ApprovalAction {
+  actor_email: string;
+  action: string;
+  comment: string;
+  created_at: string;
+}
 export interface ApprovalRequest {
   id: string;
   reference: string;
@@ -422,12 +551,15 @@ export interface ApprovalRequest {
   link: string;
   approver: string;
   requested_by_email: string;
+  required_approvals: number;
+  approvals_received: number;
   decided_by_email: string;
   decided_at: string | null;
   decision_comment: string;
   due_date: string | null;
   is_overdue: boolean;
   created_at: string;
+  actions: ApprovalAction[];
 }
 
 export interface CustomField {
@@ -489,10 +621,346 @@ export interface CollabAttachment {
   added_by_email: string;
   created_at: string;
 }
+export interface AuditableUnit {
+  id: string;
+  reference: string;
+  name: string;
+  description: string;
+  category: string;
+  owner: string;
+  inherent_risk: string;
+  audit_frequency: string;
+  last_audited_date: string | null;
+  next_audit_due: string | null;
+  workflow_status: string;
+  is_overdue: boolean;
+  created_at: string;
+}
+export interface AuditProcedure {
+  id: string;
+  engagement_id: string;
+  title: string;
+  description: string;
+  result: string;
+  conclusion: string;
+  workpaper_ref: string;
+  performed_by: string;
+  performed_date: string | null;
+  created_at: string;
+}
+export interface AuditFinding {
+  id: string;
+  engagement_id: string;
+  reference: string;
+  title: string;
+  description: string;
+  rating: string;
+  risk_implication: string;
+  recommendation: string;
+  management_response: string;
+  action_owner: string;
+  due_date: string | null;
+  status: string;
+  closed_date: string | null;
+  is_overdue: boolean;
+  created_at: string;
+}
+export interface AuditEngagement {
+  id: string;
+  reference: string;
+  title: string;
+  scope: string;
+  objectives: string;
+  auditable_unit_id: string | null;
+  lead_auditor: string;
+  audit_team: string;
+  status: string;
+  period_start: string | null;
+  period_end: string | null;
+  planned_start: string | null;
+  planned_end: string | null;
+  actual_start: string | null;
+  actual_end: string | null;
+  conclusion: string;
+  rating: string | null;
+  workflow_status: string;
+  finding_count: number;
+  open_finding_count: number;
+  is_overdue: boolean;
+  created_at: string;
+  procedures: AuditProcedure[];
+  findings: AuditFinding[];
+}
+export interface ShariahRuling {
+  id: string;
+  reference: string;
+  title: string;
+  subject: string;
+  ruling_text: string;
+  basis: string;
+  status: string;
+  approved_by: string;
+  issued_date: string | null;
+  review_frequency: string;
+  next_review_date: string | null;
+  workflow_status: string;
+  is_review_overdue: boolean;
+  created_at: string;
+}
+export interface IslamicProduct {
+  id: string;
+  reference: string;
+  name: string;
+  description: string;
+  shariah_mode: string;
+  structure: string;
+  status: string;
+  owner: string;
+  launch_date: string | null;
+  approving_ruling_id: string | null;
+  workflow_status: string;
+  created_at: string;
+}
+export interface ShariahFinding {
+  id: string;
+  review_id: string;
+  reference: string;
+  title: string;
+  description: string;
+  severity: string;
+  snc_income_amount: number | null;
+  recommendation: string;
+  management_response: string;
+  action_owner: string;
+  due_date: string | null;
+  status: string;
+  closed_date: string | null;
+  is_overdue: boolean;
+  created_at: string;
+}
+export interface ShariahReview {
+  id: string;
+  reference: string;
+  title: string;
+  scope: string;
+  review_type: string;
+  reviewer: string;
+  status: string;
+  period_start: string | null;
+  period_end: string | null;
+  planned_date: string | null;
+  conclusion: string;
+  rating: string | null;
+  product_id: string | null;
+  workflow_status: string;
+  finding_count: number;
+  open_finding_count: number;
+  snc_income_total: number;
+  created_at: string;
+  findings: ShariahFinding[];
+}
+export interface CharityDisbursement {
+  id: string;
+  reference: string;
+  description: string;
+  amount: number;
+  currency: string;
+  source_finding_id: string | null;
+  beneficiary: string;
+  status: string;
+  disbursement_date: string | null;
+  notes: string;
+  workflow_status: string;
+  created_at: string;
+}
+export interface RcsaRisk {
+  id: string;
+  assessment_id: string;
+  title: string;
+  category: string;
+  inherent_likelihood: number;
+  inherent_impact: number;
+  control_description: string;
+  control_effectiveness: string;
+  residual_likelihood: number;
+  residual_impact: number;
+  action: string;
+  action_owner: string;
+  due_date: string | null;
+  inherent_score: number;
+  residual_score: number;
+  created_at: string;
+}
+export interface RcsaAssessment {
+  id: string;
+  reference: string;
+  title: string;
+  business_unit: string;
+  process: string;
+  assessor: string;
+  status: string;
+  period: string;
+  due_date: string | null;
+  completed_date: string | null;
+  workflow_status: string;
+  risk_count: number;
+  is_overdue: boolean;
+  created_at: string;
+  risks: RcsaRisk[];
+}
+export interface KriMeasurement {
+  id: string;
+  value: number;
+  as_of_date: string | null;
+  notes: string;
+  created_at: string;
+}
+export interface KeyRiskIndicator {
+  id: string;
+  reference: string;
+  name: string;
+  description: string;
+  category: string;
+  business_area: string;
+  owner: string;
+  unit: string;
+  frequency: string;
+  direction: string;
+  warning_threshold: number | null;
+  limit_threshold: number | null;
+  current_value: number | null;
+  last_measured_date: string | null;
+  workflow_status: string;
+  status: string;
+  is_breached: boolean;
+  created_at: string;
+  measurements: KriMeasurement[];
+}
+export interface LossEvent {
+  id: string;
+  reference: string;
+  title: string;
+  description: string;
+  basel_event_type: string;
+  business_line: string;
+  gross_loss: number;
+  recovery: number;
+  currency: string;
+  status: string;
+  occurrence_date: string | null;
+  discovery_date: string | null;
+  accounting_date: string | null;
+  root_cause: string;
+  action_owner: string;
+  workflow_status: string;
+  net_loss: number;
+  created_at: string;
+}
+export interface LossSummary {
+  rows: { basel_event_type: string; count: number; gross_loss: number; net_loss: number }[];
+  total_gross: number;
+  total_net: number;
+  total_count: number;
+}
+export interface ScreeningCase {
+  id: string;
+  reference: string;
+  subject_name: string;
+  subject_type: string;
+  screening_type: string;
+  lists_checked: string;
+  match_status: string;
+  risk_rating: string;
+  screened_date: string | null;
+  disposition: string;
+  reviewer: string;
+  status: string;
+  workflow_status: string;
+  created_at: string;
+}
+export interface ScreeningSummary {
+  total: number;
+  by_match_status: Record<string, number>;
+  open_cases: number;
+  escalated: number;
+}
+export interface Sar {
+  id: string;
+  reference: string;
+  subject: string;
+  activity_description: string;
+  suspicion_reason: string;
+  amount: number | null;
+  currency: string;
+  analyst: string;
+  priority: string;
+  detected_date: string | null;
+  deadline: string | null;
+  filed_date: string | null;
+  fmu_reference: string;
+  status: string;
+  workflow_status: string;
+  is_overdue: boolean;
+  created_at: string;
+}
+export interface AmlRisk {
+  id: string;
+  reference: string;
+  title: string;
+  scope: string;
+  subject: string;
+  inherent_risk: string;
+  mitigating_controls: string;
+  residual_risk: string;
+  assessor: string;
+  assessment_date: string | null;
+  review_frequency: string;
+  next_review_date: string | null;
+  workflow_status: string;
+  is_review_overdue: boolean;
+  created_at: string;
+}
+export interface SearchHit {
+  type: string;
+  label: string;
+  reference: string;
+  title: string;
+  link: string;
+}
+export interface SearchResults {
+  query: string;
+  hits: SearchHit[];
+}
+export interface RiskMatrixCell {
+  likelihood: number;
+  impact: number;
+  score: number;
+  inherent_count: number;
+  residual_count: number;
+  inherent_refs: string[];
+  residual_refs: string[];
+}
+export interface RiskMatrix {
+  cells: RiskMatrixCell[];
+  appetite_score: number;
+  tolerance_score: number;
+  total: number;
+}
+export interface CollabFile {
+  id: string;
+  title: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  uploaded_by_email: string;
+  created_at: string;
+  can_delete: boolean;
+}
 export interface CollabBundle {
   comments: CollabComment[];
   tags: CollabTag[];
   attachments: CollabAttachment[];
+  files: CollabFile[];
   available_tags: CollabTag[];
 }
 
@@ -910,10 +1378,33 @@ export interface Vendor {
 
 export const api = {
   login: (tenant_slug: string, email: string, password: string) =>
-    request<LoginResponse>("/auth/login", {
+    request<LoginResult>("/auth/login", {
       method: "POST",
       body: JSON.stringify({ tenant_slug, email, password }),
     }),
+  mfaVerify: (challenge_token: string, code: string) =>
+    request<LoginResponse>("/auth/mfa/verify", {
+      method: "POST",
+      body: JSON.stringify({ challenge_token, code }),
+    }),
+  mfaSetup: () => request<MfaSetup>("/auth/mfa/setup", { method: "POST" }),
+  mfaActivate: (code: string) =>
+    request<unknown>("/auth/mfa/activate", { method: "POST", body: JSON.stringify({ code }) }),
+  mfaDisable: (code: string) =>
+    request<unknown>("/auth/mfa/disable", { method: "POST", body: JSON.stringify({ code }) }),
+  changePassword: (current_password: string, new_password: string) =>
+    request<void>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ current_password, new_password }),
+    }),
+  ldapConfig: () => request<LdapConfig>("/auth/ldap/config"),
+  saveLdapConfig: (payload: Record<string, unknown>) =>
+    request<LdapConfig>("/auth/ldap/config", { method: "PUT", body: JSON.stringify(payload) }),
+  systemInfo: () => request<SystemInfo>("/system/info"),
+  systemHealth: () => request<SystemHealth>("/system/health"),
+  listBackups: () => request<BackupItem[]>("/system/backups"),
+  createBackup: () => request<BackupItem>("/system/backups", { method: "POST" }),
+  downloadSupportBundle: () => downloadBlob("/system/support-bundle", "nexusline-support-bundle.zip"),
   risks: () => request<Page<Risk>>("/risks?limit=200"),
   dashboard: () => request<Dashboard>("/dashboard"),
   createRisk: (payload: Record<string, unknown>) =>
@@ -967,6 +1458,17 @@ export const api = {
     request<CollabAttachment>(`/collab/${entityType}/${entityId}/attachments`, { method: "POST", body: JSON.stringify(payload) }),
   deleteAttachment: (id: string) =>
     request<void>(`/collab/attachments/${id}`, { method: "DELETE" }),
+  uploadFile: (entityType: string, entityId: string, file: File) =>
+    uploadMultipart<CollabFile>(`/collab/${entityType}/${entityId}/files`, file),
+  downloadFile: (id: string, filename: string) =>
+    downloadBlob(`/collab/files/${id}/download`, filename),
+  deleteFile: (id: string) =>
+    request<void>(`/collab/files/${id}`, { method: "DELETE" }),
+  sendTestEmail: () =>
+    request<{ smtp_configured: boolean; sent: boolean; recipient: string }>(
+      "/notifications/test-email",
+      { method: "POST" },
+    ),
   assignTag: (entityType: string, entityId: string, payload: Record<string, unknown>) =>
     request<CollabTag[]>(`/collab/${entityType}/${entityId}/tags`, { method: "POST", body: JSON.stringify(payload) }),
   unassignTag: (entityType: string, entityId: string, tagId: string) =>
@@ -1051,6 +1553,125 @@ export const api = {
     request<RiskSetting>("/risk-settings", { method: "PUT", body: JSON.stringify(payload) }),
   riskAlerts: () => request<Risk[]>("/risk-alerts"),
   riskAggregate: () => request<RiskAggregate>("/risk-aggregate"),
+  riskMatrix: () => request<RiskMatrix>("/risk-matrix"),
+  search: (q: string) => request<SearchResults>(`/search?q=${encodeURIComponent(q)}`),
+
+  // AML/CFT
+  amlScreening: () => request<Page<ScreeningCase>>("/aml/screening?limit=200"),
+  createScreening: (p: Record<string, unknown>) =>
+    request<ScreeningCase>("/aml/screening", { method: "POST", body: JSON.stringify(p) }),
+  updateScreening: (id: string, p: Record<string, unknown>) =>
+    request<ScreeningCase>(`/aml/screening/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteScreening: (id: string) => request<void>(`/aml/screening/${id}`, { method: "DELETE" }),
+  screeningSummary: () => request<ScreeningSummary>("/aml/screening-summary"),
+  amlSars: () => request<Page<Sar>>("/aml/sars?limit=200"),
+  createSar: (p: Record<string, unknown>) =>
+    request<Sar>("/aml/sars", { method: "POST", body: JSON.stringify(p) }),
+  updateSar: (id: string, p: Record<string, unknown>) =>
+    request<Sar>(`/aml/sars/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteSar: (id: string) => request<void>(`/aml/sars/${id}`, { method: "DELETE" }),
+  amlRisks: () => request<Page<AmlRisk>>("/aml/risk-assessments?limit=200"),
+  createAmlRisk: (p: Record<string, unknown>) =>
+    request<AmlRisk>("/aml/risk-assessments", { method: "POST", body: JSON.stringify(p) }),
+  updateAmlRisk: (id: string, p: Record<string, unknown>) =>
+    request<AmlRisk>(`/aml/risk-assessments/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteAmlRisk: (id: string) => request<void>(`/aml/risk-assessments/${id}`, { method: "DELETE" }),
+
+  // Operational risk — RCSA, KRIs, loss database
+  rcsaList: () => request<Page<RcsaAssessment>>("/rcsa?limit=200"),
+  rcsaGet: (id: string) => request<RcsaAssessment>(`/rcsa/${id}`),
+  createRcsa: (p: Record<string, unknown>) =>
+    request<RcsaAssessment>("/rcsa", { method: "POST", body: JSON.stringify(p) }),
+  updateRcsa: (id: string, p: Record<string, unknown>) =>
+    request<RcsaAssessment>(`/rcsa/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteRcsa: (id: string) => request<void>(`/rcsa/${id}`, { method: "DELETE" }),
+  addRcsaRisk: (id: string, p: Record<string, unknown>) =>
+    request<RcsaAssessment>(`/rcsa/${id}/risks`, { method: "POST", body: JSON.stringify(p) }),
+  updateRcsaRisk: (lineId: string, p: Record<string, unknown>) =>
+    request<RcsaRisk>(`/rcsa-risks/${lineId}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteRcsaRisk: (lineId: string) => request<void>(`/rcsa-risks/${lineId}`, { method: "DELETE" }),
+  kris: () => request<Page<KeyRiskIndicator>>("/kris?limit=200"),
+  createKri: (p: Record<string, unknown>) =>
+    request<KeyRiskIndicator>("/kris", { method: "POST", body: JSON.stringify(p) }),
+  updateKri: (id: string, p: Record<string, unknown>) =>
+    request<KeyRiskIndicator>(`/kris/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteKri: (id: string) => request<void>(`/kris/${id}`, { method: "DELETE" }),
+  addKriMeasurement: (id: string, p: Record<string, unknown>) =>
+    request<KeyRiskIndicator>(`/kris/${id}/measurements`, { method: "POST", body: JSON.stringify(p) }),
+  lossEvents: () => request<Page<LossEvent>>("/loss-events?limit=200"),
+  createLossEvent: (p: Record<string, unknown>) =>
+    request<LossEvent>("/loss-events", { method: "POST", body: JSON.stringify(p) }),
+  updateLossEvent: (id: string, p: Record<string, unknown>) =>
+    request<LossEvent>(`/loss-events/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteLossEvent: (id: string) => request<void>(`/loss-events/${id}`, { method: "DELETE" }),
+  lossSummary: () => request<LossSummary>("/loss-events-summary"),
+
+  // PDF reports (board / audit-committee / Shariah-board packs)
+  pdfRiskRegister: () => downloadBlob("/reports/pdf/risk-register", "risk-register.pdf"),
+  pdfExecutiveSummary: () => downloadBlob("/reports/pdf/executive-summary", "executive-summary.pdf"),
+  pdfAuditEngagement: (id: string, ref: string) =>
+    downloadBlob(`/reports/pdf/audit-engagement/${id}`, `audit-${ref}.pdf`),
+  pdfShariahReview: (id: string, ref: string) =>
+    downloadBlob(`/reports/pdf/shariah-review/${id}`, `shariah-${ref}.pdf`),
+
+  // Internal Audit
+  auditUnits: () => request<Page<AuditableUnit>>("/audit-universe?limit=200"),
+  createAuditUnit: (payload: Record<string, unknown>) =>
+    request<AuditableUnit>("/audit-universe", { method: "POST", body: JSON.stringify(payload) }),
+  updateAuditUnit: (id: string, payload: Record<string, unknown>) =>
+    request<AuditableUnit>(`/audit-universe/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteAuditUnit: (id: string) => request<void>(`/audit-universe/${id}`, { method: "DELETE" }),
+
+  auditEngagements: () => request<Page<AuditEngagement>>("/audit-engagements?limit=200"),
+  auditEngagement: (id: string) => request<AuditEngagement>(`/audit-engagements/${id}`),
+  createAuditEngagement: (payload: Record<string, unknown>) =>
+    request<AuditEngagement>("/audit-engagements", { method: "POST", body: JSON.stringify(payload) }),
+  updateAuditEngagement: (id: string, payload: Record<string, unknown>) =>
+    request<AuditEngagement>(`/audit-engagements/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteAuditEngagement: (id: string) => request<void>(`/audit-engagements/${id}`, { method: "DELETE" }),
+  addAuditProcedure: (eid: string, payload: Record<string, unknown>) =>
+    request<AuditEngagement>(`/audit-engagements/${eid}/procedures`, { method: "POST", body: JSON.stringify(payload) }),
+  updateAuditProcedure: (pid: string, payload: Record<string, unknown>) =>
+    request<AuditProcedure>(`/audit-procedures/${pid}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteAuditProcedure: (pid: string) => request<void>(`/audit-procedures/${pid}`, { method: "DELETE" }),
+  addAuditFinding: (eid: string, payload: Record<string, unknown>) =>
+    request<AuditEngagement>(`/audit-engagements/${eid}/findings`, { method: "POST", body: JSON.stringify(payload) }),
+  updateAuditFinding: (fid: string, payload: Record<string, unknown>) =>
+    request<AuditFinding>(`/audit-findings/${fid}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteAuditFinding: (fid: string) => request<void>(`/audit-findings/${fid}`, { method: "DELETE" }),
+  auditFindings: (params = "") => request<AuditFinding[]>(`/audit-findings${params}`),
+
+  // Shariah governance
+  shariahRulings: () => request<Page<ShariahRuling>>("/shariah-rulings?limit=200"),
+  createShariahRuling: (p: Record<string, unknown>) =>
+    request<ShariahRuling>("/shariah-rulings", { method: "POST", body: JSON.stringify(p) }),
+  updateShariahRuling: (id: string, p: Record<string, unknown>) =>
+    request<ShariahRuling>(`/shariah-rulings/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteShariahRuling: (id: string) => request<void>(`/shariah-rulings/${id}`, { method: "DELETE" }),
+  islamicProducts: () => request<Page<IslamicProduct>>("/islamic-products?limit=200"),
+  createIslamicProduct: (p: Record<string, unknown>) =>
+    request<IslamicProduct>("/islamic-products", { method: "POST", body: JSON.stringify(p) }),
+  updateIslamicProduct: (id: string, p: Record<string, unknown>) =>
+    request<IslamicProduct>(`/islamic-products/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteIslamicProduct: (id: string) => request<void>(`/islamic-products/${id}`, { method: "DELETE" }),
+  shariahReviews: () => request<Page<ShariahReview>>("/shariah-reviews?limit=200"),
+  shariahReview: (id: string) => request<ShariahReview>(`/shariah-reviews/${id}`),
+  createShariahReview: (p: Record<string, unknown>) =>
+    request<ShariahReview>("/shariah-reviews", { method: "POST", body: JSON.stringify(p) }),
+  updateShariahReview: (id: string, p: Record<string, unknown>) =>
+    request<ShariahReview>(`/shariah-reviews/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteShariahReview: (id: string) => request<void>(`/shariah-reviews/${id}`, { method: "DELETE" }),
+  addShariahFinding: (rid: string, p: Record<string, unknown>) =>
+    request<ShariahReview>(`/shariah-reviews/${rid}/findings`, { method: "POST", body: JSON.stringify(p) }),
+  updateShariahFinding: (fid: string, p: Record<string, unknown>) =>
+    request<ShariahFinding>(`/shariah-findings/${fid}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteShariahFinding: (fid: string) => request<void>(`/shariah-findings/${fid}`, { method: "DELETE" }),
+  charityLedger: () => request<Page<CharityDisbursement>>("/charity-ledger?limit=200"),
+  createCharity: (p: Record<string, unknown>) =>
+    request<CharityDisbursement>("/charity-ledger", { method: "POST", body: JSON.stringify(p) }),
+  updateCharity: (id: string, p: Record<string, unknown>) =>
+    request<CharityDisbursement>(`/charity-ledger/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteCharity: (id: string) => request<void>(`/charity-ledger/${id}`, { method: "DELETE" }),
 
   evidence: () => request<Page<Evidence>>("/evidence"),
   createEvidence: (payload: Record<string, unknown>) =>

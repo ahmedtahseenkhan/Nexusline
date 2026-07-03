@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import {
   Field,
@@ -285,6 +286,34 @@ export default function CompliancePage() {
   const [editingFw, setEditingFw] = useState<Framework | null>(null);
   const [fw, setFw] = useState<FwState>(FW_BLANK);
   const [savingFw, setSavingFw] = useState(false);
+
+  // framework library
+  type FwTemplate = { key: string; name: string; version: string; authority: string; description: string; requirement_count: number };
+  const [showLib, setShowLib] = useState(false);
+  const [templates, setTemplates] = useState<FwTemplate[]>([]);
+  const [loadingTpl, setLoadingTpl] = useState<string | null>(null);
+  async function openLibrary() {
+    setError(null);
+    setShowLib(true);
+    try {
+      setTemplates(await apiCall<FwTemplate[]>("GET", "/framework-templates"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load library");
+    }
+  }
+  async function loadTemplate(key: string) {
+    setError(null);
+    setLoadingTpl(key);
+    try {
+      const created = await apiCall<Framework>("POST", `/framework-templates/${key}/load`);
+      setShowLib(false);
+      await loadFrameworks(created.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load framework");
+    } finally {
+      setLoadingTpl(null);
+    }
+  }
 
   // requirement modal
   const [showReq, setShowReq] = useState(false);
@@ -741,13 +770,23 @@ export default function CompliancePage() {
               Edit
             </button>
           )}
+          <button className="btn secondary" onClick={openLibrary}>
+            <IconCompliance width={16} height={16} /> Library
+          </button>
           <button className="btn secondary" onClick={openNewFw}>
             <IconPlus width={16} height={16} /> Framework
           </button>
           {selected && (
-            <button className="btn" onClick={openNewReq}>
-              <IconPlus width={16} height={16} /> Requirement
-            </button>
+            <>
+              <ImportExport
+                resource="requirements"
+                label="Requirements"
+                onDone={() => { if (selected) loadRequirements(selected); }}
+              />
+              <button className="btn" onClick={openNewReq}>
+                <IconPlus width={16} height={16} /> Requirement
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -978,6 +1017,42 @@ export default function CompliancePage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {showLib && (
+        <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setShowLib(false)}>
+          <div className="modal" role="dialog" aria-modal="true" aria-label="Framework library">
+            <div className="modal-head">
+              <h2>Framework Library</h2>
+              <button className="x" onClick={() => setShowLib(false)} aria-label="Close">✕</button>
+            </div>
+            <div className="modal-body">
+              <p className="muted" style={{ marginTop: 0, marginBottom: 16 }}>
+                Load a recognised standard with all of its clauses and controls as requirements. You can then map controls,
+                collect evidence and track coverage against it.
+              </p>
+              {templates.length === 0 && <div className="empty"><p>Loading…</p></div>}
+              {templates.map((t) => (
+                <div key={t.key} className="card card-pad" style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
+                  <div>
+                    <div className="cell-title" style={{ marginBottom: 2 }}>{t.name}</div>
+                    <div className="muted" style={{ fontSize: 12.5 }}>{t.description}</div>
+                    <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                      <Badge tone="info">{t.authority}</Badge>
+                      <Badge tone="neutral" plain>{t.requirement_count} requirements</Badge>
+                    </div>
+                  </div>
+                  <button className="btn" disabled={loadingTpl === t.key} onClick={() => loadTemplate(t.key)}>
+                    {loadingTpl === t.key ? "Loading…" : "Load"}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="modal-foot">
+              <button className="btn secondary" onClick={() => setShowLib(false)}>Close</button>
+            </div>
           </div>
         </div>
       )}

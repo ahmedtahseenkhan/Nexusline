@@ -1,23 +1,27 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { api, clearToken, type Me } from "@/lib/api";
+import { api, clearToken, type Me, type SearchHit } from "@/lib/api";
 import { IconBell, IconLogout } from "./icons";
 
 const TITLES: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/goals": "Strategy & Goals",
   "/risks": "Risk Register",
+  "/operational-risk": "Operational Risk",
   "/threat-library": "Threat & Vulnerability Library",
   "/assets": "Asset Management",
   "/vendors": "Third-Party Risk",
   "/assessments": "Vendor Assessments",
   "/questionnaires": "Questionnaires",
   "/compliance": "Compliance Management",
+  "/aml": "AML / CFT",
   "/controls": "Control Catalog",
   "/evidence": "Evidence",
+  "/internal-audit": "Internal Audit",
+  "/shariah": "Shariah Governance",
   "/policies": "Policy Management",
   "/privacy": "Data Privacy (RoPA)",
   "/awareness": "Awareness Training",
@@ -57,9 +61,42 @@ export default function Topbar({ user }: { user: Me | null }) {
   const title = key ? TITLES[key] : "NexusLine";
   const [unseen, setUnseen] = useState(0);
 
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<SearchHit[]>([]);
+  const [open, setOpen] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     api.notifications().then((r) => setUnseen(r.unseen_count)).catch(() => {});
   }, [pathname]);
+
+  // Debounced global search.
+  useEffect(() => {
+    const term = q.trim();
+    if (term.length < 2) {
+      setHits([]);
+      return;
+    }
+    const t = setTimeout(() => {
+      api.search(term).then((r) => { setHits(r.hits); setOpen(true); }).catch(() => setHits([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  // Close the dropdown on outside click.
+  useEffect(() => {
+    function onClick(e: MouseEvent) {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+
+  function go(hit: SearchHit) {
+    setOpen(false);
+    setQ("");
+    router.push(hit.link);
+  }
 
   function logout() {
     clearToken();
@@ -70,6 +107,42 @@ export default function Topbar({ user }: { user: Me | null }) {
     <header className="topbar">
       <div className="topbar-title">{title}</div>
       <div className="topbar-right">
+        <div ref={searchRef} style={{ position: "relative" }}>
+          <input
+            className="input sm"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onFocus={() => hits.length && setOpen(true)}
+            placeholder="Search…"
+            aria-label="Global search"
+            style={{ width: 220, height: 32 }}
+          />
+          {open && (
+            <div
+              className="card"
+              style={{ position: "absolute", top: 38, right: 0, width: 340, maxHeight: 380, overflowY: "auto", zIndex: 50, boxShadow: "0 8px 28px rgba(0,0,0,0.14)" }}
+            >
+              {hits.length === 0 ? (
+                <div className="card-pad muted" style={{ fontSize: 13 }}>No matches for “{q}”.</div>
+              ) : (
+                <div style={{ padding: 4 }}>
+                  {hits.map((h, i) => (
+                    <button
+                      key={`${h.type}-${h.reference}-${i}`}
+                      onClick={() => go(h)}
+                      style={{ display: "block", width: "100%", textAlign: "left", border: "none", background: "none", cursor: "pointer", padding: "8px 10px", borderRadius: 6 }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-2, #f3f4f6)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                    >
+                      <div style={{ fontSize: 13.5, fontWeight: 600 }}>{h.title}</div>
+                      <div className="muted" style={{ fontSize: 11.5 }}>{h.label}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
         <Link href="/notifications" className="btn secondary sm" aria-label="Notifications" title="Notifications" style={{ position: "relative" }}>
           <IconBell width={16} height={16} />
           {unseen > 0 && (

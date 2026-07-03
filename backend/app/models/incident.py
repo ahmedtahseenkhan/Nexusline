@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Column, Date, Float, ForeignKey, Integer, String, Table, Text, Uuid
+from sqlalchemy import Boolean, Column, Date, Float, ForeignKey, Integer, String, Table, Text, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,7 +17,13 @@ from app.models.base import (
     UUIDPrimaryKeyMixin,
     WorkflowMixin,
 )
-from app.models.enums import IncidentStatus, Severity, StageStatus
+from app.models.enums import (
+    IncidentStatus,
+    RegulatoryReportStatus,
+    RegulatoryReportType,
+    Severity,
+    StageStatus,
+)
 
 # Default response stages created with each incident (NIST 800-61 phases).
 DEFAULT_STAGES = ["Identification", "Containment", "Eradication", "Recovery", "Lessons Learned"]
@@ -61,6 +67,15 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, 
     detected_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     occurred_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     resolved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # Regulatory reporting (e.g. SBP breach notification obligations).
+    is_reportable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    regulator: Mapped[str] = mapped_column(String(64), default="")
+
+    regulatory_reports: Mapped[list["RegulatoryReport"]] = relationship(
+        back_populates="incident", cascade="all, delete-orphan", lazy="selectin",
+        order_by="RegulatoryReport.deadline",
+    )
 
     stages: Mapped[list["IncidentStage"]] = relationship(
         back_populates="incident",
@@ -116,3 +131,42 @@ class IncidentStage(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     completed_at: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     incident: Mapped[Incident] = relationship(back_populates="stages")
+
+
+class RegulatoryReport(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """A regulator submission tied to an incident, with an SLA deadline and status.
+
+    Models the SBP breach-reporting chain (initial notification → final report), each
+    with its own deadline computed from the incident detection date and configurable
+    SLA windows.
+    """
+
+    __tablename__ = "regulatory_reports"
+
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    regulator: Mapped[str] = mapped_column(String(64), default="SBP")
+    report_type: Mapped[RegulatoryReportType] = mapped_column(
+        SAEnum(RegulatoryReportType, name="regulatory_report_type"),
+        default=RegulatoryReportType.initial_notification, nullable=False,
+    )
+    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[RegulatoryReportStatus] = mapped_column(
+        SAEnum(RegulatoryReportStatus, name="regulatory_report_status"),
+        default=RegulatoryReportStatus.pending, nullable=False,
+    )
+    submitted_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    reference: Mapped[str] = mapped_column(String(120), default="")  # regulator acknowledgement ref
+    summary: Mapped[str] = mapped_column(Text, default="")
+    submitted_by: Mapped[str] = mapped_column(String(200), default="")
+
+    incident: Mapped[Incident] = relationship(back_populates="regulatory_reports")
+
+    @property
+    def is_overdue(self) -> bool:
+        return (
+            self.status == RegulatoryReportStatus.pending
+            and self.deadline is not None
+            and self.deadline < date.today()
+        )

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import RecordPanels from "@/components/RecordPanels";
 import { Field, TextInput, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
@@ -437,9 +438,12 @@ export default function ProjectsPage() {
           <h1>Project Management</h1>
           <p>Remediation projects with tasks &amp; milestones, budget tracking, and links to the risks, controls and policies they address.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add project
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="projects" label="Projects" onDone={() => load()} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add project
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

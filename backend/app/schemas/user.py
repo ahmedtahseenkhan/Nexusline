@@ -39,6 +39,8 @@ class UserRead(BaseModel):
     full_name: str
     is_active: bool
     created_at: datetime
+    mfa_enabled: bool = False
+    auth_source: str = "local"
     # ``User`` ORM exposes ``permission_codes`` and ``role_names`` as properties.
     permission_codes: list[str] = []
     roles: list[RoleSummary] = []

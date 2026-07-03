@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -360,9 +361,12 @@ export default function GoalsPage() {
           <h1>Strategy &amp; Goals</h1>
           <p>Strategic goals with a recurring pass/fail audit cycle, linked to the risks, projects and policies that support them.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add goal
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="goals" label="Goals" onDone={() => load()} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add goal
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

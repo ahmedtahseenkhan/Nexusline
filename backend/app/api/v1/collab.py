@@ -6,22 +6,26 @@ attachments may be removed by their author or an admin (``role:write``).
 from __future__ import annotations
 
 import uuid
+from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.collab import Attachment, Comment, EntityTag, Tag
+from app.models.collab import Attachment, Comment, EntityTag, StoredFile, Tag
 from app.schemas.collab import (
     AttachmentCreate,
     AttachmentRead,
     CollabBundle,
     CommentCreate,
     CommentRead,
+    StoredFileRead,
     TagAssign,
     TagCreate,
     TagRead,
 )
+from app.services import storage
 
 router = APIRouter(prefix="/collab", tags=["collaboration"])
 
@@ -76,6 +80,13 @@ async def get_bundle(entity_type: str, entity_id: uuid.UUID, db: DbSession, user
             .order_by(Attachment.created_at)
         )
     ).all()
+    files = (
+        await db.scalars(
+            select(StoredFile)
+            .where(StoredFile.entity_type == entity_type, StoredFile.entity_id == entity_id)
+            .order_by(StoredFile.created_at)
+        )
+    ).all()
     tags = await _tags_for(db, entity_type, entity_id)
     available = (await db.scalars(select(Tag).order_by(Tag.name))).all()
 
@@ -85,10 +96,16 @@ async def get_bundle(entity_type: str, entity_id: uuid.UUID, db: DbSession, user
         cr = CommentRead.model_validate(c)
         cr.can_delete = admin or c.author_id == user.id
         crs.append(cr)
+    frs = []
+    for f in files:
+        fr = StoredFileRead.model_validate(f)
+        fr.can_delete = admin or f.uploaded_by_email == user.email
+        frs.append(fr)
     return CollabBundle(
         comments=crs,
         tags=[TagRead.model_validate(t) for t in tags],
         attachments=[AttachmentRead.model_validate(a) for a in attachments],
+        files=frs,
         available_tags=[TagRead.model_validate(t) for t in available],
     )
 
@@ -148,6 +165,64 @@ async def delete_attachment(attachment_id: uuid.UUID, db: DbSession, user: Curre
     if not (_is_admin(user) or a.added_by_email == user.email):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your attachment")
     await db.delete(a)
+
+
+# --------------------------------------------------------------- uploaded files ---
+@router.post("/{entity_type}/{entity_id}/files", response_model=StoredFileRead, status_code=201)
+async def upload_file(
+    entity_type: str,
+    entity_id: uuid.UUID,
+    db: DbSession,
+    user: CurrentUser,
+    file: UploadFile = File(...),
+) -> StoredFileRead:
+    """Upload a binary file (evidence, screenshot, PDF…) and attach it to a record."""
+    blob = await storage.save_upload(user.tenant_id, file)
+    sf = StoredFile(
+        tenant_id=user.tenant_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        title=blob.filename,
+        filename=blob.filename,
+        content_type=blob.content_type,
+        size_bytes=blob.size_bytes,
+        sha256=blob.sha256,
+        storage_key=blob.storage_key,
+        uploaded_by_email=user.email,
+    )
+    db.add(sf)
+    await db.flush()
+    await db.refresh(sf)
+    fr = StoredFileRead.model_validate(sf)
+    fr.can_delete = True
+    return fr
+
+
+@router.get("/files/{file_id}/download")
+async def download_file(file_id: uuid.UUID, db: DbSession, user: CurrentUser) -> FileResponse:
+    sf = await db.scalar(select(StoredFile).where(StoredFile.id == file_id))
+    if sf is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    path = storage.resolve_path(user.tenant_id, sf.storage_key)
+    return FileResponse(
+        path,
+        media_type=sf.content_type or "application/octet-stream",
+        filename=sf.filename,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(sf.filename)}"
+        },
+    )
+
+
+@router.delete("/files/{file_id}", status_code=204)
+async def delete_file(file_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    sf = await db.scalar(select(StoredFile).where(StoredFile.id == file_id))
+    if sf is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    if not (_is_admin(user) or sf.uploaded_by_email == user.email):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your file")
+    storage.delete_object(sf.storage_key)
+    await db.delete(sf)
 
 
 @router.post("/{entity_type}/{entity_id}/tags", response_model=list[TagRead], status_code=201)

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -227,9 +228,12 @@ export default function LegalPage() {
           <h1>Legal Register</h1>
           <p>Legal &amp; regulatory obligations; the risk magnifier amplifies linked risks.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add legal
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="legal" label="Legal &amp; Regulatory" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add legal
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

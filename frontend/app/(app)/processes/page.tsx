@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
 import { IconLayers, IconPlus } from "@/components/icons";
@@ -234,9 +235,12 @@ export default function ProcessesPage() {
           <h1>Business Processes</h1>
           <p>Processes with continuity objectives (RTO / RPO / MTD), criticality and asset dependencies for impact analysis.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add process
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="processes" label="Processes" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add process
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

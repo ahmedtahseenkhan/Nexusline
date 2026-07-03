@@ -42,6 +42,7 @@ TENANT_SCOPED_TABLES: list[str] = [
     "evidence",
     "incidents",
     "incident_stages",
+    "regulatory_reports",
     "policies",
     "policy_acknowledgments",
     "policy_reviews",
@@ -57,6 +58,23 @@ TENANT_SCOPED_TABLES: list[str] = [
     "project_expenses",
     "goals",
     "goal_audits",
+    "auditable_units",
+    "audit_engagements",
+    "audit_procedures",
+    "audit_findings",
+    "shariah_rulings",
+    "islamic_products",
+    "shariah_reviews",
+    "shariah_findings",
+    "charity_disbursements",
+    "rcsa_assessments",
+    "rcsa_risks",
+    "key_risk_indicators",
+    "kri_measurements",
+    "loss_events",
+    "screening_cases",
+    "suspicious_activity_reports",
+    "aml_risk_assessments",
     "questionnaires",
     "questions",
     "question_options",
@@ -76,6 +94,7 @@ TENANT_SCOPED_TABLES: list[str] = [
     "notifications",
     "notification_views",
     "approval_requests",
+    "approval_actions",
     "custom_fields",
     "custom_field_values",
     "dashboard_widgets",
@@ -83,29 +102,41 @@ TENANT_SCOPED_TABLES: list[str] = [
     "tags",
     "entity_tags",
     "attachments",
+    "stored_files",
     "webhooks",
     "webhook_deliveries",
     "status_rules",
     "attestations",
     "saved_filters",
     "sso_configs",
+    "ldap_configs",
 ]
 
 _POLICY = "tenant_isolation"
 _PREDICATE = "tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid"
 
 
-async def apply_rls_policies(conn: AsyncConnection) -> None:
+def rls_ddl_statements() -> list[str]:
+    """The full list of RLS DDL statements as plain SQL strings.
+
+    Shared by the async boot path (``apply_rls_policies``) and the synchronous
+    Alembic baseline migration, so the policy definition lives in exactly one place.
+    """
+    statements: list[str] = []
     for table in TENANT_SCOPED_TABLES:
-        await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
-        await conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
-        await conn.execute(text(f"DROP POLICY IF EXISTS {_POLICY} ON {table}"))
-        await conn.execute(
-            text(
-                f"CREATE POLICY {_POLICY} ON {table} "
-                f"USING ({_PREDICATE}) WITH CHECK ({_PREDICATE})"
-            )
+        statements.append(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        statements.append(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+        statements.append(f"DROP POLICY IF EXISTS {_POLICY} ON {table}")
+        statements.append(
+            f"CREATE POLICY {_POLICY} ON {table} "
+            f"USING ({_PREDICATE}) WITH CHECK ({_PREDICATE})"
         )
+    return statements
+
+
+async def apply_rls_policies(conn: AsyncConnection) -> None:
+    for statement in rls_ddl_statements():
+        await conn.execute(text(statement))
 
 
 async def _main() -> None:

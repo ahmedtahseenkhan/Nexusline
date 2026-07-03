@@ -6,7 +6,51 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
-from app.models.enums import IncidentStatus, Severity, StageStatus
+from app.models.enums import (
+    IncidentStatus,
+    RegulatoryReportStatus,
+    RegulatoryReportType,
+    Severity,
+    StageStatus,
+)
+
+
+class RegReportCreate(BaseModel):
+    regulator: str = "SBP"
+    report_type: RegulatoryReportType = RegulatoryReportType.initial_notification
+    deadline: date | None = None
+    status: RegulatoryReportStatus = RegulatoryReportStatus.pending
+    submitted_at: date | None = None
+    reference: str = ""
+    summary: str = ""
+    submitted_by: str = ""
+
+
+class RegReportUpdate(BaseModel):
+    regulator: str | None = None
+    report_type: RegulatoryReportType | None = None
+    deadline: date | None = None
+    status: RegulatoryReportStatus | None = None
+    submitted_at: date | None = None
+    reference: str | None = None
+    summary: str | None = None
+    submitted_by: str | None = None
+
+
+class RegReportRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    incident_id: uuid.UUID
+    regulator: str
+    report_type: RegulatoryReportType
+    deadline: date | None
+    status: RegulatoryReportStatus
+    submitted_at: date | None
+    reference: str
+    summary: str
+    submitted_by: str
+    is_overdue: bool
+    created_at: datetime
 
 
 class IncRef(BaseModel):
@@ -55,6 +99,8 @@ class IncidentBase(BaseModel):
     detected_at: date | None = None
     occurred_at: date | None = None
     resolved_at: date | None = None
+    is_reportable: bool = False
+    regulator: str = ""
 
 
 class IncidentCreate(IncidentBase):
@@ -81,6 +127,8 @@ class IncidentUpdate(BaseModel):
     detected_at: date | None = None
     occurred_at: date | None = None
     resolved_at: date | None = None
+    is_reportable: bool | None = None
+    regulator: str | None = None
     control_ids: list[uuid.UUID] | None = None
     vendor_ids: list[uuid.UUID] | None = None
     asset_ids: list[uuid.UUID] | None = None
@@ -96,6 +144,7 @@ class IncidentRead(IncidentBase):
     lifecycle_complete: bool
     current_stage: str | None
     stages: list[StageRead] = []
+    regulatory_reports: list[RegReportRead] = []
     controls: list[IncRef] = []
     vendors: list[IncRef] = []
     assets: list[IncRef] = []

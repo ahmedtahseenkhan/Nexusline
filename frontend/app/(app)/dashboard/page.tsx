@@ -17,6 +17,7 @@ import {
   IconLayers,
   IconRisk,
 } from "@/components/icons";
+import RiskHeatmap from "@/components/RiskHeatmap";
 
 function money(n: number) {
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
@@ -84,9 +85,14 @@ export default function DashboardPage() {
 
   return (
     <>
-      <div className="page-head">
-        <h1>Welcome back</h1>
-        <p>Your organization&apos;s governance, risk and compliance posture at a glance.</p>
+      <div className="page-head row-between">
+        <div>
+          <h1>Welcome back</h1>
+          <p>Your organization&apos;s governance, risk and compliance posture at a glance.</p>
+        </div>
+        <button className="btn secondary sm" onClick={() => api.pdfExecutiveSummary().catch(() => {})}>
+          Executive summary PDF
+        </button>
       </div>
 
       <div className="grid stat-grid">
@@ -225,6 +231,10 @@ export default function DashboardPage() {
             )}
           </div>
         </div>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <RiskHeatmap />
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>

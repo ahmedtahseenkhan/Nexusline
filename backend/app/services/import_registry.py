@@ -12,15 +12,19 @@ adjusting a resource never touches the module's own model/schema/api files.
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from app.models.access_review import AccessReview
 from app.models.asset import Asset
-from app.models.compliance import Requirement
+from app.models.awareness import AwarenessProgram
+from app.models.compliance import Framework, Requirement
 from app.models.continuity import ContinuityPlan
 from app.models.control import Control
+from app.models.evidence import Evidence
 from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
 from app.models.incident import Incident
@@ -35,13 +39,19 @@ from app.models.vendor import Vendor
 # --- enums -----------------------------------------------------------------
 from app.models.base import WorkflowState
 from app.models.enums import (
+    AccessReviewStatus,
     AssessmentStatus,
+    AwarenessStatus,
+    ComplianceStatus,
+    ComplianceTreatment,
     ContinuityStatus,
     ControlEffectiveness,
     ControlStatus,
     ControlType,
     Criticality,
     DpiaStatus,
+    EvidenceStatus,
+    EvidenceType,
     ExceptionType,
     GoalStatus,
     IncidentStatus,
@@ -59,9 +69,13 @@ from app.models.enums import (
 )
 
 # --- Create schemas --------------------------------------------------------
+from app.schemas.access_review import ReviewCreate
 from app.schemas.asset import AssetCreate
+from app.schemas.awareness import ProgramCreate
+from app.schemas.compliance import RequirementCreate
 from app.schemas.continuity import PlanCreate
 from app.schemas.control import ControlCreate
+from app.schemas.evidence import EvidenceCreate
 from app.schemas.exception import ExceptionCreate
 from app.schemas.goal import GoalCreate
 from app.schemas.incident import IncidentCreate
@@ -74,8 +88,12 @@ from app.schemas.threat import ThreatCreate, VulnerabilityCreate
 from app.schemas.vendor import VendorCreate
 
 # --- existing module create functions --------------------------------------
+from app.api.v1.access_reviews import create_review
+from app.api.v1.awareness import create_program
+from app.api.v1.compliance import create_requirement
 from app.api.v1.continuity import create_plan
 from app.api.v1.controls import create_control
+from app.api.v1.evidence import create_evidence
 from app.api.v1.exceptions import create_exception
 from app.api.v1.goals import create_goal
 from app.api.v1.incidents import create_incident
@@ -613,5 +631,99 @@ _register(ResourceIO(
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
         link_col("controls", "control_ids", Control, "controls", match_field="name"),
         link_col("policies", "policy_ids", Policy, "policies", match_field="title"),
+    ],
+))
+
+# ----- requirements (compliance) -------------------------------------------
+# create_requirement takes framework_id as a PATH parameter, so an import carries
+# the framework as a reference column and this adapter routes it into the real
+# create function. RequirementImport = RequirementCreate + a resolved framework_id.
+class RequirementImport(RequirementCreate):
+    framework_id: uuid.UUID
+
+
+async def _create_requirement_import(body: RequirementImport, db, user):
+    inner = RequirementCreate(**body.model_dump(exclude={"framework_id"}))
+    return await create_requirement(
+        framework_id=body.framework_id, body=inner, db=db, user=user
+    )
+
+
+_register(ResourceIO(
+    resource="requirements", label="Compliance Requirements", model=Requirement,
+    create_schema=RequirementImport, create_func=_create_requirement_import,
+    read_perm="compliance:read", write_perm="compliance:write", importable=True,
+    columns=[
+        link_col("framework", "framework_id", Framework, "framework", match_field="name",
+                 multi=False, help="Framework this requirement belongs to (required)"),
+        text("title", required=True),
+        text("reference", help="Requirement reference, e.g. A.5.1 / CC6.1"),
+        text("domain"),
+        text("description"),
+        text("implementation", help="How we comply"),
+        text("audit_questionnaire", help="How to test compliance"),
+        enum_col("status", ComplianceStatus),
+        enum_col("treatment", ComplianceTreatment),
+        integer("efficacy", help="0-100 %"),
+        text("owner"),
+        enum_col("workflow_status", WorkflowState),
+        link_col("legal", "legal_id", Legal, "legal", match_field="name", multi=False,
+                 help="Legal obligation this requirement discharges (single value)"),
+        link_col("controls", "control_ids", Control, "controls", match_field="name"),
+        link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+        link_col("policies", "policy_ids", Policy, "policies", match_field="title"),
+    ],
+))
+
+# ----- evidence ------------------------------------------------------------
+_register(ResourceIO(
+    resource="evidence", label="Evidence", model=Evidence,
+    create_schema=EvidenceCreate, create_func=create_evidence,
+    read_perm="control:read", write_perm="control:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("description"),
+        enum_col("evidence_type", EvidenceType),
+        text("reference", help="URL or storage location"),
+        enum_col("status", EvidenceStatus),
+        date_col("collected_at"),
+        date_col("valid_until"),
+        # control_id is required on EvidenceCreate -> a blank cell fails the row.
+        link_col("control", "control_id", Control, "control", match_field="name", multi=False,
+                 help="Control this evidence supports (single value, required)"),
+    ],
+))
+
+# ----- awareness-programs --------------------------------------------------
+_register(ResourceIO(
+    resource="awareness-programs", label="Awareness Programs", model=AwarenessProgram,
+    create_schema=ProgramCreate, create_func=create_program,
+    read_perm="awareness:read", write_perm="awareness:write", importable=True,
+    columns=[
+        text("name", required=True),
+        text("description"),
+        text("content", help="Training material / URL"),
+        enum_col("status", AwarenessStatus),
+        integer("passing_score", help="0-100 %"),
+        enum_col("frequency", ReviewFrequency),
+        date_col("due_date"),
+    ],
+))
+
+# ----- access-reviews ------------------------------------------------------
+_register(ResourceIO(
+    resource="access-reviews", label="Access Reviews", model=AccessReview,
+    create_schema=ReviewCreate, create_func=create_review,
+    read_perm="review:read", write_perm="review:write", importable=True,
+    columns=[
+        text("name", required=True),
+        text("description"),
+        enum_col("status", AccessReviewStatus),
+        text("reviewer"),
+        text("system_name", help="System / application under review"),
+        date_col("due_date"),
+        enum_col("frequency", ReviewFrequency),
+        link_col("asset", "asset_id", Asset, "asset", match_field="name", multi=False,
+                 help="Asset the reviewed system maps to (single value)"),
     ],
 ))

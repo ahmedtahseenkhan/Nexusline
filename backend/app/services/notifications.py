@@ -22,6 +22,13 @@ from app.models.enums import (
 )
 from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
+from app.models.internal_audit import AuditEngagement, AuditFinding
+from app.models.shariah import ShariahFinding
+from app.models.operational_risk import KeyRiskIndicator, RcsaAssessment
+from app.models.incident import RegulatoryReport
+from app.models.aml import ScreeningCase, SuspiciousActivityReport
+from app.models.enums import RegulatoryReportStatus, ScreeningCaseStatus
+from app.models.enums import AuditEngagementStatus, AuditFindingStatus, ShariahFindingStatus
 from app.models.notification import Notification
 from app.models.policy import Policy
 from app.models.privacy import ProcessingActivity
@@ -123,6 +130,58 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
                 f"{etype} review was due {att.next_due} (last by {att.attested_by_email or 'n/a'})",
                 _W, etype, eid, "")
 
+    _closed_finding = {AuditFindingStatus.closed, AuditFindingStatus.risk_accepted}
+    for f in (await db.scalars(select(AuditFinding))).all():
+        if f.status not in _closed_finding and f.due_date and f.due_date < today:
+            add(f"iafinding-overdue:{f.id}", f"Audit finding overdue: {f.reference}",
+                f"{f.title} — remediation due {f.due_date} (owner {f.action_owner or 'n/a'})",
+                _C if f.rating.value in ("high", "critical") else _W,
+                "audit_finding", f.id, "/internal-audit")
+
+    _closed_eng = {AuditEngagementStatus.closed, AuditEngagementStatus.cancelled}
+    for eng in (await db.scalars(select(AuditEngagement))).all():
+        if eng.status not in _closed_eng and eng.planned_end and eng.planned_end < today:
+            add(f"iaeng-overdue:{eng.id}", f"Audit engagement overdue: {eng.reference}",
+                f"{eng.title} — planned completion {eng.planned_end}", _W,
+                "audit_engagement", eng.id, "/internal-audit")
+
+    _closed_snc = {ShariahFindingStatus.closed, ShariahFindingStatus.remediated}
+    for sf in (await db.scalars(select(ShariahFinding))).all():
+        if sf.status not in _closed_snc and sf.due_date and sf.due_date < today:
+            add(f"snc-overdue:{sf.id}", f"Shariah non-compliance overdue: {sf.reference}",
+                f"{sf.title} — remediation due {sf.due_date}"
+                + (f"; SNC income {sf.snc_income_amount} to purify" if sf.snc_income_amount else ""),
+                _C if sf.severity.value in ("high", "critical") else _W,
+                "shariah_finding", sf.id, "/shariah")
+
+    for kri in (await db.scalars(select(KeyRiskIndicator).where(KeyRiskIndicator.deleted.is_(False)))).all():
+        if kri.is_breached:
+            add(f"kri-breach:{kri.id}", f"KRI breach: {kri.reference}",
+                f"{kri.name} — current {kri.current_value} breached its limit threshold",
+                _C, "key_risk_indicator", kri.id, "/operational-risk")
+
+    for rc in (await db.scalars(select(RcsaAssessment).where(RcsaAssessment.deleted.is_(False)))).all():
+        if rc.is_overdue:
+            add(f"rcsa-overdue:{rc.id}", f"RCSA overdue: {rc.reference}",
+                f"{rc.title} — due {rc.due_date} ({rc.business_unit or 'n/a'})",
+                _W, "rcsa_assessment", rc.id, "/operational-risk")
+
+    for rr in (await db.scalars(select(RegulatoryReport))).all():
+        if rr.status == RegulatoryReportStatus.pending and rr.deadline and rr.deadline < today:
+            add(f"regreport-overdue:{rr.id}",
+                f"Regulatory report overdue: {rr.regulator} {rr.report_type.value.replace('_', ' ')}",
+                f"Submission was due {rr.deadline}", _C, "regulatory_report", rr.id, "/incidents")
+
+    for sar in (await db.scalars(select(SuspiciousActivityReport).where(SuspiciousActivityReport.deleted.is_(False)))).all():
+        if sar.is_overdue:
+            add(f"sar-overdue:{sar.id}", f"STR/SAR filing overdue: {sar.reference}",
+                f"{sar.subject} — filing was due {sar.deadline}", _C, "sar", sar.id, "/aml")
+
+    for sc in (await db.scalars(select(ScreeningCase).where(ScreeningCase.deleted.is_(False)))).all():
+        if sc.status == ScreeningCaseStatus.escalated:
+            add(f"screening-escalated:{sc.id}", f"Screening case escalated: {sc.reference}",
+                f"{sc.subject_name} — {sc.match_status.value.replace('_', ' ')}", _C, "screening_case", sc.id, "/aml")
+
     for ap in (await db.scalars(select(ApprovalRequest))).all():
         if ap.status == ApprovalStatus.pending:
             overdue = ap.due_date is not None and ap.due_date < today
@@ -134,27 +193,33 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
     return alerts
 
 
-async def refresh(db: AsyncSession, tenant_id) -> None:
-    """Reconcile current alerts into the notifications table (add new, delete resolved)."""
+async def refresh(db: AsyncSession, tenant_id) -> list[Notification]:
+    """Reconcile current alerts into the notifications table (add new, delete resolved).
+
+    Returns the list of newly created notifications so callers (e.g. the scheduler)
+    can email a digest of only what is genuinely new — dedup prevents repeat alerts.
+    """
     alerts = await scan_alerts(db, tenant_id)
     existing = {n.dedup_key: n for n in (await db.scalars(select(Notification))).all()}
     current_keys = {a["dedup_key"] for a in alerts}
 
+    created: list[Notification] = []
     for a in alerts:
         if a["dedup_key"] not in existing:
-            db.add(
-                Notification(
-                    tenant_id=tenant_id,
-                    title=a["title"],
-                    body=a["body"],
-                    category=a["category"],
-                    entity_type=a["entity_type"],
-                    entity_id=a["entity_id"],
-                    link=a["link"],
-                    dedup_key=a["dedup_key"],
-                )
+            n = Notification(
+                tenant_id=tenant_id,
+                title=a["title"],
+                body=a["body"],
+                category=a["category"],
+                entity_type=a["entity_type"],
+                entity_id=a["entity_id"],
+                link=a["link"],
+                dedup_key=a["dedup_key"],
             )
+            db.add(n)
+            created.append(n)
     for key, n in existing.items():
         if key not in current_keys:
             await db.delete(n)
     await db.flush()
+    return created

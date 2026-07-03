@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, apiCall, type AwarenessProgram, type TrainingRecord, type AwQuestion } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import RichText from "@/components/RichText";
 import { Badge } from "@/components/badges";
@@ -473,9 +474,12 @@ export default function AwarenessPage() {
           <h1>Awareness Training</h1>
           <p>Recurring security-awareness programs with a quiz and per-participant completion / compliance tracking.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add program
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="awareness-programs" label="Awareness Programs" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add program
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

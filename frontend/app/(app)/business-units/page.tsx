@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconUsers } from "@/components/icons";
@@ -222,9 +223,12 @@ export default function BusinessUnitsPage() {
           <h1>Business Units</h1>
           <p>Organizational hierarchy that owns assets, runs processes and holds legal obligations.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add business unit
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="business-units" label="Business Units" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add business unit
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

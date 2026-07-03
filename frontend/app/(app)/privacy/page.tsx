@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, MultiSelect, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconAlert, IconPlus, IconPolicy, IconShield } from "@/components/icons";
@@ -449,9 +450,12 @@ export default function PrivacyPage() {
           <h1>Data Privacy (RoPA)</h1>
           <p>GDPR Article 30 records of processing — lawful basis, data categories, retention, transfers, DPIA, and data-subject rights.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add activity
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="processing-activities" label="Processing Activities" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add activity
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

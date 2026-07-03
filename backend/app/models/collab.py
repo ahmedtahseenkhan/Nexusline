@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import BigInteger, ForeignKey, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -46,7 +46,7 @@ class EntityTag(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
 
 
 class Attachment(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
-    """A document/evidence link attached to a record (URL-based; no blob store)."""
+    """A document/evidence link attached to a record (URL-based)."""
 
     __tablename__ = "attachments"
 
@@ -56,3 +56,23 @@ class Attachment(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     url: Mapped[str] = mapped_column(String(1024), default="")
     kind: Mapped[str] = mapped_column(String(32), default="link")  # link | document
     added_by_email: Mapped[str] = mapped_column(String(255), default="")
+
+
+class StoredFile(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """An uploaded binary file attached to any record via (entity_type, entity_id).
+
+    The blob lives on the object store (``app.services.storage``); this row holds its
+    metadata and the ``storage_key`` that resolves back to the bytes for download.
+    """
+
+    __tablename__ = "stored_files"
+
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    entity_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(128), default="application/octet-stream")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    uploaded_by_email: Mapped[str] = mapped_column(String(255), default="")

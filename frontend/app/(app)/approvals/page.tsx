@@ -20,6 +20,7 @@ export default function ApprovalsPage() {
   const [title, setTitle] = useState("");
   const [approver, setApprover] = useState("");
   const [description, setDescription] = useState("");
+  const [required, setRequired] = useState(1);
 
   async function load() {
     try {
@@ -44,11 +45,17 @@ export default function ApprovalsPage() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    await act(api.submitApproval({ title, approver, description }));
+    await act(api.submitApproval({ title, approver, description, required_approvals: required }));
     setShowForm(false);
     setTitle("");
     setApprover("");
     setDescription("");
+    setRequired(1);
+  }
+
+  function reject(id: string) {
+    const reason = window.prompt("Reason for rejection (required):");
+    if (reason && reason.trim()) act(api.decideApproval(id, false, reason.trim()));
   }
 
   const pending = items.filter((i) => i.status === "pending");
@@ -81,8 +88,20 @@ export default function ApprovalsPage() {
               <label className="label">Notes</label>
               <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
             </div>
+            <div style={{ flex: "0 0 180px" }}>
+              <label className="label">Approvals required</label>
+              <select className="input" value={required} onChange={(e) => setRequired(Number(e.target.value))}>
+                <option value={1}>1 — four-eyes</option>
+                <option value={2}>2 — six-eyes</option>
+                <option value={3}>3 checkers</option>
+              </select>
+            </div>
           </div>
-          <button className="btn" style={{ marginTop: 16 }}>Submit for approval</button>
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
+            Maker-checker: the submitter cannot approve their own request; {required} independent
+            checker{required !== 1 ? "s" : ""} must approve before it is granted.
+          </p>
+          <button className="btn" style={{ marginTop: 12 }}>Submit for approval</button>
         </form>
       )}
 
@@ -93,7 +112,7 @@ export default function ApprovalsPage() {
         </div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Ref</th><th>Title</th><th>Approver</th><th>Requested by</th><th>Due</th><th></th></tr></thead>
+            <thead><tr><th>Ref</th><th>Title</th><th>Maker</th><th>Approvals</th><th>Due</th><th></th></tr></thead>
             <tbody>
               {pending.map((a) => (
                 <tr key={a.id}>
@@ -102,13 +121,17 @@ export default function ApprovalsPage() {
                     {a.title}
                     {a.link && a.entity_label && <Link href={a.link} style={{ marginLeft: 8, fontSize: 12 }}>{a.entity_label}</Link>}
                   </td>
-                  <td className="muted">{a.approver || "—"}</td>
                   <td className="muted">{a.requested_by_email}</td>
+                  <td>
+                    <Badge tone={a.approvals_received >= a.required_approvals ? "low" : "medium"}>
+                      {a.approvals_received}/{a.required_approvals}
+                    </Badge>
+                  </td>
                   <td className="muted">{a.due_date || "—"}{a.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}</td>
                   <td>
                     <div style={{ display: "flex", gap: 6 }}>
-                      <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true))}><IconCheck width={13} height={13} /> Approve</button>
-                      <button className="btn secondary sm" onClick={() => act(api.decideApproval(a.id, false))}>Reject</button>
+                      <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true))} title="An independent checker approves"><IconCheck width={13} height={13} /> Approve</button>
+                      <button className="btn secondary sm" onClick={() => reject(a.id)}>Reject</button>
                       <button className="btn secondary sm" onClick={() => act(api.cancelApproval(a.id))}>Cancel</button>
                     </div>
                   </td>

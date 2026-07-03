@@ -307,3 +307,185 @@ class AssetReviewStatus(str, enum.Enum):
     in_progress = "in_progress"
     completed = "completed"
     expired = "expired"
+
+
+class AuditEngagementStatus(str, enum.Enum):
+    """Lifecycle of an internal-audit engagement."""
+
+    planned = "planned"
+    fieldwork = "fieldwork"
+    reporting = "reporting"
+    closed = "closed"
+    cancelled = "cancelled"
+
+
+class AuditProcedureResult(str, enum.Enum):
+    """Outcome of an audit test/procedure (workpaper)."""
+
+    pending = "pending"
+    passed = "passed"
+    failed = "failed"
+    not_applicable = "not_applicable"
+
+
+class AuditFindingStatus(str, enum.Enum):
+    """Lifecycle of an audit finding through remediation follow-up."""
+
+    open = "open"
+    in_progress = "in_progress"
+    closed = "closed"
+    risk_accepted = "risk_accepted"
+
+
+class ShariahMode(str, enum.Enum):
+    """Islamic modes of finance / contract types."""
+
+    murabaha = "murabaha"
+    ijarah = "ijarah"
+    musharakah = "musharakah"
+    diminishing_musharakah = "diminishing_musharakah"
+    mudarabah = "mudarabah"
+    salam = "salam"
+    istisna = "istisna"
+    wakala = "wakala"
+    tawarruq = "tawarruq"
+    qard = "qard"
+    other = "other"
+
+
+class ShariahRulingStatus(str, enum.Enum):
+    """Lifecycle of a Shariah Board ruling / fatwa / resolution."""
+
+    draft = "draft"
+    under_review = "under_review"
+    approved = "approved"
+    superseded = "superseded"
+
+
+class IslamicProductStatus(str, enum.Enum):
+    in_development = "in_development"
+    approved = "approved"
+    active = "active"
+    suspended = "suspended"
+    withdrawn = "withdrawn"
+
+
+class ShariahReviewStatus(str, enum.Enum):
+    planned = "planned"
+    in_progress = "in_progress"
+    completed = "completed"
+
+
+class ShariahFindingStatus(str, enum.Enum):
+    """Lifecycle of a Shariah Non-Compliance (SNC) finding."""
+
+    open = "open"
+    in_progress = "in_progress"
+    remediated = "remediated"
+    closed = "closed"
+
+
+class CharityStatus(str, enum.Enum):
+    """Purification / charity disbursement of Shariah non-compliant income."""
+
+    pending = "pending"
+    approved = "approved"
+    disbursed = "disbursed"
+
+
+class RcsaStatus(str, enum.Enum):
+    """Risk & Control Self-Assessment campaign lifecycle."""
+
+    planned = "planned"
+    in_progress = "in_progress"
+    completed = "completed"
+
+
+class KriStatus(str, enum.Enum):
+    """Key Risk Indicator RAG status (computed from value vs thresholds)."""
+
+    green = "green"
+    amber = "amber"
+    red = "red"
+    no_data = "no_data"
+
+
+class KriDirection(str, enum.Enum):
+    """Which direction breaches a KRI threshold."""
+
+    higher_is_worse = "higher_is_worse"
+    lower_is_worse = "lower_is_worse"
+
+
+class BaselEventType(str, enum.Enum):
+    """Basel II operational-risk loss event categories (level 1)."""
+
+    internal_fraud = "internal_fraud"
+    external_fraud = "external_fraud"
+    employment_practices = "employment_practices"
+    clients_products_business_practices = "clients_products_business_practices"
+    damage_to_physical_assets = "damage_to_physical_assets"
+    business_disruption_system_failure = "business_disruption_system_failure"
+    execution_delivery_process_management = "execution_delivery_process_management"
+
+
+class LossEventStatus(str, enum.Enum):
+    open = "open"
+    under_investigation = "under_investigation"
+    recovered = "recovered"
+    closed = "closed"
+
+
+class RegulatoryReportType(str, enum.Enum):
+    """Regulator submission types (e.g. SBP incident-reporting stages)."""
+
+    initial_notification = "initial_notification"
+    interim_update = "interim_update"
+    final_report = "final_report"
+    closure = "closure"
+
+
+class RegulatoryReportStatus(str, enum.Enum):
+    pending = "pending"
+    submitted = "submitted"
+    acknowledged = "acknowledged"
+
+
+class ScreeningType(str, enum.Enum):
+    """AML/CFT screening scope."""
+
+    sanctions = "sanctions"
+    pep = "pep"
+    adverse_media = "adverse_media"
+    comprehensive = "comprehensive"
+
+
+class ScreeningMatchStatus(str, enum.Enum):
+    no_match = "no_match"
+    potential_match = "potential_match"
+    confirmed_match = "confirmed_match"
+    false_positive = "false_positive"
+
+
+class ScreeningCaseStatus(str, enum.Enum):
+    open = "open"
+    under_review = "under_review"
+    cleared = "cleared"
+    escalated = "escalated"
+
+
+class SarStatus(str, enum.Enum):
+    """Suspicious Transaction/Activity Report lifecycle (filed with the FMU)."""
+
+    draft = "draft"
+    under_review = "under_review"
+    filed = "filed"
+    closed = "closed"
+
+
+class AmlScope(str, enum.Enum):
+    customer = "customer"
+    product = "product"
+    geography = "geography"
+    channel = "channel"
+    enterprise = "enterprise"

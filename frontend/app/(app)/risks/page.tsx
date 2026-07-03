@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, apiCall, type RiskSetting, type StatusLabel } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
@@ -497,6 +498,10 @@ export default function RisksPage() {
           <button className="btn secondary" onClick={() => setShowSettings((v) => !v)}>
             <IconGauge width={16} height={16} />
             Appetite
+          </button>
+          <ImportExport resource="risks" label="Risks" onDone={load} />
+          <button className="btn secondary" onClick={() => api.pdfRiskRegister().catch(() => {})}>
+            Register PDF
           </button>
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} />

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type Policy, type Control, type Risk } from "@/lib/api";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, MultiSelect, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -217,9 +218,12 @@ export default function PoliciesPage() {
           <h1>Policy Management</h1>
           <p>Repository for policies with document content, versioning, review cycles, cross-links and acknowledgments.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add policy
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="policies" label="Policies" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add policy
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
