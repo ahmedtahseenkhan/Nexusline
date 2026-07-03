@@ -87,63 +87,53 @@ export default function DashboardPage() {
     <>
       <div className="page-head row-between">
         <div>
-          <h1>Welcome back</h1>
-          <p>Your organization&apos;s governance, risk and compliance posture at a glance.</p>
+          <div className="eyebrow"><span className="live" /> Live posture</div>
+          <h1>Governance &amp; risk overview</h1>
+          <p>Where the organization stands across risk, compliance and controls — right now.</p>
         </div>
         <button className="btn secondary sm" onClick={() => api.pdfExecutiveSummary().catch(() => {})}>
           Executive summary PDF
         </button>
       </div>
 
-      <div className="grid stat-grid">
-        <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{d?.total_risks ?? "—"}</span>
-            <span className="ico"><IconRisk /></span>
-          </div>
-          <span className="l">Total risks</span>
+      <div className="kpis primary">
+        <div className="kpi">
+          <div className="top"><span className="k">Total risks</span><span className="ic"><IconRisk /></span></div>
+          <div className="n">{d?.total_risks ?? "—"}</div>
+          <div className="ctx">{d ? <><b>{d.risks_in_breach}</b> above tolerance</> : " "}</div>
         </div>
-        <div className="card stat danger">
-          <div className="stat-top">
-            <span className="n">{critical}</span>
-            <span className="ico"><IconAlert /></span>
-          </div>
-          <span className="l">Critical (inherent)</span>
+        <div className="kpi danger">
+          <div className="top"><span className="k">Critical inherent</span><span className="ic"><IconAlert /></span></div>
+          <div className="n">{critical}</div>
+          <div className="ctx">{d ? <>of <b>{d.total_risks}</b> total risks</> : " "}</div>
         </div>
-        <div className="card stat ok">
-          <div className="stat-top">
-            <span className="n">{c ? `${c.overall_compliant_pct}%` : "—"}</span>
-            <span className="ico"><IconCompliance /></span>
-          </div>
-          <span className="l">Overall compliant</span>
+        <div className="kpi ok">
+          <div className="top"><span className="k">Overall compliant</span><span className="ic"><IconCompliance /></span></div>
+          <div className="n">{c ? <>{c.overall_compliant_pct}<span className="u">%</span></> : "—"}</div>
+          <div className="ctx">{c ? <>across <b>{c.total_frameworks}</b> frameworks</> : " "}</div>
         </div>
-        <div className="card stat warn">
-          <div className="stat-top">
-            <span className="n">{d?.overdue_reviews ?? "—"}</span>
-            <span className="ico"><IconGauge /></span>
-          </div>
-          <span className="l">Overdue reviews</span>
+        <div className="kpi warn">
+          <div className="top"><span className="k">Annual exposure</span><span className="ic"><IconLayers /></span></div>
+          <div className="n">{d ? money(d.total_exposure) : "—"}</div>
+          <div className="ctx">expected annual loss (ALE)</div>
         </div>
-        <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{d?.total_controls ?? "—"}</span>
-            <span className="ico"><IconControl /></span>
-          </div>
-          <span className="l">Controls</span>
+      </div>
+
+      <div className="kpis secondary">
+        <div className={`kpi ${d && d.overdue_reviews > 0 ? "warn" : "ok"}`}>
+          <div className="top"><span className="k">Overdue reviews</span><span className="ic"><IconGauge /></span></div>
+          <div className="n">{d?.overdue_reviews ?? "—"}</div>
+          <div className="ctx">{d ? (d.overdue_reviews > 0 ? "need attention" : "everything current") : " "}</div>
         </div>
-        <div className="card stat danger">
-          <div className="stat-top">
-            <span className="n">{d?.risks_in_breach ?? "—"}</span>
-            <span className="ico"><IconAlert /></span>
-          </div>
-          <span className="l">Tolerance breaches</span>
+        <div className="kpi">
+          <div className="top"><span className="k">Controls</span><span className="ic"><IconControl /></span></div>
+          <div className="n">{d?.total_controls ?? "—"}</div>
+          <div className="ctx">in the catalog</div>
         </div>
-        <div className="card stat warn">
-          <div className="stat-top">
-            <span className="n">{d ? money(d.total_exposure) : "—"}</span>
-            <span className="ico"><IconLayers /></span>
-          </div>
-          <span className="l">Annual exposure (ALE)</span>
+        <div className="kpi danger">
+          <div className="top"><span className="k">Tolerance breaches</span><span className="ic"><IconAlert /></span></div>
+          <div className="n">{d?.risks_in_breach ?? "—"}</div>
+          <div className="ctx">{d ? (d.risks_in_breach > 0 ? "requires escalation" : "within tolerance") : " "}</div>
         </div>
       </div>
 
