@@ -56,6 +56,14 @@ PERMISSION_CATALOG: dict[str, str] = {
     "role:read": "View roles",
     "role:write": "Manage roles",
     "audit:read": "View the activity log",
+    "internal_audit:read": "View the audit universe, engagements and findings",
+    "internal_audit:write": "Manage internal-audit engagements, working papers and findings",
+    "shariah:read": "View Shariah rulings, Islamic products, reviews and the charity ledger",
+    "shariah:write": "Manage Shariah governance: rulings, products, reviews, SNC findings, purification",
+    "oprisk:read": "View RCSA, KRIs and the operational loss database",
+    "oprisk:write": "Manage RCSA assessments, KRIs and operational loss events",
+    "aml:read": "View AML/CFT screening, STR/SAR filings and AML risk assessments",
+    "aml:write": "Manage AML/CFT screening, STR/SAR filings and AML risk assessments",
 }
 
 ALL_PERMISSIONS = list(PERMISSION_CATALOG.keys())
@@ -99,6 +107,8 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "report:read",
             "report:write",
             "audit:read",
+            "oprisk:read",
+            "oprisk:write",
         ],
     ),
     "Risk Approver": (
@@ -136,11 +146,16 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "exception:read",
             "exception:write",
             "audit:read",
+            "internal_audit:read",
+            "shariah:read",
+            "shariah:write",
+            "aml:read",
+            "aml:write",
         ],
     ),
     "Auditor": (
-        "Read-only access for audit and assurance",
-        _READ_ONLY,
+        "Assurance role: read-only across the platform, plus full internal-audit management",
+        _READ_ONLY + ["internal_audit:write"],
     ),
     "Viewer": ("Read-only access", _READ_ONLY),
 }

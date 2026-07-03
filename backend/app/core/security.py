@@ -47,6 +47,26 @@ def decode_access_token(token: str) -> dict[str, Any]:
     return jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
 
 
+def create_mfa_challenge(user_id: str, tenant_id: str, expires_minutes: int = 5) -> str:
+    """Short-lived token proving the password step passed; exchanged for a real token
+    once the TOTP code is verified. Carries no permissions."""
+    payload = {
+        "purpose": "mfa_challenge",
+        "sub": user_id,
+        "tid": tenant_id,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=expires_minutes),
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
+
+
+def decode_mfa_challenge(token: str) -> dict[str, Any]:
+    data = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
+    if data.get("purpose") != "mfa_challenge":
+        raise jwt.InvalidTokenError("not an mfa challenge token")
+    return data
+
+
 def create_state_token(tenant_slug: str, expires_minutes: int = 10) -> str:
     """Short-lived signed CSRF/state token for the SSO redirect round-trip."""
     payload = {

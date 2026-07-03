@@ -39,6 +39,7 @@ const NAV: Section[] = [
     title: "Risk",
     items: [
       { href: "/risks", label: "Risk Register", icon: <IconRisk /> },
+      { href: "/operational-risk", label: "Operational Risk", icon: <IconGauge /> },
       { href: "/threat-library", label: "Threat Library", icon: <IconAlert /> },
       { href: "/assets", label: "Asset Management", icon: <IconAsset /> },
       { href: "/vendors", label: "Third Parties", icon: <IconVendor /> },
@@ -50,8 +51,11 @@ const NAV: Section[] = [
     title: "Compliance",
     items: [
       { href: "/compliance", label: "Compliance", icon: <IconCompliance /> },
+      { href: "/aml", label: "AML / CFT", icon: <IconShield /> },
       { href: "/controls", label: "Control Catalog", icon: <IconControl /> },
       { href: "/evidence", label: "Evidence", icon: <IconEvidence /> },
+      { href: "/internal-audit", label: "Internal Audit", icon: <IconCheck /> },
+      { href: "/shariah", label: "Shariah Governance", icon: <IconShield /> },
     ],
   },
   {

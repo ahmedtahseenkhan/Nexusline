@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import {
   Field,
@@ -505,9 +506,12 @@ export default function ControlsPage() {
           <h1>Control Catalog</h1>
           <p>Reusable controls with cost, effectiveness, framework mappings and recurring audit &amp; maintenance test cycles.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add control
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="controls" label="Controls" onDone={() => load()} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add control
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

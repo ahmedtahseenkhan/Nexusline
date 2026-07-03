@@ -34,6 +34,7 @@ _KEEP = object()  # sentinel: field absent from request -> leave the link table 
 def _loads():
     return (
         selectinload(Incident.stages),
+        selectinload(Incident.regulatory_reports),
         selectinload(Incident.controls),
         selectinload(Incident.vendors),
         selectinload(Incident.assets),

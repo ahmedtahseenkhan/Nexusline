@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
+import FileAttachments from "@/components/FileAttachments";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconEvidence, IconPlus } from "@/components/icons";
@@ -138,9 +140,15 @@ export default function EvidencePage() {
     setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Evidence>("PATCH", `/evidence/${editing.id}`, payload);
-      else await apiCall<Evidence>("POST", "/evidence", payload);
-      setShowForm(false);
+      if (editing) {
+        await apiCall<Evidence>("PATCH", `/evidence/${editing.id}`, payload);
+        setShowForm(false);
+      } else {
+        // Convert to edit mode after creating so the Files tab becomes usable and
+        // the user can immediately upload the actual artifact.
+        const created = await apiCall<Evidence>("POST", "/evidence", payload);
+        setEditing(created);
+      }
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save evidence");
@@ -179,7 +187,7 @@ export default function EvidencePage() {
         <TextArea value={f.description} onChange={(v) => set("description", v)} rows={4} placeholder="Exported from the IAM console on the first business day of the quarter…" />
       </Field>
       <div className="field-row">
-        <Field label="Type">
+        <Field label="Type" help="A label for the artifact. Upload the file in the Files tab, or paste a link under Source & Validity.">
           <Select value={f.evidence_type} onChange={(v) => set("evidence_type", v)} options={TYPES} />
         </Field>
         <Field label="Status" help="Expired evidence (or one past its valid-until date) is flagged in the list.">
@@ -187,6 +195,15 @@ export default function EvidencePage() {
         </Field>
       </div>
     </>
+  );
+
+  const filesTab = editing ? (
+    <FileAttachments entityType="evidence" entityId={editing.id} />
+  ) : (
+    <div className="muted" style={{ fontSize: 13, padding: "8px 0" }}>
+      Save this evidence first (click <b>Collect evidence</b>) — the form stays open and you can
+      upload the actual artifact file(s) here.
+    </div>
   );
 
   const sourceTab = (
@@ -212,9 +229,12 @@ export default function EvidencePage() {
           <h1>Evidence</h1>
           <p>Audit-ready artifacts attached to controls — collect once, satisfy many.</p>
         </div>
-        <button className="btn" onClick={openNew} disabled={!controls.length}>
-          <IconPlus width={16} height={16} /> Add evidence
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="evidence" label="Evidence" onDone={load} />
+          <button className="btn" onClick={openNew} disabled={!controls.length}>
+            <IconPlus width={16} height={16} /> Add evidence
+          </button>
+        </div>
       </div>
 
       {error && !showForm && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
@@ -293,6 +313,7 @@ export default function EvidencePage() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "source", label: "Source & Validity", content: sourceTab },
+            { id: "files", label: "Files", content: filesTab },
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -442,9 +443,12 @@ export default function ContinuityPage() {
           <h1>Business Continuity</h1>
           <p>Continuity plans with BIA, recovery objectives, a 5W recovery playbook and an exercise calendar.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add plan
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="continuity-plans" label="Continuity Plans" onDone={() => load()} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add plan
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

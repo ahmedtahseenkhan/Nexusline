@@ -13,6 +13,12 @@ function ago(iso: string) {
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
   return `${Math.floor(d / 86400)}d ago`;
 }
+function fmtBytes(n: number) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB"];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
 
 /** Polymorphic comments + tags + attachments for any record. */
 export default function CollabPanel({ entityType, entityId }: { entityType: string; entityId: string }) {
@@ -22,6 +28,8 @@ export default function CollabPanel({ entityType, entityId }: { entityType: stri
   const [attTitle, setAttTitle] = useState("");
   const [attUrl, setAttUrl] = useState("");
   const [showAtt, setShowAtt] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   async function load() {
     setBundle(await api.collab(entityType, entityId).catch(() => null));
@@ -54,6 +62,21 @@ export default function CollabPanel({ entityType, entityId }: { entityType: stri
     setAttUrl("");
     setShowAtt(false);
     await load();
+  }
+  async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file
+    if (!file) return;
+    setUploadError(null);
+    setUploading(true);
+    try {
+      await api.uploadFile(entityType, entityId, file);
+      await load();
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
   }
 
   const assignedIds = new Set(bundle.tags.map((t) => t.id));
@@ -110,6 +133,38 @@ export default function CollabPanel({ entityType, entityId }: { entityType: stri
               </div>
             ))}
             {bundle.attachments.length === 0 && <span className="muted" style={{ fontSize: 12 }}>No attachments</span>}
+          </div>
+        </div>
+
+        {/* Uploaded files (binary) */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <label className="label" style={{ margin: 0 }}>Files</label>
+            <label className="btn secondary sm" style={{ cursor: uploading ? "wait" : "pointer", margin: 0 }}>
+              {uploading ? "Uploading…" : "⤒ Upload"}
+              <input type="file" onChange={onUpload} disabled={uploading} style={{ display: "none" }} />
+            </label>
+          </div>
+          {uploadError && <div className="error" style={{ marginTop: 8, fontSize: 12 }}>{uploadError}</div>}
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+            {bundle.files.map((f) => (
+              <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                <span aria-hidden>🗎</span>
+                <button
+                  className="linklike"
+                  onClick={() => api.downloadFile(f.id, f.filename).catch(() => {})}
+                  style={{ border: "none", background: "none", padding: 0, color: "var(--primary-text, #1d4fd7)", cursor: "pointer", textAlign: "left" }}
+                  title="Download"
+                >
+                  {f.title || f.filename}
+                </button>
+                <span className="muted" style={{ fontSize: 11 }}>· {fmtBytes(f.size_bytes)} · {f.uploaded_by_email}</span>
+                {f.can_delete && (
+                  <button className="btn secondary sm" style={{ marginLeft: "auto" }} onClick={async () => { await api.deleteFile(f.id).catch(() => {}); await load(); }}>Remove</button>
+                )}
+              </div>
+            ))}
+            {bundle.files.length === 0 && <span className="muted" style={{ fontSize: 12 }}>No files uploaded</span>}
           </div>
         </div>
 

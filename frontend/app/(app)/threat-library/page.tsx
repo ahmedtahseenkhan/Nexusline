@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall, type Page as PageT } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconRisk, IconShield, IconAlert } from "@/components/icons";
@@ -69,11 +70,13 @@ function CatalogSection({
   rows,
   onEdit,
   onAdd,
+  onImported,
 }: {
   kind: Kind;
   rows: CatalogRow[];
   onEdit: (r: CatalogRow) => void;
   onAdd: () => void;
+  onImported: () => void;
 }) {
   const m = META[kind];
   const Icon = m.icon;
@@ -88,9 +91,12 @@ function CatalogSection({
             {rows.length} in catalog{rows.length ? ` · ${linked} linked to risks` : ""}
           </span>
         </div>
-        <button className="btn sm" onClick={onAdd}>
-          <IconPlus width={14} height={14} /> Add {m.label.toLowerCase()}
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource={m.base} label={m.plural} onDone={onImported} />
+          <button className="btn sm" onClick={onAdd}>
+            <IconPlus width={14} height={14} /> Add {m.label.toLowerCase()}
+          </button>
+        </div>
       </div>
       <div className="table-wrap">
         <table>
@@ -340,12 +346,13 @@ export default function ThreatLibraryPage() {
       )}
 
       <div className="grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
-        <CatalogSection kind="threat" rows={threats} onEdit={(r) => openEdit("threat", r)} onAdd={() => openNew("threat")} />
+        <CatalogSection kind="threat" rows={threats} onEdit={(r) => openEdit("threat", r)} onAdd={() => openNew("threat")} onImported={load} />
         <CatalogSection
           kind="vulnerability"
           rows={vulns}
           onEdit={(r) => openEdit("vulnerability", r)}
           onAdd={() => openNew("vulnerability")}
+          onImported={load}
         />
       </div>
 

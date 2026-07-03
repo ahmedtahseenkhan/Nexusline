@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
 import { IconAsset, IconPlus } from "@/components/icons";
@@ -506,9 +507,12 @@ export default function AssetsPage() {
           <h1>Asset Management</h1>
           <p>Inventory with media types, CIA classification, RACI ownership, review cycles and cross-links.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add asset
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="assets" label="Assets" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add asset
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

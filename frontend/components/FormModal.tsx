@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 export type FormTab = { id: string; label: string; content: ReactNode; required?: boolean };
 
@@ -16,7 +16,13 @@ type Props = {
   footerLeft?: ReactNode;
 };
 
-/** eramba-style tabbed record dialog: header, tab strip, scrollable body, Close/Save footer. */
+/** eramba-style tabbed record dialog: header, tab strip, scrollable body, Close/Save footer.
+ *
+ *  Client-side validation is automatic and global: on save it finds any empty
+ *  `required` inputs, switches to the tab that contains the first one, highlights the
+ *  fields, focuses the first, and shows a plain-language message — all without the
+ *  page needing to wire anything. The server's (now readable) validation is the
+ *  backstop for anything not caught here. */
 export default function FormModal({
   title,
   tabs,
@@ -29,6 +35,8 @@ export default function FormModal({
   footerLeft,
 }: Props) {
   const [active, setActive] = useState(tabs[0]?.id);
+  const [clientError, setClientError] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -41,6 +49,45 @@ export default function FormModal({
       document.body.style.overflow = "";
     };
   }, [onClose]);
+
+  function labelFor(el: Element): string {
+    const lbl = el.closest(".field")?.querySelector("label")?.textContent || "";
+    return lbl.replace(/\*/g, "").trim() || "This field";
+  }
+
+  function handleSave() {
+    const root = bodyRef.current;
+    if (root) {
+      const reqEls = Array.from(
+        root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
+          "input[required], textarea[required], select[required]",
+        ),
+      );
+      reqEls.forEach((el) => el.classList.remove("field-invalid"));
+      const empty = reqEls.filter((el) => !String(el.value).trim());
+      if (empty.length) {
+        // Switch to the tab holding the first missing field, then focus it.
+        const firstTab = empty[0].closest("[data-tab-id]")?.getAttribute("data-tab-id");
+        if (firstTab) setActive(firstTab);
+        empty.forEach((el) => el.classList.add("field-invalid"));
+        const names = [...new Set(empty.map(labelFor))];
+        setClientError(
+          `Please fill in the required field${names.length > 1 ? "s" : ""}: ${names.join(", ")}.`,
+        );
+        setTimeout(() => empty[0].focus(), 0);
+        return;
+      }
+    }
+    setClientError(null);
+    onSave();
+  }
+
+  // Clear a field's error highlight as soon as the user starts fixing it.
+  function onBodyInput(e: React.FormEvent) {
+    (e.target as HTMLElement)?.classList?.remove("field-invalid");
+  }
+
+  const shownError = clientError || error;
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -66,10 +113,15 @@ export default function FormModal({
           </div>
         )}
 
-        <div className="modal-body">
-          {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
+        <div className="modal-body" ref={bodyRef} onInput={onBodyInput}>
+          {shownError && (
+            <div className="alert alert-error" role="alert" style={{ marginBottom: 16 }}>
+              <span className="alert-ico" aria-hidden>⚠</span>
+              <span>{shownError}</span>
+            </div>
+          )}
           {tabs.map((t) => (
-            <div key={t.id} style={{ display: active === t.id ? "block" : "none" }}>
+            <div key={t.id} data-tab-id={t.id} style={{ display: active === t.id ? "block" : "none" }}>
               {t.content}
             </div>
           ))}
@@ -80,7 +132,7 @@ export default function FormModal({
           <button className="btn secondary" onClick={onClose} type="button" disabled={saving}>
             Close
           </button>
-          <button className="btn" onClick={onSave} type="button" disabled={saving}>
+          <button className="btn" onClick={handleSave} type="button" disabled={saving}>
             {saving ? "Saving…" : saveLabel}
           </button>
         </div>

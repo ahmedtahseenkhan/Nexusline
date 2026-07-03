@@ -32,6 +32,61 @@ class Settings(BaseSettings):
     environment: str = "development"
     cors_origins: str = "http://localhost:3000"
 
+    # File storage (binary uploads for attachments & evidence)
+    file_storage_dir: str = "./var/uploads"
+    max_upload_mb: int = 25
+
+    # Outbound email (SMTP). When smtp_host is empty, mail is logged, not sent.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "NexusLine GRC <no-reply@nexusline.local>"
+    smtp_use_tls: bool = True
+    app_base_url: str = "http://localhost:3000"
+
+    # Background scheduler (periodic notification refresh, reminders, chasing)
+    scheduler_enabled: bool = True
+    scheduler_interval_minutes: int = 15
+
+    # Governance controls. Maker-checker Segregation of Duties: when true, the user
+    # who submits an approval request (maker) can never be the one who approves it
+    # (checker). Mandated in most banking control environments; keep on for banks.
+    enforce_segregation_of_duties: bool = True
+
+    # --- Authentication hardening (banking baseline) ---
+    # Password policy
+    password_min_length: int = 12
+    password_require_complexity: bool = True  # upper+lower+digit+symbol
+    password_expiry_days: int = 0  # 0 = no expiry
+    # Brute-force protection / account lockout
+    max_failed_logins: int = 5
+    lockout_minutes: int = 15
+    # MFA (TOTP). When required, all local users must enrol before full access.
+    mfa_issuer: str = "NexusLine GRC"
+    mfa_required: bool = False
+    # LDAP / Active Directory (per-tenant config in DB; this only gates the feature)
+    ldap_enabled: bool = False
+
+    # --- On-prem productionization ---
+    app_version: str = "1.0.0"
+    deployment_mode: str = "on-prem"  # on-prem | saas
+    # Offline licensing (Ed25519, no phone-home). enforce_license fails startup on an
+    # invalid/expired/absent license when true; keep false for dev/self-host.
+    enforce_license: bool = False
+    license_file: str = "./deploy/license.key"
+    license_public_key_path: str = "./deploy/license_pubkey.pem"
+    # Backups (pg_dump) target directory.
+    backup_dir: str = "./var/backups"
+
+    # Regulatory incident reporting SLA windows (verify against the current SBP circular).
+    default_regulator: str = "SBP"
+    regulatory_initial_report_hours: int = 24   # initial breach notification
+    regulatory_final_report_days: int = 30      # detailed / final report
+
+    # AML/CFT — STR/SAR filing SLA (days from detection; verify vs FMU/SBP rules).
+    aml_str_filing_days: int = 7
+
     # Seed
     seed_data: bool = True
     seed_org_name: str = "Acme Corp"

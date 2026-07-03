@@ -1,7 +1,10 @@
 """Enterprise risk program: appetite/tolerance settings, breach alerts, and roll-up."""
 from __future__ import annotations
 
+from collections import defaultdict
+
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession, require
@@ -17,6 +20,23 @@ from app.services.risk_scoring import effective_score
 from app.services.risk_settings import get_or_create_settings
 
 router = APIRouter(tags=["risk program"])
+
+
+class MatrixCell(BaseModel):
+    likelihood: int
+    impact: int
+    score: int
+    inherent_count: int
+    residual_count: int
+    inherent_refs: list[str]
+    residual_refs: list[str]
+
+
+class RiskMatrix(BaseModel):
+    cells: list[MatrixCell]
+    appetite_score: int
+    tolerance_score: int
+    total: int
 
 
 @router.get(
@@ -58,6 +78,52 @@ async def risk_alerts(db: DbSession, user: CurrentUser) -> list[RiskRead]:
         key=lambda r: effective_score(r.inherent_score, r.residual_score) or 0, reverse=True
     )
     return [RiskRead.model_validate(r) for r in breached]
+
+
+@router.get(
+    "/risk-matrix",
+    response_model=RiskMatrix,
+    dependencies=[Depends(require("risk:read"))],
+    summary="5x5 likelihood-by-impact heatmap counts (inherent & residual)",
+)
+async def risk_matrix(db: DbSession, user: CurrentUser) -> RiskMatrix:
+    settings = await get_or_create_settings(db, user.tenant_id)
+    risks = (await db.scalars(select(Risk))).all()
+
+    inherent: dict[tuple[int, int], list[str]] = defaultdict(list)
+    residual: dict[tuple[int, int], list[str]] = defaultdict(list)
+    for r in risks:
+        il, ii = getattr(r, "inherent_likelihood", None), getattr(r, "inherent_impact", None)
+        if il and ii:
+            inherent[(il, ii)].append(r.reference)
+        # Residual falls back to inherent when a risk hasn't been separately re-scored.
+        rl = getattr(r, "residual_likelihood", None) or il
+        ri = getattr(r, "residual_impact", None) or ii
+        if rl and ri:
+            residual[(rl, ri)].append(r.reference)
+
+    cells: list[MatrixCell] = []
+    for likelihood in range(1, 6):
+        for impact in range(1, 6):
+            ic = inherent.get((likelihood, impact), [])
+            rc = residual.get((likelihood, impact), [])
+            cells.append(
+                MatrixCell(
+                    likelihood=likelihood,
+                    impact=impact,
+                    score=likelihood * impact,
+                    inherent_count=len(ic),
+                    residual_count=len(rc),
+                    inherent_refs=ic[:25],
+                    residual_refs=rc[:25],
+                )
+            )
+    return RiskMatrix(
+        cells=cells,
+        appetite_score=settings.appetite_score,
+        tolerance_score=settings.tolerance_score,
+        total=len(risks),
+    )
 
 
 @router.get(

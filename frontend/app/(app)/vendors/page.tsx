@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiCall, type Page, type Risk, type Asset } from "@/lib/api";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import {
   Field,
@@ -517,9 +518,12 @@ export default function VendorsPage() {
           <h1>Third-Party Risk</h1>
           <p>Vendor registry with criticality, risk rating, assessment status, contracts and linked risks/assets.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add vendor
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="vendors" label="Vendors" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add vendor
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

@@ -5,6 +5,7 @@ import { apiCall, type Page, type Control, type Vendor, type Risk, type Asset } 
 import { Badge, Severity } from "@/components/badges";
 import { Field, TextInput, TextArea, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import RecordPanels from "@/components/RecordPanels";
 import { IconCheck, IconPlus, IconShield } from "@/components/icons";
@@ -20,6 +21,21 @@ type IncidentStageFull = {
   status: string;
   notes: string;
   completed_at: string | null;
+};
+
+type RegReport = {
+  id: string;
+  incident_id: string;
+  regulator: string;
+  report_type: string;
+  deadline: string | null;
+  status: string;
+  submitted_at: string | null;
+  reference: string;
+  summary: string;
+  submitted_by: string;
+  is_overdue: boolean;
+  created_at: string;
 };
 
 type IncidentFull = {
@@ -46,6 +62,9 @@ type IncidentFull = {
   lifecycle_complete: boolean;
   current_stage: string | null;
   stages: IncidentStageFull[];
+  is_reportable: boolean;
+  regulator: string;
+  regulatory_reports: RegReport[];
   controls: Ref[];
   vendors: Ref[];
   assets: Ref[];
@@ -244,6 +263,28 @@ export default function IncidentsPage() {
     }
   }
 
+  async function regAction(fn: Promise<unknown>) {
+    if (!open) return;
+    setError(null);
+    try {
+      await fn;
+      await load(open.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Action failed");
+    }
+  }
+  function generateRegReports() {
+    if (!open) return;
+    regAction(apiCall("POST", `/incidents/${open.id}/regulatory-reports/generate`));
+  }
+  function markReportSubmitted(reportId: string) {
+    const ref = window.prompt("Regulator acknowledgement reference (optional):") ?? "";
+    regAction(apiCall("PATCH", `/regulatory-reports/${reportId}`, { status: "submitted", reference: ref }));
+  }
+  function deleteRegReport(reportId: string) {
+    regAction(apiCall("DELETE", `/regulatory-reports/${reportId}`));
+  }
+
   const controlOpts: Option[] = useMemo(
     () => controls.map((c) => ({ value: c.id, label: c.name, sub: c.reference })),
     [controls],
@@ -360,9 +401,12 @@ export default function IncidentsPage() {
           <h1>Security Operations</h1>
           <p>Log, triage and resolve security incidents through their response lifecycle.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add incident
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="incidents" label="Incidents" onDone={() => load()} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add incident
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
@@ -459,6 +503,54 @@ export default function IncidentsPage() {
             ))}
           </div>
         </div>
+
+        <div className="card">
+          <div className="card-head">
+            <h3>Regulatory reporting</h3>
+            <span className="sub">
+              {open.is_reportable ? `Reportable to ${open.regulator || "regulator"}` : "Not flagged reportable"}
+            </span>
+          </div>
+          <div className="card-pad">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 460 }}>
+                Generate the standard {open.regulator || "SBP"} submissions (initial notification + final report)
+                with SLA deadlines computed from the detection date.
+              </p>
+              <button className="btn secondary sm" onClick={generateRegReports}>Generate {open.regulator || "SBP"} reports</button>
+            </div>
+            {open.regulatory_reports.length > 0 ? (
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Regulator</th><th>Report</th><th>Deadline</th><th>Status</th><th>Reference</th><th></th></tr></thead>
+                  <tbody>
+                    {open.regulatory_reports.map((r) => (
+                      <tr key={r.id}>
+                        <td className="muted">{r.regulator}</td>
+                        <td className="cell-title">{cap(r.report_type)}</td>
+                        <td className="muted">
+                          {r.deadline || "—"}
+                          {r.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="critical">overdue</Badge></span>}
+                        </td>
+                        <td><Badge tone={r.status === "pending" ? "medium" : "low"}>{cap(r.status)}</Badge></td>
+                        <td className="muted">{r.reference || "—"}</td>
+                        <td>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            {r.status === "pending" && <button className="btn sm" onClick={() => markReportSubmitted(r.id)}>Mark submitted</button>}
+                            <button className="btn secondary sm" onClick={() => deleteRegReport(r.id)}>Remove</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <span className="muted" style={{ fontSize: 12.5 }}>No regulatory reports yet.</span>
+            )}
+          </div>
+        </div>
+
         <RecordPanels model="incident" entityId={open.id} />
         </>
       )}

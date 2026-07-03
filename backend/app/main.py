@@ -20,6 +20,11 @@ async def lifespan(app: FastAPI):
     # disable by setting SEED_DATA=false and manage schema with Alembic.
     from app.db.init_db import init_models
     from app.db.seed import seed_if_empty
+    from app.services import license as lic
+    from app.services import scheduler
+
+    # Offline license gate (fail-closed only when enforcement is on — banking mode).
+    lic.enforce_on_startup()
 
     try:
         await init_models()
@@ -27,7 +32,13 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logger.exception("Startup DB initialization failed")
         raise
-    yield
+
+    # Time-driven reminder/chasing sweep (notifications + email digests).
+    scheduler.start()
+    try:
+        yield
+    finally:
+        await scheduler.stop()
 
 
 app = FastAPI(
@@ -50,7 +61,12 @@ app.include_router(api_router)
 
 @app.get("/health", tags=["meta"])
 async def health() -> dict[str, str]:
-    return {"status": "ok", "environment": settings.environment}
+    # Public, unauthenticated liveness probe (used by container healthchecks).
+    return {
+        "status": "ok",
+        "environment": settings.environment,
+        "version": settings.app_version,
+    }
 
 
 @app.get("/", tags=["meta"])

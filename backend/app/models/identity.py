@@ -8,11 +8,14 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
     Column,
+    DateTime,
     ForeignKey,
+    Integer,
     String,
     Table,
     UniqueConstraint,
@@ -72,6 +75,20 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     full_name: Mapped[str] = mapped_column(String(200), default="")
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Where this account authenticates: "local" (bcrypt) or "ldap" (directory bind).
+    auth_source: Mapped[str] = mapped_column(String(16), default="local", nullable=False)
+
+    # MFA (TOTP)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    mfa_secret: Mapped[str] = mapped_column(String(64), default="")  # base32; empty until enrolled
+
+    # Brute-force protection / account lockout
+    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Password lifecycle (for expiry policy)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     roles: Mapped[list[Role]] = relationship(secondary=user_roles, lazy="selectin")
 

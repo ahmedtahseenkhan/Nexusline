@@ -4,7 +4,7 @@ from app.models.tenant import Tenant
 from app.models.identity import Permission, Role, User, role_permissions, user_roles
 from app.models.audit import AuditLog
 from app.models.access_review import AccessReview, AccessReviewItem
-from app.models.approval import ApprovalRequest
+from app.models.approval import ApprovalAction, ApprovalRequest
 from app.models.attestation import Attestation
 from app.models.asset import (
     Asset,
@@ -35,7 +35,7 @@ from app.models.assessment import (
     QuestionOption,
     Questionnaire,
 )
-from app.models.collab import Attachment, Comment, EntityTag, Tag
+from app.models.collab import Attachment, Comment, EntityTag, StoredFile, Tag
 from app.models.continuity import ContinuityPlan, ContinuityTask, ContinuityTest
 from app.models.control import Control, ControlAudit, ControlMaintenance, control_policies
 from app.models.custom_field import CustomField, CustomFieldValue
@@ -72,7 +72,38 @@ from app.models.exception import (
     exception_risks,
 )
 from app.models.goal import Goal, GoalAudit, goal_policies, goal_projects, goal_risks
-from app.models.incident import Incident, IncidentStage, incident_controls, incident_vendors
+from app.models.internal_audit import (
+    AuditableUnit,
+    AuditEngagement,
+    AuditFinding,
+    AuditProcedure,
+)
+from app.models.shariah import (
+    CharityDisbursement,
+    IslamicProduct,
+    ShariahFinding,
+    ShariahReview,
+    ShariahRuling,
+)
+from app.models.operational_risk import (
+    KeyRiskIndicator,
+    KriMeasurement,
+    LossEvent,
+    RcsaAssessment,
+    RcsaRisk,
+)
+from app.models.aml import (
+    AmlRiskAssessment,
+    ScreeningCase,
+    SuspiciousActivityReport,
+)
+from app.models.incident import (
+    Incident,
+    IncidentStage,
+    RegulatoryReport,
+    incident_controls,
+    incident_vendors,
+)
 from app.models.notification import Notification, NotificationView
 from app.models.organization import (
     BusinessUnit,
@@ -99,6 +130,7 @@ from app.models.policy import Policy, PolicyAcknowledgment, PolicyReview, polici
 from app.models.vendor import ServiceContract, Vendor, VendorType, vendor_assets, vendor_risks
 from app.models.saved_filter import SavedFilter
 from app.models.sso import SsoConfig
+from app.models.ldap_config import LdapConfig
 from app.models.status_rule import StatusRule
 from app.models.version import RecordVersion
 from app.models.webhook import Webhook, WebhookDelivery
@@ -143,6 +175,7 @@ __all__ = [
     "Evidence",
     "Incident",
     "IncidentStage",
+    "RegulatoryReport",
     "BusinessUnit",
     "Process",
     "Legal",
@@ -194,6 +227,24 @@ __all__ = [
     "Notification",
     "NotificationView",
     "ApprovalRequest",
+    "ApprovalAction",
+    "AuditableUnit",
+    "AuditEngagement",
+    "AuditProcedure",
+    "AuditFinding",
+    "ShariahRuling",
+    "IslamicProduct",
+    "ShariahReview",
+    "ShariahFinding",
+    "CharityDisbursement",
+    "RcsaAssessment",
+    "RcsaRisk",
+    "KeyRiskIndicator",
+    "KriMeasurement",
+    "LossEvent",
+    "ScreeningCase",
+    "SuspiciousActivityReport",
+    "AmlRiskAssessment",
     "CustomField",
     "CustomFieldValue",
     "DashboardWidget",
@@ -201,6 +252,7 @@ __all__ = [
     "Tag",
     "EntityTag",
     "Attachment",
+    "StoredFile",
     "RecordVersion",
     "Webhook",
     "WebhookDelivery",
@@ -208,4 +260,5 @@ __all__ = [
     "Attestation",
     "SavedFilter",
     "SsoConfig",
+    "LdapConfig",
 ]

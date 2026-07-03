@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy import select
 
-from app.core.deps import CurrentUser, DbSession
+from app.core.deps import CurrentUser, DbSession, require
 from app.models.notification import Notification, NotificationView
 from app.schemas.notification import NotificationList, NotificationRead
+from app.services import email as email_service
 from app.services import notifications as notif_service
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -48,3 +50,27 @@ async def mark_seen(db: DbSession, user: CurrentUser) -> None:
     else:
         view.last_seen_at = now
     await db.flush()
+
+
+class EmailStatus(BaseModel):
+    smtp_configured: bool
+    sent: bool
+    recipient: str
+
+
+@router.post("/test-email", response_model=EmailStatus, dependencies=[Depends(require("role:write"))])
+async def send_test_email(user: CurrentUser) -> EmailStatus:
+    """Send a test email to the current admin to verify SMTP configuration.
+
+    In dev (no SMTP configured) this returns ``sent=false`` and the message is logged
+    rather than delivered — the endpoint still confirms the pipeline is wired.
+    """
+    html = (
+        '<div style="font-family:system-ui,Arial,sans-serif">'
+        "<h2>NexusLine SMTP test</h2>"
+        "<p>If you can read this, outbound email is working.</p></div>"
+    )
+    sent = await email_service.send_email(user.email, "NexusLine SMTP test", html)
+    return EmailStatus(
+        smtp_configured=email_service.is_configured(), sent=sent, recipient=user.email
+    )

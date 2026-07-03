@@ -3,6 +3,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     access_reviews,
+    aml,
     approvals,
     assessments,
     attestations,
@@ -23,15 +24,23 @@ from app.api.v1 import (
     filters,
     goals,
     incidents,
+    internal_audit,
+    ldap,
     notifications,
+    operational_risk,
     organization,
+    pdf,
     policies,
     privacy,
     projects,
+    regulatory,
     reports,
     risk_program,
     risks,
+    search,
+    shariah,
     sso,
+    system,
     status_rules,
     threats,
     users,
@@ -42,6 +51,7 @@ from app.api.v1 import (
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
 api_router.include_router(sso.router)
+api_router.include_router(ldap.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(risks.router)
 api_router.include_router(risk_program.router)
@@ -56,6 +66,10 @@ api_router.include_router(evidence.router)
 api_router.include_router(exceptions.router)
 api_router.include_router(projects.router)
 api_router.include_router(goals.router)
+api_router.include_router(internal_audit.router)
+api_router.include_router(shariah.router)
+api_router.include_router(operational_risk.router)
+api_router.include_router(aml.router)
 api_router.include_router(continuity.router)
 api_router.include_router(privacy.router)
 api_router.include_router(access_reviews.router)
@@ -64,12 +78,14 @@ api_router.include_router(notifications.router)
 api_router.include_router(approvals.router)
 api_router.include_router(custom_fields.router)
 api_router.include_router(reports.router)
+api_router.include_router(pdf.router)
 api_router.include_router(collab.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(status_rules.router)
 api_router.include_router(attestations.router)
 api_router.include_router(filters.router)
 api_router.include_router(incidents.router)
+api_router.include_router(regulatory.router)
 api_router.include_router(policies.router)
 api_router.include_router(vendors.router)
 api_router.include_router(vendors.types_router)
@@ -79,3 +95,5 @@ api_router.include_router(audit.router)
 api_router.include_router(versions.router)
 api_router.include_router(users.router)
 api_router.include_router(dataio.router)
+api_router.include_router(search.router)
+api_router.include_router(system.router)

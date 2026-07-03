@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -340,9 +341,12 @@ export default function ExceptionsPage() {
           <h1>Exceptions</h1>
           <p>Formal, time-boxed acceptance of risk, policy or compliance gaps with an approval workflow.</p>
         </div>
-        <button className="btn" onClick={openNew}>
-          <IconPlus width={16} height={16} /> Add exception
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="exceptions" label="Exceptions" onDone={load} />
+          <button className="btn" onClick={openNew}>
+            <IconPlus width={16} height={16} /> Add exception
+          </button>
+        </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}

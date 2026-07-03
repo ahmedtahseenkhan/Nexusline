@@ -22,6 +22,7 @@ Security notes:
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -43,7 +44,7 @@ from app.schemas.user import (
     UserRead,
     UserUpdate,
 )
-from app.services import audit
+from app.services import audit, password_policy
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -285,6 +286,7 @@ async def create_user(body: UserCreate, db: DbSession, actor: CurrentUser) -> Us
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Email already in use"
         )
+    password_policy.validate_password(body.password)
     roles = await _roles_by_names(db, body.role_names)
     user = User(
         tenant_id=actor.tenant_id,
@@ -292,6 +294,7 @@ async def create_user(body: UserCreate, db: DbSession, actor: CurrentUser) -> Us
         full_name=body.full_name,
         is_active=body.is_active,
         hashed_password=hash_password(body.password),
+        password_changed_at=datetime.now(timezone.utc),
         roles=roles,
     )
     db.add(user)
@@ -381,8 +384,13 @@ async def deactivate_user(user_id: uuid.UUID, db: DbSession, actor: CurrentUser)
 async def set_user_password(
     user_id: uuid.UUID, body: UserPasswordSet, db: DbSession, actor: CurrentUser
 ) -> UserRead:
+    password_policy.validate_password(body.password)
     user = await _load_user(db, user_id)
     user.hashed_password = hash_password(body.password)
+    user.password_changed_at = datetime.now(timezone.utc)
+    # An admin reset clears any lockout so the user can sign in again.
+    user.failed_login_attempts = 0
+    user.locked_until = None
     await db.flush()
     await audit.record(
         db, actor=actor, action="update", entity_type="user", entity_id=user.id,

@@ -205,6 +205,77 @@ async def delete_framework(framework_id: uuid.UUID, db: DbSession) -> None:
     fw.deleted_date = datetime.now(timezone.utc)
 
 
+# ------------------------------------------------------------- framework library
+@router.get("/framework-templates", dependencies=[Depends(require("compliance:read"))])
+async def list_framework_templates() -> list[dict]:
+    """Predefined standards that can be loaded into the tenant (e.g. ISO/IEC 42001)."""
+    from app.services.framework_library import TEMPLATES
+
+    return [
+        {
+            "key": key,
+            "name": t["name"],
+            "version": t["version"],
+            "authority": t["authority"],
+            "description": t.get("description", ""),
+            "requirement_count": len(t["requirements"]),
+        }
+        for key, t in TEMPLATES.items()
+    ]
+
+
+@router.post(
+    "/framework-templates/{key}/load",
+    response_model=FrameworkRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require("compliance:write"))],
+)
+async def load_framework_template(key: str, db: DbSession, user: CurrentUser) -> FrameworkRead:
+    """Create a framework and all its requirements from a built-in template."""
+    from app.services.framework_library import TEMPLATES
+
+    tpl = TEMPLATES.get(key)
+    if tpl is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown framework template")
+    existing = await db.scalar(
+        select(Framework).where(Framework.name == tpl["name"], Framework.deleted.is_(False))
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{tpl['name']} is already loaded.",
+        )
+    fw = Framework(
+        tenant_id=user.tenant_id,
+        name=tpl["name"],
+        version=tpl["version"],
+        authority=tpl["authority"],
+        regulator=tpl.get("regulator", ""),
+        scope=tpl.get("scope", ""),
+        description=tpl.get("description", ""),
+    )
+    db.add(fw)
+    await db.flush()
+    for r in tpl["requirements"]:
+        db.add(
+            Requirement(
+                tenant_id=user.tenant_id,
+                framework_id=fw.id,
+                reference=r["reference"],
+                title=r["title"],
+                domain=r.get("domain", ""),
+                description=r.get("description", ""),
+            )
+        )
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="create", entity_type="framework", entity_id=fw.id,
+        summary=f"Loaded framework {fw.name} ({len(tpl['requirements'])} requirements) from library",
+    )
+    await db.refresh(fw)
+    return FrameworkRead.model_validate(fw)
+
+
 # ----------------------------------------------------------------- requirements
 @router.get(
     "/frameworks/{framework_id}/requirements",

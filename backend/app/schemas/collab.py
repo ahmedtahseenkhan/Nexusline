@@ -53,8 +53,21 @@ class AttachmentRead(BaseModel):
     created_at: datetime
 
 
+class StoredFileRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    uploaded_by_email: str
+    created_at: datetime
+    can_delete: bool = False
+
+
 class CollabBundle(BaseModel):
     comments: list[CommentRead]
     tags: list[TagRead]
     attachments: list[AttachmentRead]
+    files: list[StoredFileRead]
     available_tags: list[TagRead]
