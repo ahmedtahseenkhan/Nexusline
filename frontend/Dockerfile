@@ -14,10 +14,13 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
+# Standalone output traces only the deps actually used at runtime, so the final
+# image needs no full node_modules copy — cuts the image (and every rebuild's
+# layer churn) from ~1GB+ down to tens of MB.
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/next.config.js ./next.config.js
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
 EXPOSE 3000
-CMD ["npm", "start"]
+CMD ["node", "server.js"]
