@@ -122,10 +122,17 @@ The left navigation groups every module into seven sections, which this guide fo
 ## 5. Overview
 
 ### Dashboard (`/dashboard`)
-**Purpose:** Read-only executive snapshot of live risk/compliance/control posture.
-**What's on it:** KPI tiles, risk-by-severity and risk-by-status charts, compliance-by-framework progress bars, a risk heatmap, an enterprise risk roll-up by category, and a recent activity feed pulled from the audit log.
-**Key action:** "Executive Summary PDF" export button.
-**Note:** content is fixed to risk metrics — for a customizable dashboard, use Reports & KPIs instead.
+**Purpose:** Read-only executive snapshot of live risk/compliance/control posture — the default landing page.
+**What's on it:**
+- A composite **Governance Health** score (0–100, banded Healthy / Elevated / Critical), blended from the share of risks within tolerance, overall compliance %, and the residual critical/high risk mix.
+- A **"Needs your attention"** queue — auto-generated and prioritized (tolerance breaches, critical inherent risks pending treatment, frameworks below 80% compliant, overdue asset reviews, pending risk acceptances), each row carrying a one-click action button (Escalate / Assign / Review / Approve) that links straight into the relevant module.
+- A 5-tile metric strip: Total risks, Critical inherent, Overall compliant %, Annual exposure (ALE), Tolerance breaches.
+- A **risk matrix** bubble chart with an Inherent/Residual toggle — bubble size is the risk count in that likelihood×impact cell — plus the organization's appetite/tolerance scores.
+- **Compliance** donut rings — one overall ring plus one per framework.
+- An **enterprise risk roll-up** table by category (risk count, max residual, breaches, exposure).
+- A **recent activity** feed, filterable to 30 days / Quarter / YTD.
+**Key action:** "Executive summary" PDF export button.
+**Note:** content is still fixed to risk/compliance metrics — for a customizable dashboard, use Reports & KPIs instead.
 
 ### Reports & KPIs (`/reports`)
 **Purpose:** Build your own KPI dashboard from a metrics catalog spanning every module.
@@ -504,6 +511,8 @@ Every permission is a `resource:action` code (93 total across every module). Mos
 | **Viewer** | Read-only everywhere. |
 
 Admins can also build **custom roles** by hand-picking any combination of the 93 permissions from Users & Roles ([§9.4](#94-users--roles-organization)). Assignment is per-user (pick one or more roles) — there's no per-record or per-business-unit scoping.
+
+When the platform is upgraded with new modules (and therefore new permission codes), every built-in role is automatically topped up with the new codes it's entitled to the next time the backend restarts — this is additive only, never removes a grant, and never touches custom roles or a user's individual assignments. In practice this means you won't hit an unexpected 403 on a newly-added module after an upgrade without having to manually re-grant anything.
 
 ---
 
