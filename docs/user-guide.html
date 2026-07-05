@@ -406,11 +406,15 @@ td b{color:var(--text-strong);}
 
       <article class="module" id="dashboard">
         <div class="module-head"><h3>Dashboard</h3><code class="route">/dashboard</code></div>
-        <p class="purpose">Read-only executive snapshot of live risk, compliance, and control posture.</p>
+        <p class="purpose">Read-only executive snapshot of live risk, compliance, and control posture — the default landing page.</p>
         <div class="mgrid">
-          <div class="field full"><span class="field-label">What's on it</span><p>KPI tiles, risk-by-severity and risk-by-status charts, compliance-by-framework progress bars, a risk heatmap, an enterprise risk roll-up by category, and a recent-activity feed pulled from the audit log.</p></div>
-          <div class="field"><span class="field-label">Key action</span><p>"Executive Summary PDF" export.</p></div>
-          <div class="field"><span class="field-label">Note</span><p>Content is fixed to risk metrics — for a customizable dashboard, use Reports &amp; KPIs instead.</p></div>
+          <div class="field full"><span class="field-label">Governance Health</span><p>A composite 0–100 score, banded Healthy / Elevated / Critical, blended from the share of risks within tolerance, overall compliance %, and the residual critical/high risk mix.</p></div>
+          <div class="field full"><span class="field-label">Needs your attention</span><p>An auto-generated, prioritized queue — tolerance breaches, critical inherent risks pending treatment, frameworks below 80% compliant, overdue asset reviews, pending risk acceptances — each row with a one-click action button (Escalate / Assign / Review / Approve) linking straight into the relevant module.</p></div>
+          <div class="field"><span class="field-label">Metric strip</span><p>Total risks, Critical inherent, Overall compliant %, Annual exposure (ALE), Tolerance breaches.</p></div>
+          <div class="field"><span class="field-label">Risk matrix &amp; compliance</span><p>A bubble chart (Inherent/Residual toggle, bubble size = risk count per cell) plus appetite/tolerance scores, and compliance donut rings — one overall, one per framework.</p></div>
+          <div class="field"><span class="field-label">Roll-up &amp; activity</span><p>An enterprise risk roll-up table by category, and a recent-activity feed filterable to 30 days / Quarter / YTD.</p></div>
+          <div class="field"><span class="field-label">Key action</span><p>"Executive summary" PDF export.</p></div>
+          <div class="field full"><span class="field-label">Note</span><p>Content is still fixed to risk/compliance metrics — for a customizable dashboard, use Reports &amp; KPIs instead.</p></div>
         </div>
       </article>
 
@@ -1039,6 +1043,7 @@ td b{color:var(--text-strong);}
           </table>
         </div>
         <p>Admins can also build <b>custom roles</b> by hand-picking any combination of the 93 permissions under <a href="#organization-users">Users &amp; Roles</a>. Assignment is per-user — there's no per-record or per-business-unit scoping.</p>
+        <div class="callout note"><span class="glyph">ℹ</span><div>When the platform is upgraded with new modules — and therefore new permission codes — every built-in role is automatically topped up with the codes it's entitled to, the next time the backend restarts. This is additive only: it never removes a grant, and never touches custom roles or a user's individual assignments. In practice, you won't hit an unexpected 403 on a newly-added module after an upgrade without having to manually re-grant anything.</div></div>
       </section>
 
       <section class="page-section" id="gaps">
