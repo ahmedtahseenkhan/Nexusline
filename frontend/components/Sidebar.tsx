@@ -33,6 +33,7 @@ const NAV: Section[] = [
       { href: "/dashboard", label: "Dashboard", icon: <IconDashboard /> },
       { href: "/reports", label: "Reports & KPIs", icon: <IconActivity /> },
       { href: "/goals", label: "Strategy & Goals", icon: <IconGauge /> },
+      { href: "/ai-assist", label: "AI Assist", icon: <IconActivity />, tag: "AI" },
     ],
   },
   {
@@ -40,9 +41,14 @@ const NAV: Section[] = [
     items: [
       { href: "/risks", label: "Risk Register", icon: <IconRisk /> },
       { href: "/operational-risk", label: "Operational Risk", icon: <IconGauge /> },
+      { href: "/scenario-analysis", label: "Scenario & Capital", icon: <IconGauge /> },
+      { href: "/model-risk", label: "Model Risk", icon: <IconGauge /> },
       { href: "/threat-library", label: "Threat Library", icon: <IconAlert /> },
-      { href: "/assets", label: "Asset Management", icon: <IconAsset /> },
+      { href: "/risk-quantification", label: "Risk Quantification", icon: <IconGauge /> },
+      { href: "/it-assets", label: "IT Asset Management", icon: <IconAsset /> },
+      { href: "/information-assets", label: "Information Assets", icon: <IconLayers /> },
       { href: "/vendors", label: "Third Parties", icon: <IconVendor /> },
+      { href: "/outsourcing", label: "Outsourcing & Cloud", icon: <IconVendor /> },
       { href: "/assessments", label: "Vendor Assessments", icon: <IconCompliance /> },
       { href: "/questionnaires", label: "Questionnaires", icon: <IconPolicy /> },
     ],
@@ -51,10 +57,16 @@ const NAV: Section[] = [
     title: "Compliance",
     items: [
       { href: "/compliance", label: "Compliance", icon: <IconCompliance /> },
+      { href: "/content-library", label: "Framework Library", icon: <IconCompliance /> },
+      { href: "/regulatory-change", label: "Regulatory Change", icon: <IconCompliance /> },
+      { href: "/icfr", label: "ICFR", icon: <IconCheck /> },
       { href: "/aml", label: "AML / CFT", icon: <IconShield /> },
+      { href: "/fraud", label: "Fraud Risk", icon: <IconAlert /> },
       { href: "/controls", label: "Control Catalog", icon: <IconControl /> },
+      { href: "/vulnerabilities", label: "Vulnerabilities", icon: <IconAlert /> },
       { href: "/evidence", label: "Evidence", icon: <IconEvidence /> },
       { href: "/internal-audit", label: "Internal Audit", icon: <IconCheck /> },
+      { href: "/declarations", label: "Declarations", icon: <IconPolicy /> },
       { href: "/shariah", label: "Shariah Governance", icon: <IconShield /> },
     ],
   },
@@ -63,7 +75,11 @@ const NAV: Section[] = [
     items: [
       { href: "/policies", label: "Policy Management", icon: <IconPolicy /> },
       { href: "/privacy", label: "Data Privacy (RoPA)", icon: <IconCompliance /> },
+      { href: "/data-protection", label: "Data Protection", icon: <IconShield /> },
       { href: "/awareness", label: "Awareness Training", icon: <IconUsers /> },
+      { href: "/delegation-of-authority", label: "Delegation of Authority", icon: <IconUsers /> },
+      { href: "/governance", label: "Board & Committees", icon: <IconUsers /> },
+      { href: "/esg", label: "ESG / Green Banking", icon: <IconGauge /> },
     ],
   },
   {
@@ -80,6 +96,9 @@ const NAV: Section[] = [
     items: [
       { href: "/incidents", label: "Security Operations", icon: <IconShield /> },
       { href: "/continuity", label: "Business Continuity", icon: <IconShield /> },
+      { href: "/bia", label: "Business Impact Analysis", icon: <IconShield /> },
+      { href: "/issues", label: "Issues & Actions", icon: <IconAlert /> },
+      { href: "/whistleblowing", label: "Whistleblowing", icon: <IconAlert /> },
       { href: "/access-reviews", label: "Access Reviews", icon: <IconUsers /> },
       { href: "/approvals", label: "Approvals", icon: <IconCheck /> },
       { href: "/exceptions", label: "Exceptions", icon: <IconAlert /> },
@@ -90,6 +109,7 @@ const NAV: Section[] = [
   {
     title: "System",
     items: [
+      { href: "/integrations", label: "Integrations & CCM", icon: <IconActivity /> },
       { href: "/custom-fields", label: "Custom Fields", icon: <IconLayers /> },
       { href: "/status-rules", label: "Status Rules", icon: <IconGauge /> },
       { href: "/filters", label: "Saved Filters", icon: <IconCompliance /> },

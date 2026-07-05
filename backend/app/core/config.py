@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     app_base_url: str = "http://localhost:3000"
 
+    # AI Assist ("Circular Intelligence"). Optional — when blank, the module falls back
+    # to a deterministic offline heuristic so on-prem installs work with no external calls.
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-4-5"
+
     # Background scheduler (periodic notification refresh, reminders, chasing)
     scheduler_enabled: bool = True
     scheduler_interval_minutes: int = 15

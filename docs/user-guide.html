@@ -1,0 +1,1135 @@
+<title>NexusLine — User &amp; Administrator Guide</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+/* ============================================================================
+   NEXUSLINE GUIDE — reuses the product's own tokens: dark command rail,
+   warm light canvas, teal signal. Editorial typography, tabular data.
+   ========================================================================== */
+:root{
+  --bg:#f3f4f7; --bg-tint:#eef0f5; --surface:#ffffff; --surface-2:#f7f8fa; --surface-3:#eef0f4;
+  --border:#e7e9ef; --border-strong:#d6dae3;
+  --text:#1b2330; --text-strong:#0c121d; --muted:#5d6776; --faint:#98a1b1;
+  --primary:#0d9488; --primary-hover:#0b7d72; --primary-deep:#0f766e; --primary-weak:#e2f3f0; --primary-weak-2:#f0f9f7; --primary-text:#0b6b62; --primary-bright:#2dd4bf; --ring:rgba(13,148,136,.30);
+  --ink:#0c1322; --ink-2:#111a2c; --ink-line:rgba(255,255,255,.08); --ink-text:#aeb7c7; --ink-faint:#6b7689;
+  --amber:#a96414; --amber-bg:#faefda; --red:#b42323; --red-bg:#fbe6e6; --green:#157f4a; --green-bg:#e4f5ea;
+  --shadow-sm:0 1px 2px rgba(12,18,29,.06); --shadow:0 2px 6px rgba(12,18,29,.06),0 1px 2px rgba(12,18,29,.04); --shadow-md:0 10px 30px -8px rgba(12,18,29,.18);
+  --radius:12px; --radius-sm:8px; --rail-w:296px;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;}
+html{scroll-behavior:smooth;}
+body{
+  margin:0; background:var(--bg); color:var(--text); font-family:var(--font);
+  font-size:15px; line-height:1.6; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+h1,h2,h3,h4{color:var(--text-strong); margin:0; font-weight:680; letter-spacing:-0.02em; text-wrap:balance;}
+a{color:var(--primary-text); text-decoration:none;}
+a:hover{color:var(--primary-hover);}
+p{margin:0 0 .7em; max-width:68ch;}
+ul,ol{margin:.3em 0 0; padding-left:1.3em;}
+li{margin:.28em 0;}
+code{font-family:var(--mono); font-size:.86em;}
+::selection{background:var(--primary-weak); color:var(--primary-deep);}
+:focus-visible{outline:2px solid var(--primary); outline-offset:2px; border-radius:4px;}
+@media (prefers-reduced-motion: reduce){ *{scroll-behavior:auto !important; transition:none !important; animation:none !important;} }
+
+/* ---------------------------------------------------------------- shell */
+.shell{display:flex; min-height:100vh;}
+.hidden{display:none !important;}
+
+/* ---------------------------------------------------------------- rail */
+.rail{
+  position:fixed; inset:0 auto 0 0; width:var(--rail-w); display:flex; flex-direction:column;
+  background:
+    radial-gradient(130% 55% at 0% 0%, rgba(45,212,191,.11), transparent 60%),
+    linear-gradient(180deg, var(--ink-2), var(--ink));
+  border-right:1px solid rgba(0,0,0,.25); z-index:20;
+}
+.rail-brand{
+  display:flex; align-items:center; gap:11px; height:64px; padding:0 20px; flex:none;
+  border-bottom:1px solid var(--ink-line); font-weight:700; font-size:16.5px; letter-spacing:-0.03em; color:#fff;
+}
+.rail-brand .mark{
+  width:30px; height:30px; border-radius:9px; flex:none; display:grid; place-items:center;
+  background:linear-gradient(150deg, var(--primary-bright), var(--primary));
+  color:#06231f; font-weight:800; font-size:13px;
+  box-shadow:0 4px 14px -4px rgba(45,212,191,.55), inset 0 1px 0 rgba(255,255,255,.4);
+}
+.rail-brand b{color:var(--primary-bright); font-weight:inherit;}
+.rail-sub{padding:12px 20px 4px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-faint);}
+.rail-search{padding:8px 16px 12px; flex:none;}
+.rail-search input{
+  width:100%; background:rgba(255,255,255,.05); border:1px solid var(--ink-line); color:#fff;
+  border-radius:8px; padding:9px 11px; font:inherit; font-size:13px;
+}
+.rail-search input::placeholder{color:var(--ink-faint);}
+.rail-search input:focus-visible{outline:2px solid var(--primary-bright); outline-offset:0;}
+.rail-nav{flex:1 1 auto; overflow-y:auto; padding:2px 12px 16px;}
+.rail-nav::-webkit-scrollbar{width:8px;}
+.rail-nav::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12); border-radius:8px;}
+.rail-group{margin-top:14px;}
+.rail-group-title{
+  padding:6px 8px 4px; font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--ink-faint); font-weight:600;
+}
+.rail-link{
+  display:block; padding:6.5px 10px; border-radius:7px; font-size:13.2px; color:var(--ink-text);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.rail-link:hover{color:#fff; background:rgba(255,255,255,.06);}
+.rail-link.active{color:#fff; background:rgba(45,212,191,.14); box-shadow:inset 2px 0 0 var(--primary-bright);}
+.rail-empty{padding:14px 10px; color:var(--ink-faint); font-size:12.5px;}
+.rail-foot{
+  flex:none; padding:12px 20px; font-size:11px; color:var(--ink-faint); border-top:1px solid var(--ink-line);
+}
+
+/* ---------------------------------------------------------------- content */
+.content{margin-left:var(--rail-w); flex:1; min-width:0;}
+.wrap{max-width:860px; margin:0 auto; padding:56px 48px 120px;}
+.doc-header{padding-bottom:28px; margin-bottom:8px; border-bottom:1px solid var(--border-strong);}
+.eyebrow{
+  display:inline-flex; align-items:center; gap:7px; font-size:11.5px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--primary-text); font-weight:700; margin-bottom:14px;
+}
+.eyebrow::before{content:""; width:7px; height:7px; border-radius:2px; background:var(--primary); display:inline-block;}
+.doc-header h1{font-size:33px; margin-bottom:12px;}
+.doc-header .dek{font-size:16px; color:var(--muted); max-width:62ch;}
+.doc-meta{display:flex; gap:18px; margin-top:18px; font-size:12.5px; color:var(--faint); flex-wrap:wrap;}
+.doc-meta span{display:inline-flex; align-items:center; gap:6px;}
+.doc-meta b{color:var(--muted); font-weight:600;}
+
+.page-section{padding:52px 0 6px; border-top:1px solid var(--border);}
+.page-section:first-of-type{border-top:none;}
+.section-kicker{font-size:11.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); font-weight:700; margin-bottom:8px;}
+.page-section h2{font-size:25px; margin-bottom:6px;}
+.section-intro{color:var(--muted); font-size:14.5px; margin:10px 0 26px; max-width:64ch;}
+
+.prose h3{font-size:16.5px; margin:22px 0 8px;}
+.prose{color:var(--text); font-size:14.8px;}
+
+/* -------------------------------------------------------------- callouts */
+.callout{
+  border-radius:var(--radius-sm); padding:13px 16px; font-size:13.6px; margin:16px 0;
+  border:1px solid; display:flex; gap:10px; align-items:flex-start;
+}
+.callout .glyph{flex:none; font-size:14px; line-height:1.5;}
+.callout.note{background:var(--primary-weak-2); border-color:var(--primary-weak); color:var(--primary-deep);}
+.callout.warn{background:var(--amber-bg); border-color:#f0dbb3; color:#7c4c0f;}
+
+/* -------------------------------------------------------------- key/val grid (concepts, getting started) */
+.kv{display:grid; grid-template-columns:150px 1fr; gap:4px 18px; margin:18px 0; font-size:14px;}
+.kv dt{color:var(--muted); font-weight:600;}
+.kv dd{margin:0 0 10px;}
+
+.step-list{counter-reset:step; list-style:none; padding:0; margin:16px 0;}
+.step-list li{
+  counter-increment:step; position:relative; padding:2px 0 2px 34px; margin:10px 0; font-size:14.5px;
+}
+.step-list li::before{
+  content:counter(step); position:absolute; left:0; top:0; width:23px; height:23px; border-radius:50%;
+  background:var(--primary-weak); color:var(--primary-deep); font-size:12px; font-weight:700;
+  display:grid; place-items:center; font-family:var(--mono);
+}
+
+/* -------------------------------------------------------------- module cards */
+.module{
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+  padding:24px 26px 22px; margin:18px 0; box-shadow:var(--shadow-sm); scroll-margin-top:24px;
+}
+.module-head{display:flex; align-items:baseline; gap:11px; flex-wrap:wrap; margin-bottom:6px;}
+.module-head h3{font-size:18.5px;}
+.route{
+  font-family:var(--mono); font-size:12px; color:var(--primary-deep); background:var(--primary-weak);
+  padding:2.5px 8px; border-radius:6px; letter-spacing:0;
+}
+.purpose{color:var(--muted); font-size:14.3px; margin:6px 0 16px;}
+.mgrid{display:grid; grid-template-columns:1fr 1fr; gap:20px 28px;}
+.mgrid .full{grid-column:1/-1;}
+.field-label{
+  display:block; font-size:10.8px; letter-spacing:.09em; text-transform:uppercase; color:var(--faint);
+  font-weight:700; margin-bottom:6px;
+}
+.field p, .field ul{margin:0; font-size:13.9px;}
+.field ul{padding-left:1.1em;}
+.field li{margin:.22em 0;}
+
+.flow{display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:2px;}
+.flow .pill{
+  font-family:var(--mono); font-size:12px; color:var(--text); background:var(--surface-3);
+  border:1px solid var(--border-strong); border-radius:20px; padding:4px 11px; white-space:nowrap;
+}
+.flow .arrow{color:var(--faint); font-size:13px;}
+
+/* -------------------------------------------------------------- table (roles) */
+.tbl-wrap{overflow-x:auto; margin:16px 0; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface);}
+table{width:100%; border-collapse:collapse; font-size:14px; min-width:520px;}
+th,td{text-align:left; padding:12px 16px; border-bottom:1px solid var(--border); vertical-align:top;}
+thead th{background:var(--surface-2); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); font-weight:700;}
+tbody tr:last-child td{border-bottom:none;}
+td b{color:var(--text-strong);}
+
+/* -------------------------------------------------------------- workflow chain */
+.chain{
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+  padding:18px 22px; margin:14px 0; box-shadow:var(--shadow-sm);
+}
+.chain h4{font-size:15px; margin-bottom:8px;}
+.chain-path{font-size:13.6px; color:var(--text); line-height:1.85;}
+.chain-path b{color:var(--primary-deep); font-weight:650;}
+.chain-note{margin-top:8px; font-size:13px; color:var(--muted);}
+
+/* -------------------------------------------------------------- gap list */
+.gap-list{list-style:none; padding:0; margin:14px 0; display:flex; flex-direction:column; gap:10px;}
+.gap-list li{
+  background:var(--amber-bg); border:1px solid #f0dbb3; border-radius:var(--radius-sm);
+  padding:12px 15px; font-size:13.8px; color:#5f3b0c; display:flex; gap:10px;
+}
+.gap-list li b{color:#4a2e08;}
+.gap-list .glyph{flex:none;}
+
+.back-top{
+  position:fixed; right:28px; bottom:28px; width:42px; height:42px; border-radius:50%;
+  background:var(--ink); color:var(--primary-bright); display:grid; place-items:center; box-shadow:var(--shadow-md);
+  opacity:0; pointer-events:none; transition:opacity .18s ease; z-index:15; font-size:16px; border:none; cursor:pointer;
+}
+.back-top.show{opacity:1; pointer-events:auto;}
+
+@media (max-width: 880px){
+  .rail{width:240px;}
+  .content{margin-left:240px;}
+  .wrap{padding:40px 24px 100px;}
+  .mgrid{grid-template-columns:1fr;}
+}
+@media (max-width: 620px){
+  .rail{position:static; width:100%; height:auto;}
+  .rail-nav{max-height:46vh;}
+  .content{margin-left:0;}
+  .shell{flex-direction:column;}
+}
+</style>
+
+<div class="shell">
+  <nav class="rail" aria-label="Guide navigation">
+    <div class="rail-brand"><span class="mark">N</span>Nexus<b>Line</b></div>
+    <div class="rail-sub">User &amp; Admin Guide</div>
+    <div class="rail-search">
+      <input id="railSearch" type="search" placeholder="Search modules…" aria-label="Search the guide" />
+    </div>
+    <div class="rail-nav" id="railNav">
+      <div class="rail-group" data-group="start">
+        <div class="rail-group-title">Start here</div>
+        <a class="rail-link" data-nav href="#intro">What is NexusLine</a>
+        <a class="rail-link" data-nav href="#getting-started">Getting started</a>
+        <a class="rail-link" data-nav href="#concepts">Shared concepts</a>
+      </div>
+      <div class="rail-group" data-group="overview">
+        <div class="rail-group-title">Overview</div>
+        <a class="rail-link" data-nav href="#dashboard">Dashboard</a>
+        <a class="rail-link" data-nav href="#reports">Reports &amp; KPIs</a>
+        <a class="rail-link" data-nav href="#goals">Strategy &amp; Goals</a>
+        <a class="rail-link" data-nav href="#ai-assist">AI Assist</a>
+      </div>
+      <div class="rail-group" data-group="risk">
+        <div class="rail-group-title">Risk</div>
+        <a class="rail-link" data-nav href="#risks">Risk Register</a>
+        <a class="rail-link" data-nav href="#operational-risk">Operational Risk</a>
+        <a class="rail-link" data-nav href="#scenario-analysis">Scenario &amp; Capital</a>
+        <a class="rail-link" data-nav href="#model-risk">Model Risk</a>
+        <a class="rail-link" data-nav href="#threat-library">Threat Library</a>
+        <a class="rail-link" data-nav href="#risk-quantification">Risk Quantification</a>
+        <a class="rail-link" data-nav href="#it-assets">IT Asset Management</a>
+        <a class="rail-link" data-nav href="#information-assets">Information Assets</a>
+        <a class="rail-link" data-nav href="#vendors">Third Parties</a>
+        <a class="rail-link" data-nav href="#outsourcing">Outsourcing &amp; Cloud</a>
+        <a class="rail-link" data-nav href="#assessments">Vendor Assessments</a>
+        <a class="rail-link" data-nav href="#questionnaires">Questionnaires</a>
+      </div>
+      <div class="rail-group" data-group="compliance">
+        <div class="rail-group-title">Compliance</div>
+        <a class="rail-link" data-nav href="#compliance">Compliance</a>
+        <a class="rail-link" data-nav href="#content-library">Framework Library</a>
+        <a class="rail-link" data-nav href="#regulatory-change">Regulatory Change</a>
+        <a class="rail-link" data-nav href="#icfr">ICFR</a>
+        <a class="rail-link" data-nav href="#aml">AML / CFT</a>
+        <a class="rail-link" data-nav href="#fraud">Fraud Risk</a>
+        <a class="rail-link" data-nav href="#controls">Control Catalog</a>
+        <a class="rail-link" data-nav href="#vulnerabilities">Vulnerabilities</a>
+        <a class="rail-link" data-nav href="#evidence">Evidence</a>
+        <a class="rail-link" data-nav href="#internal-audit">Internal Audit</a>
+        <a class="rail-link" data-nav href="#declarations">Declarations</a>
+        <a class="rail-link" data-nav href="#shariah">Shariah Governance</a>
+      </div>
+      <div class="rail-group" data-group="governance">
+        <div class="rail-group-title">Governance</div>
+        <a class="rail-link" data-nav href="#policies">Policy Management</a>
+        <a class="rail-link" data-nav href="#privacy">Data Privacy (RoPA)</a>
+        <a class="rail-link" data-nav href="#data-protection">Data Protection</a>
+        <a class="rail-link" data-nav href="#awareness">Awareness Training</a>
+        <a class="rail-link" data-nav href="#delegation-of-authority">Delegation of Authority</a>
+        <a class="rail-link" data-nav href="#governance">Board &amp; Committees</a>
+        <a class="rail-link" data-nav href="#esg">ESG / Green Banking</a>
+      </div>
+      <div class="rail-group" data-group="organization">
+        <div class="rail-group-title">Organization</div>
+        <a class="rail-link" data-nav href="#business-units">Business Units</a>
+        <a class="rail-link" data-nav href="#processes">Processes</a>
+        <a class="rail-link" data-nav href="#legal">Legal Register</a>
+        <a class="rail-link" data-nav href="#organization-users">Users &amp; Roles</a>
+      </div>
+      <div class="rail-group" data-group="operations">
+        <div class="rail-group-title">Operations</div>
+        <a class="rail-link" data-nav href="#incidents">Security Operations</a>
+        <a class="rail-link" data-nav href="#continuity">Business Continuity</a>
+        <a class="rail-link" data-nav href="#bia">Business Impact Analysis</a>
+        <a class="rail-link" data-nav href="#issues">Issues &amp; Actions</a>
+        <a class="rail-link" data-nav href="#whistleblowing">Whistleblowing</a>
+        <a class="rail-link" data-nav href="#access-reviews">Access Reviews</a>
+        <a class="rail-link" data-nav href="#approvals">Approvals</a>
+        <a class="rail-link" data-nav href="#exceptions">Exceptions</a>
+        <a class="rail-link" data-nav href="#projects">Projects</a>
+        <a class="rail-link" data-nav href="#audit">Activity Log</a>
+      </div>
+      <div class="rail-group" data-group="system">
+        <div class="rail-group-title">System</div>
+        <a class="rail-link" data-nav href="#integrations">Integrations &amp; CCM</a>
+        <a class="rail-link" data-nav href="#custom-fields">Custom Fields</a>
+        <a class="rail-link" data-nav href="#status-rules">Status Rules</a>
+        <a class="rail-link" data-nav href="#filters">Saved Filters</a>
+        <a class="rail-link" data-nav href="#data-io">Import / Export</a>
+        <a class="rail-link" data-nav href="#webhooks">Webhooks</a>
+        <a class="rail-link" data-nav href="#sso-settings">SSO</a>
+        <a class="rail-link" data-nav href="#settings">Settings</a>
+      </div>
+      <div class="rail-group" data-group="end">
+        <div class="rail-group-title">Reference</div>
+        <a class="rail-link" data-nav href="#workflows">End-to-end workflows</a>
+        <a class="rail-link" data-nav href="#roles">Roles &amp; permissions</a>
+        <a class="rail-link" data-nav href="#gaps">Known gaps</a>
+      </div>
+      <div class="rail-empty hidden" id="railEmpty">No modules match “<span id="railEmptyTerm"></span>”</div>
+    </div>
+    <div class="rail-foot">Code-verified guide · 2026-07-05</div>
+  </nav>
+
+  <main class="content">
+    <div class="wrap">
+
+      <header class="doc-header" id="top">
+        <div class="eyebrow">Platform guide</div>
+        <h1>User &amp; Administrator Guide</h1>
+        <p class="dek">How every module works, how to use it, and how the modules connect to each other — written from a direct audit of the running application, not the sales deck.</p>
+        <div class="doc-meta">
+          <span><b>Modules&nbsp;covered</b> 57</span>
+          <span><b>Sidebar&nbsp;sections</b> 7</span>
+          <span><b>Verified against</b> live source, 2026-07-05</span>
+        </div>
+      </header>
+
+      <section class="page-section" id="intro">
+        <div class="section-kicker">01 — Orientation</div>
+        <h2>What NexusLine is</h2>
+        <div class="prose">
+          <p>NexusLine is a one-stop Governance, Risk &amp; Compliance platform built for the depth Pakistani banks need — SBP ETGRM, AML/CFT, Basel operational risk, Shariah governance, PDPA — while covering the breadth of a mature GRC suite: risk, compliance, policy, audit, continuity, third-party oversight and more. It ships as multi-tenant SaaS or as an on-premise install for banks that require data sovereignty.</p>
+          <p>Every bank that uses the platform is a fully isolated <b>tenant</b> — see <a href="#concepts">Shared concepts, §3</a>.</p>
+        </div>
+      </section>
+
+      <section class="page-section" id="getting-started">
+        <div class="section-kicker">02 — Orientation</div>
+        <h2>Getting started</h2>
+        <div class="prose">
+          <h3>Signing in</h3>
+          <p>The login screen asks for three things: your <b>Organization</b> (your bank's short slug, e.g. <code>acme</code>), <b>Email</b>, and <b>Password</b>. Bookmark the login URL once you know your organization's slug.</p>
+          <ul>
+            <li>If your account has <b>MFA</b> enabled, you'll be asked for a 6-digit authenticator code after your password.</li>
+            <li>After <b>5 failed attempts</b> your account locks for 15 minutes (both figures are admin-configurable).</li>
+            <li>Sessions expire after 60 minutes by default — sign in again after that.</li>
+            <li>If your bank has <b>SSO</b> configured, a "Sign in with SSO" button redirects to your identity provider instead of a local password.</li>
+            <li>If your bank has <b>LDAP / Active Directory</b> configured, your normal directory password is checked instead of, or alongside, a local one.</li>
+          </ul>
+          <div class="callout note"><span class="glyph">ℹ</span><div>Directory- and SSO-managed accounts can't change their password inside NexusLine — that happens at the source (AD / your identity provider).</div></div>
+
+          <h3>How you get an account</h3>
+          <p><b>There is no self-signup.</b> An account is created one of two ways: an administrator creates you directly under <a href="#organization-users">Users &amp; Roles</a>, or — if your bank has LDAP/SSO with just-in-time provisioning enabled — your account is created automatically the first time you sign in through the directory or identity provider.</p>
+
+          <h3>Bootstrap checklist for a new bank deployment</h3>
+          <ol class="step-list">
+            <li>Org and first Admin user are created by the platform operator.</li>
+            <li>Admin signs in and configures <a href="#sso-settings">SSO</a> or LDAP (on <a href="#settings">Settings</a>) if the bank uses one — otherwise use local accounts.</li>
+            <li>Create the compliance/risk/IT team under <a href="#organization-users">Users &amp; Roles</a>, or let LDAP JIT provisioning populate them.</li>
+            <li>Set up <a href="#business-units">Business Units</a> (your branch/division hierarchy) and <a href="#processes">Processes</a>.</li>
+            <li>Install the standards you need from the <a href="#content-library">Framework Library</a> — ISO 27001, NIST CSF, SBP ETGRM, PCI DSS, Basel, Shariah.</li>
+            <li>Build the <a href="#controls">Control Catalog</a>, mapping to the requirements the installed frameworks created.</li>
+            <li>Populate <a href="#it-assets">IT Assets</a> and <a href="#information-assets">Information Assets</a> and link them so criticality inherits correctly.</li>
+            <li>Set your organization's risk appetite/tolerance, then start the <a href="#risks">Risk Register</a>.</li>
+            <li>Onboard <a href="#vendors">Vendors</a>, layering <a href="#outsourcing">Outsourcing</a> records for SBP-material or cloud arrangements.</li>
+            <li>Turn on whichever specialist modules your bank needs — AML, Fraud, ICFR, BIA, Shariah, Whistleblowing, Declarations, and so on.</li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="page-section" id="concepts">
+        <div class="section-kicker">03 — Orientation</div>
+        <h2>Concepts that apply to every module</h2>
+        <p class="section-intro">Learn these once — they show up almost everywhere and the rest of this guide won't repeat them per module.</p>
+        <div class="prose">
+          <h3>3.1 — The generic workflow status</h3>
+          <p>On top of its own business status, nearly every record also carries a second, lightweight "is this record itself finalized" tracker:</p>
+          <div class="flow"><span class="pill">draft</span><span class="arrow">→</span><span class="pill">in_review</span><span class="arrow">→</span><span class="pill">approved</span><span class="arrow">→</span><span class="pill">retired</span></div>
+
+          <h3>3.2 — RecordPanels, the shared toolkit on every record</h3>
+          <p>Open almost any record — risks, controls, vendors, incidents, policies, BIA, continuity, ICFR, issues, model risk, projects, Shariah, vulnerabilities, whistleblowing, assets, and more (roughly 30 modules) — and you'll find the same three panels:</p>
+          <ul>
+            <li><b>Custom Fields</b> — any extra fields your admin defined for that record type (<a href="#custom-fields">§11.2</a>) appear automatically.</li>
+            <li><b>Review &amp; Attestation</b> — a periodic sign-off tracker: set a frequency, click "Attest now," see who confirmed the record and when it's next due. This is where most "management sign-off" requirements are actually satisfied, even on modules with no dedicated approval button.</li>
+            <li><b>Collaboration</b> — comments, tags, and file attachments on any record that has this panel. This, not the dedicated Evidence module, is the general-purpose "attach a document" mechanism.</li>
+          </ul>
+
+          <h3>3.3 — Multi-tenancy &amp; data isolation</h3>
+          <p>Each bank's data is walled off from every other bank at the database level — even a buggy query cannot leak across tenants, and if the tenant tag is ever missing the system shows zero rows rather than everything. Your users, roles, SSO/LDAP configuration, custom fields, filters, and dashboards are all private to your organization.</p>
+          <div class="callout warn"><span class="glyph">⚠</span><div><b>Business Units are a label, not a security boundary.</b> Records can be organized by branch or division for reporting, but nothing stops a user with a module's read permission from seeing every business unit's records in it — only whole-organization isolation is enforced.</div></div>
+
+          <h3>3.4 — Evidence vs. attachments</h3>
+          <p><b>Evidence</b> (<a href="#evidence">§7</a>) specifically proves a <b>Control</b> is operating — every evidence item must point at a control. Collect it once per control and it counts toward every Compliance requirement that control maps to. <b>Attachments</b> on any other record type go through the Collaboration panel above, not the Evidence module.</p>
+
+          <h3>3.5 &amp; 3.6 — Reference numbers, and shared services</h3>
+          <p>Most modules auto-generate a reference number when you save (e.g. <code>REG-001</code>, <code>VLN-014</code>) — you never type these. Import/export, custom fields, and status rules are System-section services that plug into modules rather than modules of their own — see <a href="#integrations">§11</a>.</p>
+        </div>
+      </section>
+
+      <section class="page-section" id="grp-overview-head">
+        <div class="section-kicker">Sidebar section</div>
+        <h2>Overview</h2>
+        <p class="section-intro">The landing zone — executive snapshot, a self-service dashboard builder, strategic goals, and the AI text-extraction workspace.</p>
+      </section>
+
+      <article class="module" id="dashboard">
+        <div class="module-head"><h3>Dashboard</h3><code class="route">/dashboard</code></div>
+        <p class="purpose">Read-only executive snapshot of live risk, compliance, and control posture.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">What's on it</span><p>KPI tiles, risk-by-severity and risk-by-status charts, compliance-by-framework progress bars, a risk heatmap, an enterprise risk roll-up by category, and a recent-activity feed pulled from the audit log.</p></div>
+          <div class="field"><span class="field-label">Key action</span><p>"Executive Summary PDF" export.</p></div>
+          <div class="field"><span class="field-label">Note</span><p>Content is fixed to risk metrics — for a customizable dashboard, use Reports &amp; KPIs instead.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="reports">
+        <div class="module-head"><h3>Reports &amp; KPIs</h3><code class="route">/reports</code></div>
+        <p class="purpose">Build your own KPI dashboard from a metrics catalog spanning every module.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Click <b>Add widget</b> → pick a metric, grouped by category (risk, compliance, incidents, assets, vendors, policies, projects, approvals…) → pick a visualization — Number, Bar, or Donut — and it's added live.</p></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>Widgets are <b>organization-wide</b>, not personal — anyone who edits this dashboard changes what everyone sees.</div></div>
+      </article>
+
+      <article class="module" id="goals">
+        <div class="module-head"><h3>Strategy &amp; Goals</h3><code class="route">/goals</code></div>
+        <p class="purpose">Track strategic goals with a recurring pass/fail audit cycle.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create a goal (name, owner, related Risks / Projects / Policies) → set an audit frequency and success criteria → periodically <b>Record audit</b> (pass/fail + auditor + conclusion), which auto-reschedules the next audit date.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">not_started</span><span class="arrow">→</span><span class="pill">on_track</span><span class="arrow">→</span><span class="pill">at_risk</span><span class="arrow">→</span><span class="pill">off_track</span><span class="arrow">→</span><span class="pill">achieved</span></div></div>
+          <div class="field full"><span class="field-label">Connects to</span><p>Many-to-many with Risks, Projects, Policies. CSV import/export supported.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="ai-assist">
+        <div class="module-head"><h3>AI Assist</h3><code class="route">/ai-assist</code><span class="route" style="background:var(--surface-3); color:var(--muted);">Circular Intelligence</span></div>
+        <p class="purpose">A text-extraction workspace — paste text, get a structured extraction.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Paste text (no PDF upload) → choose a source type (circular / policy / free text / incident) → choose an extraction type: <i>Extract obligations, Summarize, Suggest risks,</i> or <i>Map to ISO 27001 controls</i> → click <b>Run extraction</b>. Results save with a reference number in a searchable history; <b>Copy</b> pastes the output into the module it belongs to.</p></div>
+          <div class="field"><span class="field-label">Offline vs. online</span><p>No API key configured → a deterministic offline heuristic runs, clearly labeled, no data leaves your deployment. A key configured → calls the AI model (labeled in the result) and silently falls back to the heuristic on any failure — a request never crashes.</p></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>No natural-language "ask a question about my data" chat exists — only these four fixed modes. Results are not auto-filed into other modules; you copy them over yourself.</div></div>
+      </article>
+
+      <section class="page-section" id="grp-risk-head">
+        <div class="section-kicker">Sidebar section</div>
+        <h2>Risk</h2>
+        <p class="section-intro">The risk register itself, plus the specialist registers that feed it — operational risk, scenario &amp; capital, model risk, assets, and third parties.</p>
+      </section>
+
+      <article class="module" id="risks">
+        <div class="module-head"><h3>Risk Register</h3><code class="route">/risks</code></div>
+        <p class="purpose">The platform's central qualitative (5×5) and quantitative (FAIR) risk log — the hub most other modules link back to.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a risk → <b>General</b> (title, category, owner) → <b>Assessment</b> (inherent likelihood/impact 1–5, plus optional FAIR fields: annual loss frequency, single loss expectancy → auto-computed ALE) → <b>Links &amp; Relations</b> (Assets, Controls, Threats, Vulnerabilities, Policies, Incidents) → <b>Review</b> (frequency). Set your organization's Appetite/Tolerance thresholds once, from the settings panel on this page — every risk is then banded against it.</p></div>
+          <div class="field full"><span class="field-label">Status flow</span><div class="flow"><span class="pill">draft</span><span class="arrow">→</span><span class="pill">assessed</span><span class="arrow">→</span><span class="pill">treatment_planned</span><span class="arrow">→</span><span class="pill">treatment_in_progress</span><span class="arrow">→</span><span class="pill">accepted</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+          <div class="field"><span class="field-label">Key actions</span><ul><li>Appetite / Tolerance editor</li><li>Import / Export CSV</li><li>"Register PDF" export</li></ul></div>
+          <div class="field"><span class="field-label">Connects to</span><p>Assets, Controls, Threats, Vulnerabilities, Policies, Incidents, Goals, Vendors, and optionally a Risk Quantification record.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="operational-risk">
+        <div class="module-head"><h3>Operational Risk</h3><code class="route">/operational-risk</code></div>
+        <p class="purpose">Basel-style RCSA, Key Risk Indicators, and the operational loss-event database.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">RCSA tab</span><p>Create an assessment campaign (business unit, process, assessor, period), then add risk/control lines inside it — inherent/residual scoring, control effectiveness, remediation action + owner.</p></div>
+          <div class="field"><span class="field-label">Key Risk Indicators tab</span><p>Define an indicator (unit, frequency, direction, warning/limit thresholds), then log measurements over time. Current RAG status (green/amber/red) is computed automatically from the latest value vs. thresholds.</p></div>
+          <div class="field"><span class="field-label">Loss Database tab</span><p>Log a loss event — Basel event type, business line, gross loss, recovery, dates, root cause.</p></div>
+          <div class="field"><span class="field-label">Status flows</span><div class="flow"><span class="pill">planned</span><span class="arrow">→</span><span class="pill">in_progress</span><span class="arrow">→</span><span class="pill">completed</span></div><div class="flow" style="margin-top:6px;"><span class="pill">open</span><span class="arrow">→</span><span class="pill">under_investigation</span><span class="arrow">→</span><span class="pill">recovered</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>Shares the 7 Basel event-type taxonomy with Scenario &amp; Capital's calculator, below.</div></div>
+      </article>
+
+      <article class="module" id="scenario-analysis">
+        <div class="module-head"><h3>Scenario &amp; Capital</h3><code class="route">/scenario-analysis</code></div>
+        <p class="purpose">Forward-looking op-risk scenario workshops, plus Basel III SMA operational-risk capital calculation.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">Scenario Library</span><p>Record a workshop — frequency/year, typical loss, worst-case loss, participants, assumptions. Expected annual loss is computed automatically.</p></div>
+          <div class="field"><span class="field-label">Capital tab</span><p>Enter a period's Business Indicator and average 10-year annual loss. The Business Indicator Component, Loss Component, Internal Loss Multiplier and final Operational Risk Capital are all computed server-side from the Basel SMA formula.</p></div>
+          <div class="field full"><span class="field-label">Status flows</span><div class="flow"><span class="pill">draft</span><span class="arrow">→</span><span class="pill">workshopped</span><span class="arrow">→</span><span class="pill">approved</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+        </div>
+      </article>
+
+      <article class="module" id="model-risk">
+        <div class="module-head"><h3>Model Risk</h3><code class="route">/model-risk</code></div>
+        <p class="purpose">SR 11-7-style inventory and validation cycle for quantitative and AI/ML models — credit scoring, IFRS 9 ECL, AML monitoring, capital, AI/ML.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Add a model (purpose, type, materiality, methodology, owner / developer / vendor, whether it's regulatory-relevant and/or AI/ML) → add Validations underneath it as they occur (type, validator, date, outcome, findings).</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">development</span><span class="arrow">→</span><span class="pill">validated</span><span class="arrow">→</span><span class="pill">in_production</span><span class="arrow">→</span><span class="pill">under_review</span><span class="arrow">→</span><span class="pill">retired</span></div></div>
+          <div class="field full"><span class="field-label">Key action</span><p>Filter by overdue validation; a summary rolls up counts by status/type and flags overdue validations.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="threat-library">
+        <div class="module-head"><h3>Threat Library</h3><code class="route">/threat-library</code></div>
+        <p class="purpose">Two reusable reference catalogs — Threats and Vulnerabilities — linked onto risks: a threat exploits a vulnerability to create a risk.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Add entries (name, category, description) to either catalog. Linking to a specific risk happens from that risk's Links &amp; Relations tab in the Risk Register, not here. Deleting an entry first shows how many risks currently use it.</p></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>A static reference catalog — for a live, scanner-fed register see <a href="#vulnerabilities">Vulnerabilities</a> instead, a separate, unrelated table.</div></div>
+      </article>
+
+      <article class="module" id="risk-quantification">
+        <div class="module-head"><h3>Risk Quantification</h3><code class="route">/risk-quantification</code></div>
+        <p class="purpose">FAIR-style Monte Carlo simulation of PKR loss exposure, layered on top of the simpler ALE estimate on the Risk Register.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create a quantification (title, scenario, optionally link a Risk Register entry) → enter Threat Event Frequency and Loss Magnitude as triangular distributions (min / likely / max) → click <b>Run simulation</b> (default 10,000 iterations). P10 / P50 / P90 / mean / max exposure cache on the record.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">draft</span><span class="arrow">→</span><span class="pill">simulated</span><span class="arrow">→</span><span class="pill">approved</span></div><p style="margin-top:8px;">Running a simulation auto-advances the status.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="it-assets">
+        <div class="module-head"><h3>IT Asset Management</h3><code class="route">/it-assets</code></div>
+        <p class="purpose">Inventory of supporting/IT assets, judged by replacement cost and availability (RTO/RPO), with criticality that can also be <i>inherited</i> from the information it hosts.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create an asset (media type, cost + currency, availability, environment, hostname / IP / serial / manufacturer) → tag it → set a discovery source (manual, or a connector name) → in the dependency manager, <b>link</b> it to any Information Asset it hosts, stores, processes, transmits, or backs up.</p></div>
+          <div class="field full"><span class="field-label">Criticality inheritance</span><p>Each asset shows <code>intrinsic_criticality</code> (from its own cost/availability), <code>derived_criticality</code> (the highest business value of everything it hosts), and <code>effective_criticality</code> (the higher of the two). Link assets correctly and the platform surfaces which IT assets are critical because of the data on them — not just their replacement cost.</p></div>
+          <div class="field full"><span class="field-label">Connects to</span><p>Information Assets (dependency link), Risks, Processes, Legal, Compliance Requirements, Incidents, Exceptions.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="information-assets">
+        <div class="module-head"><h3>Information Assets</h3><code class="route">/information-assets</code></div>
+        <p class="purpose">Inventory of data/information assets, whose business value is self-assessed by the business owner — not IT or Security.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create an asset (information owner, business value, Confidentiality / Integrity / Availability, handling label — Public / Internal / Confidential / Restricted / PII, data categories, volume) → toggle <b>Self-assessed</b> and record who assessed it and when → in the dependency manager, link it to the IT Asset(s) that host it.</p></div>
+          <div class="field full"><span class="field-label">Design intent</span><p>Security defines the rating <i>criteria</i>; the business owner does the actual rating via self-assessment — this feeds the IT asset's derived criticality above.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="vendors">
+        <div class="module-head"><h3>Third Parties</h3><code class="route">/vendors</code></div>
+        <p class="purpose">The vendor/third-party registry — contacts, criticality, contracts, risk rating, review cycle — referenced by both Outsourcing and Assessments.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create a vendor (category, type, contact, criticality) → <b>Risk &amp; Assessment</b> (risk rating, assessment status, review frequency) → <b>Contracts</b> (value and dates — active contract value auto-sums) → <b>Links</b> (related Risks/Assets).</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">prospective</span><span class="arrow">→</span><span class="pill">active</span><span class="arrow">→</span><span class="pill">suspended</span><span class="arrow">→</span><span class="pill">offboarded</span></div></div>
+          <div class="field full"><span class="field-label">Connects to</span><p>Risks (many-to-many), Assets, Outsourcing (optional link back to a vendor), Assessments (via vendor_id).</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="outsourcing">
+        <div class="module-head"><h3>Outsourcing &amp; Cloud</h3><code class="route">/outsourcing</code></div>
+        <p class="purpose">The SBP-specific regulatory layer on top of the vendor register — materiality, cloud model, data-offshoring, approval/NOC tracking, exit planning.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create an arrangement (optionally linked to a Vendor) → <b>Materiality &amp; Cloud</b> (material / non-material classification, cloud model, offshoring country) → <b>SBP &amp; Contract</b> (approval required?, status, reference, contract dates) → <b>Exit Plan</b> (plan text + tested?) → periodically add a monitoring Review underneath it.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">proposed</span><span class="arrow">→</span><span class="pill">active</span><span class="arrow">→</span><span class="pill">under_review</span><span class="arrow">→</span><span class="pill">terminated</span></div></div>
+          <div class="field"><span class="field-label">Key action</span><p>A summary flags contracts expiring within 90 days and exit plans that have never been tested.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="assessments">
+        <div class="module-head"><h3>Vendor Assessments</h3><code class="route">/assessments</code></div>
+        <p class="purpose">Send a scored questionnaire to a vendor, capture their answers, auto-score, and track resulting findings.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create an assessment (pick a Questionnaire template, optional Vendor, due date) → answer each question as responses come in (scored option + comment) → <b>Save &amp; submit</b> → raise Findings against weak answers and track them to Close.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">draft</span><span class="arrow">→</span><span class="pill">sent</span><span class="arrow">→</span><span class="pill">in_progress</span><span class="arrow">→</span><span class="pill">submitted</span><span class="arrow">→</span><span class="pill">reviewed</span></div><p style="margin-top:8px;">Score % = scored answers ÷ questionnaire max score.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="questionnaires">
+        <div class="module-head"><h3>Questionnaires</h3><code class="route">/questionnaires</code></div>
+        <p class="purpose">The builder for the reusable, weighted-scored questionnaire templates that Assessments sends out.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a questionnaire → add questions → for each, add answer options with a score (new questions default to Yes=10 / Partial=5 / No=0) → reorder as needed → Save. A live "max score" preview updates as you build.</p></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>Templates carry no status of their own — the lifecycle lives on the Assessment that uses one.</div></div>
+      </article>
+
+      <section class="page-section" id="grp-compliance-head">
+        <div class="section-kicker">Sidebar section</div>
+        <h2>Compliance</h2>
+        <p class="section-intro">Frameworks and requirements, the standard-specific overlays (AML, Fraud, ICFR, Shariah), and the control/evidence backbone they all draw on.</p>
+      </section>
+
+      <article class="module" id="compliance">
+        <div class="module-head"><h3>Compliance</h3><code class="route">/compliance</code></div>
+        <p class="purpose">Framework and requirement registers — map controls once to satisfy many frameworks, and track compliance gaps.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Pick a Framework (or create one, or load a lighter built-in template via <b>Library</b>) → its Requirements populate below → open a requirement's tabs: <b>General</b>, <b>Implementation</b> (status, treatment strategy, efficacy %), <b>Mappings &amp; Crosswalks</b> (link Controls / Risks / Policies / a Legal obligation, and crosswalk to equivalent requirements in other installed frameworks), <b>Audit &amp; Findings</b> (raise / close findings).</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">not_assessed</span><span class="arrow">→</span><span class="pill">non_compliant</span><span class="arrow">/</span><span class="pill">partially_compliant</span><span class="arrow">→</span><span class="pill">compliant</span></div></div>
+          <div class="field"><span class="field-label">Key action</span><p><b>Gap Analysis</b> — auto-computed per framework, listing uncovered or non-compliant requirements.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="content-library">
+        <div class="module-head"><h3>Framework Library</h3><code class="route">/content-library</code></div>
+        <p class="purpose">One-click install of six preloaded, banking-relevant standards.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Click <b>Install</b> on a pack: ISO/IEC 27001:2022 Annex A (93 controls), NIST CSF 2.0, SBP ETGRM, PCI DSS v4.0, Basel Operational Risk (7 loss types + 11 PSMOR principles), or SBP/AAOIFI Shariah Governance (12 requirements). This creates a Framework and all its Requirements in Compliance in one step.</p></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>Re-installing an already-installed pack is blocked (idempotent). Map controls and set up crosswalks back in the Compliance module.</div></div>
+      </article>
+
+      <article class="module" id="regulatory-change">
+        <div class="module-head"><h3>Regulatory Change</h3><code class="route">/regulatory-change</code></div>
+        <p class="purpose">Track SBP circulars/laws from identification through implementation, distill them into obligations, and manage the recurring returns calendar.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p><b>Regulatory Changes</b> — log a circular (regulator, circular reference, dates, summary, applicability, impact assessment) → expand it to add <b>Obligations</b> directly underneath. <b>Returns Calendar</b> — recurring submissions with next/last due dates; overdue ones auto-flag.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">identified</span><span class="arrow">→</span><span class="pill">under_assessment</span><span class="arrow">→</span><span class="pill">in_implementation</span><span class="arrow">→</span><span class="pill">implemented</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>Mapped policies/controls on an obligation are <b>free text</b>, not real links — type the name/reference, don't expect a clickable link.</div></div>
+      </article>
+
+      <article class="module" id="icfr">
+        <div class="module-head"><h3>ICFR</h3><code class="route">/icfr</code></div>
+        <p class="purpose">Run the SBP-mandated annual Internal Control over Financial Reporting cycle.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p><b>Process &amp; RCM</b> — create a financial process → expand it to add RCM Controls (financial assertion, control type/nature/frequency, design &amp; operating effectiveness) → expand a control to add Tests (sample size, exceptions found, result). <b>Deficiencies</b> — raise one against a process/control whenever a test fails or a control is rated ineffective.</p></div>
+          <div class="field"><span class="field-label">Deficiency severity</span><div class="flow"><span class="pill">deficiency</span><span class="arrow">→</span><span class="pill">significant_deficiency</span><span class="arrow">→</span><span class="pill">material_weakness</span></div></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>No dedicated attestation button — use the generic Review &amp; Attestation panel on the control record for management sign-off.</div></div>
+      </article>
+
+      <article class="module" id="aml">
+        <div class="module-head"><h3>AML / CFT</h3><code class="route">/aml</code></div>
+        <p class="purpose">Sanctions/PEP/adverse-media screening register, STR/SAR filings to the FMU, and AML/CFT risk assessments.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p><b>Screening</b> — log a case (subject, screening type, lists checked, match status). <b>STR/SAR</b> — log a suspicious-activity case; the FMU filing deadline auto-calculates from detected date + your configured SLA, and filed date stamps automatically. <b>AML Risk Assessments</b> — periodic inherent/residual risk by customer, product, geography, channel.</p></div>
+          <div class="field"><span class="field-label">SAR status flow</span><div class="flow"><span class="pill">draft</span><span class="arrow">→</span><span class="pill">under_review</span><span class="arrow">→</span><span class="pill">filed</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>This is a <b>register</b>, not a live screening integration — there's no "run screening" button checking an actual sanctions list; results are recorded manually.</div></div>
+      </article>
+
+      <article class="module" id="fraud">
+        <div class="module-head"><h3>Fraud Risk</h3><code class="route">/fraud</code></div>
+        <p class="purpose">Fraud risk register, fraud case management, and the SBP digital-fraud control checklist — deliberately separate from AML.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p><b>Fraud Risk Register</b> — log a scheme (channel, business line, inherent/residual scoring, red flags). <b>Fraud Cases</b> — log an incident (amount involved/recovered, customer impact, regulator reporting, root cause). <b>SBP Control Checklist</b> — tick off each requirement as implemented, with an evidence note.</p></div>
+          <div class="field"><span class="field-label">Case status flow</span><div class="flow"><span class="pill">reported</span><span class="arrow">→</span><span class="pill">investigating</span><span class="arrow">→</span><span class="pill">confirmed</span><span class="arrow">→</span><span class="pill">recovered/closed</span></div></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>Fraud cases are <b>not</b> linked to Basel loss events in Operational Risk — log a shared event in both places if it applies to both.</div></div>
+      </article>
+
+      <article class="module" id="controls">
+        <div class="module-head"><h3>Control Catalog</h3><code class="route">/controls</code></div>
+        <p class="purpose">The central, reusable control library referenced by Compliance and Risks.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create a control (objective, description, owner, type, classification) → <b>Cost &amp; Resourcing</b> → <b>Audit &amp; Maintenance</b> (set an audit frequency/success criteria and a separate maintenance frequency) → <b>Links</b> (Policies, Requirements, Risks). Use <b>Record Audit</b> and <b>Record Maintenance</b> periodically — each logs a pass/fail and auto-reschedules the next due date.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">planned</span><span class="arrow">→</span><span class="pill">implemented</span><span class="arrow">→</span><span class="pill">operational</span><span class="arrow">→</span><span class="pill">retired</span></div></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>ICFR uses its own separate control entity, not this catalog.</div></div>
+      </article>
+
+      <article class="module" id="vulnerabilities">
+        <div class="module-head"><h3>Vulnerabilities</h3><code class="route">/vulnerabilities</code></div>
+        <p class="purpose">Live vulnerability register for scanner findings, and the patch pipeline that remediates them.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p><b>Vulnerabilities</b> — log a finding (CVE, CVSS score, severity, asset name/IP, source); the remediation deadline auto-sets by severity — critical 7 days, high 30, medium 90, low 180, informational 365 — and flags overdue automatically. <b>Patches</b> — track a patch through its deployment.</p></div>
+          <div class="field"><span class="field-label">Patch status flow</span><div class="flow"><span class="pill">pending</span><span class="arrow">→</span><span class="pill">testing</span><span class="arrow">→</span><span class="pill">deploying</span><span class="arrow">→</span><span class="pill">deployed</span></div></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>No CSV import and no real link to the Asset inventory — asset name/IP are free text, a "conceptual" link only. Add findings one at a time or via the API for bulk scanner ingestion.</div></div>
+      </article>
+
+      <article class="module" id="evidence">
+        <div class="module-head"><h3>Evidence</h3><code class="route">/evidence</code></div>
+        <p class="purpose">Attach audit-readiness artifacts to a Control — see <a href="#concepts">§3.4</a>.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create an evidence item (must pick a Control), fill in type / description / reference → save, then use the Files tab (appears after the first save) to upload the artifact.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">pending</span><span class="arrow">→</span><span class="pill">valid</span><span class="arrow">→</span><span class="pill">expired</span></div></div>
+        </div>
+      </article>
+
+      <article class="module" id="internal-audit">
+        <div class="module-head"><h3>Internal Audit</h3><code class="route">/internal-audit</code></div>
+        <p class="purpose">Full assurance workflow — a risk-based audit universe, engagements, working-paper procedures, and findings follow-up.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p><b>Audit Universe</b> — build your auditable units (category, inherent risk, audit frequency). <b>Engagements</b> — create one against a unit (lead auditor, scope, planned/actual dates) → add Procedures as fieldwork progresses → raise Findings (rating, recommendation, due date). <b>Findings follow-up</b> — a cross-engagement view filterable to open/overdue, until every finding is closed.</p></div>
+          <div class="field"><span class="field-label">Engagement status flow</span><div class="flow"><span class="pill">planned</span><span class="arrow">→</span><span class="pill">fieldwork</span><span class="arrow">→</span><span class="pill">reporting</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+          <div class="field"><span class="field-label">Key action</span><p>An "Audit Engagement Report" PDF export on an open engagement.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="declarations">
+        <div class="module-head"><h3>Declarations</h3><code class="route">/declarations</code></div>
+        <p class="purpose">Periodic and event-driven staff attestation campaigns — COI, gifts &amp; entertainment, personal account dealing, outside employment, code of conduct.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p><b>Campaigns</b> — create one (declaration type, period, due date), open it, add each staff member's Declaration underneath (disclosure?, details, amount, reviewer notes). <b>All Declarations</b> — a flat, cross-campaign view.</p></div>
+          <div class="field"><span class="field-label">Declaration status flow</span><div class="flow"><span class="pill">pending</span><span class="arrow">→</span><span class="pill">submitted</span><span class="arrow">→</span><span class="pill">reviewed</span><span class="arrow">→</span><span class="pill">escalated/cleared</span></div></div>
+        </div>
+      </article>
+
+      <article class="module" id="shariah">
+        <div class="module-head"><h3>Shariah Governance</h3><code class="route">/shariah</code></div>
+        <p class="purpose">Fatwa/ruling register, Islamic product register, Shariah compliance reviews, and the purification/charity ledger.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p><b>Fatwa Register</b> — record a ruling. <b>Islamic Products</b> — register a product, linked to the ruling that approved it. <b>Shariah Reviews</b> — scope a review to a product/branch/transaction/process → raise SNC (Shariah Non-Compliance) findings underneath it, each with a tainted-income amount. <b>Purification Ledger</b> — record a charity disbursement, optionally tracing it back to the source SNC finding.</p></div>
+          <div class="field"><span class="field-label">SNC finding status flow</span><div class="flow"><span class="pill">open</span><span class="arrow">→</span><span class="pill">in_progress</span><span class="arrow">→</span><span class="pill">remediated</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+          <div class="field"><span class="field-label">Key action</span><p>A "Shariah Review Report" PDF export on an open review; a review's tainted-income total auto-rolls up from its findings.</p></div>
+        </div>
+      </article>
+
+      <section class="page-section" id="grp-governance-head">
+        <div class="section-kicker">Sidebar section</div>
+        <h2>Governance</h2>
+        <p class="section-intro">Policy lifecycle, privacy and data protection, awareness, authority matrices, board governance, and ESG.</p>
+      </section>
+
+      <article class="module" id="policies">
+        <div class="module-head"><h3>Policy Management</h3><code class="route">/policies</code></div>
+        <p class="purpose">Central policy repository with a full document lifecycle, review cycle, and staff acknowledgment tracking.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a policy (category, owner, review frequency) → write or attach the document (rich text, or toggle "use external document" and paste a URL) → <b>Links</b> (related Policies/Controls/Risks) → click <b>Publish</b> when ready. Staff click <b>Acknowledge</b> to record sign-off; schedule and <b>Complete review</b> cycles from the record.</p></div>
+          <div class="field full"><span class="field-label">Status flow</span><div class="flow"><span class="pill">draft</span><span class="arrow">→</span><span class="pill">under_review</span><span class="arrow">→</span><span class="pill">approved</span><span class="arrow">→</span><span class="pill">published</span><span class="arrow">→</span><span class="pill">retired</span></div></div>
+        </div>
+      </article>
+
+      <article class="module" id="privacy">
+        <div class="module-head"><h3>Data Privacy (RoPA)</h3><code class="route">/privacy</code></div>
+        <p class="purpose">A GDPR-style Record of Processing Activities register.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a processing activity: <b>General</b> (controller/processor/DPO/business unit), <b>Lawfulness &amp; Data</b> (lawful basis, data subjects/categories), <b>Transfers &amp; Retention</b> (retention period, cross-border transfer + safeguard, DPIA required?), <b>Data Subject Rights</b> (how each right is handled), <b>Links</b> (processes/policies/assets/risks).</p></div>
+          <div class="field"><span class="field-label">Key indicator</span><p>The dashboard flags "transfer gaps" — a cross-border transfer with no documented safeguard — and outstanding DPIAs.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="data-protection">
+        <div class="module-head"><h3>Data Protection</h3><code class="route">/data-protection</code></div>
+        <p class="purpose">The DPO's day-to-day Pakistan-PDPA toolkit — distinct from the RoPA register above.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p><b>DPIA</b> — log an impact assessment. <b>DSAR</b> — log a subject request; a 30-day SLA clock runs from received date and flags overdue automatically. <b>Breach Register</b> — a 72-hour notification-overdue flag triggers if it's been more than 3 days since discovery and you haven't reported it. <b>Consent</b> — log or withdraw consent records.</p></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>DPIA references a "processing activity" by free text, not a real link to the RoPA module above.</div></div>
+      </article>
+
+      <article class="module" id="awareness">
+        <div class="module-head"><h3>Awareness Training</h3><code class="route">/awareness</code></div>
+        <p class="purpose">Run recurring security-awareness campaigns with a built-in quiz.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create a program (audience, passing score %, due date) → write the training material → build a quiz (2+ options per question, mark the correct one) → add participants under Training Records. They <b>Take quiz</b> (auto-scored) or you <b>Mark done</b> manually for off-platform completions.</p></div>
+          <div class="field"><span class="field-label">Compliant means</span><p>Completed AND score ≥ the program's passing score.</p></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>Participants are free-text name/email, not linked to actual accounts in Users &amp; Roles.</div></div>
+      </article>
+
+      <article class="module" id="delegation-of-authority">
+        <div class="module-head"><h3>Delegation of Authority</h3><code class="route">/delegation-of-authority</code></div>
+        <p class="purpose">Registers who may approve what (by role, amount band) and the maker-checker rules that should apply per module action.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p><b>Authority Matrix</b> — add an entry (activity, category, role title, approval level, amount range). <b>Maker-Checker Rules</b> — add a rule (module, action, maker role, checker role, threshold amount) and toggle it Enabled.</p></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div><b>This module is a documented registry only.</b> Defining a limit or dual-control rule here does not currently force approval routing anywhere else in the system. For enforced four-eyes today, use <a href="#approvals">Approvals</a>.</div></div>
+      </article>
+
+      <article class="module" id="governance">
+        <div class="module-head"><h3>Board &amp; Committees</h3><code class="route">/governance</code></div>
+        <p class="purpose">Committee register, meeting lifecycle, and enterprise-wide decision/action tracking.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a committee (type — board / audit / risk / credit / hr / it_steering / shariah / alco / compliance — chairperson, secretary, frequency, charter) → add Meetings underneath (agenda, minutes, attendees, quorum met?) → inside a meeting, log Decisions/Actions. Track everything enterprise-wide from the <b>Action Tracker</b> tab, regardless of which committee it came from.</p></div>
+          <div class="field"><span class="field-label">Meeting status flow</span><div class="flow"><span class="pill">scheduled</span><span class="arrow">→</span><span class="pill">held</span><span class="arrow">→</span><span class="pill">minuted</span></div></div>
+        </div>
+      </article>
+
+      <article class="module" id="esg">
+        <div class="module-head"><h3>ESG / Green Banking</h3><code class="route">/esg</code></div>
+        <p class="purpose">SBP Green Banking Guidelines alignment tracker, plus environmental risk ratings for credit and vendor exposures.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p><b>ESG Assessments</b> — track a metric against a target (pillar: environmental / social / governance; SBP reference). <b>Environmental Risk Ratings</b> — rate an entity's sector-specific environmental risk with findings and mitigation notes.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">not_started</span><span class="arrow">→</span><span class="pill">in_progress</span><span class="arrow">→</span><span class="pill">achieved</span><span class="arrow">/</span><span class="pill">off_track</span></div></div>
+        </div>
+      </article>
+
+      <section class="page-section" id="grp-organization-head">
+        <div class="section-kicker">Sidebar section</div>
+        <h2>Organization</h2>
+        <p class="section-intro">Reference/master data: your organizational hierarchy, process catalog, legal obligations register, and platform user administration.</p>
+      </section>
+
+      <article class="module" id="business-units">
+        <div class="module-head"><h3>Business Units</h3><code class="route">/business-units</code></div>
+        <p class="purpose">Your organizational hierarchy — owns assets, processes, and legal obligations across the platform.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create a unit (manager, contact, location) → optionally set a Parent Unit to build the tree → link the Legal &amp; Regulatory Obligations it's subject to.</p></div>
+          <div class="field"><span class="field-label">Note</span><p>Descriptive/reporting structure, not a security boundary — see <a href="#concepts">§3.3</a>.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="processes">
+        <div class="module-head"><h3>Processes</h3><code class="route">/processes</code></div>
+        <p class="purpose">Business process catalog with continuity objectives, used for impact analysis.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a process (business unit, owner, criticality) → <b>Continuity</b> tab (RTO hours, RPO hours, Max Tolerable Downtime) → link Related Assets.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="legal">
+        <div class="module-head"><h3>Legal Register</h3><code class="route">/legal</code></div>
+        <p class="purpose">Legal and regulatory obligations register with a risk-amplifying factor.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create an obligation (category, jurisdiction, statute reference, applicable countries) → set a Risk Magnifier — a multiplier above 1.0 that amplifies the risk score of anything linked to it — → link the Business Units and Assets in scope.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="organization-users">
+        <div class="module-head"><h3>Users &amp; Roles</h3><code class="route">/organization</code></div>
+        <p class="purpose">Admin screen for user accounts, roles, and the platform's permission catalog — see <a href="#roles">§13</a> for the full role list.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p><b>Users</b> — create a user (name, email, initial password, one or more roles); use Activate/Deactivate to suspend access (you can't deactivate your own account) and Reset password as needed. <b>Roles</b> — build a custom role by picking permissions from the catalog; built-in roles can have permissions edited but not be renamed or deleted, and can't be deleted while still assigned to a user.</p></div>
+        </div>
+      </article>
+
+      <section class="page-section" id="grp-operations-head">
+        <div class="section-kicker">Sidebar section</div>
+        <h2>Operations</h2>
+        <p class="section-intro">Day-to-day event handling: incidents, continuity, unified issues, whistleblowing, access certification, approvals, exceptions, projects, and the audit trail.</p>
+      </section>
+
+      <article class="module" id="incidents">
+        <div class="module-head"><h3>Security Operations</h3><code class="route">/incidents</code></div>
+        <p class="purpose">Log and resolve security incidents through a response lifecycle, with SBP-style regulatory breach-notification tracking.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create an incident (category, classification, severity, assignee) → work through its Response Stages — a fixed NIST 800-61 lifecycle: Identification, Containment, Eradication, Recovery, Lessons Learned — with Start/Done/Reopen buttons → if reportable, click <b>Generate regulatory reports</b> (auto-creates an initial-notification + final-report pair with SLA-computed deadlines) → <b>Mark submitted</b> once filed.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">open</span><span class="arrow">→</span><span class="pill">triage</span><span class="arrow">→</span><span class="pill">investigating</span><span class="arrow">→</span><span class="pill">contained</span><span class="arrow">→</span><span class="pill">resolved</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>No automatic link to Issues &amp; Actions — create the Issue manually if a root cause needs long-term remediation tracking.</div></div>
+      </article>
+
+      <article class="module" id="continuity">
+        <div class="module-head"><h3>Business Continuity</h3><code class="route">/continuity</code></div>
+        <p class="purpose">Continuity plans with recovery objectives and a recurring test/exercise calendar.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a plan (business unit, process, criticality, RTO/RPO/max-tolerable-downtime, invocation criteria) → build the Recovery Tasks playbook (action / actor / timing / location / method) → <b>Record exercise</b> periodically — auto-updates the next-test date and flags overdue tests.</p></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>This module has its own free-text impact narrative but is not structurally linked to the dedicated BIA module below — treat them as complementary, not synced.</div></div>
+      </article>
+
+      <article class="module" id="bia">
+        <div class="module-head"><h3>Business Impact Analysis</h3><code class="route">/bia</code></div>
+        <p class="purpose">Per-process impact analysis — criticality, RTO/RPO/MTPD, financial and reputational impact — feeding continuity planning.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create an assessment (process, business unit, owner) → <b>Impact &amp; Timing</b> (RTO/RPO/MTPD hours, financial impact at 24h and 1 week, operational / reputational / regulatory / legal impact) → <b>Recovery</b> (minimum resources, recovery strategy, workaround) → add Dependencies underneath (applications, assets, vendors, people, facilities — flag any single point of failure).</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">draft</span><span class="arrow">→</span><span class="pill">submitted</span><span class="arrow">→</span><span class="pill">approved</span><span class="arrow">→</span><span class="pill">retired</span></div></div>
+          <div class="field"><span class="field-label">Note</span><p>Recovery-strategy sign-off happens via the generic Review &amp; Attestation panel, not a dedicated approval button.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="issues">
+        <div class="module-head"><h3>Issues &amp; Actions</h3><code class="route">/issues</code></div>
+        <p class="purpose">The unified CAPA register meant to hold every finding or gap from every other module in one place, through to closure.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create an issue and pick a source type — internal_audit, compliance, rcsa, shariah, assessment, incident, external_inspection, risk_assessment, self_identified, other — plus a free-text source reference pointing back at where it came from. Add CAPA Actions underneath (owner, due date) and log Progress Updates as remediation proceeds.</p></div>
+          <div class="field full"><span class="field-label">Status flow</span><div class="flow"><span class="pill">open</span><span class="arrow">→</span><span class="pill">in_progress</span><span class="arrow">→</span><span class="pill">remediated / closed / risk_accepted</span></div></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div><b>This is entirely manual today.</b> No other module has a "raise an Issue" button — when you close a finding elsewhere, come here separately to track it in the unified register if you want it here.</div></div>
+      </article>
+
+      <article class="module" id="whistleblowing">
+        <div class="module-head"><h3>Whistleblowing</h3><code class="route">/whistleblowing</code></div>
+        <p class="purpose">Confidential-disclosure intake and investigation case management.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Log a report (category, channel, received date, severity) — toggle <b>Anonymous</b> to suppress reporter name/contact, which auto-generates a tracking code (e.g. <code>WBX-1A2B3C4D</code>) shown in the case header → work it through triage/investigation, logging Case Log entries as you go.</p></div>
+          <div class="field full"><span class="field-label">Status flow</span><div class="flow"><span class="pill">received</span><span class="arrow">→</span><span class="pill">triage</span><span class="arrow">→</span><span class="pill">investigating</span><span class="arrow">→</span><span class="pill">substantiated / unsubstantiated / closed</span></div></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>The tracking code is an <b>internal staff reference only</b> — there's no public page for an anonymous reporter to check status or add a follow-up themselves yet.</div></div>
+      </article>
+
+      <article class="module" id="access-reviews">
+        <div class="module-head"><h3>Access Reviews</h3><code class="route">/access-reviews</code></div>
+        <p class="purpose">Periodic user-access certification campaigns.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a review (system name or linked asset, reviewer, frequency, due date) → add each account under review as an item (username, access held) → for each, click <b>Keep</b>, <b>Revoke</b>, or <b>Reset</b> → once every item has a decision, click <b>Complete review</b> — blocked until all are decided, and auto-schedules the next review from your frequency.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="approvals">
+        <div class="module-head"><h3>Approvals</h3><code class="route">/approvals</code></div>
+        <p class="purpose">A generic, genuinely-enforced maker-checker inbox for any request needing independent sign-off.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a request (title, approver, description, and how many independent checkers are required — 1 for four-eyes, 2 for six-eyes) → checkers <b>Approve</b> or <b>Reject</b> (a reject requires a written reason) → it auto-resolves to approved once enough checkers sign off, or rejected on a single reject.</p></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>What's real and enforced: the requester can never approve their own request, and each checker can vote only once — checked server-side, not just a UI suggestion.</div></div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>Unlike Delegation of Authority, this module's four-eyes logic is actually enforced — but only for requests created here. No other module auto-routes anything through Approvals.</div></div>
+      </article>
+
+      <article class="module" id="exceptions">
+        <div class="module-head"><h3>Exceptions</h3><code class="route">/exceptions</code></div>
+        <p class="purpose">Formal, time-boxed acceptance of a risk, policy, or compliance gap.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create an exception (type, classification, rationale, start/expiry dates, compensating controls) linked to the Risks/Policies/Controls/Requirements/Assets it covers → an approver clicks <b>Approve</b> or <b>Reject</b> → once approved and remediated, click <b>Close</b>.</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">pending</span><span class="arrow">→</span><span class="pill">approved / rejected</span><span class="arrow">→</span><span class="pill">closed</span></div></div>
+        </div>
+      </article>
+
+      <article class="module" id="projects">
+        <div class="module-head"><h3>Projects</h3><code class="route">/projects</code></div>
+        <p class="purpose">Track remediation projects or initiatives addressing risks, controls, or policies.</p>
+        <div class="mgrid">
+          <div class="field"><span class="field-label">How to use it</span><p>Create a project (owner, start date, deadline, budget) linked to what it addresses → add Tasks (assignee, due date, % completion — overall progress averages task completion) → log Expenses against the budget (flags over-budget automatically).</p></div>
+          <div class="field"><span class="field-label">Status flow</span><div class="flow"><span class="pill">planned</span><span class="arrow">→</span><span class="pill">ongoing</span><span class="arrow">→</span><span class="pill">on_hold</span><span class="arrow">→</span><span class="pill">completed / cancelled</span></div></div>
+        </div>
+      </article>
+
+      <article class="module" id="audit">
+        <div class="module-head"><h3>Activity Log</h3><code class="route">/audit</code></div>
+        <p class="purpose">The system-wide, read-only, append-only trail of who did what — distinct from the Internal Audit module.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>View only — every create/update/close/decide/publish/test action across nearly every module writes an entry here automatically. Nothing to configure; use it to answer "who changed this, and when."</p></div>
+        </div>
+      </article>
+
+      <section class="page-section" id="grp-system-head">
+        <div class="section-kicker">Sidebar section</div>
+        <h2>System</h2>
+        <p class="section-intro">Platform administration: connectors and monitoring, extensibility, bulk data movement, integrations, and identity configuration.</p>
+      </section>
+
+      <article class="module" id="integrations">
+        <div class="module-head"><h3>Integrations &amp; CCM</h3><code class="route">/integrations</code></div>
+        <p class="purpose">Register connections to your bank's systems and define automated control tests for Continuous Controls Monitoring.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p><b>Connectors</b> — register one (AD, O365, SIEM, EDR, CMDB, core banking, cloud — type, endpoint, auth method note, sync frequency); flagged <i>stale</i> automatically after 35+ days without syncing. <b>CCM</b> — define an automated control test (which control it verifies, the pass condition, optionally which connector it uses) → <b>Record</b> a run's result each time it's executed.</p></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>Execution is manual today — no live "test connection" or scheduled auto-run. A recorded run doesn't automatically update the linked Control's effectiveness or create an Issue.</div></div>
+      </article>
+
+      <article class="module" id="custom-fields">
+        <div class="module-head"><h3>Custom Fields</h3><code class="route">/custom-fields</code></div>
+        <p class="purpose">Add tenant-specific fields to a record type without code changes.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Pick a module — risk, control, asset, vendor, policy, incident, project, goal, exception, processing_activity, continuity_plan, or framework — name the field, pick its type (text/textarea/number/date/select/checkbox), mark required if needed. It then appears automatically in that record type's Custom Fields panel everywhere.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="status-rules">
+        <div class="module-head"><h3>Status Rules</h3><code class="route">/status-rules</code></div>
+        <p class="purpose">Auto-label records with a colored badge when a field meets a condition.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Pick a module (risk, control, incident, vendor, project, policy, asset, goal, or exception), a field and operator (equals / greater-than / contains / overdue / is-true / not-empty…), a comparison value, and a label + color.</p></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>A labeling engine, not a time-based escalation engine — it doesn't send alerts or reassign anything on its own.</div></div>
+      </article>
+
+      <article class="module" id="filters">
+        <div class="module-head"><h3>Saved Filters</h3><code class="route">/filters</code></div>
+        <p class="purpose">Build and reuse named, multi-condition queries over a module.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Pick a module, add condition rows (field / operator / value), choose match-all or match-any, mark it Shared if others should see it, then <b>Run</b> it to see matching records.</p></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>A standalone query tool — it doesn't appear as a "load filter" dropdown on each module's own table view.</div></div>
+      </article>
+
+      <article class="module" id="data-io">
+        <div class="module-head"><h3>Import / Export</h3><code class="route">/data-io</code></div>
+        <p class="purpose">Bulk CSV import/export for 20 supported record types.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>For any listed resource — Policies, Risks, Controls, Assets, Vendors, Incidents, Exceptions, Legal, Business Units, Processes, Threats, Vulnerabilities catalog, Goals, RoPA, Continuity Plans, Projects, Compliance Requirements, Evidence, Awareness Programs, Access Reviews — click <b>Export</b>, grab a <b>Template</b>, or <b>Import</b> a matching CSV. A per-row result table shows what succeeded or failed; one bad row doesn't block the rest.</p></div>
+        </div>
+      </article>
+
+      <article class="module" id="webhooks">
+        <div class="module-head"><h3>Webhooks</h3><code class="route">/webhooks</code></div>
+        <p class="purpose">Push real-time HTTP notifications to an external system whenever records change.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Create a webhook (name, payload URL, events — a comma list like <code>risk,incident,approval</code>, or <code>*</code> for everything, optional signing secret) → <b>Test</b> it → <b>Enable</b> it. Check the Log for recent deliveries.</p></div>
+        </div>
+        <div class="callout warn"><span class="glyph">⚠</span><div>Delivery is single-shot, best-effort — no automatic retry if the receiving end is briefly down.</div></div>
+      </article>
+
+      <article class="module" id="sso-settings">
+        <div class="module-head"><h3>SSO</h3><code class="route">/sso-settings</code></div>
+        <p class="purpose">Configure OIDC/OAuth2 sign-in with your bank's identity provider.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">How to use it</span><p>Toggle SSO enabled, enter your IdP's Client ID/Secret and authorize/token/userinfo URLs, set the email/name claim names, toggle JIT provisioning and pick the default role new SSO users get, and optionally restrict to specific email domains.</p></div>
+        </div>
+        <div class="callout note"><span class="glyph">ℹ</span><div>LDAP/Active Directory is configured separately, on the Settings page below.</div></div>
+      </article>
+
+      <article class="module" id="settings">
+        <div class="module-head"><h3>Settings</h3><code class="route">/settings</code></div>
+        <p class="purpose">The general admin hub — organization info, system health, personal security, and LDAP.</p>
+        <div class="mgrid">
+          <div class="field full"><span class="field-label">What's here</span><p>Organization/role summary, a "Send test email" button, read-only system health/version/license info, personal MFA and password change, the LDAP/Active Directory configuration card (host, bind DN, base DN, user filter, default role for JIT users), and an Administration hub linking out to Users &amp; Roles, SSO, Webhooks, Custom Fields, Status Rules, Saved Filters, Import/Export, and the Activity Log.</p></div>
+        </div>
+      </article>
+
+      <section class="page-section" id="workflows">
+        <div class="section-kicker">Reference</div>
+        <h2>End-to-end workflows</h2>
+        <p class="section-intro">Worked examples of how modules chain together in practice.</p>
+
+        <div class="chain">
+          <h4>A · Taking a risk from identification to closure</h4>
+          <p class="chain-path"><a href="#threat-library">Threat Library</a> <b>→</b> <a href="#risks">Risk Register</a> <b>→</b> assess inherent likelihood × impact <b>→</b> link a <a href="#controls">Control</a> as treatment, collect <a href="#evidence">Evidence</a> against it <b>→</b> optional <a href="#risk-quantification">Risk Quantification</a> Monte Carlo <b>→</b> review on a set frequency <b>→</b> close or formally accept.</p>
+        </div>
+        <div class="chain">
+          <h4>B · Responding to a new SBP circular</h4>
+          <p class="chain-path"><a href="#ai-assist">AI Assist</a> extracts obligations <b>→</b> <a href="#regulatory-change">Regulatory Change</a> record + obligations <b>→</b> update the relevant <a href="#compliance">Compliance</a> framework requirements (install a new pack from the <a href="#content-library">Framework Library</a> first if needed) <b>→</b> update the affected <a href="#policies">Policy</a> <b>→</b> if there's a gap, manually raise an <a href="#issues">Issue</a> (source_type = regulatory_change) <b>→</b> add any recurring submission to the Returns Calendar.</p>
+        </div>
+        <div class="chain">
+          <h4>C · Onboarding and assessing a vendor</h4>
+          <p class="chain-path"><a href="#vendors">Vendors</a> (status: prospective) <b>→</b> <a href="#questionnaires">Questionnaires</a> (build or reuse a template) <b>→</b> <a href="#assessments">Assessments</a> (send it, capture answers, review findings) <b>→</b> if SBP-material or cloud, add an <a href="#outsourcing">Outsourcing</a> record linked to the same vendor <b>→</b> link the vendor to related <a href="#risks">Risk Register</a> entries <b>→</b> move to active with a recurring review frequency.</p>
+        </div>
+        <div class="chain">
+          <h4>D · Handling a security incident</h4>
+          <p class="chain-path"><a href="#incidents">Security Operations</a> — log, work the NIST response stages to closure <b>→</b> if reportable, generate regulatory reports and mark submitted once filed <b>→</b> manually create an <a href="#issues">Issue</a> (source_type = incident) if root-cause remediation needs longer tracking <b>→</b> link affected Controls/Assets/Vendors/Risks for context.</p>
+        </div>
+        <div class="chain">
+          <h4>E · Running the annual ICFR cycle</h4>
+          <p class="chain-path"><a href="#icfr">ICFR</a> — build the process universe <b>→</b> add RCM controls with financial assertions <b>→</b> run tests each cycle <b>→</b> a failed test or ineffective control raises a Deficiency, classified by severity, and remediated <b>→</b> sign off via the Review &amp; Attestation panel on each control.</p>
+        </div>
+        <div class="chain">
+          <h4>F · An internal audit engagement</h4>
+          <p class="chain-path"><a href="#internal-audit">Internal Audit</a> — maintain the risk-based Audit Universe <b>→</b> create an Engagement against a unit <b>→</b> record Procedures as fieldwork proceeds <b>→</b> raise Findings <b>→</b> track them on the Findings follow-up tab until closed <b>→</b> optionally mirror a significant finding into <a href="#issues">Issues &amp; Actions</a> manually.</p>
+        </div>
+        <div class="chain">
+          <h4>G · Asset criticality inheritance</h4>
+          <p class="chain-path"><a href="#information-assets">Information Assets</a> — business owner self-assesses business value + CIA <b>→</b> link it to the <a href="#it-assets">IT Asset(s)</a> that host it <b>→</b> the IT asset's <code>derived_criticality</code> inherits the highest business value hosted, and <code>effective_criticality</code> should drive incident-response prioritization and vulnerability remediation urgency.</p>
+        </div>
+        <div class="chain">
+          <h4>H · Operational-risk loss to Basel capital</h4>
+          <p class="chain-path"><a href="#operational-risk">Operational Risk</a> — log a loss event with its Basel type <b>→</b> over time, <a href="#scenario-analysis">Scenario Analysis</a> workshops future scenarios using observed frequency/severity as a starting point <b>→</b> the Capital tab computes Basel III SMA operational risk capital from your Business Indicator and average annual losses.</p>
+        </div>
+        <div class="chain">
+          <h4>I · A whistleblowing case</h4>
+          <p class="chain-path"><a href="#whistleblowing">Whistleblowing</a> — intake, toggle Anonymous if needed <b>→</b> triage <b>→</b> investigate, logging Case Log entries <b>→</b> resolve to substantiated / unsubstantiated / closed.</p>
+          <p class="chain-note">No public follow-up portal exists yet for the reporter — see <a href="#gaps">Known gaps</a>.</p>
+        </div>
+        <div class="chain">
+          <h4>J · Maker-checker, today</h4>
+          <p class="chain-path"><a href="#delegation-of-authority">Delegation of Authority</a> documents <i>who should</i> approve <i>what</i> — a reference matrix, not enforced. For an approval you need enforced today, create the request directly in <a href="#approvals">Approvals</a>, set the required number of independent checkers, and reference the record it concerns in the description.</p>
+        </div>
+      </section>
+
+      <section class="page-section" id="roles">
+        <div class="section-kicker">Reference</div>
+        <h2>Roles &amp; permissions</h2>
+        <p class="section-intro">Every permission is a <code>resource:action</code> code — 93 total across every module. Most follow simple read/write; a few sensitive actions get their own verb (e.g. <code>risk:accept</code>, <code>exception:approve</code>) so "can edit" and "can approve" can be different people.</p>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Built-in role</th><th>Typical use</th></tr></thead>
+            <tbody>
+              <tr><td><b>Admin</b></td><td>Full access, including user/role management.</td></tr>
+              <tr><td><b>Risk Manager</b></td><td>Risk, controls, assets, incidents, vendors, BCP, projects, operational risk, fraud, scenario analysis, vulnerabilities, model risk, outsourcing, quantitative risk, AI Assist.</td></tr>
+              <tr><td><b>Risk Approver</b></td><td>Read-only across risk/controls/assets, plus <i>approve</i> actions only (risk acceptance, exceptions, approvals) — a pure "checker" role.</td></tr>
+              <tr><td><b>Compliance Manager</b></td><td>Frameworks, policies, privacy, awareness, Shariah, AML, issues, regulatory change, ICFR, declarations, whistleblowing, governance, ESG, DoA, data protection.</td></tr>
+              <tr><td><b>Auditor</b></td><td>Read-only across the entire platform, plus full read/write on Internal Audit — preserving independence.</td></tr>
+              <tr><td><b>Viewer</b></td><td>Read-only everywhere.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Admins can also build <b>custom roles</b> by hand-picking any combination of the 93 permissions under <a href="#organization-users">Users &amp; Roles</a>. Assignment is per-user — there's no per-record or per-business-unit scoping.</p>
+      </section>
+
+      <section class="page-section" id="gaps">
+        <div class="section-kicker">Reference</div>
+        <h2>Known gaps — things that look automatic but aren't yet</h2>
+        <p class="section-intro">Documented so you plan your bank's process around what's actually enforced, not what's merely configured.</p>
+        <ul class="gap-list">
+          <li><span class="glyph">⚠</span><div><b>Delegation of Authority / dual-control rules are a registry, not an enforcement engine.</b> Defining a limit or a maker-checker rule doesn't gate any write anywhere else yet.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Approvals isn't auto-triggered by other modules.</b> You create the request yourself and reference the source record manually; the four-eyes logic once a request exists is genuinely enforced.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Issues &amp; Actions is entirely manually populated.</b> No other module has a "raise an Issue" button.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Business Units are not a security boundary.</b> Only whole-organization isolation is enforced at the database level.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Whistleblowing's tracking code is internal-only.</b> No public self-service status check or follow-up page yet.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Fraud Cases and Operational Risk Loss Events are separate, unlinked registers</b> — log a shared event in both if it applies to both.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Integrations/CCM runs are manually recorded</b>, not live or automatic; a run doesn't update a Control's effectiveness or auto-create an Issue.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Webhook delivery has no retry</b> — a failed POST is logged, not retried.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Saved Filters run from their own page</b>, not as a live filter dropdown on each module's table.</div></li>
+          <li><span class="glyph">⚠</span><div><b>Reporting is on-demand, not scheduled.</b> Four PDF exports exist — Risk Register, Executive Summary, Audit Engagement Report, Shariah Review Report — no "email me this every Monday."</div></li>
+          <li><span class="glyph">⚠</span><div><b>Record-level immutability</b> for loss events, SAR, and breach records — a regulator expectation — is not yet built.</div></li>
+          <li><span class="glyph">⚠</span><div><b>New organization/tenant self-service creation</b> has no frontend page — it's an operator-run backend step today.</div></li>
+        </ul>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<button class="back-top" id="backTop" aria-label="Back to top" title="Back to top">↑</button>
+
+<script>
+(function(){
+  var railNav = document.getElementById('railNav');
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail-link'));
+  var groups = Array.prototype.slice.call(document.querySelectorAll('.rail-group'));
+  var sections = links.map(function(a){ return document.querySelector(a.getAttribute('href')); }).filter(Boolean);
+
+  /* scroll-spy */
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      var id = '#' + entry.target.id;
+      var link = links.find(function(a){ return a.getAttribute('href') === id; });
+      if (!link) return;
+      if (entry.isIntersecting) {
+        links.forEach(function(a){ a.classList.remove('active'); });
+        link.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-15% 0px -70% 0px', threshold: 0 });
+  sections.forEach(function(s){ io.observe(s); });
+
+  /* search / filter */
+  var input = document.getElementById('railSearch');
+  var emptyBox = document.getElementById('railEmpty');
+  var emptyTerm = document.getElementById('railEmptyTerm');
+  var modules = Array.prototype.slice.call(document.querySelectorAll('.module'));
+
+  input.addEventListener('input', function(){
+    var q = input.value.trim().toLowerCase();
+    if (!q) {
+      modules.forEach(function(m){ m.classList.remove('hidden'); });
+      links.forEach(function(a){ a.parentElement.classList && a.classList.remove('hidden'); });
+      groups.forEach(function(g){ g.classList.remove('hidden'); });
+      emptyBox.classList.add('hidden');
+      return;
+    }
+    var anyVisible = false;
+    groups.forEach(function(g){
+      if (g.dataset.group === 'start' || g.dataset.group === 'end') { g.classList.remove('hidden'); return; }
+      var groupLinks = Array.prototype.slice.call(g.querySelectorAll('.rail-link'));
+      var groupHasMatch = false;
+      groupLinks.forEach(function(a){
+        var targetId = a.getAttribute('href').slice(1);
+        var mod = document.getElementById(targetId);
+        var text = (mod ? mod.textContent : a.textContent).toLowerCase();
+        var match = text.indexOf(q) !== -1;
+        a.classList.toggle('hidden', !match);
+        if (mod) mod.classList.toggle('hidden', !match);
+        if (match) { groupHasMatch = true; anyVisible = true; }
+      });
+      g.classList.toggle('hidden', !groupHasMatch);
+    });
+    emptyTerm.textContent = input.value.trim();
+    emptyBox.classList.toggle('hidden', anyVisible);
+  });
+
+  /* back to top */
+  var backTop = document.getElementById('backTop');
+  window.addEventListener('scroll', function(){
+    backTop.classList.toggle('show', window.scrollY > 600);
+  }, { passive: true });
+  backTop.addEventListener('click', function(){
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+</script>

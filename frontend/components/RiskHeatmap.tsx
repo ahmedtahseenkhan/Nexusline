@@ -3,8 +3,21 @@
 import { useEffect, useState } from "react";
 import { api, type RiskMatrix } from "@/lib/api";
 
-/** Standard 5x5 risk heatmap. Cell color follows likelihood×impact score bands;
- *  the count shown toggles between inherent and residual exposure. */
+const BANDS = [
+  { key: "critical", label: "Critical (15–25)", color: "#b42323" },
+  { key: "high", label: "High (10–14)", color: "#bd4408" },
+  { key: "medium", label: "Medium (5–9)", color: "#a96414" },
+  { key: "low", label: "Low (1–4)", color: "#157f4a" },
+] as const;
+
+function bandColor(score: number): string {
+  if (score >= 15) return "#b42323";
+  if (score >= 10) return "#bd4408";
+  if (score >= 5) return "#a96414";
+  return "#157f4a";
+}
+
+/** 5×5 risk matrix with an inherent/residual toggle and a distribution legend. */
 export default function RiskHeatmap() {
   const [matrix, setMatrix] = useState<RiskMatrix | null>(null);
   const [mode, setMode] = useState<"inherent" | "residual">("residual");
@@ -15,8 +28,7 @@ export default function RiskHeatmap() {
 
   if (!matrix) return null;
 
-  const cell = (l: number, i: number) =>
-    matrix.cells.find((c) => c.likelihood === l && c.impact === i);
+  const cell = (l: number, i: number) => matrix.cells.find((c) => c.likelihood === l && c.impact === i);
   const count = (l: number, i: number) => {
     const c = cell(l, i);
     return c ? (mode === "inherent" ? c.inherent_count : c.residual_count) : 0;
@@ -27,79 +39,67 @@ export default function RiskHeatmap() {
     return list.length ? list.join(", ") : "No risks";
   };
 
-  // Score-band background (score = likelihood*impact, 1..25).
-  const band = (score: number) => {
-    if (score >= 15) return "#ba1c1c"; // critical
-    if (score >= 10) return "#c03f0c"; // high
-    if (score >= 5) return "#b7791f"; // medium
-    return "#166434"; // low
-  };
+  const impacts = [5, 4, 3, 2, 1];
+  const likelihoods = [1, 2, 3, 4, 5];
 
-  const impacts = [5, 4, 3, 2, 1]; // rows top→bottom (high impact at top)
-  const likelihoods = [1, 2, 3, 4, 5]; // columns left→right
+  // Distribution by severity band for the active mode.
+  const dist: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const c of matrix.cells) {
+    const n = mode === "inherent" ? c.inherent_count : c.residual_count;
+    if (!n) continue;
+    if (c.score >= 15) dist.critical += n;
+    else if (c.score >= 10) dist.high += n;
+    else if (c.score >= 5) dist.medium += n;
+    else dist.low += n;
+  }
 
   return (
     <div className="card">
       <div className="card-head">
         <h3>Risk heatmap</h3>
-        <div style={{ display: "inline-flex", gap: 6 }}>
-          <button
-            className={`btn sm ${mode === "inherent" ? "" : "secondary"}`}
-            onClick={() => setMode("inherent")}
-          >
-            Inherent
-          </button>
-          <button
-            className={`btn sm ${mode === "residual" ? "" : "secondary"}`}
-            onClick={() => setMode("residual")}
-          >
-            Residual
-          </button>
+        <div className="seg">
+          <button className={mode === "inherent" ? "on" : ""} onClick={() => setMode("inherent")}>Inherent</button>
+          <button className={mode === "residual" ? "on" : ""} onClick={() => setMode("residual")}>Residual</button>
         </div>
       </div>
       <div className="card-pad">
-        <div style={{ display: "flex", gap: 8 }}>
-          {/* Y axis label */}
-          <div style={{ display: "flex", alignItems: "center", writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>
-            Impact →
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ display: "grid", gridTemplateColumns: `repeat(5, 1fr)`, gap: 4 }}>
-              {impacts.map((i) =>
-                likelihoods.map((l) => {
-                  const n = count(l, i);
-                  const c = cell(l, i);
-                  return (
-                    <div
-                      key={`${l}-${i}`}
-                      title={`Likelihood ${l} × Impact ${i} (score ${c?.score ?? l * i})\n${refs(l, i)}`}
-                      style={{
-                        aspectRatio: "1.6 / 1",
-                        borderRadius: 6,
-                        background: n ? band(l * i) : "var(--surface-2, #f3f4f6)",
-                        color: n ? "#fff" : "var(--muted)",
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontWeight: 700,
-                        fontSize: 16,
-                        border: "1px solid var(--border)",
-                        cursor: n ? "default" : "default",
-                        opacity: n ? 1 : 0.55,
-                      }}
-                    >
-                      {n || ""}
-                    </div>
-                  );
-                })
-              )}
+        <div className="hm">
+          <div className="hm-matrix">
+            <div className="hm-yaxis">Impact →</div>
+            <div>
+              <div className="hm-grid">
+                {impacts.map((i) =>
+                  likelihoods.map((l) => {
+                    const n = count(l, i);
+                    const c = cell(l, i);
+                    return (
+                      <div
+                        key={`${l}-${i}`}
+                        className={`hm-cell${n ? " filled" : ""}`}
+                        style={n ? { background: bandColor(c?.score ?? l * i) } : undefined}
+                        title={`Likelihood ${l} × Impact ${i} (score ${c?.score ?? l * i})\n${refs(l, i)}`}
+                      >
+                        {n || ""}
+                      </div>
+                    );
+                  }),
+                )}
+              </div>
+              <div className="hm-xaxis"><span>Likelihood →</span></div>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11, fontWeight: 600, color: "var(--muted)" }}>
-              <span>Likelihood →</span>
-              <span>
-                {matrix.total} risk{matrix.total !== 1 ? "s" : ""} · appetite {matrix.appetite_score} / tolerance {matrix.tolerance_score}
-              </span>
+          </div>
+          <div className="hm-side">
+            <div className="bt">{mode} distribution</div>
+            {BANDS.map((b) => (
+              <div className="hm-band" key={b.key}>
+                <span className="sw" style={{ background: b.color }} />
+                <span className="nm">{b.label}</span>
+                <span className="ct">{dist[b.key]}</span>
+              </div>
+            ))}
+            <div className="hm-note">
+              <span>{matrix.total} risk{matrix.total !== 1 ? "s" : ""} plotted</span>
+              <span>appetite {matrix.appetite_score} · tolerance {matrix.tolerance_score}</span>
             </div>
           </div>
         </div>

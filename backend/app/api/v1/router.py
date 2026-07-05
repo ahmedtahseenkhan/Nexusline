@@ -3,12 +3,15 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     access_reviews,
+    ai_assist,
     aml,
     approvals,
     assessments,
     attestations,
     assets,
     audit,
+    authority,
+    bia,
     versions,
     auth,
     awareness,
@@ -17,26 +20,40 @@ from app.api.v1 import (
     continuity,
     controls,
     custom_fields,
+    content_library,
     dashboard,
     dataio,
+    data_protection,
+    declaration,
+    esg,
     evidence,
     exceptions,
     filters,
+    fraud,
     goals,
+    governance,
+    icfr,
     incidents,
+    integrations,
     internal_audit,
+    issues,
     ldap,
+    model_risk,
     notifications,
     operational_risk,
     organization,
+    outsourcing,
     pdf,
     policies,
     privacy,
     projects,
     regulatory,
+    regulatory_change,
     reports,
     risk_program,
+    risk_quant,
     risks,
+    scenario,
     search,
     shariah,
     sso,
@@ -45,7 +62,9 @@ from app.api.v1 import (
     threats,
     users,
     vendors,
+    vulnerability,
     webhooks,
+    whistleblowing,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -59,6 +78,7 @@ api_router.include_router(threats.router)
 api_router.include_router(controls.router)
 api_router.include_router(assets.router)
 api_router.include_router(assets.labels_router)
+api_router.include_router(assets.tags_router)
 api_router.include_router(assets.media_types_router)
 api_router.include_router(assets.class_router)
 api_router.include_router(compliance.router)
@@ -70,6 +90,26 @@ api_router.include_router(internal_audit.router)
 api_router.include_router(shariah.router)
 api_router.include_router(operational_risk.router)
 api_router.include_router(aml.router)
+# --- Banking-productionization modules (gap-analysis build) ---
+api_router.include_router(issues.router)
+api_router.include_router(regulatory_change.router)
+api_router.include_router(icfr.router)
+api_router.include_router(bia.router)
+api_router.include_router(fraud.router)
+api_router.include_router(authority.router)
+api_router.include_router(scenario.router)
+api_router.include_router(whistleblowing.router)
+api_router.include_router(vulnerability.router)
+api_router.include_router(esg.router)
+api_router.include_router(model_risk.router)
+api_router.include_router(declaration.router)
+api_router.include_router(governance.router)
+api_router.include_router(data_protection.router)
+api_router.include_router(outsourcing.router)
+api_router.include_router(integrations.router)
+api_router.include_router(content_library.router)
+api_router.include_router(risk_quant.router)
+api_router.include_router(ai_assist.router)
 api_router.include_router(continuity.router)
 api_router.include_router(privacy.router)
 api_router.include_router(access_reviews.router)
