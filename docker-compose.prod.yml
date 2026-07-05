@@ -125,9 +125,12 @@ services:
     depends_on:
       - api
     # No published ports — nginx is the only public entry point.
-    # node:20-alpine ships busybox wget; probe the web root.
+    # node:20-alpine ships busybox wget; probe the web root. Use 127.0.0.1, not
+    # localhost — Alpine/musl resolves "localhost" to ::1 only, but the standalone
+    # Next.js server binds the IPv4 wildcard (HOSTNAME=0.0.0.0), so wget's IPv6
+    # attempt gets "Connection refused" even though the app is up and healthy.
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
