@@ -19,6 +19,7 @@ async def lifespan(app: FastAPI):
     # Dev convenience: ensure schema + RLS + seed exist on boot. In production,
     # disable by setting SEED_DATA=false and manage schema with Alembic.
     from app.db.init_db import init_models
+    from app.db.provisioning import reconcile_permissions
     from app.db.seed import seed_if_empty
     from app.services import license as lic
     from app.services import scheduler
@@ -29,6 +30,11 @@ async def lifespan(app: FastAPI):
     try:
         await init_models()
         await seed_if_empty()
+        # Grant newly-added module permissions to existing tenants' system roles
+        # (no-op on a fresh seed; fixes 403s after modules are added to an existing DB).
+        granted = await reconcile_permissions()
+        if granted:
+            logger.info("Reconciled permissions: added %s role grants", granted)
     except Exception:  # noqa: BLE001
         logger.exception("Startup DB initialization failed")
         raise

@@ -26,6 +26,7 @@ from alembic import op
 import app.models  # noqa: F401 - registers all metadata (incl. the new modules)
 from app.core.database import Base
 from app.db.rls import rls_ddl_statements
+from app.db.schema_patches import asset_split_ddl_statements
 
 revision = "0008_banking_productionization"
 down_revision = "0007_aml_cft"
@@ -33,68 +34,18 @@ branch_labels = None
 depends_on = None
 
 
-# New enum types that are only referenced by columns added to the pre-existing assets table.
-_ASSET_ENUMS = {
-    "asset_class": ("it_asset", "information_asset"),
-    "asset_environment": ("production", "dr", "uat", "staging", "development", "not_applicable"),
-    "discovery_source": (
-        "manual", "active_directory", "intune_mdm", "cmdb",
-        "network_scan", "cloud_connector", "edr", "import_csv",
-    ),
-}
-
-# New columns on assets: (name, DDL type, server default or None).
-_ASSET_COLUMNS: list[tuple[str, str, str | None]] = [
-    ("asset_class", "asset_class", "'information_asset'"),
-    ("business_value", "criticality", "'medium'"),
-    ("information_owner", "VARCHAR(200)", "''"),
-    ("data_categories", "TEXT", "''"),
-    ("records_volume", "VARCHAR(120)", "''"),
-    ("self_assessed", "BOOLEAN", "false"),
-    ("assessed_by", "VARCHAR(200)", "''"),
-    ("assessed_date", "DATE", None),
-    ("replacement_cost", "NUMERIC(18,2)", "0"),
-    ("currency", "VARCHAR(8)", "'PKR'"),
-    ("rto_hours", "INTEGER", None),
-    ("rpo_hours", "INTEGER", None),
-    ("environment", "asset_environment", "'production'"),
-    ("location", "VARCHAR(200)", "''"),
-    ("hostname", "VARCHAR(200)", "''"),
-    ("ip_address", "VARCHAR(64)", "''"),
-    ("serial_number", "VARCHAR(120)", "''"),
-    ("manufacturer", "VARCHAR(120)", "''"),
-    ("model_number", "VARCHAR(120)", "''"),
-    ("os_version", "VARCHAR(120)", "''"),
-    ("discovery_source", "discovery_source", "'manual'"),
-    ("external_id", "VARCHAR(200)", "''"),
-    ("auto_discovered", "BOOLEAN", "false"),
-    ("last_seen", "DATE", None),
-]
-
-
 def upgrade() -> None:
     bind = op.get_bind()
 
-    # 1. enum types for the new assets columns (idempotent).
-    for name, values in _ASSET_ENUMS.items():
-        vals = ", ".join(f"'{v}'" for v in values)
-        op.execute(
-            f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{name}') "
-            f"THEN CREATE TYPE {name} AS ENUM ({vals}); END IF; END $$;"
-        )
+    # 1. asset-split enum types + new columns on the pre-existing assets table
+    #    (shared with the create_all boot path — one source of truth).
+    for statement in asset_split_ddl_statements():
+        op.execute(statement)
 
-    # 2. add the new columns to assets (guarded so re-runs are safe).
-    for col, ddl_type, default in _ASSET_COLUMNS:
-        default_clause = f" DEFAULT {default}" if default is not None else ""
-        not_null = " NOT NULL" if default is not None else ""
-        op.execute(
-            f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {col} {ddl_type}{default_clause}{not_null}"
-        )
-
-    # 3. create every new module table (+ their own enum types) that doesn't yet exist.
+    # 2. create every new module table (+ their own enum types) that doesn't yet exist.
     Base.metadata.create_all(bind=bind, checkfirst=True)
 
-    # 4. (re)apply RLS across all tenant-scoped tables, including the new ones.
+    # 3. (re)apply RLS across all tenant-scoped tables, including the new ones.
     for statement in rls_ddl_statements():
         op.execute(statement)
 
