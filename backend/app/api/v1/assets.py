@@ -20,11 +20,13 @@ from app.models.asset import (
     Asset,
     AssetClassification,
     AssetClassificationType,
+    AssetDependency,
     AssetLabel,
     AssetMediaType,
     AssetReview,
+    AssetTag,
 )
-from app.models.enums import AssetReviewStatus
+from app.models.enums import AssetClass, AssetReviewStatus
 from app.models.exception import ExceptionRecord
 from app.models.incident import Incident
 from app.models.compliance import Requirement
@@ -36,6 +38,8 @@ from app.schemas.asset import (
     AssetClassificationTypeCreate,
     AssetClassificationTypeRead,
     AssetCreate,
+    AssetDependencyCreate,
+    AssetDependencyRead,
     AssetLabelCreate,
     AssetLabelRead,
     AssetMediaTypeCreate,
@@ -44,6 +48,8 @@ from app.schemas.asset import (
     AssetReviewComplete,
     AssetReviewCreate,
     AssetReviewRead,
+    AssetTagCreate,
+    AssetTagRead,
     AssetUpdate,
     ClassificationRef,
     LinkRef,
@@ -57,6 +63,7 @@ router = APIRouter(prefix="/assets", tags=["assets"])
 # Relationship name -> (model, write-field on the schema)
 _REL = {
     "classifications": (AssetClassification, "classification_ids"),
+    "tags": (AssetTag, "tag_ids"),
     "processes": (Process, "process_ids"),
     "legals": (Legal, "legal_ids"),
     "requirements": (Requirement, "requirement_ids"),
@@ -74,6 +81,9 @@ def _loads():
         selectinload(Asset.guardian),
         selectinload(Asset.user),
         selectinload(Asset.classifications).selectinload(AssetClassification.type),
+        selectinload(Asset.tags),
+        selectinload(Asset.hosted_dependencies).selectinload(AssetDependency.information_asset),
+        selectinload(Asset.hosting_dependencies).selectinload(AssetDependency.it_asset),
         selectinload(Asset.processes),
         selectinload(Asset.legals),
         selectinload(Asset.requirements),
@@ -92,11 +102,24 @@ def _ref(obj) -> LinkRef | None:
     return LinkRef(id=obj.id, label=str(label))
 
 
+def _dep_ref(dep: AssetDependency) -> AssetDependencyRead:
+    return AssetDependencyRead(
+        id=dep.id,
+        relationship_type=dep.relationship_type,
+        notes=dep.notes,
+        information_asset=_ref(dep.information_asset),
+        it_asset=_ref(dep.it_asset),
+    )
+
+
 def _serialize(a: Asset) -> AssetRead:
+    # An IT asset shows the info assets it hosts; an information asset shows the IT it runs on.
+    deps = a.hosted_dependencies if a.asset_class == AssetClass.it_asset else a.hosting_dependencies
     return AssetRead(
         id=a.id,
         name=a.name,
         description=a.description,
+        asset_class=a.asset_class,
         media_type=_ref(a.media_type),
         label=_ref(a.label),
         owner=_ref(a.owner),
@@ -108,6 +131,33 @@ def _serialize(a: Asset) -> AssetRead:
         criticality=a.criticality,
         classification=a.classification,
         potential_liabilities=a.potential_liabilities,
+        business_value=a.business_value,
+        information_owner=a.information_owner,
+        data_categories=a.data_categories,
+        records_volume=a.records_volume,
+        self_assessed=a.self_assessed,
+        assessed_by=a.assessed_by,
+        assessed_date=a.assessed_date,
+        replacement_cost=float(a.replacement_cost or 0),
+        currency=a.currency,
+        rto_hours=a.rto_hours,
+        rpo_hours=a.rpo_hours,
+        environment=a.environment,
+        location=a.location,
+        hostname=a.hostname,
+        ip_address=a.ip_address,
+        serial_number=a.serial_number,
+        manufacturer=a.manufacturer,
+        model_number=a.model_number,
+        os_version=a.os_version,
+        discovery_source=a.discovery_source,
+        external_id=a.external_id,
+        auto_discovered=a.auto_discovered,
+        last_seen=a.last_seen,
+        cost_band=a.cost_band,
+        intrinsic_criticality=a.intrinsic_criticality,
+        derived_criticality=a.derived_criticality,
+        effective_criticality=a.effective_criticality,
         review_frequency=a.review_frequency,
         next_review_date=a.next_review_date,
         last_review_date=a.last_review_date,
@@ -118,6 +168,8 @@ def _serialize(a: Asset) -> AssetRead:
             ClassificationRef(id=c.id, name=c.name, value=c.value, type_name=c.type.name if c.type else "")
             for c in a.classifications
         ],
+        tags=[AssetTagRead.model_validate(t) for t in a.tags],
+        dependencies=[_dep_ref(d) for d in deps],
         processes=[_ref(x) for x in a.processes],
         legals=[_ref(x) for x in a.legals],
         requirements=[_ref(x) for x in a.requirements],
@@ -190,6 +242,7 @@ async def _apply_relations(db, asset: Asset, data: dict) -> None:
 async def list_assets(
     db: DbSession,
     search: Annotated[str | None, Query()] = None,
+    asset_class: Annotated[AssetClass | None, Query(description="Filter by IT vs Information asset")] = None,
     media_type_id: Annotated[uuid.UUID | None, Query()] = None,
     review_overdue: Annotated[bool | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -198,6 +251,8 @@ async def list_assets(
     stmt = select(Asset).where(Asset.deleted.is_(False))
     if search:
         stmt = stmt.where(Asset.name.ilike(f"%{search}%"))
+    if asset_class:
+        stmt = stmt.where(Asset.asset_class == asset_class)
     if media_type_id:
         stmt = stmt.where(Asset.media_type_id == media_type_id)
     if review_overdue:
@@ -293,6 +348,47 @@ async def complete_review(asset_id: uuid.UUID, review_id: uuid.UUID, body: Asset
     return _serialize(await _fresh(db, asset.id))
 
 
+# -------------------------------------------- information ↔ IT dependency links
+@router.get("/{asset_id}/dependencies", response_model=list[AssetDependencyRead], dependencies=[Depends(require("asset:read"))])
+async def list_dependencies(asset_id: uuid.UUID, db: DbSession) -> list[AssetDependencyRead]:
+    asset = await _get_or_404(db, asset_id)
+    deps = asset.hosted_dependencies if asset.asset_class == AssetClass.it_asset else asset.hosting_dependencies
+    return [_dep_ref(d) for d in deps]
+
+
+@router.post("/dependencies", response_model=AssetDependencyRead, status_code=201, dependencies=[Depends(require("asset:write"))])
+async def create_dependency(body: AssetDependencyCreate, db: DbSession, user: CurrentUser) -> AssetDependencyRead:
+    """Link an information asset to the IT asset that carries it (so criticality inherits)."""
+    info = await db.scalar(select(Asset).where(Asset.id == body.information_asset_id, Asset.deleted.is_(False)))
+    it = await db.scalar(select(Asset).where(Asset.id == body.it_asset_id, Asset.deleted.is_(False)))
+    if info is None or it is None:
+        raise HTTPException(status_code=404, detail="Both information and IT assets must exist")
+    if info.asset_class != AssetClass.information_asset:
+        raise HTTPException(status_code=422, detail="information_asset_id must reference an information asset")
+    if it.asset_class != AssetClass.it_asset:
+        raise HTTPException(status_code=422, detail="it_asset_id must reference an IT asset")
+    dep = AssetDependency(
+        tenant_id=user.tenant_id,
+        information_asset_id=body.information_asset_id,
+        it_asset_id=body.it_asset_id,
+        relationship_type=body.relationship_type,
+        notes=body.notes,
+    )
+    db.add(dep)
+    await db.flush()
+    dep = await db.scalar(
+        select(AssetDependency).where(AssetDependency.id == dep.id).execution_options(populate_existing=True)
+    )
+    return _dep_ref(dep)
+
+
+@router.delete("/dependencies/{dependency_id}", status_code=204, dependencies=[Depends(require("asset:write"))])
+async def delete_dependency(dependency_id: uuid.UUID, db: DbSession) -> None:
+    dep = await db.get(AssetDependency, dependency_id)
+    if dep is not None:
+        await db.delete(dep)
+
+
 # ----------------------------------------------------------------- labels lookup
 labels_router = APIRouter(prefix="/asset-labels", tags=["assets"])
 
@@ -385,4 +481,31 @@ async def delete_classification(classification_id: uuid.UUID, db: DbSession) -> 
     obj = await db.get(AssetClassification, classification_id)
     if obj is None:
         raise HTTPException(status_code=404, detail="Classification not found")
+    await db.delete(obj)
+
+
+# --------------------------------------------------------- IT asset tags lookup
+tags_router = APIRouter(prefix="/asset-tags", tags=["assets"])
+
+
+@tags_router.get("", response_model=list[AssetTagRead], dependencies=[Depends(require("asset:read"))])
+async def list_asset_tags(db: DbSession) -> list[AssetTagRead]:
+    rows = (await db.scalars(select(AssetTag).order_by(AssetTag.name))).all()
+    return [AssetTagRead.model_validate(r) for r in rows]
+
+
+@tags_router.post("", response_model=AssetTagRead, status_code=201, dependencies=[Depends(require("asset:write"))])
+async def create_asset_tag(body: AssetTagCreate, db: DbSession, user: CurrentUser) -> AssetTagRead:
+    obj = AssetTag(tenant_id=user.tenant_id, **body.model_dump())
+    db.add(obj)
+    await db.flush()
+    await db.refresh(obj)
+    return AssetTagRead.model_validate(obj)
+
+
+@tags_router.delete("/{tag_id}", status_code=204, dependencies=[Depends(require("asset:write"))])
+async def delete_asset_tag(tag_id: uuid.UUID, db: DbSession) -> None:
+    obj = await db.get(AssetTag, tag_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
     await db.delete(obj)

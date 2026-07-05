@@ -10,10 +10,13 @@ from app.models.asset import (
     Asset,
     AssetClassification,
     AssetClassificationType,
+    AssetDependency,
     AssetLabel,
     AssetMediaType,
     AssetReview,
+    AssetTag,
     asset_classification_links,
+    asset_tag_links,
     assets_exceptions,
     assets_incidents,
     assets_legals,
@@ -105,6 +108,25 @@ from app.models.incident import (
     incident_vendors,
 )
 from app.models.notification import Notification, NotificationView
+# --- Banking-productionization modules (gap-analysis build) ---
+from app.models.issue import Issue, IssueAction, IssueUpdate
+from app.models.regulatory_change import Obligation, RegulatoryChange, RegulatoryReturn
+from app.models.icfr import IcfrControl, IcfrDeficiency, IcfrProcess, IcfrTest
+from app.models.bia import BiaAssessment, BiaDependency
+from app.models.fraud import FraudCase, FraudControlCheck, FraudRisk
+from app.models.authority import AuthorityMatrix, DualControlRule
+from app.models.scenario import CapitalCalculation, ScenarioAnalysis
+from app.models.whistleblowing import WhistleUpdate, WhistleblowingReport
+from app.models.vulnerability import PatchRecord, VulnFinding
+from app.models.esg import EnvironmentalRiskRating, EsgAssessment
+from app.models.model_risk import ModelInventory, ModelValidation
+from app.models.declaration import Declaration, DeclarationCampaign
+from app.models.governance import Committee, Meeting, MeetingDecision
+from app.models.data_protection import ConsentRecord, DataBreach, Dpia, Dsar
+from app.models.outsourcing import OutsourcingArrangement, OutsourcingReview
+from app.models.integrations import AutomatedControlTest, Connector, ControlTestRun
+from app.models.risk_quant import RiskQuantification
+from app.models.ai_assist import AiExtraction
 from app.models.organization import (
     BusinessUnit,
     Legal,
@@ -147,10 +169,13 @@ __all__ = [
     "AuditLog",
     "Asset",
     "AssetLabel",
+    "AssetTag",
+    "AssetDependency",
     "AssetMediaType",
     "AssetClassificationType",
     "AssetClassification",
     "AssetReview",
+    "asset_tag_links",
     "Control",
     "ControlAudit",
     "ControlMaintenance",
@@ -261,4 +286,22 @@ __all__ = [
     "SavedFilter",
     "SsoConfig",
     "LdapConfig",
+    # Banking-productionization modules
+    "Issue",
+    "IssueAction",
+    "IssueUpdate",
+    "RegulatoryChange",
+    "Obligation",
+    "RegulatoryReturn",
+    "IcfrProcess",
+    "IcfrControl",
+    "IcfrTest",
+    "IcfrDeficiency",
+    "BiaAssessment",
+    "BiaDependency",
+    "FraudRisk",
+    "FraudCase",
+    "FraudControlCheck",
+    "AuthorityMatrix",
+    "DualControlRule",
 ]

@@ -37,6 +37,55 @@ class AssetType(str, enum.Enum):
     process = "process"
 
 
+class AssetClass(str, enum.Enum):
+    """The ISO 27005 primary/supporting split.
+
+    * ``information_asset`` — a *primary* asset (data / application). Its criticality
+      reflects **business value**, attested by the business owner. Classification &
+      handling labels live here (ISO 27001:2022 A.5.9 / A.5.12 / A.5.13).
+    * ``it_asset`` — a *supporting* asset (hardware / software / network / facility).
+      Judged by **intrinsic** cost + availability, PLUS **derived** criticality
+      inherited from the information assets it hosts (the "backup server" rule).
+    """
+
+    it_asset = "it_asset"
+    information_asset = "information_asset"
+
+
+class AssetEnvironment(str, enum.Enum):
+    """Operational environment tag for IT (supporting) assets."""
+
+    production = "production"
+    dr = "dr"
+    uat = "uat"
+    staging = "staging"
+    development = "development"
+    not_applicable = "not_applicable"
+
+
+class AssetDependencyType(str, enum.Enum):
+    """How an information asset relates to the IT asset that carries it."""
+
+    hosts = "hosts"
+    stores = "stores"
+    processes = "processes"
+    transmits = "transmits"
+    backs_up = "backs_up"
+
+
+class DiscoverySource(str, enum.Enum):
+    """Where an asset record originated — manual today, automated discovery later (CAASM)."""
+
+    manual = "manual"
+    active_directory = "active_directory"
+    intune_mdm = "intune_mdm"
+    cmdb = "cmdb"
+    network_scan = "network_scan"
+    cloud_connector = "cloud_connector"
+    edr = "edr"
+    import_csv = "import_csv"
+
+
 class ControlStatus(str, enum.Enum):
     planned = "planned"
     implemented = "implemented"
