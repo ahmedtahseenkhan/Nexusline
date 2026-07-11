@@ -887,3 +887,8 @@ tr.active-row > td { background: var(--primary-weak); }
 .confirm-modal { max-width: 440px; width: 440px; }
 .btn.danger { background: var(--red); border-color: var(--red); color: #fff; }
 .btn.danger:hover { background: #9c1c1c; border-color: #9c1c1c; }
+
+/* ---- Multi-select chips ---- */
+.chip { display: inline-flex; align-items: center; gap: 5px; background: var(--primary-weak); color: var(--primary-text); border-radius: 6px; padding: 2px 7px; font-size: 12.5px; }
+.chip-x { cursor: pointer; opacity: 0.6; font-size: 11px; }
+.chip-x:hover { opacity: 1; }

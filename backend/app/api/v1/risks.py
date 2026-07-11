@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Select, func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.asset import Asset
 from app.models.control import Control
 from app.models.incident import Incident
@@ -71,12 +72,26 @@ async def _next_reference(db) -> str:
 
 
 # --------------------------------------------------------------------------- CRUD
+_RISK_SORTABLE = {
+    "reference": Risk.reference,
+    "title": Risk.title,
+    "category": Risk.category,
+    "status": Risk.status,
+    "inherent_score": Risk.inherent_score,
+    "residual_score": Risk.residual_score,
+    "next_review_date": Risk.next_review_date,
+    "created_at": Risk.created_at,
+}
+
+
 @router.get("", response_model=Page[RiskRead], dependencies=[Depends(require("risk:read"))])
 async def list_risks(
     db: DbSession,
     status_filter: Annotated[RiskStatus | None, Query(alias="status")] = None,
     category: str | None = None,
     search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[RiskRead]:
@@ -86,16 +101,16 @@ async def list_risks(
     if category:
         stmt = stmt.where(Risk.category == category)
     if search:
-        stmt = stmt.where(Risk.title.ilike(f"%{search}%"))
+        like = f"%{search}%"
+        stmt = stmt.where(Risk.title.ilike(like) | Risk.reference.ilike(like))
 
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(
-            stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _RISK_SORTABLE, default=Risk.inherent_score)
+    else:
+        stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(
         items=[RiskRead.model_validate(r) for r in rows],
         total=total,
