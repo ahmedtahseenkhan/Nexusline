@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.asset import Asset
 from app.models.risk import Risk
 from app.models.vendor import ServiceContract, Vendor, VendorType
@@ -54,17 +55,37 @@ async def _resolve(db, model, ids):
     return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
 
 
+_VENDOR_SORTABLE = {
+    "name": Vendor.name,
+    "category": Vendor.category,
+    "criticality": Vendor.criticality,
+    "status": Vendor.status,
+    "risk_rating": Vendor.risk_rating,
+    "assessment_status": Vendor.assessment_status,
+    "last_assessed_at": Vendor.last_assessed_at,
+    "created_at": Vendor.created_at,
+}
+
+
 @router.get("", response_model=Page[VendorRead], dependencies=[Depends(require("vendor:read"))])
 async def list_vendors(
     db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[VendorRead]:
     stmt = select(Vendor).where(Vendor.deleted.is_(False))
+    if search:
+        stmt = stmt.where(Vendor.name.ilike(f"%{search}%") | Vendor.category.ilike(f"%{search}%"))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _VENDOR_SORTABLE, default=Vendor.name)
+    else:
+        stmt = stmt.order_by(Vendor.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(stmt.options(*_loads()).order_by(Vendor.name).limit(limit).offset(offset))
-    ).all()
+    rows = (await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))).all()
     return Page(
         items=[VendorRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
     )
