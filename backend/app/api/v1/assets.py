@@ -16,6 +16,8 @@ from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
+from app.models.enums import Criticality
 from app.models.asset import (
     Asset,
     AssetClassification,
@@ -238,6 +240,17 @@ async def _apply_relations(db, asset: Asset, data: dict) -> None:
         await _set_risk_links(db, asset.id, data["risk_ids"])
 
 
+# Columns a client may sort the asset list by (allow-list — keeps the API and any
+# future index in agreement and blocks sorting by arbitrary/unindexed columns).
+_ASSET_SORTABLE = {
+    "name": Asset.name,
+    "created_at": Asset.created_at,
+    "business_value": Asset.business_value,
+    "next_review_date": Asset.next_review_date,
+    "self_assessed": Asset.self_assessed,
+}
+
+
 @router.get("", response_model=Page[AssetRead], dependencies=[Depends(require("asset:read"))])
 async def list_assets(
     db: DbSession,
@@ -245,21 +258,58 @@ async def list_assets(
     asset_class: Annotated[AssetClass | None, Query(description="Filter by IT vs Information asset")] = None,
     media_type_id: Annotated[uuid.UUID | None, Query()] = None,
     review_overdue: Annotated[bool | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[AssetRead]:
     stmt = select(Asset).where(Asset.deleted.is_(False))
     if search:
-        stmt = stmt.where(Asset.name.ilike(f"%{search}%"))
+        like = f"%{search}%"
+        stmt = stmt.where(
+            Asset.name.ilike(like) | Asset.information_owner.ilike(like) | Asset.hostname.ilike(like)
+        )
     if asset_class:
         stmt = stmt.where(Asset.asset_class == asset_class)
     if media_type_id:
         stmt = stmt.where(Asset.media_type_id == media_type_id)
     if review_overdue:
         stmt = stmt.where(Asset.next_review_date < date.today())
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+    stmt = apply_sort(stmt, params, _ASSET_SORTABLE, default=Asset.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.options(*_loads()).order_by(Asset.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))).all()
     return Page(items=[_serialize(r) for r in rows], total=total, limit=limit, offset=offset)
+
+
+@router.get("/summary", dependencies=[Depends(require("asset:read"))])
+async def asset_summary(
+    db: DbSession,
+    asset_class: Annotated[AssetClass | None, Query()] = None,
+) -> dict:
+    """Server-computed stat-card figures (correct at any scale — never derived from a
+    truncated page fetch)."""
+    base = select(Asset).where(Asset.deleted.is_(False))
+    if asset_class:
+        base = base.where(Asset.asset_class == asset_class)
+
+    def _count(extra=None):
+        stmt = base
+        if extra is not None:
+            stmt = stmt.where(extra)
+        return select(func.count()).select_from(stmt.subquery())
+
+    total = await db.scalar(_count()) or 0
+    high_val = await db.scalar(_count(Asset.business_value.in_([Criticality.high, Criticality.critical]))) or 0
+    self_assessed = await db.scalar(_count(Asset.self_assessed.is_(True))) or 0
+    with_pii = await db.scalar(_count(Asset.data_categories.ilike("%pii%"))) or 0
+    return {
+        "total": total,
+        "high_or_critical_value": high_val,
+        "self_assessed": self_assessed,
+        "self_assessed_pct": round(self_assessed / total * 100, 1) if total else 0.0,
+        "with_pii": with_pii,
+    }
 
 
 @router.post("", response_model=AssetRead, status_code=201, dependencies=[Depends(require("asset:write"))])

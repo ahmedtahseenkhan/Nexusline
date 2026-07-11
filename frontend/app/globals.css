@@ -821,3 +821,50 @@ textarea.input { resize: vertical; min-height: 84px; line-height: 1.5; }
 .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px 22px; }
 .meta-item .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); font-weight: 600; }
 .meta-item .v { font-size: 13.5px; color: var(--text-strong); margin-top: 2px; }
+
+/* ---- Enterprise data primitives (DataTable / RecordDrawer / AsyncSelect) ---- */
+.data-table-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+tr.active-row > td { background: var(--primary-weak); }
+.table-foot { border-top: 1px solid var(--border); }
+
+.skeleton {
+  display: block; height: 12px; border-radius: 6px;
+  background: linear-gradient(90deg, var(--bg-tint) 25%, var(--border) 37%, var(--bg-tint) 63%);
+  background-size: 400% 100%; animation: skeleton 1.2s ease-in-out infinite;
+}
+@keyframes skeleton { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
+.linklike { background: none; border: none; color: var(--primary-text); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
+
+/* Slide-over drawer */
+.drawer-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(12, 18, 29, 0.32);
+  display: flex; justify-content: flex-end;
+  animation: drawer-fade 0.12s ease-out;
+}
+.drawer {
+  height: 100%; max-width: 94vw; background: var(--surface);
+  box-shadow: var(--shadow-lg); display: flex; flex-direction: column;
+  animation: drawer-slide 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes drawer-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drawer-slide { from { transform: translateX(24px); opacity: 0.6; } to { transform: translateX(0); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .drawer, .drawer-overlay { animation: none; } }
+.drawer-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 16px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.drawer-body { padding: 18px 20px; overflow-y: auto; flex: 1; }
+
+/* Async typeahead menu */
+.async-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 5;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-md);
+  max-height: 260px; overflow-y: auto; padding: 4px;
+}
+.async-opt { padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13.5px; display: flex; align-items: baseline; }
+.async-opt.active { background: var(--primary-weak); }
