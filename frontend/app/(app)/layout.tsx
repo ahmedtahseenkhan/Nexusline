@@ -6,6 +6,7 @@ import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import { api, getToken, type Me, type ModuleState } from "@/lib/api";
 import { ModulesProvider, buildModulesContext, moduleForRoute, routeDisabled } from "@/lib/modules";
+import { FeedbackHost } from "@/lib/feedback";
 
 function ModuleLocked({ module: mod }: { module?: ModuleState }) {
   return (
@@ -74,6 +75,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           </main>
         </div>
       </div>
+      <FeedbackHost />
     </ModulesProvider>
   );
 }

@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { confirmDialog, toast } from "@/lib/feedback";
 import { type Page } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
@@ -145,16 +146,17 @@ function ITAssetsInner() {
       else await apiCall<Asset>("POST", "/assets", payload);
       setShowForm(false); setRefreshKey((k) => k + 1); loadSummary();
       if (openId) loadDetail(openId);
+      toast(editing ? "Changes saved" : "Created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save IT asset");
     } finally { setSaving(false); }
   }
   async function remove(a: Asset) {
-    if (!window.confirm(`Archive IT asset "${a.name}"? It will be removed from the inventory.`)) return;
+    if (!(await confirmDialog({ title: `Archive IT asset "${a.name}"?`, message: "It will be removed from the inventory.", confirmLabel: "Archive", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/assets/${a.id}`);
-      setShowForm(false); if (openId === a.id) setOpenId(null); setRefreshKey((k) => k + 1); loadSummary();
+      setShowForm(false); if (openId === a.id) setOpenId(null); setRefreshKey((k) => k + 1); loadSummary(); toast("Archived");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete IT asset"); }
   }
   async function createTag() {
@@ -173,7 +175,7 @@ function ITAssetsInner() {
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to link information asset"); }
   }
   async function removeDependency(depId: string) {
-    if (!detail) return; if (!window.confirm("Unlink this hosted information asset?")) return;
+    if (!detail) return; if (!(await confirmDialog({ title: "Unlink this hosted information asset?", danger: true, confirmLabel: "Unlink" }))) return;
     try { await apiCall<void>("DELETE", `/assets/dependencies/${depId}`); loadDetail(detail.id); }
     catch (e) { setError(e instanceof Error ? e.message : "Failed to unlink information asset"); }
   }

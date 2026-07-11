@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { confirmDialog } from "@/lib/feedback";
 
 export type FormTab = { id: string; label: string; content: ReactNode; required?: boolean };
 
@@ -37,10 +38,21 @@ export default function FormModal({
   const [active, setActive] = useState(tabs[0]?.id);
   const [clientError, setClientError] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const dirtyRef = useRef(false);
+
+  /** Close, but guard unsaved edits: any change in the form marks it dirty, and closing
+   *  a dirty form prompts before discarding — so a stray Escape/overlay-click can't wipe
+   *  a half-completed multi-tab record. */
+  const requestClose = useCallback(async () => {
+    if (!dirtyRef.current) return onClose();
+    if (await confirmDialog({ title: "Discard changes?", message: "Your edits to this form haven't been saved.", confirmLabel: "Discard", danger: true })) {
+      onClose();
+    }
+  }, [onClose]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") requestClose();
     }
     window.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
@@ -48,7 +60,7 @@ export default function FormModal({
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
-  }, [onClose]);
+  }, [requestClose]);
 
   function labelFor(el: Element): string {
     const lbl = el.closest(".field")?.querySelector("label")?.textContent || "";
@@ -82,19 +94,21 @@ export default function FormModal({
     onSave();
   }
 
-  // Clear a field's error highlight as soon as the user starts fixing it.
+  // Clear a field's error highlight as soon as the user starts fixing it, and mark the
+  // form dirty so closing it will prompt before discarding.
   function onBodyInput(e: React.FormEvent) {
+    dirtyRef.current = true;
     (e.target as HTMLElement)?.classList?.remove("field-invalid");
   }
 
   const shownError = clientError || error;
 
   return (
-    <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && requestClose()}>
       <div className={`modal${wide ? " wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-head">
           <h2>{title}</h2>
-          <button className="x" onClick={onClose} aria-label="Close">✕</button>
+          <button className="x" onClick={requestClose} aria-label="Close">✕</button>
         </div>
 
         {tabs.length > 1 && (
@@ -129,7 +143,7 @@ export default function FormModal({
 
         <div className="modal-foot">
           {footerLeft && <div className="spacer">{footerLeft}</div>}
-          <button className="btn secondary" onClick={onClose} type="button" disabled={saving}>
+          <button className="btn secondary" onClick={requestClose} type="button" disabled={saving}>
             Close
           </button>
           <button className="btn" onClick={handleSave} type="button" disabled={saving}>
