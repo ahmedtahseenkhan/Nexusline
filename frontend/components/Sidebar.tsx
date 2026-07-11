@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { routeDisabled, useModules } from "@/lib/modules";
 import {
   IconActivity,
   IconAlert,
@@ -123,6 +124,13 @@ const NAV: Section[] = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { disabledRoutes } = useModules();
+  // Hide nav entries for modules this installation hasn't licensed/enabled;
+  // sections that empty out disappear entirely.
+  const nav = NAV.map((section) => ({
+    ...section,
+    items: section.items.filter((it) => !routeDisabled(it.href, disabledRoutes)),
+  })).filter((section) => section.items.length > 0);
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -132,7 +140,7 @@ export default function Sidebar() {
         <span className="wordmark">Nexus<b>Line</b></span>
       </div>
       <nav className="nav">
-        {NAV.map((section) => (
+        {nav.map((section) => (
           <div key={section.title}>
             <div className="nav-section">{section.title}</div>
             {section.items.map((it) => {

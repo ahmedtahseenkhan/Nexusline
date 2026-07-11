@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type SystemInfo, type SystemHealth, type BackupItem } from "@/lib/api";
+import { api, type SystemInfo, type SystemHealth, type BackupItem, type ModuleState } from "@/lib/api";
 import { Badge } from "@/components/badges";
 
 function fmtBytes(n: number) {
@@ -16,6 +16,7 @@ export default function SystemSettings() {
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [backups, setBackups] = useState<BackupItem[]>([]);
+  const [modules, setModules] = useState<ModuleState[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -24,6 +25,7 @@ export default function SystemSettings() {
     setInfo(await api.systemInfo().catch(() => null));
     setHealth(await api.systemHealth().catch(() => null));
     setBackups(await api.listBackups().catch(() => []));
+    setModules(await api.systemModules().catch(() => []));
   }
   useEffect(() => {
     load();
@@ -99,6 +101,31 @@ export default function SystemSettings() {
             </div>
           </div>
         </div>
+
+        {/* Module entitlements: what the license includes and what config hides */}
+        {modules.length > 0 && (
+          <div style={{ marginTop: 18 }}>
+            <b style={{ fontSize: 14 }}>Modules</b>
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 8px" }}>
+              Enabled by the installation license; hidden modules can be unlocked with a license
+              update — no reinstall needed. <code>DISABLED_MODULES</code> in the deploy config hides
+              licensed modules.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 6 }}>
+              {modules.map((m) => (
+                <div key={m.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 13, border: "1px solid var(--border, #e5e7eb)", borderRadius: 6, padding: "6px 10px" }}>
+                  <span title={m.description}>
+                    {m.title}
+                    <span className="muted" style={{ display: "block", fontSize: 11 }}>{m.category}</span>
+                  </span>
+                  <Badge tone={m.enabled ? "low" : "neutral"}>
+                    {m.enabled ? "on" : m.licensed ? "hidden" : "unlicensed"}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Actions */}
         <div style={{ display: "flex", gap: 8, marginTop: 18, flexWrap: "wrap" }}>

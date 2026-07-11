@@ -37,6 +37,7 @@ from app.schemas.authority import (
     DualControlRuleUpdate,
 )
 from app.schemas.common import Page
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["delegation of authority"])
@@ -46,8 +47,7 @@ _WRITE = Depends(require("authority:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):

@@ -36,6 +36,7 @@ from app.schemas.internal_audit import (
     ProcedureRead,
     ProcedureUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["internal audit"])
@@ -45,8 +46,7 @@ _WRITE = Depends(require("internal_audit:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 # ============================================================ audit universe ===
@@ -74,7 +74,7 @@ async def create_unit(body: AuditableUnitCreate, db: DbSession, user: CurrentUse
 
 
 async def _load_unit(db, unit_id: uuid.UUID) -> AuditableUnit:
-    obj = await db.scalar(select(AuditableUnit).where(AuditableUnit.id == unit_id))
+    obj = await db.scalar(select(AuditableUnit).where(AuditableUnit.id == unit_id, AuditableUnit.deleted.is_(False)))
     if obj is None:
         raise HTTPException(status_code=404, detail="Auditable unit not found")
     return obj
@@ -100,7 +100,7 @@ async def delete_unit(unit_id: uuid.UUID, db: DbSession) -> None:
 # ============================================================== engagements ===
 async def _load_engagement(db, eid: uuid.UUID) -> AuditEngagement:
     obj = await db.scalar(
-        select(AuditEngagement).where(AuditEngagement.id == eid).execution_options(populate_existing=True)
+        select(AuditEngagement).where(AuditEngagement.id == eid, AuditEngagement.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Audit engagement not found")
@@ -180,8 +180,9 @@ async def update_procedure(pid: uuid.UUID, body: ProcedureUpdate, db: DbSession)
 @router.delete("/audit-procedures/{pid}", status_code=204, dependencies=[_WRITE])
 async def delete_procedure(pid: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(AuditProcedure).where(AuditProcedure.id == pid))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # ---------------------------------------------------------------- findings ---
@@ -222,8 +223,9 @@ async def update_finding(fid: uuid.UUID, body: FindingUpdate, db: DbSession) -> 
 @router.delete("/audit-findings/{fid}", status_code=204, dependencies=[_WRITE])
 async def delete_finding(fid: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(AuditFinding).where(AuditFinding.id == fid))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 @router.get("/audit-findings", response_model=list[FindingRead], dependencies=[_READ],
@@ -233,7 +235,12 @@ async def list_findings(
     status_filter: Annotated[AuditFindingStatus | None, Query(alias="status")] = None,
     overdue: bool = False,
 ) -> list[FindingRead]:
-    stmt = select(AuditFinding)
+    # Exclude findings of archived engagements from the remediation follow-up view.
+    stmt = (
+        select(AuditFinding)
+        .join(AuditEngagement, AuditEngagement.id == AuditFinding.engagement_id)
+        .where(AuditEngagement.deleted.is_(False))
+    )
     if status_filter is not None:
         stmt = stmt.where(AuditFinding.status == status_filter)
     rows = (await db.scalars(stmt.order_by(AuditFinding.due_date.is_(None), AuditFinding.due_date))).all()

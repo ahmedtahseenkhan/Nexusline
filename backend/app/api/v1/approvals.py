@@ -15,6 +15,7 @@ from app.models.approval import ApprovalAction, ApprovalRequest
 from app.models.enums import ApprovalStatus
 from app.schemas.approval import ApprovalCreate, ApprovalDecision, ApprovalRead
 from app.schemas.common import Page
+from app.services.refs import next_reference
 from app.services import audit
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
@@ -32,8 +33,7 @@ async def _load(db, approval_id: uuid.UUID) -> ApprovalRequest:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(ApprovalRequest)) or 0
-    return f"APR-{count + 1:03d}"
+    return await next_reference(db, ApprovalRequest, "APR")
 
 
 @router.get("", response_model=Page[ApprovalRead], dependencies=[Depends(require("workflow:read"))])

@@ -22,6 +22,7 @@ from app.schemas.esg import (
     EsgAssessmentRead,
     EsgAssessmentUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["esg"])
@@ -31,13 +32,12 @@ _WRITE = Depends(require("esg:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 

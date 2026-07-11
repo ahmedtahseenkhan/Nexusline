@@ -24,6 +24,7 @@ from app.schemas.awareness import (
     ProgramUpdate,
     QuizSubmit,
 )
+from app.services.refs import next_reference
 from app.services import audit
 from app.services.risk_scoring import next_review_date
 
@@ -31,7 +32,11 @@ router = APIRouter(prefix="/awareness-programs", tags=["awareness"])
 
 
 async def _load(db, program_id: uuid.UUID) -> AwarenessProgram:
-    obj = await db.scalar(select(AwarenessProgram).where(AwarenessProgram.id == program_id))
+    obj = await db.scalar(
+        select(AwarenessProgram).where(
+            AwarenessProgram.id == program_id, AwarenessProgram.deleted.is_(False)
+        )
+    )
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Program not found")
     return obj
@@ -44,8 +49,7 @@ async def _fresh(db, program_id: uuid.UUID) -> AwarenessProgram:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(AwarenessProgram)) or 0
-    return f"AW-{count + 1:03d}"
+    return await next_reference(db, AwarenessProgram, "AW")
 
 
 @router.get("", response_model=list[ProgramSummary], dependencies=[Depends(require("awareness:read"))])

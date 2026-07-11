@@ -537,7 +537,9 @@ async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
     dependencies=[Depends(require("compliance:read"))],
 )
 async def compliance_summary(db: DbSession) -> ComplianceSummary:
-    frameworks = (await db.scalars(select(Framework).order_by(Framework.name))).all()
+    frameworks = (await db.scalars(
+        select(Framework).where(Framework.deleted.is_(False)).order_by(Framework.name)
+    )).all()
     rows: list[FrameworkSummary] = []
     total_reqs = 0
     total_compliant = 0

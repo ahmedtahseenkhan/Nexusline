@@ -22,6 +22,7 @@ from app.schemas.bia import (
     BiaUpdate,
 )
 from app.schemas.common import Page
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["business impact analysis"])
@@ -31,20 +32,19 @@ _WRITE = Depends(require("bia:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
 
 async def _load_bia(db, bid) -> BiaAssessment:
     obj = await db.scalar(
-        select(BiaAssessment).where(BiaAssessment.id == bid).execution_options(populate_existing=True)
+        select(BiaAssessment).where(BiaAssessment.id == bid, BiaAssessment.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="BIA not found")
@@ -99,10 +99,13 @@ async def update_bia(bid: uuid.UUID, body: BiaUpdate, db: DbSession) -> BiaRead:
 
 
 @router.delete("/bia/{bid}", status_code=204, dependencies=[_WRITE])
-async def delete_bia(bid: uuid.UUID, db: DbSession) -> None:
+async def delete_bia(bid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_bia(db, bid)
     obj.deleted = True
     obj.deleted_date = date.today()
+    await db.flush()
+    await audit_log.record(db, actor=user, action="delete", entity_type="bia_assessment",
+                         entity_id=obj.id, summary=f"Archived BIA {obj.reference}")
     await db.flush()
 
 
@@ -127,8 +130,9 @@ async def update_dependency(line_id: uuid.UUID, body: BiaDependencyUpdate, db: D
 @router.delete("/bia-dependencies/{line_id}", status_code=204, dependencies=[_WRITE])
 async def delete_dependency(line_id: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(BiaDependency).where(BiaDependency.id == line_id))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # -------------------------------------------------------------------- summary ---

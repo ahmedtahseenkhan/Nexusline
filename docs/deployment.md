@@ -227,6 +227,51 @@ default paths (`/app/deploy/license.key`, `/app/deploy/license_pubkey.pem`)
 resolve automatically. With `ENFORCE_LICENSE=true`, the API refuses to start on
 an absent, invalid, or expired license. Keep `ENFORCE_LICENSE=false` for dev.
 
+### 8.1 Module packaging (per-client entitlements)
+
+Every client runs the **same build**; which modules are active is decided by the
+license. When minting a license, list editions and/or individual module keys:
+
+```bash
+# Vendor side — one-time keypair (private key NEVER ships):
+python -m app.tools.license keygen --out deploy
+
+# Conventional bank (no Shariah module):
+python -m app.tools.license sign --key deploy/license_signing_key.pem \
+  --to "Conventional Bank Ltd" --plan enterprise --seats 200 --days 365 \
+  --modules financial_crime,enterprise_risk,resilience,audit,governance \
+  --out license-conventional.key
+
+# Islamic bank (adds Shariah governance):
+python -m app.tools.license sign --key deploy/license_signing_key.pem \
+  --to "Islamic Bank Ltd" --plan enterprise --seats 200 --days 365 \
+  --modules islamic_banking,financial_crime,enterprise_risk,audit \
+  --out license-islamic.key
+
+# Catalog of module keys and edition bundles:
+python -m app.tools.license modules
+```
+
+Rules of thumb:
+
+- **Omitting `--modules` unlocks everything** (also true for licenses minted
+  before module packaging existed). Use `--modules core` to license only the
+  base platform.
+- A **disabled module is enforced server-side** (its API returns 403) and
+  disappears from the sidebar; direct URLs show a "module not enabled" notice.
+- The database schema is identical on every install — enabling a module later
+  is a **license-file swap plus API restart**, no reinstall or migration.
+- `DISABLED_MODULES` in `.env` (comma-separated module keys, e.g.
+  `DISABLED_MODULES=esg,ai_assist`) hides licensed modules a client doesn't
+  want to see; the license always remains the entitlement ceiling.
+- The **Settings → System** admin view shows the full module matrix
+  (on / hidden / unlicensed) and the license status.
+
+Selling upgrades: a conventional bank that later opens an Islamic-banking
+window just gets a re-signed license including `islamic_banking` — flip the
+file, restart the api container, and the Shariah module appears with all its
+seeded content intact.
+
 ---
 
 ## 9. Support

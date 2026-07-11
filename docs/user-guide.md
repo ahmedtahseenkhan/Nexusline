@@ -117,6 +117,8 @@ These are System-section services that plug into modules rather than modules in 
 
 The left navigation groups every module into seven sections, which this guide follows exactly: **Overview, Risk, Compliance, Governance, Organization, Operations, System**.
 
+**Not seeing a module described in this guide?** Installations are licensed per module — the sidebar only shows what your license enables (for example, conventional banks typically don't license **Shariah Governance**; Islamic banks do). Administrators can see the full module matrix — *on / hidden / unlicensed* — under **Settings → System → Modules**. Enabling an additional module is a license update from your vendor, not a reinstall: your data model already supports every module, so nothing is lost or migrated when one is switched on later. A licensed module can also be hidden by the deployment's `DISABLED_MODULES` setting; opening its URL directly shows a "module not enabled" notice, and its API rejects calls, so hiding a module genuinely turns it off rather than just removing the menu entry.
+
 ---
 
 ## 5. Overview
@@ -429,7 +431,12 @@ The left navigation groups every module into seven sections, which this guide fo
 
 ### Custom Fields (`/custom-fields`)
 **Purpose:** Add tenant-specific fields to a record type without code changes.
-**How to use it:** Pick a module (risk, control, asset, vendor, policy, incident, project, goal, exception, processing_activity, continuity_plan, or framework), name the field, pick its type (text/textarea/number/date/select/checkbox), mark required if needed. It then appears automatically in that record type's Custom Fields panel ([§3.2](#32-recordpanels--the-shared-toolkit-on-every-record)) everywhere.
+**How to use it:** Pick a module (all ~32 record types are supported — risk, control, asset, vendor, policy, incident, shariah_review, rcsa_assessment, audit_engagement, and so on), name the field, pick its type (text/textarea/number/date/select/checkbox), mark required if needed.
+**Where the field appears:**
+- **Risk Register** — as a **Custom fields tab directly inside the Add/Edit risk form**; values save together with the risk, and required custom fields block saving like any other required field.
+- **Every other record type** — in the **Custom Fields panel on the record's detail view** ([§3.2](#32-recordpanels--the-shared-toolkit-on-every-record)): create/open the record, fill the custom values in that panel, and click **Save fields** (a separate save from the main form).
+
+Fields do not appear retroactively inside other modules' Add/Edit dialogs — the record must exist before its panel shows. If you define a field and see nothing, check you picked the model key matching the module you're testing (e.g. `shariah_review`, not `risk`).
 
 ### Status Rules (`/status-rules`)
 **Purpose:** Auto-label records with a colored badge when a field meets a condition (e.g. "Above Tolerance" when a score exceeds a threshold).
@@ -457,7 +464,7 @@ The left navigation groups every module into seven sections, which this guide fo
 
 ### Settings (`/settings`)
 **Purpose:** General admin hub — organization info, system health, personal security, and LDAP.
-**What's here:** organization/role summary, a **Send test email** button (to verify SMTP), read-only system health/version/license info, personal **MFA enable/change password**, the **LDAP/Active Directory** configuration card (host, bind DN, base DN, user filter, default role for JIT users), and an Administration hub linking out to Users & Roles, SSO, Webhooks, Custom Fields, Status Rules, Saved Filters, Import/Export, and the Activity Log.
+**What's here:** organization/role summary, a **Send test email** button (to verify SMTP), read-only system health/version/license info, the per-installation **module entitlement matrix** (which modules are on, hidden by config, or unlicensed), personal **MFA enable/change password**, the **LDAP/Active Directory** configuration card (host, bind DN, base DN, user filter, default role for JIT users), and an Administration hub linking out to Users & Roles, SSO, Webhooks, Custom Fields, Status Rules, Saved Filters, Import/Export, and the Activity Log.
 
 ---
 

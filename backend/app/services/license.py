@@ -32,6 +32,10 @@ class LicenseInfo:
     plan: str = ""
     seats: int = 0
     features: list[str] = field(default_factory=list)
+    # Licensed module entitlements: edition names and/or module keys (see
+    # app/core/modules.py). None (field absent from the payload) means the
+    # license predates module packaging and unlocks everything.
+    modules: list[str] | None = None
     issued: str = ""
     expires: str = ""
     deployment: str = ""
@@ -45,6 +49,7 @@ class LicenseInfo:
             "plan": self.plan,
             "seats": self.seats,
             "features": self.features,
+            "modules": self.modules,
             "issued": self.issued,
             "expires": self.expires,
             "deployment": self.deployment,
@@ -142,6 +147,7 @@ def verify_token(token: str) -> LicenseInfo:
         plan=str(payload.get("plan", "")),
         seats=int(payload.get("seats", 0) or 0),
         features=list(payload.get("features", []) or []),
+        modules=list(payload["modules"]) if payload.get("modules") is not None else None,
         issued=str(payload.get("issued", "")),
         expires=str(payload.get("expires", "")),
         deployment=str(payload.get("deployment", "")),

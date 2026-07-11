@@ -108,10 +108,18 @@ class ProcessingActivity(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workf
     business_unit: Mapped["BusinessUnit | None"] = relationship(  # noqa: F821
         "BusinessUnit", lazy="selectin"
     )
-    assets: Mapped[list["Asset"]] = relationship(secondary=ropa_assets, lazy="selectin")  # noqa: F821
-    risks: Mapped[list["Risk"]] = relationship(secondary=ropa_risks, lazy="selectin")  # noqa: F821
-    processes: Mapped[list["Process"]] = relationship(secondary=ropa_processes, lazy="selectin")  # noqa: F821
-    policies: Mapped[list["Policy"]] = relationship(secondary=ropa_policies, lazy="selectin")  # noqa: F821
+    assets: Mapped[list["Asset"]] = relationship(secondary=ropa_assets, lazy="selectin",
+        secondaryjoin="and_(ropa_assets.c.asset_id == Asset.id, Asset.deleted == False)",
+    )  # noqa: F821
+    risks: Mapped[list["Risk"]] = relationship(secondary=ropa_risks, lazy="selectin",
+        secondaryjoin="and_(ropa_risks.c.risk_id == Risk.id, Risk.deleted == False)",
+    )  # noqa: F821
+    processes: Mapped[list["Process"]] = relationship(secondary=ropa_processes, lazy="selectin",
+        secondaryjoin="and_(ropa_processes.c.process_id == Process.id, Process.deleted == False)",
+    )  # noqa: F821
+    policies: Mapped[list["Policy"]] = relationship(secondary=ropa_policies, lazy="selectin",
+        secondaryjoin="and_(ropa_policies.c.policy_id == Policy.id, Policy.deleted == False)",
+    )  # noqa: F821
 
     @property
     def has_transfer_gap(self) -> bool:

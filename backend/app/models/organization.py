@@ -44,7 +44,9 @@ class BusinessUnit(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMix
     email: Mapped[str] = mapped_column(String(255), default="")
     location: Mapped[str] = mapped_column(String(200), default="")
 
-    legals: Mapped[list["Legal"]] = relationship(secondary=business_units_legals, lazy="selectin")
+    legals: Mapped[list["Legal"]] = relationship(secondary=business_units_legals, lazy="selectin",
+        secondaryjoin="and_(business_units_legals.c.legal_id == Legal.id, Legal.deleted == False)",
+    )
 
 
 class Process(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
@@ -81,5 +83,6 @@ class Legal(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Sof
     risk_magnifier: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
 
     business_units: Mapped[list["BusinessUnit"]] = relationship(
-        secondary=business_units_legals, lazy="selectin", overlaps="legals"
+        secondary=business_units_legals, lazy="selectin", overlaps="legals",
+        secondaryjoin="and_(business_units_legals.c.business_unit_id == BusinessUnit.id, BusinessUnit.deleted == False)",
     )

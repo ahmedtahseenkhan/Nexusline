@@ -72,15 +72,20 @@ class ExceptionRecord(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflow
     approver_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     decided_at: Mapped[date | None] = mapped_column(Date, nullable=True)
 
-    risks: Mapped[list["Risk"]] = relationship(secondary=exception_risks, lazy="selectin")  # noqa: F821
+    risks: Mapped[list["Risk"]] = relationship(secondary=exception_risks, lazy="selectin",
+        secondaryjoin="and_(exception_risks.c.risk_id == Risk.id, Risk.deleted == False)",
+    )  # noqa: F821
     policies: Mapped[list["Policy"]] = relationship(  # noqa: F821
-        secondary=exception_policies, lazy="selectin"
+        secondary=exception_policies, lazy="selectin",
+        secondaryjoin="and_(exception_policies.c.policy_id == Policy.id, Policy.deleted == False)",
     )
     requirements: Mapped[list["Requirement"]] = relationship(  # noqa: F821
-        secondary=exception_requirements, lazy="selectin"
+        secondary=exception_requirements, lazy="selectin",
+        secondaryjoin="and_(exception_requirements.c.requirement_id == Requirement.id, Requirement.deleted == False)",
     )
     controls: Mapped[list["Control"]] = relationship(  # noqa: F821
-        secondary=exception_controls, lazy="selectin"
+        secondary=exception_controls, lazy="selectin",
+        secondaryjoin="and_(exception_controls.c.control_id == Control.id, Control.deleted == False)",
     )
     assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
         "Asset", secondary="assets_exceptions", lazy="selectin", viewonly=True

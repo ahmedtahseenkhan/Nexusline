@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.models.risk import Risk
 from app.models.threat import (
     Threat,
     Vulnerability,
@@ -35,9 +36,13 @@ async def _get(db, model, obj_id, name):
 
 
 async def _usage_counts(db, assoc, fk_col):
-    """Return {entity_id: number-of-risks-referencing-it} from an association table."""
+    """Return {entity_id: number-of-risks-referencing-it} from an association table,
+    excluding archived (soft-deleted) risks."""
     rows = await db.execute(
-        select(fk_col, func.count()).select_from(assoc).group_by(fk_col)
+        select(fk_col, func.count())
+        .select_from(assoc.join(Risk, Risk.id == assoc.c.risk_id))
+        .where(Risk.deleted.is_(False))
+        .group_by(fk_col)
     )
     return {row[0]: row[1] for row in rows.all()}
 

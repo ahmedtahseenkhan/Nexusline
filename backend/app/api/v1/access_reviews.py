@@ -20,6 +20,7 @@ from app.schemas.access_review import (
     ReviewUpdate,
 )
 from app.schemas.common import Page
+from app.services.refs import next_reference
 from app.services import audit
 from app.services.risk_scoring import next_review_date
 
@@ -27,7 +28,9 @@ router = APIRouter(prefix="/access-reviews", tags=["access reviews"])
 
 
 async def _load(db, review_id: uuid.UUID) -> AccessReview:
-    obj = await db.scalar(select(AccessReview).where(AccessReview.id == review_id))
+    obj = await db.scalar(
+        select(AccessReview).where(AccessReview.id == review_id, AccessReview.deleted.is_(False))
+    )
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
     return obj
@@ -51,8 +54,7 @@ async def _item_or_404(db, review_id, item_id) -> AccessReviewItem:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(AccessReview)) or 0
-    return f"AR-{count + 1:03d}"
+    return await next_reference(db, AccessReview, "AR")
 
 
 @router.get("", response_model=Page[ReviewRead], dependencies=[Depends(require("review:read"))])

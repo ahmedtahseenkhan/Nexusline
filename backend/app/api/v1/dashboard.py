@@ -24,7 +24,9 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
     settings = await get_or_create_settings(db, user.tenant_id)
     rows = (
-        await db.scalars(select(Risk).execution_options(populate_existing=True))
+        await db.scalars(
+            select(Risk).where(Risk.deleted.is_(False)).execution_options(populate_existing=True)
+        )
     ).all()
 
     by_status: Counter[str] = Counter()
@@ -55,13 +57,18 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
         if r.annual_loss_expectancy:
             total_exposure += r.annual_loss_expectancy
 
-    total_controls = await db.scalar(select(func.count()).select_from(Control)) or 0
-    total_assets = await db.scalar(select(func.count()).select_from(Asset)) or 0
+    total_controls = await db.scalar(
+        select(func.count()).select_from(Control).where(Control.deleted.is_(False))
+    ) or 0
+    total_assets = await db.scalar(
+        select(func.count()).select_from(Asset).where(Asset.deleted.is_(False))
+    ) or 0
     pending = (
         await db.scalar(
             select(func.count())
             .select_from(RiskAcceptance)
-            .where(RiskAcceptance.status == AcceptanceStatus.pending)
+            .join(Risk, Risk.id == RiskAcceptance.risk_id)
+            .where(RiskAcceptance.status == AcceptanceStatus.pending, Risk.deleted.is_(False))
         )
         or 0
     )

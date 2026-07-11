@@ -34,6 +34,7 @@ from app.schemas.operational_risk import (
     RcsaRiskUpdate,
     RcsaUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["operational risk"])
@@ -43,13 +44,12 @@ _WRITE = Depends(require("oprisk:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
@@ -124,8 +124,9 @@ async def update_rcsa_risk(line_id: uuid.UUID, body: RcsaRiskUpdate, db: DbSessi
 @router.delete("/rcsa-risks/{line_id}", status_code=204, dependencies=[_WRITE])
 async def delete_rcsa_risk(line_id: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(RcsaRisk).where(RcsaRisk.id == line_id))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # ===================================================================== KRIs ===
@@ -176,9 +177,13 @@ async def add_measurement(kid: uuid.UUID, body: MeasurementCreate, db: DbSession
     kri = await _load_kri(db, kid)
     m = KriMeasurement(tenant_id=user.tenant_id, kri_id=kid, **body.model_dump())
     db.add(m)
-    # Update the KRI's current value (drives RAG status) from this measurement.
-    kri.current_value = body.value
-    kri.last_measured_date = body.as_of_date or date.today()
+    # Only advance the KRI's current value (which drives RAG status) when this measurement
+    # is the most recent one — otherwise back-filling an older reading would corrupt the
+    # live status and regress last_measured_date.
+    as_of = body.as_of_date or date.today()
+    if kri.last_measured_date is None or as_of >= kri.last_measured_date:
+        kri.current_value = body.value
+        kri.last_measured_date = as_of
     await db.flush()
     return KriRead.model_validate(await _load_kri(db, kid))
 

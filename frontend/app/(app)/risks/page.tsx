@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, apiCall, type RiskSetting, type StatusLabel } from "@/lib/api";
+import { api, apiCall, type CustomField, type RiskSetting, type StatusLabel } from "@/lib/api";
+import CustomFieldsEditor from "@/components/CustomFieldsEditor";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
@@ -229,6 +230,10 @@ export default function RisksPage() {
   const [f, setF] = useState<FormState>(BLANK);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
+  // org-defined custom fields, edited inside the form and saved with the record
+  const [cfDefs, setCfDefs] = useState<CustomField[]>([]);
+  const [cfValues, setCfValues] = useState<Record<string, string>>({});
+
   async function load() {
     try {
       const r = await apiCall<Page<RiskRow>>("GET", "/risks?limit=200");
@@ -255,17 +260,26 @@ export default function RisksPage() {
     apiCall<Page<Named>>("GET", "/policies?limit=200").then((r) => setPolicies(r.items)).catch(() => {});
     apiCall<Page<Named>>("GET", "/incidents?limit=200").then((r) => setIncidents(r.items)).catch(() => {});
     apiCall<Page<UserRow>>("GET", "/users?limit=200").then((r) => setUsers(r.items)).catch(() => {});
+    api.customFields("risk").then((d) => setCfDefs(d.filter((x) => x.enabled))).catch(() => {});
   }, []);
 
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    setCfValues({});
     setError(null);
     setShowForm(true);
   }
   function openEdit(r: RiskRow) {
     setEditing(r);
     setF(fromRisk(r));
+    setCfValues({});
+    if (cfDefs.length) {
+      api
+        .customFieldValues("risk", r.id)
+        .then((rows) => setCfValues(Object.fromEntries(rows.map((x) => [x.field.id, x.value]))))
+        .catch(() => {});
+    }
     setError(null);
     setShowForm(true);
   }
@@ -275,8 +289,12 @@ export default function RisksPage() {
     setSaving(true);
     try {
       const payload = toPayload(f);
+      let riskId = editing?.id;
       if (editing) await apiCall("PATCH", `/risks/${editing.id}`, payload);
-      else await apiCall("POST", "/risks", payload);
+      else riskId = (await apiCall<RiskRow>("POST", "/risks", payload)).id;
+      if (cfDefs.length && riskId) {
+        await api.setCustomFieldValues("risk", riskId, cfValues);
+      }
       setShowForm(false);
       await load();
     } catch (e) {
@@ -620,6 +638,20 @@ export default function RisksPage() {
             { id: "assessment", label: "Assessment", content: assessmentTab },
             { id: "links", label: "Links & Relations", content: linksTab },
             { id: "review", label: "Review", content: reviewTab },
+            ...(cfDefs.length
+              ? [{
+                  id: "custom",
+                  label: "Custom fields",
+                  required: cfDefs.some((d) => d.required),
+                  content: (
+                    <CustomFieldsEditor
+                      fields={cfDefs}
+                      values={cfValues}
+                      onChange={(id, v) => setCfValues((p) => ({ ...p, [id]: v }))}
+                    />
+                  ),
+                }]
+              : []),
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

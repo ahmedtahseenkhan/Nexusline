@@ -16,6 +16,7 @@ from app.models.privacy import ProcessingActivity
 from app.models.risk import Risk
 from app.schemas.common import Page
 from app.schemas.privacy import RopaCreate, RopaRead, RopaUpdate
+from app.services.refs import next_reference
 from app.services import audit
 
 router = APIRouter(prefix="/processing-activities", tags=["privacy"])
@@ -70,8 +71,7 @@ async def _apply_links(db, obj: ProcessingActivity, data: dict) -> None:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(ProcessingActivity)) or 0
-    return f"ROPA-{count + 1:03d}"
+    return await next_reference(db, ProcessingActivity, "ROPA")
 
 
 @router.get("", response_model=Page[RopaRead], dependencies=[Depends(require("privacy:read"))])

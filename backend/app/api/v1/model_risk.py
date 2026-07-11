@@ -32,6 +32,7 @@ from app.schemas.model_risk import (
     ValidationRead,
     ValidationUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["model risk"])
@@ -41,20 +42,19 @@ _WRITE = Depends(require("modelrisk:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
 
 async def _load_model(db, mid) -> ModelInventory:
     obj = await db.scalar(
-        select(ModelInventory).where(ModelInventory.id == mid).execution_options(populate_existing=True)
+        select(ModelInventory).where(ModelInventory.id == mid, ModelInventory.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -141,8 +141,11 @@ async def add_validation(mid: uuid.UUID, body: ValidationCreate, db: DbSession, 
     v = ModelValidation(tenant_id=user.tenant_id, model_id=mid, **body.model_dump())
     v.reference = await _next_ref(db, ModelValidation, "VAL")
     db.add(v)
-    # Keep the inventory's validation schedule in step with the recorded exercise.
-    if body.validation_date is not None:
+    # Advance the inventory's last-validation date only for the most recent exercise, so a
+    # back-dated validation entry can't regress the schedule.
+    if body.validation_date is not None and (
+        model.last_validation_date is None or body.validation_date >= model.last_validation_date
+    ):
         model.last_validation_date = body.validation_date
     await db.flush()
     return ModelRead.model_validate(await _load_model(db, mid))
@@ -160,8 +163,9 @@ async def update_validation(vid: uuid.UUID, body: ValidationUpdate, db: DbSessio
 @router.delete("/model-validations/{vid}", status_code=204, dependencies=[_WRITE])
 async def delete_validation(vid: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(ModelValidation).where(ModelValidation.id == vid))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # ================================================================ summary ===

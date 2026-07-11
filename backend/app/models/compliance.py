@@ -115,13 +115,16 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
 
     framework: Mapped[Framework] = relationship(back_populates="requirements")
     controls: Mapped[list["Control"]] = relationship(  # noqa: F821
-        secondary=requirement_controls, lazy="selectin"
+        secondary=requirement_controls, lazy="selectin",
+        secondaryjoin="and_(requirement_controls.c.control_id == Control.id, Control.deleted == False)",
     )
     risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
-        "Risk", secondary=requirement_risks, lazy="selectin"
+        "Risk", secondary=requirement_risks, lazy="selectin",
+        secondaryjoin="and_(requirement_risks.c.risk_id == Risk.id, Risk.deleted == False)",
     )
     policies: Mapped[list["Policy"]] = relationship(  # noqa: F821
-        "Policy", secondary=requirement_policies, lazy="selectin"
+        "Policy", secondary=requirement_policies, lazy="selectin",
+        secondaryjoin="and_(requirement_policies.c.policy_id == Policy.id, Policy.deleted == False)",
     )
     legal: Mapped["Legal | None"] = relationship(lazy="selectin")  # noqa: F821
     findings: Mapped[list["ComplianceFinding"]] = relationship(

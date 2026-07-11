@@ -20,6 +20,20 @@ from app.services import status_rules as engine
 router = APIRouter(prefix="/filters", tags=["filters"])
 
 
+# Read permission required to run a filter over each model (mirrors the module RBAC).
+_MODEL_READ_PERM: dict[str, str] = {
+    "risk": "risk:read",
+    "control": "control:read",
+    "incident": "incident:read",
+    "vendor": "vendor:read",
+    "project": "project:read",
+    "policy": "policy:read",
+    "asset": "asset:read",
+    "goal": "goal:read",
+    "exception": "exception:read",
+}
+
+
 def _is_admin(user) -> bool:
     return "role:write" in user.permission_codes
 
@@ -114,12 +128,26 @@ async def delete_filter(filter_id: uuid.UUID, db: DbSession, user: CurrentUser) 
 
 
 @router.get("/{filter_id}/results", response_model=FilterResults)
-async def run_filter(filter_id: uuid.UUID, db: DbSession, _: CurrentUser) -> FilterResults:
+async def run_filter(filter_id: uuid.UUID, db: DbSession, user: CurrentUser) -> FilterResults:
     flt = await _load(db, filter_id)
+    # A filter is a query over module data: enforce the same privacy as the filter list
+    # (owner or shared) AND the model's read permission, so running someone's filter by id
+    # can't become a data oracle for a user who lacks read access to that module.
+    if not (flt.shared or _is_admin(user) or flt.owner_id == user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your filter")
+    read_perm = _MODEL_READ_PERM.get(flt.model)
+    if read_perm and read_perm not in user.permission_codes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Requires permission: {read_perm}",
+        )
     cls = engine.MODEL_MAP.get(flt.model)
     if cls is None:
         raise HTTPException(status_code=422, detail="Unsupported model")
-    records = (await db.scalars(select(cls))).all()
+    stmt = select(cls)
+    if hasattr(cls, "deleted"):
+        stmt = stmt.where(cls.deleted.is_(False))
+    records = (await db.scalars(stmt)).all()
     matched = [r for r in records if _record_matches(r, flt.match_mode, flt.conditions or [])]
     return FilterResults(
         count=len(matched),

@@ -36,6 +36,7 @@ from app.schemas.shariah import (
     ShariahFindingRead,
     ShariahFindingUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["shariah governance"])
@@ -45,13 +46,12 @@ _WRITE = Depends(require("shariah:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name: str):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
@@ -140,7 +140,7 @@ async def delete_product(pid: uuid.UUID, db: DbSession) -> None:
 # ================================================================ shariah reviews ===
 async def _load_review(db, rid: uuid.UUID) -> ShariahReview:
     obj = await db.scalar(
-        select(ShariahReview).where(ShariahReview.id == rid).execution_options(populate_existing=True)
+        select(ShariahReview).where(ShariahReview.id == rid, ShariahReview.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Shariah review not found")
@@ -224,8 +224,9 @@ async def update_finding(fid: uuid.UUID, body: ShariahFindingUpdate, db: DbSessi
 @router.delete("/shariah-findings/{fid}", status_code=204, dependencies=[_WRITE])
 async def delete_finding(fid: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(ShariahFinding).where(ShariahFinding.id == fid))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # ================================================= purification / charity ledger ===

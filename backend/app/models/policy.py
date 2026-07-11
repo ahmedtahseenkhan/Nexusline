@@ -69,17 +69,20 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     related: Mapped[list["Policy"]] = relationship(
         secondary=policies_related,
         primaryjoin=lambda: Policy.id == policies_related.c.policy_id,
-        secondaryjoin=lambda: Policy.id == policies_related.c.related_id,
+        secondaryjoin=lambda: (policies_related.c.related_id == Policy.id) & (Policy.deleted == False),
         lazy="selectin",
     )
     controls: Mapped[list["Control"]] = relationship(  # noqa: F821
-        "Control", secondary="control_policies", lazy="selectin", viewonly=True
+        "Control", secondary="control_policies", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(control_policies.c.control_id == Control.id, Control.deleted == False)",
     )
     requirements: Mapped[list["Requirement"]] = relationship(  # noqa: F821
-        "Requirement", secondary="requirement_policies", lazy="selectin", viewonly=True
+        "Requirement", secondary="requirement_policies", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(requirement_policies.c.requirement_id == Requirement.id, Requirement.deleted == False)",
     )
     risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
-        "Risk", secondary="risk_policies", lazy="selectin", viewonly=True
+        "Risk", secondary="risk_policies", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(risk_policies.c.risk_id == Risk.id, Risk.deleted == False)",
     )
 
     @property

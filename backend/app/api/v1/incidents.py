@@ -10,11 +10,11 @@ from sqlalchemy import Select, delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
-from app.models.asset import assets_incidents
+from app.models.asset import Asset, assets_incidents
 from app.models.control import Control
 from app.models.enums import IncidentStatus, Severity, StageStatus
 from app.models.incident import DEFAULT_STAGES, Incident, IncidentStage
-from app.models.risk import risk_incidents
+from app.models.risk import Risk, risk_incidents
 from app.models.vendor import Vendor
 from app.schemas.common import Page
 from app.schemas.incident import (
@@ -24,6 +24,7 @@ from app.schemas.incident import (
     StageCreate,
     StageUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
@@ -70,7 +71,26 @@ async def _set_assoc(db, table, self_col: str, other_col: str, self_id, other_id
         await db.execute(insert(table), [{self_col: self_id, other_col: oid} for oid in other_ids])
 
 
+async def _validate_ids(db, model, ids, label: str) -> None:
+    """Reject unknown/soft-deleted link ids with a 400 before they reach the FK layer
+    (an invalid id would otherwise abort the transaction with a 500)."""
+    if not ids or ids is _KEEP:
+        return
+    stmt = select(model.id).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    found = set((await db.scalars(stmt)).all())
+    missing = [str(i) for i in ids if i not in found]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown or archived {label} id(s): {sorted(missing)}",
+        )
+
+
 async def _flush_assoc(db, incident_id, asset_ids, risk_ids) -> None:
+    await _validate_ids(db, Asset, asset_ids, "asset")
+    await _validate_ids(db, Risk, risk_ids, "risk")
     await _set_assoc(db, assets_incidents, "incident_id", "asset_id", incident_id, asset_ids)
     await _set_assoc(db, risk_incidents, "incident_id", "risk_id", incident_id, risk_ids)
 
@@ -94,8 +114,7 @@ async def _stage_or_404(db, incident_id, stage_id) -> IncidentStage:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(Incident)) or 0
-    return f"INC-{count + 1:03d}"
+    return await next_reference(db, Incident, "INC")
 
 
 @router.get("", response_model=Page[IncidentRead], dependencies=[Depends(require("incident:read"))])
@@ -189,12 +208,15 @@ async def update_incident(
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require("incident:write"))],
 )
-async def delete_incident(incident_id: uuid.UUID, db: DbSession) -> None:
+async def delete_incident(incident_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     from datetime import datetime, timezone
 
     obj = await _load(db, incident_id)
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await audit.record(db, actor=user, action="delete", entity_type="incident",
+                         entity_id=obj.id, summary=f"Archived incident {obj.reference}")
 
 
 # ----------------------------------------------------------------- stages

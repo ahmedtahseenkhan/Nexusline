@@ -322,15 +322,23 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     classifications: Mapped[list["AssetClassification"]] = relationship(
         secondary=asset_classification_links, lazy="selectin"
     )
-    processes: Mapped[list["Process"]] = relationship(secondary=assets_processes, lazy="selectin")  # noqa: F821
+    processes: Mapped[list["Process"]] = relationship(secondary=assets_processes, lazy="selectin",
+        secondaryjoin="and_(assets_processes.c.process_id == Process.id, Process.deleted == False)",
+    )  # noqa: F821
     legals: Mapped[list["Legal"]] = relationship(secondary=assets_legals, lazy="selectin")  # noqa: F821
-    requirements: Mapped[list["Requirement"]] = relationship(secondary=assets_requirements, lazy="selectin")  # noqa: F821
-    incidents: Mapped[list["Incident"]] = relationship(secondary=assets_incidents, lazy="selectin")  # noqa: F821
-    exceptions: Mapped[list["ExceptionRecord"]] = relationship(secondary=assets_exceptions, lazy="selectin")  # noqa: F821
+    requirements: Mapped[list["Requirement"]] = relationship(secondary=assets_requirements, lazy="selectin",
+        secondaryjoin="and_(assets_requirements.c.requirement_id == Requirement.id, Requirement.deleted == False)",
+    )  # noqa: F821
+    incidents: Mapped[list["Incident"]] = relationship(secondary=assets_incidents, lazy="selectin",
+        secondaryjoin="and_(assets_incidents.c.incident_id == Incident.id, Incident.deleted == False)",
+    )  # noqa: F821
+    exceptions: Mapped[list["ExceptionRecord"]] = relationship(secondary=assets_exceptions, lazy="selectin",
+        secondaryjoin="and_(assets_exceptions.c.exception_id == ExceptionRecord.id, ExceptionRecord.deleted == False)",
+    )  # noqa: F821
     related_assets: Mapped[list["Asset"]] = relationship(
         secondary=assets_related,
         primaryjoin=lambda: Asset.id == assets_related.c.asset_id,
-        secondaryjoin=lambda: Asset.id == assets_related.c.related_id,
+        secondaryjoin=lambda: (assets_related.c.related_id == Asset.id) & (Asset.deleted == False),
         lazy="selectin",
     )
     reviews: Mapped[list["AssetReview"]] = relationship(
@@ -339,6 +347,7 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     )
     risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
         "Risk", secondary="risk_assets", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(risk_assets.c.risk_id == Risk.id, Risk.deleted == False)",
     )
 
     @property

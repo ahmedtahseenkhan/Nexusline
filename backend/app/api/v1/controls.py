@@ -10,7 +10,7 @@ from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
-from app.models.compliance import requirement_controls
+from app.models.compliance import Requirement, requirement_controls
 from app.models.control import Control, ControlAudit, ControlMaintenance
 from app.models.risk import Risk, risk_controls
 from app.schemas.common import Page
@@ -89,7 +89,24 @@ async def _set_assoc(db, table, self_col: str, other_col: str, self_id, other_id
         await db.execute(insert(table), [{self_col: self_id, other_col: oid} for oid in other_ids])
 
 
+async def _validate_ids(db, model, ids, label: str) -> None:
+    if not ids or ids is _KEEP:
+        return
+    stmt = select(model.id).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    found = set((await db.scalars(stmt)).all())
+    missing = [str(i) for i in ids if i not in found]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown or archived {label} id(s): {sorted(missing)}",
+        )
+
+
 async def _flush_assoc(db, control_id, stash: dict) -> None:
+    await _validate_ids(db, Requirement, stash["requirements"], "requirement")
+    await _validate_ids(db, Risk, stash["risks"], "risk")
     await _set_assoc(
         db, requirement_controls, "control_id", "requirement_id", control_id, stash["requirements"]
     )
@@ -240,7 +257,8 @@ async def record_control_audit(
 ) -> ControlRead:
     control = await _get_or_404(db, control_id)
     conducted = body.conducted_date or date.today()
-    db.add(ControlAudit(tenant_id=user.tenant_id, control_id=control_id, **body.model_dump()))
+    db.add(ControlAudit(tenant_id=user.tenant_id, control_id=control_id,
+                        **{**body.model_dump(), "conducted_date": conducted}))
     control.last_audit_date = conducted
     control.next_audit_date = next_review_date(control.audit_frequency, conducted)
     await db.flush()
@@ -284,7 +302,8 @@ async def record_control_maintenance(
     control = await _get_or_404(db, control_id)
     conducted = body.conducted_date or date.today()
     db.add(
-        ControlMaintenance(tenant_id=user.tenant_id, control_id=control_id, **body.model_dump())
+        ControlMaintenance(tenant_id=user.tenant_id, control_id=control_id,
+                           **{**body.model_dump(), "conducted_date": conducted})
     )
     control.last_maintenance_date = conducted
     control.next_maintenance_date = next_review_date(control.maintenance_frequency, conducted)

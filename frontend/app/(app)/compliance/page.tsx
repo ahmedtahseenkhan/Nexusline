@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
+import RecordPanels from "@/components/RecordPanels";
 import RichText from "@/components/RichText";
 import {
   Field,
@@ -1020,6 +1021,8 @@ export default function CompliancePage() {
           </div>
         </div>
       )}
+
+      {selectedFw && <RecordPanels model="framework" entityId={selectedFw.id} />}
 
       {showLib && (
         <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setShowLib(false)}>

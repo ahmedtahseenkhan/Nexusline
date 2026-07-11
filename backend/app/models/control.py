@@ -95,7 +95,8 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
         order_by="ControlMaintenance.created_at.desc()",
     )
     policies: Mapped[list["Policy"]] = relationship(  # noqa: F821
-        "Policy", secondary=control_policies, lazy="selectin"
+        "Policy", secondary=control_policies, lazy="selectin",
+        secondaryjoin="and_(control_policies.c.policy_id == Policy.id, Policy.deleted == False)",
     )
     requirements: Mapped[list["Requirement"]] = relationship(  # noqa: F821
         "Requirement", secondary="requirement_controls", lazy="selectin", viewonly=True

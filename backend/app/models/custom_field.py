@@ -11,10 +11,19 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import CustomFieldType
 
-# Models that may be extended with custom fields (the UI dropdown).
+# Models that may be extended with custom fields (the UI dropdown). Each key must
+# match the `model` string a frontend page passes to RecordPanels / the custom
+# fields editor — keep the two in sync when adding a module.
 CUSTOM_FIELD_MODELS = [
     "risk", "control", "asset", "vendor", "policy", "incident", "project",
     "goal", "exception", "processing_activity", "continuity_plan", "framework",
+    # Banking-productionization modules
+    "audit_engagement", "authority_matrix", "automated_control_test",
+    "bia_assessment", "committee", "data_breach", "declaration_campaign",
+    "esg_assessment", "icfr_process", "issue", "key_risk_indicator",
+    "model_inventory", "outsourcing_arrangement", "rcsa_assessment",
+    "regulatory_change", "risk_quantification", "scenario_analysis",
+    "shariah_review", "vuln_finding", "whistleblowing_report",
 ]
 
 

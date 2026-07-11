@@ -10,11 +10,11 @@ from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
-from app.models.compliance import requirement_policies
-from app.models.control import control_policies
+from app.models.compliance import Requirement, requirement_policies
+from app.models.control import Control, control_policies
 from app.models.enums import PolicyStatus
 from app.models.policy import Policy, PolicyAcknowledgment, PolicyReview
-from app.models.risk import risk_policies
+from app.models.risk import Risk, risk_policies
 
 
 def _loads():
@@ -37,6 +37,7 @@ from app.schemas.policy import (
     PolicyReviewRead,
     PolicyUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit
 from app.services.risk_scoring import next_review_date
 
@@ -56,7 +57,31 @@ async def _load(db, policy_id: uuid.UUID) -> Policy:
 async def _load_related(db, ids):
     if not ids:
         return []
-    return list((await db.scalars(select(Policy).where(Policy.id.in_(ids)))).all())
+    rows = list((await db.scalars(
+        select(Policy).where(Policy.id.in_(ids), Policy.deleted.is_(False))
+    )).all())
+    missing = set(ids) - {r.id for r in rows}
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown or archived related policy id(s): {sorted(map(str, missing))}",
+        )
+    return rows
+
+
+async def _validate_ids(db, model, ids, label: str) -> None:
+    if not ids or ids is _KEEP:
+        return
+    stmt = select(model.id).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    found = set((await db.scalars(stmt)).all())
+    missing = [str(i) for i in ids if i not in found]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown or archived {label} id(s): {sorted(missing)}",
+        )
 
 
 _KEEP = object()  # sentinel: field absent from request -> leave untouched
@@ -89,14 +114,16 @@ async def _apply_related(db, obj, data: dict) -> dict:
 
 
 async def _flush_assoc(db, policy_id, stash: dict) -> None:
+    await _validate_ids(db, Control, stash["controls"], "control")
+    await _validate_ids(db, Requirement, stash["requirements"], "requirement")
+    await _validate_ids(db, Risk, stash["risks"], "risk")
     await _set_assoc(db, control_policies, "policy_id", "control_id", policy_id, stash["controls"])
     await _set_assoc(db, requirement_policies, "policy_id", "requirement_id", policy_id, stash["requirements"])
     await _set_assoc(db, risk_policies, "policy_id", "risk_id", policy_id, stash["risks"])
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(Policy)) or 0
-    return f"POL-{count + 1:03d}"
+    return await next_reference(db, Policy, "POL")
 
 
 @router.get("", response_model=Page[PolicyRead], dependencies=[Depends(require("policy:read"))])
