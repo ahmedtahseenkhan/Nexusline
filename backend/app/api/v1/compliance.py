@@ -48,6 +48,32 @@ from app.services import audit
 router = APIRouter(tags=["compliance"])
 
 
+@router.get("/requirements", dependencies=[Depends(require("compliance:read"))])
+async def search_requirements(db: DbSession, search: str | None = None, limit: int = 20) -> list[dict]:
+    """Flat, searchable requirements list across all frameworks — powers link pickers
+    (the per-framework endpoint can't be server-typeaheaded)."""
+    lim = max(1, min(limit, 50))
+    stmt = (
+        select(Requirement)
+        .where(Requirement.deleted.is_(False))
+        .options(selectinload(Requirement.framework))
+    )
+    if search:
+        stmt = stmt.where(
+            Requirement.title.ilike(f"%{search}%") | Requirement.reference.ilike(f"%{search}%")
+        )
+    rows = (await db.scalars(stmt.order_by(Requirement.reference).limit(lim))).all()
+    return [
+        {
+            "id": str(r.id),
+            "reference": r.reference,
+            "title": r.title,
+            "framework": r.framework.name if r.framework else "",
+        }
+        for r in rows
+    ]
+
+
 # --------------------------------------------------------------------- helpers
 async def _load_framework(db, framework_id: uuid.UUID) -> Framework:
     fw = await db.scalar(

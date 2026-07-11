@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.compliance import Requirement, requirement_controls
 from app.models.control import Control, ControlAudit, ControlMaintenance
 from app.models.risk import Risk, risk_controls
@@ -121,22 +122,57 @@ async def _fresh(db, control_id: uuid.UUID) -> Control:
     return await _attach_risks(db, control)
 
 
+_CONTROL_SORTABLE = {
+    "name": Control.name,
+    "reference": Control.reference,
+    "status": Control.status,
+    "effectiveness": Control.effectiveness,
+    "next_audit_date": Control.next_audit_date,
+    "created_at": Control.created_at,
+}
+
+
+async def _attach_risks_bulk(db, controls) -> None:
+    """Attach linked (non-deleted) risks to a list of controls in ONE query instead of
+    one per control (the previous per-row loop was a 200-row → 200-query N+1)."""
+    ids = [c.id for c in controls]
+    if not ids:
+        return
+    rows = (
+        await db.execute(
+            select(risk_controls.c.control_id, Risk)
+            .join(Risk, risk_controls.c.risk_id == Risk.id)
+            .where(risk_controls.c.control_id.in_(ids), Risk.deleted.is_(False))
+            .order_by(Risk.reference)
+        )
+    ).all()
+    by_control: dict = {}
+    for control_id, risk in rows:
+        by_control.setdefault(control_id, []).append(risk)
+    for control in controls:
+        control.risks = by_control.get(control.id, [])
+
+
 @router.get("", response_model=Page[ControlRead], dependencies=[Depends(require("control:read"))])
 async def list_controls(
     db: DbSession,
     search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ControlRead]:
     stmt = select(Control).where(Control.deleted.is_(False))
     if search:
         stmt = stmt.where(Control.name.ilike(f"%{search}%") | Control.reference.ilike(f"%{search}%"))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _CONTROL_SORTABLE, default=Control.name)
+    else:
+        stmt = stmt.order_by(Control.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(stmt.options(*_loads()).order_by(Control.name).limit(limit).offset(offset))
-    ).all()
-    for control in rows:
-        await _attach_risks(db, control)
+    rows = (await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))).all()
+    await _attach_risks_bulk(db, rows)
     return Page(
         items=[ControlRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
     )
