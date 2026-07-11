@@ -93,7 +93,8 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, 
         "Asset", secondary="assets_incidents", lazy="selectin", viewonly=True
     )
     risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
-        "Risk", secondary="risk_incidents", lazy="selectin", viewonly=True
+        "Risk", secondary="risk_incidents", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(risk_incidents.c.risk_id == Risk.id, Risk.deleted == False)",
     )
 
     @property

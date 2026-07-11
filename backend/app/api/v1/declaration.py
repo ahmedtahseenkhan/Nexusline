@@ -34,6 +34,7 @@ from app.schemas.declaration import (
     DeclarationRead,
     DeclarationUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["declarations"])
@@ -43,13 +44,12 @@ _WRITE = Depends(require("declaration:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
@@ -57,7 +57,7 @@ async def _get(db, model, obj_id, name):
 async def _load_campaign(db, cid) -> DeclarationCampaign:
     obj = await db.scalar(
         select(DeclarationCampaign)
-        .where(DeclarationCampaign.id == cid)
+        .where(DeclarationCampaign.id == cid, DeclarationCampaign.deleted.is_(False))
         .execution_options(populate_existing=True)
     )
     if obj is None:
@@ -129,7 +129,12 @@ async def delete_campaign(cid: uuid.UUID, db: DbSession) -> None:
 @router.post("/declaration-campaigns/{cid}/declarations", response_model=CampaignRead,
              status_code=201, dependencies=[_WRITE])
 async def add_declaration(cid: uuid.UUID, body: DeclarationCreate, db: DbSession, user: CurrentUser) -> CampaignRead:
-    await _load_campaign(db, cid)
+    campaign = await _load_campaign(db, cid)
+    if campaign.status == CampaignStatus.closed:
+        raise HTTPException(
+            status_code=409,
+            detail="Campaign is closed; reopen it before adding declarations.",
+        )
     obj = Declaration(tenant_id=user.tenant_id, campaign_id=cid, **body.model_dump())
     obj.reference = await _next_ref(db, Declaration, "DCL")
     db.add(obj)
@@ -149,8 +154,9 @@ async def update_declaration(did: uuid.UUID, body: DeclarationUpdate, db: DbSess
 @router.delete("/declarations/{did}", status_code=204, dependencies=[_WRITE])
 async def delete_declaration(did: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(Declaration).where(Declaration.id == did))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # =============================================== standalone declarations list ===

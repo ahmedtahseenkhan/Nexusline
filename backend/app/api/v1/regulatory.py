@@ -105,8 +105,9 @@ async def update_report(report_id: uuid.UUID, body: RegReportUpdate, db: DbSessi
 @router.delete("/regulatory-reports/{report_id}", status_code=204, dependencies=[_WRITE])
 async def delete_report(report_id: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(RegulatoryReport).where(RegulatoryReport.id == report_id))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 class RegReportTrackerRow(RegReportRead):

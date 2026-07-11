@@ -143,10 +143,12 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     expired_reviews: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
-        secondary=risk_assets, lazy="selectin"
+        secondary=risk_assets, lazy="selectin",
+        secondaryjoin="and_(risk_assets.c.asset_id == Asset.id, Asset.deleted == False)",
     )
     controls: Mapped[list["Control"]] = relationship(  # noqa: F821
-        secondary=risk_controls, lazy="selectin"
+        secondary=risk_controls, lazy="selectin",
+        secondaryjoin="and_(risk_controls.c.control_id == Control.id, Control.deleted == False)",
     )
     threats: Mapped[list["Threat"]] = relationship(  # noqa: F821
         "Threat", secondary="risk_threats", lazy="selectin"
@@ -155,10 +157,12 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
         "Vulnerability", secondary="risk_vulnerabilities", lazy="selectin"
     )
     policies: Mapped[list["Policy"]] = relationship(  # noqa: F821
-        "Policy", secondary=risk_policies, lazy="selectin"
+        "Policy", secondary=risk_policies, lazy="selectin",
+        secondaryjoin="and_(risk_policies.c.policy_id == Policy.id, Policy.deleted == False)",
     )
     incidents: Mapped[list["Incident"]] = relationship(  # noqa: F821
-        "Incident", secondary=risk_incidents, lazy="selectin"
+        "Incident", secondary=risk_incidents, lazy="selectin",
+        secondaryjoin="and_(risk_incidents.c.incident_id == Incident.id, Incident.deleted == False)",
     )
     acceptances: Mapped[list["RiskAcceptance"]] = relationship(
         back_populates="risk",

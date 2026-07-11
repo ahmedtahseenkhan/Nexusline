@@ -38,6 +38,7 @@ from app.schemas.governance import (
     MeetingRead,
     MeetingUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["governance"])
@@ -47,14 +48,13 @@ _WRITE = Depends(require("governance:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 # ============================================================== committees ===
 async def _load_committee(db, cid: uuid.UUID) -> Committee:
     obj = await db.scalar(
-        select(Committee).where(Committee.id == cid).execution_options(populate_existing=True)
+        select(Committee).where(Committee.id == cid, Committee.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Committee not found")
@@ -123,7 +123,7 @@ async def delete_committee(cid: uuid.UUID, db: DbSession) -> None:
 # ================================================================= meetings ===
 async def _load_meeting(db, mid: uuid.UUID) -> Meeting:
     obj = await db.scalar(
-        select(Meeting).where(Meeting.id == mid).execution_options(populate_existing=True)
+        select(Meeting).where(Meeting.id == mid, Meeting.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -159,9 +159,10 @@ async def update_meeting(mid: uuid.UUID, body: MeetingUpdate, db: DbSession) -> 
 @router.delete("/governance-meetings/{mid}", status_code=204, dependencies=[_WRITE])
 async def delete_meeting(mid: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(Meeting).where(Meeting.id == mid))
-    if obj is not None:
-        await db.delete(obj)
-        await db.flush()
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
+    await db.flush()
 
 
 # ---------------------------------------------------- decisions (per meeting) ---
@@ -206,9 +207,10 @@ async def update_decision(did: uuid.UUID, body: DecisionUpdate, db: DbSession) -
 @router.delete("/meeting-decisions/{did}", status_code=204, dependencies=[_WRITE])
 async def delete_decision(did: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(MeetingDecision).where(MeetingDecision.id == did))
-    if obj is not None:
-        await db.delete(obj)
-        await db.flush()
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
+    await db.flush()
 
 
 @router.get("/meeting-decisions", response_model=list[DecisionTrackerRow], dependencies=[_READ],

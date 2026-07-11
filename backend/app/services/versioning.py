@@ -3,6 +3,7 @@ change, and restore a record to a prior version. Wired into the audit pipeline s
 mutation that calls ``audit.record`` is versioned automatically (for mapped models)."""
 from __future__ import annotations
 
+import decimal
 import enum
 import uuid
 from datetime import date, datetime
@@ -47,13 +48,21 @@ _SKIP = {"tenant_id"}
 
 
 def _json(value):
+    # Must be TOTAL: the result is written to a JSONB column at commit time, which
+    # happens after the HTTP response is sent — a non-serialisable value here (e.g. a
+    # Decimal from a Numeric column) would fail the flush and silently roll back the
+    # whole request. Anything unrecognised degrades to str rather than corrupting it.
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
     if isinstance(value, enum.Enum):
         return value.value
+    if isinstance(value, decimal.Decimal):
+        return float(value)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, uuid.UUID):
         return str(value)
-    return value
+    return str(value)
 
 
 def snapshot_columns(entity) -> dict:

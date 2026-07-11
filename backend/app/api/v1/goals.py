@@ -21,6 +21,7 @@ from app.schemas.goal import (
     GoalRead,
     GoalUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 from app.services.risk_scoring import next_review_date
 
@@ -28,7 +29,7 @@ router = APIRouter(prefix="/goals", tags=["goals"])
 
 
 async def _load(db, goal_id: uuid.UUID) -> Goal:
-    obj = await db.scalar(select(Goal).where(Goal.id == goal_id))
+    obj = await db.scalar(select(Goal).where(Goal.id == goal_id, Goal.deleted.is_(False)))
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Goal not found")
     return obj
@@ -65,8 +66,7 @@ async def _apply_links(db, obj: Goal, data: dict) -> None:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(Goal)) or 0
-    return f"GOAL-{count + 1:03d}"
+    return await next_reference(db, Goal, "GOAL")
 
 
 @router.get("", response_model=Page[GoalRead], dependencies=[Depends(require("goal:read"))])
@@ -134,7 +134,8 @@ async def record_audit(
 ) -> GoalRead:
     goal = await _load(db, goal_id)
     conducted = body.conducted_date or date.today()
-    db.add(GoalAudit(tenant_id=user.tenant_id, goal_id=goal_id, **body.model_dump()))
+    db.add(GoalAudit(tenant_id=user.tenant_id, goal_id=goal_id,
+                     **{**body.model_dump(), "conducted_date": conducted}))
     goal.last_audit_date = conducted
     goal.next_audit_date = next_review_date(goal.audit_frequency, conducted)
     await db.flush()

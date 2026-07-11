@@ -62,13 +62,19 @@ def catalog() -> list[dict]:
 
 async def _count(db: AsyncSession, model, *conds) -> int:
     stmt = select(func.count()).select_from(model)
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
     for c in conds:
         stmt = stmt.where(c)
     return await db.scalar(stmt) or 0
 
 
 async def _breakdown(db: AsyncSession, col) -> list[dict]:
-    rows = (await db.execute(select(col, func.count()).group_by(col))).all()
+    model = col.class_
+    stmt = select(col, func.count())
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    rows = (await db.execute(stmt.group_by(col))).all()
     out = []
     for label, count in rows:
         name = label.value if hasattr(label, "value") else (str(label) if label is not None else "—")
@@ -83,7 +89,7 @@ async def compute(db: AsyncSession, key: str, tenant_id) -> dict:
 
     if key == "risks_above_tolerance":
         settings: RiskSetting = await get_or_create_settings(db, tenant_id)
-        risks = (await db.scalars(select(Risk))).all()
+        risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
         n = sum(
             1
             for r in risks
@@ -93,7 +99,7 @@ async def compute(db: AsyncSession, key: str, tenant_id) -> dict:
         return {"kind": "scalar", "value": n, "series": None}
 
     if key == "risks_by_severity":
-        risks = (await db.scalars(select(Risk))).all()
+        risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
         buckets: dict[str, int] = {}
         for r in risks:
             sev = severity_for_score(effective_score(r.inherent_score, r.residual_score))

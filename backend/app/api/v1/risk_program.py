@@ -67,7 +67,7 @@ async def update_risk_settings(
 )
 async def risk_alerts(db: DbSession, user: CurrentUser) -> list[RiskRead]:
     settings = await get_or_create_settings(db, user.tenant_id)
-    risks = (await db.scalars(select(Risk))).all()
+    risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
     breached = [
         r
         for r in risks
@@ -88,7 +88,7 @@ async def risk_alerts(db: DbSession, user: CurrentUser) -> list[RiskRead]:
 )
 async def risk_matrix(db: DbSession, user: CurrentUser) -> RiskMatrix:
     settings = await get_or_create_settings(db, user.tenant_id)
-    risks = (await db.scalars(select(Risk))).all()
+    risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
 
     inherent: dict[tuple[int, int], list[str]] = defaultdict(list)
     residual: dict[tuple[int, int], list[str]] = defaultdict(list)
@@ -134,7 +134,7 @@ async def risk_matrix(db: DbSession, user: CurrentUser) -> RiskMatrix:
 )
 async def risk_aggregate(db: DbSession, user: CurrentUser) -> RiskAggregate:
     settings = await get_or_create_settings(db, user.tenant_id)
-    risks = (await db.scalars(select(Risk))).all()
+    risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
 
     groups: dict[str, dict] = {}
     for r in risks:

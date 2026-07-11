@@ -115,10 +115,13 @@ async def update_vendor(
 
 
 @router.delete("/{vendor_id}", status_code=204, dependencies=[Depends(require("vendor:write"))])
-async def delete_vendor(vendor_id: uuid.UUID, db: DbSession) -> None:
+async def delete_vendor(vendor_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load(db, vendor_id)
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await audit.record(db, actor=user, action="delete", entity_type="vendor",
+                         entity_id=obj.id, summary=f"Archived vendor {obj.name}")
 
 
 # ----------------------------------------------------------------- contracts

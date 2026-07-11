@@ -36,6 +36,7 @@ from app.schemas.issue import (
     IssueUpdateCreate,
     IssueUpdatePatch,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["issues"])
@@ -47,20 +48,19 @@ _CLOSED_STATES = (IssueStatus2.closed, IssueStatus2.remediated, IssueStatus2.ris
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
 
 async def _load_issue(db, iid) -> Issue:
     obj = await db.scalar(
-        select(Issue).where(Issue.id == iid).execution_options(populate_existing=True)
+        select(Issue).where(Issue.id == iid, Issue.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Issue not found")
@@ -190,8 +190,9 @@ async def update_action(line_id: uuid.UUID, body: IssueActionUpdate, db: DbSessi
 @router.delete("/issue-actions/{line_id}", status_code=204, dependencies=[_WRITE])
 async def delete_action(line_id: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(IssueAction).where(IssueAction.id == line_id))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # =========================================================== progress updates ===

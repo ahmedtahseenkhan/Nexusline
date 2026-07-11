@@ -24,13 +24,14 @@ from app.schemas.project import (
     TaskRead,
     TaskUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
 async def _load(db, project_id: uuid.UUID) -> Project:
-    obj = await db.scalar(select(Project).where(Project.id == project_id))
+    obj = await db.scalar(select(Project).where(Project.id == project_id, Project.deleted.is_(False)))
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return obj
@@ -59,8 +60,7 @@ async def _apply_links(db, obj: Project, data: dict) -> None:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(Project)) or 0
-    return f"PRJ-{count + 1:03d}"
+    return await next_reference(db, Project, "PRJ")
 
 
 async def _task_or_404(db, project_id, task_id) -> ProjectTask:
@@ -122,12 +122,15 @@ async def update_project(project_id: uuid.UUID, body: ProjectUpdate, db: DbSessi
 
 
 @router.delete("/{project_id}", status_code=204, dependencies=[Depends(require("project:write"))])
-async def delete_project(project_id: uuid.UUID, db: DbSession) -> None:
+async def delete_project(project_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     from datetime import datetime, timezone
 
     obj = await _load(db, project_id)
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await audit.record(db, actor=user, action="delete", entity_type="project",
+                         entity_id=obj.id, summary=f"Archived project {obj.reference}")
 
 
 # ---------------------------------------------------------------------- tasks

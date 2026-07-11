@@ -23,6 +23,7 @@ from app.schemas.exception import (
     ExceptionRead,
     ExceptionUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit
 
 router = APIRouter(prefix="/exceptions", tags=["exceptions"])
@@ -85,8 +86,7 @@ async def _flush_assets(db, exc_id: uuid.UUID, body) -> None:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(ExceptionRecord)) or 0
-    return f"EXC-{count + 1:03d}"
+    return await next_reference(db, ExceptionRecord, "EXC")
 
 
 @router.get("", response_model=Page[ExceptionRead], dependencies=[Depends(require("exception:read"))])
@@ -98,7 +98,15 @@ async def list_exceptions(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ExceptionRead]:
     stmt: Select = select(ExceptionRecord).where(ExceptionRecord.deleted.is_(False))
-    if status_filter is not None:
+    if status_filter is ExceptionStatus.expired:
+        # `expired` is a derived state, never persisted — an approved exception past its
+        # expiry. Translate the filter to that computed condition so the view works.
+        stmt = stmt.where(
+            ExceptionRecord.status == ExceptionStatus.approved,
+            ExceptionRecord.expires_at.is_not(None),
+            ExceptionRecord.expires_at < date.today(),
+        )
+    elif status_filter is not None:
         stmt = stmt.where(ExceptionRecord.status == status_filter)
     if type_filter is not None:
         stmt = stmt.where(ExceptionRecord.exception_type == type_filter)
@@ -136,6 +144,15 @@ async def get_exception(exc_id: uuid.UUID, db: DbSession) -> ExceptionRead:
 @router.patch("/{exc_id}", response_model=ExceptionRead, dependencies=[Depends(require("exception:write"))])
 async def update_exception(exc_id: uuid.UUID, body: ExceptionUpdate, db: DbSession) -> ExceptionRead:
     obj = await _load(db, exc_id)
+    # Maker-checker: approval/rejection is a checker action and must go through
+    # /decision (which requires exception:approve). Block those target states here so a
+    # holder of only exception:write can't self-approve via a plain PATCH.
+    if body.status in (ExceptionStatus.approved, ExceptionStatus.rejected) and body.status != obj.status:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Use the approve/reject decision action; status cannot be set to "
+            f"'{body.status.value}' via edit.",
+        )
     await _apply_links(db, obj, body)
     data = body.model_dump(
         exclude_unset=True,

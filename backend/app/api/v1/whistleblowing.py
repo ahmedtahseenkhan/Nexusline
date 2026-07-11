@@ -32,6 +32,7 @@ from app.schemas.whistleblowing import (
     WhistleReportUpdate,
     WhistleUpdateCreate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["whistleblowing"])
@@ -44,14 +45,13 @@ _CLOSED_STATES = (WhistleStatus.substantiated, WhistleStatus.unsubstantiated, Wh
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _load_report(db, rid) -> WhistleblowingReport:
     obj = await db.scalar(
         select(WhistleblowingReport)
-        .where(WhistleblowingReport.id == rid)
+        .where(WhistleblowingReport.id == rid, WhistleblowingReport.deleted.is_(False))
         .execution_options(populate_existing=True)
     )
     if obj is None:
@@ -99,6 +99,12 @@ async def list_reports(
 @router.post("/whistleblowing", response_model=WhistleReportRead, status_code=201, dependencies=[_WRITE])
 async def create_report(body: WhistleReportCreate, db: DbSession, user: CurrentUser) -> WhistleReportRead:
     data = body.model_dump()
+    # Confidentiality guarantee must hold server-side, not just in the intake form: when
+    # the report is anonymous, never persist reporter identity, so it cannot leak via any
+    # read, export or integration path.
+    if data.get("anonymous"):
+        data["reporter_name"] = ""
+        data["reporter_contact"] = ""
     obj = WhistleblowingReport(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db, WhistleblowingReport, "WB")
     # Mint a tokenized two-way channel code if the intake did not carry one.
@@ -120,8 +126,13 @@ async def get_report(rid: uuid.UUID, db: DbSession) -> WhistleReportRead:
 async def update_report(rid: uuid.UUID, body: WhistleReportUpdate, db: DbSession, user: CurrentUser) -> WhistleReportRead:
     obj = await _load_report(db, rid)
     prev_status = obj.status
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    for k, v in data.items():
         setattr(obj, k, v)
+    # If the report is (or becomes) anonymous, keep identity scrubbed on every edit.
+    if obj.anonymous:
+        obj.reporter_name = ""
+        obj.reporter_contact = ""
     await db.flush()
     # Audit the case conclusion (substantiated / closed) when it first happens.
     if obj.status != prev_status and obj.status in (WhistleStatus.substantiated, WhistleStatus.closed):

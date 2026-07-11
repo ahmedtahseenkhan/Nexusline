@@ -22,6 +22,7 @@ from app.schemas.continuity import (
     TestRead,
     TestUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit
 from app.services.risk_scoring import next_review_date
 
@@ -46,8 +47,7 @@ async def _fresh(db, plan_id: uuid.UUID) -> ContinuityPlan:
 
 
 async def _next_ref(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(ContinuityPlan)) or 0
-    return f"BCP-{count + 1:03d}"
+    return await next_reference(db, ContinuityPlan, "BCP")
 
 
 async def _task_or_404(db, plan_id, task_id) -> ContinuityTask:
@@ -118,12 +118,15 @@ async def update_plan(plan_id: uuid.UUID, body: PlanUpdate, db: DbSession) -> Pl
 
 
 @router.delete("/{plan_id}", status_code=204, dependencies=[Depends(require("bcp:write"))])
-async def delete_plan(plan_id: uuid.UUID, db: DbSession) -> None:
+async def delete_plan(plan_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     from datetime import datetime, timezone
 
     obj = await _load(db, plan_id)
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await audit.record(db, actor=user, action="delete", entity_type="continuity_plan",
+                         entity_id=obj.id, summary=f"Archived continuity plan {obj.reference}")
 
 
 # ----------------------------------------------------------------- 5W tasks
@@ -168,7 +171,8 @@ async def delete_task(plan_id: uuid.UUID, task_id: uuid.UUID, db: DbSession) -> 
 async def record_test(plan_id: uuid.UUID, body: TestCreate, db: DbSession, user: CurrentUser) -> PlanRead:
     plan = await _load(db, plan_id)
     conducted = body.conducted_date or date.today()
-    db.add(ContinuityTest(tenant_id=user.tenant_id, plan_id=plan_id, **body.model_dump()))
+    db.add(ContinuityTest(tenant_id=user.tenant_id, plan_id=plan_id,
+                          **{**body.model_dump(), "conducted_date": conducted}))
     plan.last_test_date = conducted
     plan.next_test_date = next_review_date(plan.test_frequency, conducted)
     await db.flush()

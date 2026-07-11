@@ -35,6 +35,7 @@ from app.schemas.integrations import (
     ConnectorUpdate,
     RunCreate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["integrations"])
@@ -44,8 +45,7 @@ _WRITE = Depends(require("ccm:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
@@ -180,10 +180,13 @@ async def add_run(tid: uuid.UUID, body: RunCreate, db: DbSession, user: CurrentU
     test = await _load_test(db, tid)
     run = ControlTestRun(tenant_id=user.tenant_id, test_id=tid, **body.model_dump())
     db.add(run)
-    # Recording a run rolls its outcome up onto the test (last_run / last_result / pass_rate).
-    test.last_run = body.run_date or date.today()
-    test.last_result = body.result
-    test.pass_rate = body.pass_rate
+    # Roll the outcome up onto the test only when this run is the latest — back-filling an
+    # older run must not overwrite the current last_run / last_result / pass_rate.
+    run_date = body.run_date or date.today()
+    if test.last_run is None or run_date >= test.last_run:
+        test.last_run = run_date
+        test.last_result = body.result
+        test.pass_rate = body.pass_rate
     await db.flush()
     return CctRead.model_validate(await _load_test(db, tid))
 
@@ -191,8 +194,9 @@ async def add_run(tid: uuid.UUID, body: RunCreate, db: DbSession, user: CurrentU
 @router.delete("/control-test-runs/{run_id}", status_code=204, dependencies=[_WRITE])
 async def delete_run(run_id: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(ControlTestRun).where(ControlTestRun.id == run_id))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # ================================================================== summary ===

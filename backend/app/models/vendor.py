@@ -89,8 +89,12 @@ class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
         back_populates="vendor", cascade="all, delete-orphan", lazy="selectin",
         order_by="ServiceContract.start_date.desc()",
     )
-    risks: Mapped[list["Risk"]] = relationship("Risk", secondary=vendor_risks, lazy="selectin")  # noqa: F821
-    assets: Mapped[list["Asset"]] = relationship("Asset", secondary=vendor_assets, lazy="selectin")  # noqa: F821
+    risks: Mapped[list["Risk"]] = relationship("Risk", secondary=vendor_risks, lazy="selectin",
+        secondaryjoin="and_(vendor_risks.c.risk_id == Risk.id, Risk.deleted == False)",
+    )  # noqa: F821
+    assets: Mapped[list["Asset"]] = relationship("Asset", secondary=vendor_assets, lazy="selectin",
+        secondaryjoin="and_(vendor_assets.c.asset_id == Asset.id, Asset.deleted == False)",
+    )  # noqa: F821
 
     @property
     def contract_count(self) -> int:

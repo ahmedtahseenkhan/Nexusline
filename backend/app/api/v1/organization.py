@@ -46,7 +46,17 @@ async def _soft_delete(db, obj) -> None:
 async def _load_many(db, model, ids):
     if not ids:
         return []
-    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
+    stmt = select(model).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    rows = list((await db.scalars(stmt)).all())
+    missing = set(ids) - {r.id for r in rows}
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown or archived {model.__name__.lower()} id(s): {sorted(map(str, missing))}",
+        )
+    return rows
 
 
 # ------------------------------------------------------------- business units
@@ -95,9 +105,22 @@ async def update_business_unit(obj_id: uuid.UUID, body: BusinessUnitUpdate, db: 
     obj = await _get(db, BusinessUnit, obj_id, "Business unit")
     data = body.model_dump(exclude_unset=True)
     legal_ids = data.pop("legal_ids", None)
-    if data.get("parent_id") == obj.id:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail="A business unit cannot be its own parent.")
+    if "parent_id" in data and data["parent_id"] is not None:
+        # Walk the proposed parent's ancestry; reject if this unit appears, which would
+        # create a cycle (A→B→A) that any tree rollup would loop on.
+        cursor = data["parent_id"]
+        seen: set = set()
+        while cursor is not None and cursor not in seen:
+            if cursor == obj.id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="That parent would create a business-unit cycle.",
+                )
+            seen.add(cursor)
+            parent = await db.scalar(
+                select(BusinessUnit.parent_id).where(BusinessUnit.id == cursor)
+            )
+            cursor = parent
     for f, v in data.items():
         setattr(obj, f, v)
     if legal_ids is not None:
@@ -140,10 +163,25 @@ def _process_read(obj: Process, assets_map: dict) -> ProcessRead:
     return rd
 
 
+async def _validate_assets(db, asset_ids) -> None:
+    if not asset_ids:
+        return
+    found = set((await db.scalars(
+        select(Asset.id).where(Asset.id.in_(asset_ids), Asset.deleted.is_(False))
+    )).all())
+    missing = [str(i) for i in asset_ids if i not in found]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown or archived asset id(s): {sorted(missing)}",
+        )
+
+
 async def _set_process_assets(db, process_id, asset_ids) -> None:
     """Replace the assets_processes rows for a process (call after the row has an id)."""
     if asset_ids is None:
         return
+    await _validate_assets(db, asset_ids)
     await db.execute(delete(assets_processes).where(assets_processes.c.process_id == process_id))
     if asset_ids:
         await db.execute(
@@ -236,6 +274,7 @@ async def _set_legal_assets(db, legal_id, asset_ids) -> None:
     """Replace the assets_legals rows for a legal obligation (after it has an id)."""
     if asset_ids is None:
         return
+    await _validate_assets(db, asset_ids)
     await db.execute(delete(assets_legals).where(assets_legals.c.legal_id == legal_id))
     if asset_ids:
         await db.execute(

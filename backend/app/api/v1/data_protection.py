@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -41,6 +41,7 @@ from app.schemas.data_protection import (
     DsarRead,
     DsarUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["data protection"])
@@ -50,13 +51,12 @@ _WRITE = Depends(require("dpo:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
@@ -126,6 +126,12 @@ async def list_dsars(db: DbSession, status: str | None = None, request_type: str
 @router.post("/dsars", response_model=DsarRead, status_code=201, dependencies=[_WRITE])
 async def create_dsar(body: DsarCreate, db: DbSession, user: CurrentUser) -> DsarRead:
     obj = Dsar(tenant_id=user.tenant_id, **body.model_dump())
+    # Default the statutory response deadline to received_date + 30 days when the caller
+    # doesn't supply one — otherwise a DSAR with no due_date could never become overdue,
+    # silently defeating the SLA clock.
+    if obj.due_date is None:
+        base = obj.received_date or date.today()
+        obj.due_date = base + timedelta(days=obj.sla_days)
     obj.reference = await _next_ref(db, Dsar, "DSAR")
     db.add(obj)
     await db.flush()

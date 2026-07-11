@@ -27,12 +27,12 @@ async def _load(db, widget_id: uuid.UUID) -> DashboardWidget:
     return obj
 
 
-@router.get("/metrics", response_model=list[MetricInfo])
+@router.get("/metrics", response_model=list[MetricInfo], dependencies=[Depends(require("report:read"))])
 async def list_metrics(_: CurrentUser) -> list[MetricInfo]:
     return [MetricInfo(**m) for m in metrics.catalog()]
 
 
-@router.get("/widgets", response_model=list[WidgetRead])
+@router.get("/widgets", response_model=list[WidgetRead], dependencies=[Depends(require("report:read"))])
 async def list_widgets(db: DbSession, _: CurrentUser) -> list[WidgetRead]:
     rows = (
         await db.scalars(select(DashboardWidget).order_by(DashboardWidget.order_index, DashboardWidget.created_at))
@@ -66,7 +66,7 @@ async def delete_widget(widget_id: uuid.UUID, db: DbSession) -> None:
     await db.delete(await _load(db, widget_id))
 
 
-@router.get("/dashboard", response_model=list[WidgetData])
+@router.get("/dashboard", response_model=list[WidgetData], dependencies=[Depends(require("report:read"))])
 async def dashboard(db: DbSession, user: CurrentUser) -> list[WidgetData]:
     rows = (
         await db.scalars(select(DashboardWidget).order_by(DashboardWidget.order_index, DashboardWidget.created_at))

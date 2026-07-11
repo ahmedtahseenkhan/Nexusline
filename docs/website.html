@@ -1,0 +1,984 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NexusLine — Enterprise Governance, Risk & Compliance, on your own infrastructure</title>
+<meta name="description" content="NexusLine is a one-stop GRC platform that unifies risk, compliance, governance, audit, continuity and third-party management — deployable as managed cloud or fully on-premise. Aligned to ISO 27001, NIST CSF, PCI DSS and Basel." />
+<meta name="theme-color" content="#0a1017" />
+<meta property="og:title" content="NexusLine — Enterprise GRC, on your own infrastructure" />
+<meta property="og:description" content="Risk, compliance, governance, audit and continuity — unified in one connected system. SaaS or fully on-premise and air-gapped." />
+<meta property="og:type" content="website" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a1017'/%3E%3Cpath d='M9 23V9l14 14V9' stroke='%232dd4bf' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<style>
+/* ============================================================================
+   NEXUSLINE — Marketing site.
+   Institutional "risk-terminal" identity: ink ground, teal signal,
+   monospace data labels, tabular figures, hairline borders. Self-contained.
+   ========================================================================== */
+:root{
+  --ink:#0a1017; --ink-2:#0d1622; --ink-3:#111c2b; --ink-4:#16233440;
+  --canvas:#f5f6f9; --paper:#ffffff; --paper-2:#eef1f5;
+  --line-dark:rgba(255,255,255,.09); --line-dark-2:rgba(255,255,255,.16);
+  --line:#e4e7ee; --line-2:#d3d8e2;
+  --text:#1b2330; --text-strong:#0b1119; --muted:#5d6776; --faint:#97a1b1;
+  --on-ink:#e9edf3; --on-ink-2:#a7b2c2; --on-ink-3:#6c7789;
+  --teal:#0d9488; --teal-deep:#0b6b62; --teal-bright:#2dd4bf; --teal-weak:#e2f3f0; --teal-weak-2:#f0f9f7;
+  --green:#34d399; --amber:#fbbf24; --red:#f87171; --violet:#8b9cf0; --sky:#5eb3e4;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  --maxw:1200px;
+  --shadow-lg:0 40px 80px -30px rgba(5,10,18,.55);
+  --shadow-card:0 1px 0 rgba(255,255,255,.02), 0 24px 48px -32px rgba(3,8,15,.7);
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+html{scroll-behavior:smooth; -webkit-text-size-adjust:100%;}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto;} *{animation:none !important; transition:none !important;}}
+body{
+  font-family:var(--sans); background:var(--ink); color:var(--on-ink);
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  line-height:1.5; overflow-x:hidden;
+}
+h1,h2,h3,h4{font-weight:700; letter-spacing:-0.028em; text-wrap:balance; color:#fff; line-height:1.08;}
+p{text-wrap:pretty;}
+a{color:inherit; text-decoration:none;}
+img,svg{display:block; max-width:100%;}
+::selection{background:var(--teal-bright); color:#062018;}
+:focus-visible{outline:2px solid var(--teal-bright); outline-offset:3px; border-radius:3px;}
+.tnum{font-variant-numeric:tabular-nums;}
+
+/* skip link */
+.skip{position:absolute; left:-999px; top:8px; z-index:200; background:var(--teal-bright); color:#052018;
+  padding:10px 16px; border-radius:8px; font-weight:600; font-size:14px;}
+.skip:focus{left:12px;}
+
+/* ---------------------------------------------------------------- layout atoms */
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 clamp(20px,5vw,44px);}
+section{position:relative;}
+.sec-pad{padding:clamp(72px,10vw,140px) 0;}
+.eyebrow{
+  font-family:var(--mono); font-size:12px; letter-spacing:.18em; text-transform:uppercase;
+  color:var(--teal-bright); display:inline-flex; align-items:center; gap:11px; margin-bottom:20px; font-weight:500;
+}
+.eyebrow::before{content:""; width:22px; height:1px; background:currentColor; opacity:.75;}
+.eyebrow.center{justify-content:center;}
+.display{font-size:clamp(34px,6vw,68px); line-height:1.0; letter-spacing:-0.04em;}
+.h-sec{font-size:clamp(28px,4.4vw,48px); letter-spacing:-0.035em;}
+.lede{font-size:clamp(16px,1.9vw,20px); line-height:1.55; color:var(--on-ink-2); max-width:62ch;}
+.sec-head{max-width:none; margin-bottom:clamp(40px,5vw,64px);}
+.sec-head.center{text-align:center; margin-left:auto; margin-right:auto;}
+.sec-head.center .lede{margin-left:auto; margin-right:auto;}
+.kicker-num{font-family:var(--mono); font-size:12px; color:var(--teal); letter-spacing:.12em;}
+
+/* grain + glow helpers */
+.grain::before{
+  content:""; position:absolute; inset:0; pointer-events:none; opacity:.5; z-index:0;
+  background-image:radial-gradient(rgba(255,255,255,.045) 1px, transparent 1px);
+  background-size:26px 26px;
+  mask-image:linear-gradient(180deg,transparent,#000 20%,#000 80%,transparent);
+}
+.wrap{position:relative; z-index:1;}
+
+/* ---------------------------------------------------------------- buttons */
+.btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:9px;
+  font-size:15px; font-weight:600; padding:13px 22px; border-radius:11px;
+  border:1px solid transparent; cursor:pointer; transition:transform .18s ease, box-shadow .25s ease, background .2s, border-color .2s, color .2s;
+  white-space:nowrap; letter-spacing:-0.01em;
+}
+.btn:active{transform:translateY(1px);}
+.btn-primary{background:var(--teal-bright); color:#042019; box-shadow:0 10px 30px -10px rgba(45,212,191,.55);}
+.btn-primary:hover{transform:translateY(-2px); box-shadow:0 18px 40px -12px rgba(45,212,191,.6); background:#42e6d1;}
+.btn-ghost{background:rgba(255,255,255,.04); color:var(--on-ink); border-color:var(--line-dark-2);}
+.btn-ghost:hover{background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.28); transform:translateY(-2px);}
+.btn .arr{transition:transform .2s ease;}
+.btn:hover .arr{transform:translateX(3px);}
+.btn-lg{padding:16px 28px; font-size:16px; border-radius:13px;}
+
+/* ---------------------------------------------------------------- header / nav */
+header.nav{
+  position:sticky; top:0; z-index:100; transition:background .3s, border-color .3s, backdrop-filter .3s;
+  border-bottom:1px solid transparent;
+}
+header.nav.scrolled{
+  background:rgba(9,14,21,.82); backdrop-filter:saturate(160%) blur(14px);
+  border-bottom-color:var(--line-dark);
+}
+.nav-row{display:flex; align-items:center; gap:28px; height:66px;}
+.brand{display:inline-flex; align-items:center; gap:11px; font-weight:700; letter-spacing:-0.02em; font-size:17px; color:#fff;}
+.brand .logo{width:30px; height:30px; border-radius:8px; background:linear-gradient(150deg,var(--ink-3),var(--ink)); border:1px solid var(--line-dark-2); display:grid; place-items:center; flex:0 0 auto;}
+.brand .logo svg{width:18px; height:18px;}
+.brand small{font-family:var(--mono); font-size:9.5px; letter-spacing:.22em; color:var(--teal-bright); text-transform:uppercase; display:block; margin-top:1px; font-weight:500;}
+.nav-links{display:flex; gap:6px; margin-left:8px;}
+.nav-links a{font-size:14.5px; color:var(--on-ink-2); padding:8px 12px; border-radius:8px; transition:color .2s, background .2s;}
+.nav-links a:hover{color:#fff; background:rgba(255,255,255,.05);}
+.nav-cta{margin-left:auto; display:flex; align-items:center; gap:10px;}
+.nav-cta .btn{padding:9px 17px; font-size:14px;}
+.pk-flag{display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:11px; letter-spacing:.08em; color:var(--on-ink-2);
+  border:1px solid var(--line-dark); padding:5px 10px; border-radius:999px;}
+.pk-flag .dot{width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 0 3px rgba(52,211,153,.18);}
+.menu-btn{display:none; margin-left:auto; background:none; border:1px solid var(--line-dark-2); color:#fff; width:42px; height:42px; border-radius:10px; cursor:pointer; align-items:center; justify-content:center;}
+.menu-btn svg{width:20px; height:20px;}
+.mobile-menu{display:none;}
+
+@media (max-width:940px){
+  .nav-links, .nav-cta{display:none;}
+  .menu-btn{display:inline-flex;}
+  .mobile-menu{display:block; position:fixed; inset:66px 0 auto 0; z-index:99;
+    background:rgba(9,14,21,.97); backdrop-filter:blur(16px); border-bottom:1px solid var(--line-dark);
+    padding:16px clamp(20px,5vw,44px) 26px; transform:translateY(-14px); opacity:0; pointer-events:none; transition:opacity .22s, transform .22s;}
+  .mobile-menu.open{opacity:1; transform:none; pointer-events:auto;}
+  .mobile-menu a{display:block; padding:13px 4px; font-size:16px; color:var(--on-ink); border-bottom:1px solid var(--line-dark);}
+  .mobile-menu .btn{width:100%; margin-top:18px;}
+}
+
+/* ---------------------------------------------------------------- hero */
+.hero{position:relative; overflow:hidden;
+  background:
+    radial-gradient(120% 80% at 6% -6%, rgba(45,212,191,.14), transparent 46%),
+    radial-gradient(90% 90% at 100% 0%, rgba(59,90,150,.20), transparent 52%),
+    linear-gradient(180deg, var(--ink-3), var(--ink) 70%);
+}
+.hero-inner{padding:clamp(56px,9vw,104px) 0 clamp(60px,8vw,96px);}
+.hero-grid{display:grid; grid-template-columns:1.15fr .85fr; gap:clamp(32px,5vw,64px); align-items:center;}
+.hero h1{font-size:clamp(38px,5.6vw,70px); letter-spacing:-0.045em; line-height:0.99;}
+.hero h1 .hl{color:var(--teal-bright);}
+.hero .lede{margin-top:26px;}
+.hero-cta{display:flex; gap:14px; flex-wrap:wrap; margin-top:34px;}
+.hero-meta{display:flex; gap:26px; flex-wrap:wrap; margin-top:38px; padding-top:26px; border-top:1px solid var(--line-dark);}
+.hero-meta .m{display:flex; flex-direction:column; gap:3px;}
+.hero-meta .m b{font-size:26px; font-weight:700; color:#fff; letter-spacing:-0.03em;}
+.hero-meta .m span{font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--on-ink-3);}
+
+/* hero visual: connected-register diagram */
+.hero-viz{position:relative;}
+.viz-card{
+  background:linear-gradient(180deg, rgba(20,32,48,.9), rgba(11,18,28,.92));
+  border:1px solid var(--line-dark-2); border-radius:18px; padding:22px; box-shadow:var(--shadow-lg);
+  backdrop-filter:blur(4px);
+}
+.viz-top{display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;}
+.viz-dots{display:flex; gap:6px;}
+.viz-dots i{width:9px; height:9px; border-radius:50%; background:var(--line-dark-2);}
+.viz-dots i:first-child{background:#f87171aa;} .viz-dots i:nth-child(2){background:#fbbf24aa;} .viz-dots i:nth-child(3){background:#34d399aa;}
+.viz-tag{font-family:var(--mono); font-size:10.5px; letter-spacing:.14em; color:var(--teal-bright); text-transform:uppercase;}
+.viz-flow{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+.node{border:1px solid var(--line-dark); border-radius:11px; padding:12px 13px; background:rgba(255,255,255,.02); position:relative;}
+.node .k{font-family:var(--mono); font-size:9.5px; letter-spacing:.1em; color:var(--on-ink-3); text-transform:uppercase;}
+.node .v{font-size:13.5px; color:var(--on-ink); font-weight:600; margin-top:3px;}
+.node .bar{height:4px; border-radius:99px; margin-top:9px; background:var(--line-dark-2); overflow:hidden;}
+.node .bar i{display:block; height:100%; border-radius:99px; background:linear-gradient(90deg,var(--teal),var(--teal-bright));}
+.node.full{grid-column:1 / -1;}
+.node.accent{border-color:rgba(45,212,191,.4); background:linear-gradient(180deg, rgba(45,212,191,.1), rgba(45,212,191,.02));}
+.viz-link{grid-column:1/-1; display:flex; align-items:center; gap:9px; font-family:var(--mono); font-size:10.5px; color:var(--on-ink-3); letter-spacing:.06em; padding:2px 2px;}
+.viz-link .ln{flex:1; height:1px; background:repeating-linear-gradient(90deg, var(--line-dark-2) 0 6px, transparent 6px 12px);}
+.viz-badge{position:absolute; right:-14px; top:-14px; background:var(--teal-bright); color:#042019; font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:.06em; padding:8px 12px; border-radius:10px; box-shadow:0 12px 26px -10px rgba(45,212,191,.6);}
+
+/* trust strip */
+.trust{border-top:1px solid var(--line-dark); border-bottom:1px solid var(--line-dark); background:rgba(255,255,255,.012);}
+.trust-inner{display:flex; align-items:center; gap:clamp(18px,3vw,40px); flex-wrap:wrap; padding:22px 0;}
+.trust-label{font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--on-ink-3);}
+.trust-items{display:flex; gap:clamp(14px,2.6vw,34px); flex-wrap:wrap; align-items:center;}
+.trust-items span{font-size:14.5px; font-weight:600; color:var(--on-ink-2); letter-spacing:-0.01em; display:inline-flex; align-items:center; gap:8px;}
+.trust-items span::before{content:""; width:6px; height:6px; border-radius:2px; background:var(--teal); transform:rotate(45deg); opacity:.85;}
+
+/* ---------------------------------------------------------------- generic cards / grids */
+.grid{display:grid; gap:18px;}
+.g-2{grid-template-columns:repeat(2,1fr);}
+.g-3{grid-template-columns:repeat(3,1fr);}
+.g-4{grid-template-columns:repeat(4,1fr);}
+.card{
+  border:1px solid var(--line-dark); border-radius:16px; padding:26px;
+  background:linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.006));
+  transition:transform .25s ease, border-color .25s ease, background .25s ease;
+  position:relative; overflow:hidden;
+}
+.card:hover{transform:translateY(-4px); border-color:var(--line-dark-2); background:linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.01));}
+.card .cnum{font-family:var(--mono); font-size:11px; color:var(--teal); letter-spacing:.12em;}
+.card h3{font-size:19px; margin:14px 0 9px;}
+.card h4{font-size:16.5px; margin-bottom:8px;}
+.card p{font-size:14.5px; color:var(--on-ink-2); line-height:1.55;}
+.card .ico{width:42px; height:42px; border-radius:11px; display:grid; place-items:center; background:rgba(45,212,191,.1); border:1px solid rgba(45,212,191,.22); margin-bottom:4px;}
+.card .ico svg{width:22px; height:22px; stroke:var(--teal-bright); fill:none; stroke-width:1.7;}
+.tagk{font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--on-ink-3); display:block; margin-bottom:8px;}
+
+/* problem section */
+.prob-card{border:1px solid var(--line-dark); border-radius:15px; padding:24px; background:rgba(255,255,255,.02); transition:border-color .25s, transform .25s;}
+.prob-card:hover{border-color:rgba(248,113,113,.28); transform:translateY(-3px);}
+.prob-card .n{font-family:var(--mono); font-size:12px; color:var(--red); opacity:.85; letter-spacing:.1em;}
+.prob-card h4{font-size:17px; margin:10px 0 8px;}
+.prob-card p{font-size:14px; color:var(--on-ink-2); line-height:1.55;}
+.prob-foot{margin-top:34px; font-size:clamp(16px,2vw,19px); color:var(--on-ink); max-width:74ch; line-height:1.5;}
+.prob-foot b{color:#fff;}
+
+/* stat band */
+.statband{border-top:1px solid var(--line-dark); border-bottom:1px solid var(--line-dark);
+  background:linear-gradient(180deg, rgba(45,212,191,.05), transparent);}
+.stat-grid{display:grid; grid-template-columns:repeat(4,1fr);}
+.stat{padding:clamp(28px,4vw,44px) 24px; text-align:center; border-right:1px solid var(--line-dark);}
+.stat:last-child{border-right:none;}
+.stat b{display:block; font-size:clamp(34px,5vw,54px); font-weight:700; color:#fff; letter-spacing:-0.04em; line-height:1;}
+.stat b .u{color:var(--teal-bright); font-size:.6em;}
+.stat span{font-family:var(--mono); font-size:11.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--on-ink-2); margin-top:12px; display:block;}
+
+/* module map */
+.domain-map{display:grid; grid-template-columns:repeat(4,1fr); gap:16px;}
+.dom{border:1px solid var(--line-dark); border-radius:15px; padding:20px; background:rgba(255,255,255,.018); transition:border-color .25s, transform .25s;}
+.dom:hover{border-color:var(--line-dark-2); transform:translateY(-3px);}
+.dom-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line-dark);}
+.dom-head h4{font-size:15.5px; letter-spacing:-0.01em;}
+.dom-head .ct{font-family:var(--mono); font-size:12px; color:var(--teal-bright); font-weight:600;}
+.dom ul{list-style:none; display:flex; flex-direction:column; gap:7px;}
+.dom li{font-size:13px; color:var(--on-ink-2); display:flex; gap:8px; align-items:flex-start; line-height:1.35;}
+.dom li::before{content:""; width:5px; height:5px; border-radius:50%; background:var(--teal); margin-top:6px; flex:0 0 auto; opacity:.8;}
+
+/* domain deep dive tabs */
+.tabs{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:30px;}
+.tab{font-family:var(--mono); font-size:12.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--on-ink-2);
+  border:1px solid var(--line-dark); background:rgba(255,255,255,.02); padding:10px 16px; border-radius:10px; cursor:pointer; transition:all .2s;}
+.tab:hover{color:#fff; border-color:var(--line-dark-2);}
+.tab.on{background:var(--teal-bright); color:#042019; border-color:var(--teal-bright); font-weight:600;}
+.tabpanel{display:none;}
+.tabpanel.on{display:block; animation:fade .35s ease both;}
+@keyframes fade{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:none;}}
+
+/* AI feature */
+.ai-wrap{display:grid; grid-template-columns:1fr 1fr; gap:clamp(28px,4vw,56px); align-items:center;}
+.ai-steps{display:flex; flex-direction:column; gap:14px;}
+.ai-step{display:flex; gap:16px; align-items:flex-start; border:1px solid var(--line-dark); border-radius:13px; padding:18px 20px; background:rgba(255,255,255,.02);}
+.ai-step .s{font-family:var(--mono); font-size:13px; font-weight:700; color:#042019; background:var(--teal-bright); width:28px; height:28px; border-radius:8px; display:grid; place-items:center; flex:0 0 auto;}
+.ai-step h4{font-size:16px; margin-bottom:5px;}
+.ai-step p{font-size:14px; color:var(--on-ink-2);}
+.ai-term{background:#0a1119; border:1px solid var(--line-dark-2); border-radius:16px; overflow:hidden; box-shadow:var(--shadow-lg); font-family:var(--mono);}
+.ai-term-bar{display:flex; align-items:center; gap:8px; padding:12px 16px; border-bottom:1px solid var(--line-dark); background:rgba(255,255,255,.02);}
+.ai-term-bar .d{width:10px; height:10px; border-radius:50%; background:var(--line-dark-2);}
+.ai-term-bar .t{margin-left:8px; font-size:11px; letter-spacing:.1em; color:var(--on-ink-3);}
+.ai-term-body{padding:20px; font-size:13px; line-height:1.75;}
+.ai-term-body .cmt{color:var(--on-ink-3);}
+.ai-term-body .in{color:var(--on-ink);}
+.ai-term-body .ok{color:var(--teal-bright);}
+.ai-term-body .kw{color:var(--sky);}
+.ai-term-body .row{display:flex; gap:10px;}
+.ai-term-body .caret{display:inline-block; width:8px; height:15px; background:var(--teal-bright); vertical-align:-2px; animation:blink 1.1s step-end infinite;}
+@keyframes blink{50%{opacity:0;}}
+.ai-note{margin-top:22px; font-size:14.5px; color:var(--on-ink-2); border-left:2px solid var(--teal); padding-left:16px; line-height:1.55;}
+.ai-note b{color:#fff;}
+
+/* security grid */
+.sec-item{border:1px solid var(--line-dark); border-radius:14px; padding:22px; background:rgba(255,255,255,.018); transition:transform .25s, border-color .25s;}
+.sec-item:hover{transform:translateY(-3px); border-color:var(--line-dark-2);}
+.sec-item .ico{width:38px; height:38px; border-radius:10px; display:grid; place-items:center; background:rgba(255,255,255,.04); border:1px solid var(--line-dark); margin-bottom:14px;}
+.sec-item .ico svg{width:20px; height:20px; stroke:var(--teal-bright); fill:none; stroke-width:1.7;}
+.sec-item .tagk{color:var(--teal); }
+.sec-item h4{font-size:16px; margin:2px 0 8px;}
+.sec-item p{font-size:13.5px; color:var(--on-ink-2); line-height:1.55;}
+
+/* deployment table */
+.deploy-tbl{border:1px solid var(--line-dark); border-radius:16px; overflow:hidden; background:rgba(255,255,255,.015);}
+.deploy-scroll{overflow-x:auto;}
+table.deploy{width:100%; border-collapse:collapse; min-width:620px;}
+table.deploy th, table.deploy td{text-align:left; padding:18px 22px; border-bottom:1px solid var(--line-dark); font-size:14.5px; vertical-align:top;}
+table.deploy thead th{font-size:16px; color:#fff; background:rgba(255,255,255,.02);}
+table.deploy thead th .sub{display:block; font-family:var(--mono); font-size:11px; letter-spacing:.06em; color:var(--on-ink-3); margin-top:4px; font-weight:400;}
+table.deploy th.rowh{font-family:var(--mono); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--on-ink-3); font-weight:500; width:200px;}
+table.deploy td{color:var(--on-ink-2);}
+table.deploy td b{color:#fff; font-weight:600;}
+table.deploy tr:last-child th, table.deploy tr:last-child td{border-bottom:none;}
+table.deploy .col-onprem{background:linear-gradient(180deg, rgba(45,212,191,.05), transparent);}
+.chk{color:var(--teal-bright); font-weight:700; margin-right:6px;}
+
+/* ---------------------------------------------------------------- Pakistan section (light) */
+.pk{background:linear-gradient(180deg, var(--paper), var(--canvas)); color:var(--text);}
+.pk h1,.pk h2,.pk h3,.pk h4{color:var(--text-strong);}
+.pk .eyebrow{color:var(--teal-deep);}
+.pk .lede{color:var(--muted);}
+.pk-hero{display:grid; grid-template-columns:1.1fr .9fr; gap:clamp(30px,4vw,60px); align-items:center; margin-bottom:clamp(44px,5vw,68px);}
+.pk-badge{display:inline-flex; align-items:center; gap:10px; background:#fff; border:1px solid var(--line-2); border-radius:999px; padding:8px 16px; font-size:13px; font-weight:600; color:var(--text); box-shadow:0 6px 20px -12px rgba(10,16,23,.25); margin-bottom:22px;}
+.pk-badge .flag{width:26px; height:18px; border-radius:3px; overflow:hidden; display:inline-block; box-shadow:0 0 0 1px rgba(0,0,0,.06);}
+.pk-note{margin-top:26px; font-size:15px; color:var(--muted); line-height:1.6; max-width:56ch;}
+.pk-note b{color:var(--text-strong);}
+.pk-stats{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+.pk-stat{background:#fff; border:1px solid var(--line); border-radius:14px; padding:20px; box-shadow:0 10px 30px -22px rgba(10,16,23,.4);}
+.pk-stat b{font-size:30px; color:var(--text-strong); letter-spacing:-0.03em; display:block; line-height:1;}
+.pk-stat span{font-size:13px; color:var(--muted); margin-top:8px; display:block; line-height:1.4;}
+.pk-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px;}
+.pk-card{background:#fff; border:1px solid var(--line); border-radius:15px; padding:22px; transition:transform .25s, box-shadow .25s, border-color .25s;}
+.pk-card:hover{transform:translateY(-4px); box-shadow:var(--shadow-lg); box-shadow:0 30px 60px -34px rgba(10,16,23,.35); border-color:var(--line-2);}
+.pk-card .reg{display:inline-block; font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--teal-deep); background:var(--teal-weak); padding:4px 9px; border-radius:6px; margin-bottom:13px; font-weight:600;}
+.pk-card h4{font-size:16.5px; margin-bottom:8px; color:var(--text-strong);}
+.pk-card p{font-size:13.5px; color:var(--muted); line-height:1.55;}
+.pk-cta{margin-top:clamp(40px,5vw,60px); display:flex; align-items:center; justify-content:space-between; gap:24px; flex-wrap:wrap;
+  background:var(--ink); border-radius:18px; padding:clamp(26px,4vw,40px); color:var(--on-ink);}
+.pk-cta h3{color:#fff; font-size:clamp(20px,2.6vw,28px);}
+.pk-cta p{color:var(--on-ink-2); font-size:15px; margin-top:8px; max-width:56ch;}
+
+/* why / differentiators */
+.why-item{border:1px solid var(--line-dark); border-radius:15px; padding:26px; background:rgba(255,255,255,.02); transition:transform .25s, border-color .25s;}
+.why-item:hover{transform:translateY(-4px); border-color:rgba(45,212,191,.3);}
+.why-item .k{font-family:var(--mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--teal-bright);}
+.why-item h4{font-size:19px; margin:12px 0 10px;}
+.why-item p{font-size:14.5px; color:var(--on-ink-2); line-height:1.55;}
+
+/* final CTA */
+.final{position:relative; overflow:hidden; text-align:center;
+  background:
+    radial-gradient(90% 120% at 50% -10%, rgba(45,212,191,.16), transparent 55%),
+    radial-gradient(80% 80% at 50% 120%, rgba(59,90,150,.2), transparent 55%),
+    linear-gradient(180deg, var(--ink-2), var(--ink));}
+.final h2{font-size:clamp(32px,5vw,58px); letter-spacing:-0.04em;}
+.final .lede{margin:22px auto 0;}
+.final-cta{display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:38px;}
+.final-mini{margin-top:26px; font-family:var(--mono); font-size:12.5px; letter-spacing:.06em; color:var(--on-ink-3);}
+
+/* footer */
+footer{border-top:1px solid var(--line-dark); padding:52px 0 40px; background:var(--ink);}
+.foot-grid{display:grid; grid-template-columns:1.5fr 1fr 1fr 1fr; gap:36px; margin-bottom:40px;}
+.foot-brand p{font-size:14px; color:var(--on-ink-3); margin-top:16px; max-width:34ch; line-height:1.6;}
+.foot-col h5{font-family:var(--mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--on-ink-3); margin-bottom:16px; font-weight:500;}
+.foot-col a{display:block; font-size:14px; color:var(--on-ink-2); padding:5px 0; transition:color .2s;}
+.foot-col a:hover{color:#fff;}
+.foot-bot{display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; padding-top:26px; border-top:1px solid var(--line-dark);}
+.foot-bot span{font-size:13px; color:var(--on-ink-3);}
+.foot-bot .r{display:flex; gap:20px;}
+
+/* reveal animation */
+.reveal{opacity:0; transform:translateY(22px); transition:opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1);}
+.reveal.in{opacity:1; transform:none;}
+.reveal.d1{transition-delay:.07s;} .reveal.d2{transition-delay:.14s;} .reveal.d3{transition-delay:.21s;} .reveal.d4{transition-delay:.28s;}
+@media (prefers-reduced-motion: reduce){.reveal{opacity:1; transform:none;}}
+
+/* ---------------------------------------------------------------- responsive */
+@media (max-width:1040px){
+  .hero-grid{grid-template-columns:1fr; gap:44px;}
+  .hero-viz{max-width:520px;}
+  .ai-wrap{grid-template-columns:1fr; gap:36px;}
+  .pk-hero{grid-template-columns:1fr; gap:32px;}
+  .g-4, .domain-map{grid-template-columns:repeat(2,1fr);}
+  .stat-grid{grid-template-columns:repeat(2,1fr);}
+  .stat:nth-child(2){border-right:none;} .stat:nth-child(1),.stat:nth-child(2){border-bottom:1px solid var(--line-dark);}
+  .pk-grid{grid-template-columns:repeat(2,1fr);}
+  .foot-grid{grid-template-columns:1fr 1fr;}
+}
+@media (max-width:680px){
+  .g-2,.g-3,.g-4,.domain-map,.pk-grid{grid-template-columns:1fr;}
+  .stat-grid{grid-template-columns:1fr 1fr;}
+  .hero-meta{gap:20px;}
+  .hero-meta .m b{font-size:22px;}
+  .foot-grid{grid-template-columns:1fr 1fr;}
+  .pk-stats{grid-template-columns:1fr 1fr;}
+  table.deploy th.rowh{width:140px;}
+}
+@media (max-width:460px){
+  .foot-grid{grid-template-columns:1fr;}
+  .pk-stats{grid-template-columns:1fr;}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#solution">Skip to content</a>
+
+<!-- ======================================================= NAV -->
+<header class="nav" id="nav">
+  <div class="wrap nav-row">
+    <a class="brand" href="#top" aria-label="NexusLine home">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><path d="M9 23V9l14 14V9" stroke="#2dd4bf" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </span>
+      <span>NexusLine<small>GRC PLATFORM</small></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#platform">Platform</a>
+      <a href="#modules">Modules</a>
+      <a href="#intelligence">Intelligence</a>
+      <a href="#security">Security</a>
+      <a href="#deployment">Deployment</a>
+      <a href="#pakistan">Pakistan</a>
+    </nav>
+    <div class="nav-cta">
+      <span class="pk-flag" title="Currently onboarding banks in Pakistan"><span class="dot"></span>Now in Pakistan</span>
+      <a class="btn btn-primary" href="#demo">Request a demo</a>
+    </div>
+    <button class="menu-btn" id="menuBtn" aria-label="Open menu" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="#platform">Platform</a>
+    <a href="#modules">Modules</a>
+    <a href="#intelligence">Intelligence</a>
+    <a href="#security">Security</a>
+    <a href="#deployment">Deployment</a>
+    <a href="#pakistan">Pakistan</a>
+    <a class="btn btn-primary" href="#demo">Request a demo</a>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ======================================================= HERO -->
+<section class="hero grain">
+  <div class="wrap hero-inner">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <span class="eyebrow reveal">Governance · Risk · Compliance</span>
+        <h1 class="reveal d1">Every risk, every regulator, every board — on <span class="hl">one platform.</span></h1>
+        <p class="lede reveal d2">NexusLine unifies risk, compliance, governance, audit, continuity and third-party management into a single connected system — deployable as managed cloud or entirely inside your own data centre. Aligned to ISO&nbsp;27001, NIST&nbsp;CSF, PCI&nbsp;DSS and Basel.</p>
+        <div class="hero-cta reveal d3">
+          <a class="btn btn-primary btn-lg" href="#demo">Request a live demo <span class="arr">→</span></a>
+          <a class="btn btn-ghost btn-lg" href="#platform">Explore the platform</a>
+        </div>
+        <div class="hero-meta reveal d4">
+          <div class="m"><b class="tnum">57</b><span>Modules</span></div>
+          <div class="m"><b class="tnum">7</b><span>Domains</span></div>
+          <div class="m"><b class="tnum">6</b><span>Frameworks preloaded</span></div>
+          <div class="m"><b>On-prem</b><span>Air-gapped capable</span></div>
+        </div>
+      </div>
+
+      <div class="hero-viz reveal d2">
+        <div class="viz-card">
+          <div class="viz-top">
+            <div class="viz-dots"><i></i><i></i><i></i></div>
+            <span class="viz-tag">connected registers</span>
+          </div>
+          <div class="viz-flow">
+            <div class="node accent">
+              <div class="k">Risk · RSK-014</div>
+              <div class="v">Core banking outage</div>
+              <div class="bar"><i style="width:64%"></i></div>
+            </div>
+            <div class="node">
+              <div class="k">Control · CTL-207</div>
+              <div class="v">DR failover, tested</div>
+              <div class="bar"><i style="width:88%"></i></div>
+            </div>
+            <div class="viz-link"><span>links to</span><span class="ln"></span><span>evidence · reused ×5</span></div>
+            <div class="node">
+              <div class="k">Asset · IT-031</div>
+              <div class="v">Payment switch</div>
+            </div>
+            <div class="node">
+              <div class="k">Framework</div>
+              <div class="v">ISO 27001 · A.5.30</div>
+            </div>
+            <div class="node full">
+              <div class="k">Issue · ISS-058 → CAPA</div>
+              <div class="v">Remediation owner assigned · due tracked</div>
+              <div class="bar"><i style="width:42%"></i></div>
+            </div>
+          </div>
+          <span class="viz-badge">one record, reused everywhere</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- trust strip -->
+<div class="trust">
+  <div class="wrap trust-inner">
+    <span class="trust-label">Frameworks, preloaded</span>
+    <div class="trust-items">
+      <span>ISO 27001:2022</span>
+      <span>NIST CSF 2.0</span>
+      <span>PCI DSS 4.0</span>
+      <span>Basel Operational Risk</span>
+      <span>SOC-ready audit trail</span>
+      <span>Privacy / DPA</span>
+    </div>
+  </div>
+</div>
+
+<!-- ======================================================= PROBLEM -->
+<section class="sec-pad grain" id="problem">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">The problem</span>
+      <h2 class="h-sec">GRC in spreadsheets doesn't survive an audit.</h2>
+      <p class="lede" style="margin-top:18px;">As obligations multiply, the workarounds stop scaling. Findings scatter, evidence goes stale, and every discipline becomes its own island.</p>
+    </div>
+    <div class="grid g-4">
+      <div class="prob-card reveal">
+        <div class="n">01</div>
+        <h4>Obligations tracked in Excel</h4>
+        <p>New regulations are chased manually — no obligation register, no owner, no evidence trail when the examiner asks.</p>
+      </div>
+      <div class="prob-card reveal d1">
+        <div class="n">02</div>
+        <h4>Findings scattered everywhere</h4>
+        <p>Audit, compliance, RCSA and control findings live in six different sheets with no shared lifecycle or follow-up.</p>
+      </div>
+      <div class="prob-card reveal d2">
+        <div class="n">03</div>
+        <h4>Every discipline is a silo</h4>
+        <p>ICFR, BIA, fraud, model risk, outsourcing — separate tools or no tool at all, none of them talking to each other.</p>
+      </div>
+      <div class="prob-card reveal d3">
+        <div class="n">04</div>
+        <h4>Global suites don't fit</h4>
+        <p>Legacy platforms are priced, hosted and built for a different scale — heavy to deploy, and blind to local regulation.</p>
+      </div>
+    </div>
+    <p class="prob-foot reveal">The result: a compliance function that spends its time <b>assembling evidence</b> instead of managing risk — and can't move fast when the rules change.</p>
+  </div>
+</section>
+
+<!-- ======================================================= SOLUTION -->
+<section class="sec-pad" id="solution" style="background:linear-gradient(180deg, var(--ink), var(--ink-2));">
+  <div class="wrap">
+    <div class="sec-head center reveal">
+      <span class="eyebrow center">The solution</span>
+      <h2 class="h-sec">One platform. Every discipline. Your infrastructure.</h2>
+      <p class="lede" style="margin-top:18px;">Risk → compliance → governance → audit → continuity, connected. What you record once is reused everywhere it's needed.</p>
+    </div>
+    <div class="grid g-3">
+      <div class="card reveal">
+        <div class="ico"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10" stroke-linecap="round"/><circle cx="19" cy="17" r="2.4"/></svg></div>
+        <span class="cnum">01 — UNIFY</span>
+        <h3>Everything in one register set</h3>
+        <p>Findings, controls, assets and evidence live once and are reused across risk, compliance, audit and continuity. A single connected issue register is the connective tissue point tools never build.</p>
+      </div>
+      <div class="card reveal d1">
+        <div class="ico"><svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 3l7 3v5c0 4.4-3 8.2-7 10-4-1.8-7-5.6-7-10V6z" stroke-linejoin="round"/></svg></div>
+        <span class="cnum">02 — COMPLY</span>
+        <h3>Comply once, report many</h3>
+        <p>Map one control to many requirements, cross-walk equivalent requirements across frameworks, and read an auto-computed gap analysis per framework. Six standards installed and ready to assess.</p>
+      </div>
+      <div class="card reveal d2">
+        <div class="ico"><svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3" stroke-linecap="round"/></svg></div>
+        <span class="cnum">03 — OWN YOUR DATA</span>
+        <h3>SaaS or fully on-premise</h3>
+        <p>Run it as managed cloud, or deploy the entire stack inside your data centre — air-gapped, offline-licensed, with database-level tenant isolation that fails closed, never open.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= STAT BAND -->
+<div class="statband" id="platform">
+  <div class="wrap">
+    <div class="stat-grid">
+      <div class="stat reveal"><b class="tnum" data-count="57">57</b><span>Functional modules</span></div>
+      <div class="stat reveal d1"><b class="tnum" data-count="93">93</b><span>Granular permissions</span></div>
+      <div class="stat reveal d2"><b class="tnum" data-count="6">6</b><span>Preloaded frameworks</span></div>
+      <div class="stat reveal d3"><b>100<span class="u">%</span></b><span>On-prem capable</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================================================= MODULE MAP -->
+<section class="sec-pad grain" id="modules">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Platform at a glance</span>
+      <h2 class="h-sec">57 modules across 7 domains.</h2>
+      <p class="lede" style="margin-top:18px;">The breadth of a mature GRC suite — with the lifecycle depth to actually run each discipline, not just log it.</p>
+    </div>
+    <div class="domain-map">
+      <div class="dom reveal">
+        <div class="dom-head"><h4>Overview</h4><span class="ct">04</span></div>
+        <ul><li>Executive Dashboard</li><li>Reports &amp; KPIs</li><li>Strategy &amp; Goals</li><li>AI Assist</li></ul>
+      </div>
+      <div class="dom reveal d1">
+        <div class="dom-head"><h4>Risk</h4><span class="ct">12</span></div>
+        <ul><li>Risk Register</li><li>Operational Risk (RCSA/KRI)</li><li>Scenario &amp; Capital</li><li>Model Risk</li><li>Risk Quantification</li><li>IT &amp; Information Assets</li><li>Third Parties · Outsourcing</li></ul>
+      </div>
+      <div class="dom reveal d2">
+        <div class="dom-head"><h4>Compliance</h4><span class="ct">12</span></div>
+        <ul><li>Compliance &amp; Frameworks</li><li>Regulatory Change</li><li>ICFR</li><li>Control Catalog</li><li>Internal Audit</li><li>Vulnerabilities · Evidence</li><li>AML/CFT · Fraud · Shariah</li></ul>
+      </div>
+      <div class="dom reveal d3">
+        <div class="dom-head"><h4>Governance</h4><span class="ct">7</span></div>
+        <ul><li>Policy Management</li><li>Data Privacy (RoPA)</li><li>Data Protection</li><li>Awareness Training</li><li>Delegation of Authority</li><li>Board &amp; Committees</li><li>ESG / Green Banking</li></ul>
+      </div>
+      <div class="dom reveal">
+        <div class="dom-head"><h4>Operations</h4><span class="ct">10</span></div>
+        <ul><li>Security Operations</li><li>Business Continuity</li><li>Business Impact Analysis</li><li>Issues &amp; Actions (CAPA)</li><li>Whistleblowing</li><li>Access Reviews · Approvals</li><li>Exceptions · Projects · Log</li></ul>
+      </div>
+      <div class="dom reveal d1">
+        <div class="dom-head"><h4>Organization</h4><span class="ct">4</span></div>
+        <ul><li>Business Units</li><li>Processes</li><li>Legal Register</li><li>Users &amp; Roles</li></ul>
+      </div>
+      <div class="dom reveal d2">
+        <div class="dom-head"><h4>System</h4><span class="ct">8</span></div>
+        <ul><li>Integrations &amp; CCM</li><li>Custom Fields</li><li>Status Rules · Filters</li><li>Import / Export</li><li>Webhooks</li><li>SSO · LDAP · Settings</li></ul>
+      </div>
+      <div class="dom reveal d3" style="background:linear-gradient(180deg, rgba(45,212,191,.08), rgba(45,212,191,.01)); border-color:rgba(45,212,191,.28);">
+        <div class="dom-head" style="border-color:rgba(45,212,191,.2);"><h4 style="color:var(--teal-bright)">Connected</h4><span class="ct">↔</span></div>
+        <ul>
+          <li style="color:var(--on-ink)">Shared issue &amp; action register</li>
+          <li style="color:var(--on-ink)">Evidence collected once, reused</li>
+          <li style="color:var(--on-ink)">Cross-walk across frameworks</li>
+          <li style="color:var(--on-ink)">Append-only audit trail</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= DOMAIN DEEP DIVE (tabs) -->
+<section class="sec-pad" style="background:linear-gradient(180deg, var(--ink-2), var(--ink));">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Capability, in depth</span>
+      <h2 class="h-sec">Not a form builder. A real lifecycle for every discipline.</h2>
+    </div>
+    <div class="tabs reveal" role="tablist" aria-label="Capability domains">
+      <button class="tab on" data-tab="risk" role="tab" aria-selected="true">Risk</button>
+      <button class="tab" data-tab="compliance" role="tab" aria-selected="false">Compliance &amp; Assurance</button>
+      <button class="tab" data-tab="governance" role="tab" aria-selected="false">Governance &amp; Board</button>
+      <button class="tab" data-tab="operations" role="tab" aria-selected="false">Operations &amp; Continuity</button>
+    </div>
+
+    <div class="tabpanel on" id="tab-risk" role="tabpanel">
+      <div class="grid g-3">
+        <div class="card"><span class="tagk">Risk Register</span><h4>Qualitative + quantitative</h4><p>A 5×5 inherent/residual register with appetite &amp; tolerance banding, plus FAIR fields for annual loss exposure — every risk linked to its assets, controls and threats.</p></div>
+        <div class="card"><span class="tagk">Operational Risk</span><h4>Full Basel toolkit</h4><p>RCSA campaigns, Key Risk Indicators with live RAG thresholds, and an operational loss database — all mapped to the seven Basel event types.</p></div>
+        <div class="card"><span class="tagk">Scenario &amp; Capital</span><h4>Basel III SMA capital</h4><p>Structured scenario workshops feeding a Standardised-Approach operational-risk capital calculation — computed for you, ICAAP-ready.</p></div>
+        <div class="card"><span class="tagk">Risk Quantification</span><h4>Monte Carlo simulation</h4><p>Ten-thousand-iteration simulations turning a scenario into a P10 / P50 / P90 loss-exposure curve. Boards understand money, not colours.</p></div>
+        <div class="card"><span class="tagk">Model Risk</span><h4>SR 11-7 validation</h4><p>Inventory and independent-validation lifecycle for ECL, credit-scoring and AI/ML models — with materiality and overdue-validation tracking.</p></div>
+        <div class="card"><span class="tagk">Assets</span><h4>Criticality that inherits</h4><p>Split IT and Information asset registers, linked so an IT asset's criticality is derived from the data it hosts — self-assessed by the business owner.</p></div>
+      </div>
+    </div>
+
+    <div class="tabpanel" id="tab-compliance" role="tabpanel">
+      <div class="grid g-3">
+        <div class="card"><span class="tagk">Framework Library</span><h4>Standards, one click</h4><p>ISO 27001:2022, NIST CSF 2.0, PCI DSS 4.0, Basel Operational Risk and more — installed as ready-to-assess frameworks with their full control sets.</p></div>
+        <div class="card"><span class="tagk">Compliance</span><h4>Map controls, cross-walk</h4><p>Map one control to many requirements, cross-walk equivalent requirements across frameworks, and read an auto-computed gap analysis per framework.</p></div>
+        <div class="card"><span class="tagk">ICFR</span><h4>The annual cycle</h4><p>Process universe → risk-control matrix → design &amp; operating tests → deficiency evaluation, from simple deficiency to material weakness.</p></div>
+        <div class="card"><span class="tagk">Internal Audit</span><h4>Universe to follow-up</h4><p>Risk-based audit universe, engagements, working-paper procedures and findings — tracked enterprise-wide until every one is closed.</p></div>
+        <div class="card"><span class="tagk">Controls &amp; Evidence</span><h4>Tested, evidenced, reused</h4><p>A central control catalog with recurring audit and maintenance cycles, and evidence collected once per control that satisfies every mapped requirement.</p></div>
+        <div class="card"><span class="tagk">Vulnerabilities</span><h4>Findings to patch</h4><p>Scanner findings with severity-driven remediation SLAs (critical in 7 days) and a patch-deployment pipeline through to deployed.</p></div>
+      </div>
+    </div>
+
+    <div class="tabpanel" id="tab-governance" role="tabpanel">
+      <div class="grid g-3">
+        <div class="card"><span class="tagk">Policy Management</span><h4>Draft to acknowledgment</h4><p>A full policy lifecycle — draft, review, approve, publish — with periodic review cycles and per-staff acknowledgment tracking.</p></div>
+        <div class="card"><span class="tagk">Board &amp; Committees</span><h4>Meetings to decisions</h4><p>Committee register with charters, meeting lifecycle and agendas/minutes, and an enterprise action-tracker for every board decision.</p></div>
+        <div class="card"><span class="tagk">Whistleblowing</span><h4>Confidential intake</h4><p>Anonymous disclosure intake with tokenised case references, triage and investigation case files through to a substantiated outcome.</p></div>
+        <div class="card"><span class="tagk">Declarations</span><h4>Conflicts &amp; conduct</h4><p>Periodic conflict-of-interest, gifts, personal-account-dealing and outside-employment declaration campaigns with reviewer sign-off.</p></div>
+        <div class="card"><span class="tagk">Delegation of Authority</span><h4>Authority matrix</h4><p>A documented delegation-of-authority matrix and dual-control rules — who may approve what, by role and amount band.</p></div>
+        <div class="card"><span class="tagk">Data Privacy</span><h4>RoPA &amp; protection</h4><p>Records of processing, DPIA workflow, DSAR handling with an SLA clock, a breach register and a consent ledger.</p></div>
+      </div>
+    </div>
+
+    <div class="tabpanel" id="tab-operations" role="tabpanel">
+      <div class="grid g-3">
+        <div class="card"><span class="tagk">Security Operations</span><h4>Incident lifecycle</h4><p>Detection → triage → containment → closure with severity, timelines and links to the risks, assets and controls involved.</p></div>
+        <div class="card"><span class="tagk">Business Continuity</span><h4>Plans &amp; exercises</h4><p>Continuity plans with a recurring exercise calendar and tested recovery strategies — sign-off tracked, never assumed.</p></div>
+        <div class="card"><span class="tagk">Business Impact Analysis</span><h4>RTO / RPO / MTPD</h4><p>Structured BIA capturing recovery objectives and single points of failure, feeding directly into continuity plans.</p></div>
+        <div class="card"><span class="tagk">Issues &amp; Actions</span><h4>One CAPA register</h4><p>Every finding from every module lands in one shared issue register with owners, due dates and a common lifecycle to closure.</p></div>
+        <div class="card"><span class="tagk">Approvals</span><h4>Enforced four-eyes</h4><p>Maker-checker where the requester can never approve their own request, each checker votes once, and every rejection carries a reason.</p></div>
+        <div class="card"><span class="tagk">Activity Log</span><h4>Everything, logged</h4><p>An append-only activity log records every create, update, decision and closure across every module — the examiner's first question, answered.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= INTELLIGENCE -->
+<section class="sec-pad grain" id="intelligence">
+  <div class="wrap">
+    <div class="ai-wrap">
+      <div class="reveal">
+        <span class="eyebrow">Document intelligence</span>
+        <h2 class="h-sec">Turn a regulation into obligations in seconds.</h2>
+        <p class="lede" style="margin:18px 0 28px;">Paste a circular, a policy or an incident note. NexusLine extracts the obligations, summarises, suggests risks, or maps the text to a framework — and files a structured result straight into Regulatory Change.</p>
+        <div class="ai-steps">
+          <div class="ai-step"><span class="s">1</span><div><h4>Paste the source</h4><p>A regulatory circular, internal policy, or incident note — any prose your team would otherwise read line by line.</p></div></div>
+          <div class="ai-step"><span class="s">2</span><div><h4>Choose the action</h4><p>Extract obligations, summarise, suggest risks, or map to ISO 27001 — whatever the moment needs.</p></div></div>
+          <div class="ai-step"><span class="s">3</span><div><h4>File the result</h4><p>Get a structured output, saved and ready to file into the obligation register with owners and deadlines.</p></div></div>
+        </div>
+        <p class="ai-note reveal"><b>Runs offline, too.</b> With no API key configured, a deterministic on-device engine does the extraction — so an air-gapped bank gets the feature with zero data leaving the building.</p>
+      </div>
+      <div class="reveal d1">
+        <div class="ai-term" aria-hidden="true">
+          <div class="ai-term-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">nexusline · circular-intelligence</span></div>
+          <div class="ai-term-body">
+            <div class="cmt"># input · regulatory_circular.pdf</div>
+            <div class="in">"...institutions shall implement multi-factor</div>
+            <div class="in">authentication for all privileged access and</div>
+            <div class="in">report material incidents within 24 hours..."</div>
+            <br>
+            <div class="row"><span class="ok">▸</span><span class="kw">extract_obligations</span></div>
+            <br>
+            <div class="ok">✓ OBL-01</div><div class="in">Enforce MFA on privileged access</div>
+            <div class="ok">✓ OBL-02</div><div class="in">Report material incidents ≤ 24h</div>
+            <br>
+            <div class="cmt"># mapped → ISO 27001 A.5.15, A.5.17</div>
+            <div class="cmt"># filed → Regulatory Change · owner set</div>
+            <div class="row"><span class="ok">$</span><span class="caret"></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= SECURITY -->
+<section class="sec-pad" id="security" style="background:linear-gradient(180deg, var(--ink), var(--ink-2));">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Built for regulated institutions</span>
+      <h2 class="h-sec">Passes the IT audit on day one.</h2>
+      <p class="lede" style="margin-top:18px;">Security isn't a feature flag — it's the foundation. Isolation, access control and an unbroken audit trail are enforced at the layer that matters.</p>
+    </div>
+    <div class="grid g-3">
+      <div class="sec-item reveal">
+        <div class="ico"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.4-3 8.2-7 10-4-1.8-7-5.6-7-10V6z" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <span class="tagk">Tenant isolation</span><h4>Enforced at the database</h4>
+        <p>PostgreSQL row-level security with FORCE RLS — even a compromised query cannot cross organizational boundaries. Fails closed, never open.</p>
+      </div>
+      <div class="sec-item reveal d1">
+        <div class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-3.3 3.1-6 7-6s7 2.7 7 6" stroke-linecap="round"/></svg></div>
+        <span class="tagk">RBAC</span><h4>93 permissions, 6 roles</h4>
+        <p>Granular resource:action permissions, six built-in roles plus custom roles — splitting "can edit" from "can approve" where it matters.</p>
+      </div>
+      <div class="sec-item reveal d2">
+        <div class="ico"><svg viewBox="0 0 24 24"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="M11 8h4M8 11v3" stroke-linecap="round"/></svg></div>
+        <span class="tagk">Four-eyes</span><h4>Enforced maker-checker</h4>
+        <p>Approvals where the requester can never approve their own request, each checker votes once, and every rejection carries a written reason.</p>
+      </div>
+      <div class="sec-item reveal">
+        <div class="ico"><svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3" stroke-linecap="round"/><circle cx="12" cy="15" r="1.3"/></svg></div>
+        <span class="tagk">Identity</span><h4>MFA · SSO · LDAP</h4>
+        <p>TOTP multi-factor, password policy and lockout, plus OIDC single sign-on and Active Directory with just-in-time provisioning.</p>
+      </div>
+      <div class="sec-item reveal d1">
+        <div class="ico"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" stroke-linecap="round"/><circle cx="19" cy="18" r="1.6"/></svg></div>
+        <span class="tagk">Audit trail</span><h4>Everything, logged</h4>
+        <p>An append-only activity log records every create, update, decision and closure across every module — the examiner's first question, answered.</p>
+      </div>
+      <div class="sec-item reveal d2">
+        <div class="ico"><svg viewBox="0 0 24 24"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z" stroke-linejoin="round"/><path d="M12 8v4l2 2" stroke-linecap="round"/></svg></div>
+        <span class="tagk">Licensing</span><h4>Offline, no phone-home</h4>
+        <p>Ed25519-signed offline licences and a least-privilege runtime database role — designed for air-gapped bank environments.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= DEPLOYMENT -->
+<section class="sec-pad grain" id="deployment">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Deployment</span>
+      <h2 class="h-sec">Managed cloud, or entirely your own.</h2>
+      <p class="lede" style="margin-top:18px;">The same platform, two operating models. Choose speed, or choose data sovereignty — the capability set is identical.</p>
+    </div>
+    <div class="deploy-tbl reveal">
+      <div class="deploy-scroll">
+        <table class="deploy">
+          <thead>
+            <tr>
+              <th class="rowh"></th>
+              <th>SaaS<span class="sub">Managed cloud</span></th>
+              <th class="col-onprem">On-Premise<span class="sub">Your data centre</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><th class="rowh">Hosting</th><td>We operate it — fastest to launch</td><td class="col-onprem"><b>Inside your data centre</b>, air-gapped capable</td></tr>
+            <tr><th class="rowh">Data residency</th><td>Segregated per-tenant</td><td class="col-onprem"><b>Never leaves the bank</b></td></tr>
+            <tr><th class="rowh">Tenant isolation</th><td>Database-level RLS</td><td class="col-onprem">Database-level RLS</td></tr>
+            <tr><th class="rowh">Updates</th><td>Continuous, managed</td><td class="col-onprem">Versioned images + migrations · offline bundle</td></tr>
+            <tr><th class="rowh">Licensing</th><td>Subscription</td><td class="col-onprem">Offline Ed25519, no phone-home</td></tr>
+            <tr><th class="rowh">Best for</th><td>Speed &amp; low ops overhead</td><td class="col-onprem"><b>Data-sovereignty mandates</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= PAKISTAN -->
+<section class="pk sec-pad" id="pakistan">
+  <div class="wrap">
+    <div class="pk-hero">
+      <div class="reveal">
+        <span class="pk-badge">
+          <span class="flag" aria-hidden="true">
+            <svg viewBox="0 0 26 18" width="26" height="18"><rect width="26" height="18" fill="#01411c"/><rect width="6.5" height="18" fill="#fff"/><circle cx="17" cy="9" r="4.6" fill="#fff"/><circle cx="18.4" cy="8.2" r="4.1" fill="#01411c"/><path d="M20.8 5.4l.5 1.5 1.5.1-1.2 1 .4 1.5-1.3-.9-1.3.8.5-1.4-1.2-1 1.5-.1z" fill="#fff"/></svg>
+          </span>
+          Now onboarding banks in Pakistan
+        </span>
+        <span class="eyebrow">Regional depth</span>
+        <h2 class="h-sec">Global-grade platform, tuned to your regulator.</h2>
+        <p class="lede" style="margin-top:18px;">Our first market is Pakistan's banking sector — so NexusLine ships with the regulatory depth global suites skip. The SBP-specific frameworks, filings and Shariah governance are built in, not bolted on.</p>
+        <p class="pk-note"><b>Everything below is included</b> — assessable frameworks, filing calendars and case management, aligned to what an SBP examiner actually asks for. Deploy on-premise to keep every record inside the bank.</p>
+      </div>
+      <div class="pk-stats reveal d1">
+        <div class="pk-stat"><b class="tnum">6</b><span>SBP &amp; local mandates covered end-to-end</span></div>
+        <div class="pk-stat"><b>72<span style="color:var(--teal-deep); font-size:.6em">h</span></b><span>Breach-notification clock, tracked automatically</span></div>
+        <div class="pk-stat"><b>SMA</b><span>Basel Standardised-Approach capital, computed</span></div>
+        <div class="pk-stat"><b class="tnum">100%</b><span>On-prem — data never leaves the country</span></div>
+      </div>
+    </div>
+
+    <div class="pk-grid">
+      <div class="pk-card reveal"><span class="reg">SBP · ETGRM</span><h4>Enterprise Technology Governance</h4><p>Assessable ETGRM framework, IT-asset governance, BIA and continuity aligned to the technology-governance mandate.</p></div>
+      <div class="pk-card reveal d1"><span class="reg">SBP · BPRD</span><h4>Circulars &amp; regulatory change</h4><p>Circular intake → applicability → obligation register → implementation → closure attestation, with a recurring returns calendar.</p></div>
+      <div class="pk-card reveal d2"><span class="reg">AML / CFT</span><h4>Screening &amp; FMU filings</h4><p>Sanctions/PEP screening, STR/SAR filings with auto-calculated FMU deadlines, and customer/product/geography risk assessments.</p></div>
+      <div class="pk-card reveal"><span class="reg">SBP · Fraud</span><h4>Digital-fraud checklist</h4><p>The SBP digital-fraud control checklist plus dedicated fraud case management, with loss and recovery tracking — distinct from AML.</p></div>
+      <div class="pk-card reveal d1"><span class="reg">Shariah</span><h4>Islamic-banking governance</h4><p>Fatwa register → product approval → Shariah reviews → non-compliance findings → the charity/purification ledger.</p></div>
+      <div class="pk-card reveal d2"><span class="reg">SBP · Outsourcing</span><h4>Outsourcing &amp; cloud NOC</h4><p>Materiality assessment, SBP approval/NOC tracking, cloud model, data-offshoring and tested exit plans.</p></div>
+      <div class="pk-card reveal"><span class="reg">PSMOR</span><h4>Operational-risk soundness</h4><p>RCSA, Key Risk Indicators, the loss database and Standardised-Approach operational-risk capital — ICAAP-ready.</p></div>
+      <div class="pk-card reveal d1"><span class="reg">SBP · Green</span><h4>Green Banking Guidelines</h4><p>ESG metric tracking and environmental risk ratings for credit and vendor exposures.</p></div>
+      <div class="pk-card reveal d2"><span class="reg">PDPA</span><h4>Personal Data Protection readiness</h4><p>DPIA workflow, DSAR SLA clock, a 72-hour breach register and a consent ledger — ahead of the law taking force.</p></div>
+    </div>
+
+    <div class="pk-cta reveal">
+      <div>
+        <h3>See your first SBP circular become a tracked obligation register — live.</h3>
+        <p>Book a walkthrough with your own frameworks loaded. We'll take a real circular and turn it into obligations, owners and deadlines during the demo.</p>
+      </div>
+      <a class="btn btn-primary btn-lg" href="#demo">Book a Pakistan walkthrough <span class="arr">→</span></a>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= WHY -->
+<section class="sec-pad grain" style="background:linear-gradient(180deg, var(--ink-2), var(--ink));">
+  <div class="wrap">
+    <div class="sec-head center reveal">
+      <span class="eyebrow center">Why NexusLine</span>
+      <h2 class="h-sec">Enterprise capability, right-sized.</h2>
+    </div>
+    <div class="grid g-4">
+      <div class="why-item reveal"><span class="k">Breadth</span><h4>One connected suite</h4><p>More modules, more lifecycle depth and a real unified issue register — the connective tissue point tools never build.</p></div>
+      <div class="why-item reveal d1"><span class="k">Depth</span><h4>Regulation, not templates</h4><p>Basel capital, model-risk validation, ICFR, continuity and local-regulator specifics — the details, not a generic checklist.</p></div>
+      <div class="why-item reveal d2"><span class="k">Class</span><h4>Archer-grade, adoptable</h4><p>The capability set of the enterprise suites, delivered at a scale and price a growing institution can actually adopt.</p></div>
+      <div class="why-item reveal d3"><span class="k">Sovereignty</span><h4>On your terms</h4><p>SaaS when speed matters, fully on-premise and air-gapped when the mandate says data cannot leave the building.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= FINAL CTA -->
+<section class="final sec-pad" id="demo">
+  <div class="wrap">
+    <span class="eyebrow center reveal">Request a demo</span>
+    <h2 class="reveal d1">One platform for every regulator, every risk, every board.</h2>
+    <p class="lede reveal d2">Book a walkthrough with your own frameworks loaded — and see how NexusLine unifies your risk and compliance function in a single system, on the infrastructure you choose.</p>
+    <div class="final-cta reveal d3">
+      <a class="btn btn-primary btn-lg" href="mailto:info@nexusline.io?subject=NexusLine%20demo%20request">Request a live demo <span class="arr">→</span></a>
+      <a class="btn btn-ghost btn-lg" href="#platform">Explore the platform</a>
+    </div>
+    <p class="final-mini reveal d3">nexusline.io · info@nexusline.io · SaaS &amp; on-premise</p>
+  </div>
+</section>
+
+</main>
+
+<!-- ======================================================= FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <a class="brand" href="#top" aria-label="NexusLine home">
+          <span class="logo" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 23V9l14 14V9" stroke="#2dd4bf" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span>NexusLine<small>GRC PLATFORM</small></span>
+        </a>
+        <p>The one-stop governance, risk &amp; compliance platform — unified, deployable on your own infrastructure, and tuned to your regulator.</p>
+      </div>
+      <div class="foot-col">
+        <h5>Platform</h5>
+        <a href="#platform">Overview</a>
+        <a href="#modules">Modules</a>
+        <a href="#intelligence">Document Intelligence</a>
+        <a href="#security">Security</a>
+      </div>
+      <div class="foot-col">
+        <h5>Solutions</h5>
+        <a href="#deployment">SaaS &amp; On-premise</a>
+        <a href="#pakistan">Pakistan / SBP</a>
+        <a href="#security">Data sovereignty</a>
+        <a href="#demo">Request a demo</a>
+      </div>
+      <div class="foot-col">
+        <h5>Contact</h5>
+        <a href="mailto:info@nexusline.io">info@nexusline.io</a>
+        <a href="#demo">Book a walkthrough</a>
+      </div>
+    </div>
+    <div class="foot-bot">
+      <span>© 2026 NexusLine · Governance, Risk &amp; Compliance</span>
+      <div class="r">
+        <span>SaaS &amp; On-premise</span>
+        <span>Air-gapped capable</span>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* sticky nav shadow */
+  var nav = document.getElementById('nav');
+  var onScroll = function(){ nav.classList.toggle('scrolled', window.scrollY > 12); };
+  onScroll(); window.addEventListener('scroll', onScroll, {passive:true});
+
+  /* mobile menu */
+  var mb = document.getElementById('menuBtn'), mm = document.getElementById('mobileMenu');
+  mb.addEventListener('click', function(){
+    var open = mm.classList.toggle('open');
+    mb.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  mm.querySelectorAll('a').forEach(function(a){
+    a.addEventListener('click', function(){ mm.classList.remove('open'); mb.setAttribute('aria-expanded','false'); });
+  });
+
+  /* reveal on scroll */
+  var revs = Array.prototype.slice.call(document.querySelectorAll('.reveal'));
+  if (reduce || !('IntersectionObserver' in window)){
+    revs.forEach(function(el){ el.classList.add('in'); });
+  } else {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if (e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); } });
+    }, {threshold:0.12, rootMargin:'0px 0px -8% 0px'});
+    revs.forEach(function(el){ io.observe(el); });
+  }
+
+  /* tabs */
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  tabs.forEach(function(t){
+    t.addEventListener('click', function(){
+      var id = t.getAttribute('data-tab');
+      tabs.forEach(function(x){ x.classList.remove('on'); x.setAttribute('aria-selected','false'); });
+      t.classList.add('on'); t.setAttribute('aria-selected','true');
+      document.querySelectorAll('.tabpanel').forEach(function(p){ p.classList.remove('on'); });
+      var panel = document.getElementById('tab-' + id);
+      if (panel) panel.classList.add('on');
+    });
+  });
+
+  /* count-up stats */
+  var counted = false;
+  var band = document.querySelector('.statband');
+  function runCount(){
+    if (counted) return; counted = true;
+    document.querySelectorAll('[data-count]').forEach(function(el){
+      var target = parseInt(el.getAttribute('data-count'), 10);
+      if (reduce){ el.textContent = target; return; }
+      var start = null, dur = 1100;
+      function step(ts){
+        if (!start) start = ts;
+        var p = Math.min((ts - start) / dur, 1);
+        var eased = 1 - Math.pow(1 - p, 3);
+        el.textContent = Math.round(target * eased);
+        if (p < 1) requestAnimationFrame(step); else el.textContent = target;
+      }
+      requestAnimationFrame(step);
+    });
+  }
+  if (band && 'IntersectionObserver' in window && !reduce){
+    var io2 = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if (e.isIntersecting){ runCount(); io2.disconnect(); } });
+    }, {threshold:0.4});
+    io2.observe(band);
+  } else { runCount(); }
+})();
+</script>
+</body>
+</html>

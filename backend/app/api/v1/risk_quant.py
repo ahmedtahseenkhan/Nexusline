@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.models.risk import Risk
 from app.models.risk_quant import QuantStatus, RiskQuantification
 from app.schemas.common import Page
 from app.schemas.risk_quant import (
@@ -24,6 +25,7 @@ from app.schemas.risk_quant import (
     RiskQuantUpdate,
     SimulationResult,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["risk quantification"])
@@ -33,13 +35,24 @@ _WRITE = Depends(require("riskquant:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
+
+
+async def _validate_risk(db, risk_id) -> None:
+    """A quantification may optionally link a parent risk; reject unknown/archived ids
+    with a 400 instead of a flush-time 500 (FK violation)."""
+    if risk_id is None:
+        return
+    exists = await db.scalar(
+        select(Risk.id).where(Risk.id == risk_id, Risk.deleted.is_(False))
+    )
+    if exists is None:
+        raise HTTPException(status_code=400, detail=f"Unknown or archived risk id: {risk_id}")
 
 
 async def _load(db, qid) -> RiskQuantification:
     obj = await db.scalar(
-        select(RiskQuantification).where(RiskQuantification.id == qid).execution_options(populate_existing=True)
+        select(RiskQuantification).where(RiskQuantification.id == qid, RiskQuantification.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Risk quantification not found")
@@ -73,6 +86,7 @@ async def list_quantifications(
 
 @router.post("/risk-quantification", response_model=RiskQuantRead, status_code=201, dependencies=[_WRITE])
 async def create_quantification(body: RiskQuantCreate, db: DbSession, user: CurrentUser) -> RiskQuantRead:
+    await _validate_risk(db, body.risk_id)
     obj = RiskQuantification(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db, RiskQuantification, "FAIR")
     db.add(obj)
@@ -90,7 +104,10 @@ async def get_quantification(qid: uuid.UUID, db: DbSession) -> RiskQuantRead:
 @router.patch("/risk-quantification/{qid}", response_model=RiskQuantRead, dependencies=[_WRITE])
 async def update_quantification(qid: uuid.UUID, body: RiskQuantUpdate, db: DbSession) -> RiskQuantRead:
     obj = await _load(db, qid)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if "risk_id" in data:
+        await _validate_risk(db, data["risk_id"])
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
     return RiskQuantRead.model_validate(await _load(db, qid))

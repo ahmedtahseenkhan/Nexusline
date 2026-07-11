@@ -23,9 +23,9 @@ from app.models.enums import (
 from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
 from app.models.internal_audit import AuditEngagement, AuditFinding
-from app.models.shariah import ShariahFinding
+from app.models.shariah import ShariahFinding, ShariahReview
 from app.models.operational_risk import KeyRiskIndicator, RcsaAssessment
-from app.models.incident import RegulatoryReport
+from app.models.incident import Incident, RegulatoryReport
 from app.models.aml import ScreeningCase, SuspiciousActivityReport
 from app.models.enums import RegulatoryReportStatus, ScreeningCaseStatus
 from app.models.enums import AuditEngagementStatus, AuditFindingStatus, ShariahFindingStatus
@@ -60,7 +60,7 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
         )
 
     settings = await get_or_create_settings(db, tenant_id)
-    for r in (await db.scalars(select(Risk))).all():
+    for r in (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all():
         if r.next_review_date and r.next_review_date < today:
             add(f"risk-review:{r.id}", f"Risk review overdue: {r.reference}",
                 f"{r.title} — review was due {r.next_review_date}", _W, "risk", r.id, "/risks")
@@ -69,7 +69,7 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
             add(f"risk-breach:{r.id}", f"Risk above tolerance: {r.reference}",
                 f"{r.title} — score {eff} exceeds tolerance {settings.tolerance_score}", _C, "risk", r.id, "/risks")
 
-    for c in (await db.scalars(select(Control))).all():
+    for c in (await db.scalars(select(Control).where(Control.deleted.is_(False)))).all():
         if c.next_audit_date and c.next_audit_date < today:
             add(f"control-audit:{c.id}", f"Control audit overdue: {c.reference or c.name}",
                 f"Audit was due {c.next_audit_date}", _W, "control", c.id, "/controls")
@@ -77,27 +77,27 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
             add(f"control-maint:{c.id}", f"Control maintenance overdue: {c.reference or c.name}",
                 f"Maintenance was due {c.next_maintenance_date}", _W, "control", c.id, "/controls")
 
-    for e in (await db.scalars(select(ExceptionRecord))).all():
+    for e in (await db.scalars(select(ExceptionRecord).where(ExceptionRecord.deleted.is_(False)))).all():
         if e.status == ExceptionStatus.approved and e.expires_at and e.expires_at < today:
             add(f"exc-expired:{e.id}", f"Exception expired: {e.reference}",
                 f"{e.title} expired {e.expires_at}", _C, "exception", e.id, "/exceptions")
 
-    for g in (await db.scalars(select(Goal))).all():
+    for g in (await db.scalars(select(Goal).where(Goal.deleted.is_(False)))).all():
         if g.next_audit_date and g.next_audit_date < today:
             add(f"goal-audit:{g.id}", f"Goal audit overdue: {g.reference}",
                 f"{g.name} — audit was due {g.next_audit_date}", _W, "goal", g.id, "/goals")
 
-    for p in (await db.scalars(select(ContinuityPlan))).all():
+    for p in (await db.scalars(select(ContinuityPlan).where(ContinuityPlan.deleted.is_(False)))).all():
         if p.next_test_date and p.next_test_date < today:
             add(f"bcp-test:{p.id}", f"Continuity test overdue: {p.reference}",
                 f"{p.name} — test was due {p.next_test_date}", _W, "continuity_plan", p.id, "/continuity")
 
-    for ar in (await db.scalars(select(AccessReview))).all():
+    for ar in (await db.scalars(select(AccessReview).where(AccessReview.deleted.is_(False)))).all():
         if ar.due_date and ar.due_date < today and ar.status != AccessReviewStatus.completed:
             add(f"ar-overdue:{ar.id}", f"Access review overdue: {ar.reference}",
                 f"{ar.name} — due {ar.due_date}", _W, "access_review", ar.id, "/access-reviews")
 
-    for ra in (await db.scalars(select(ProcessingActivity))).all():
+    for ra in (await db.scalars(select(ProcessingActivity).where(ProcessingActivity.deleted.is_(False)))).all():
         if ra.has_transfer_gap:
             add(f"ropa-transfer:{ra.id}", f"Transfer gap: {ra.reference}",
                 f"{ra.name} — cross-border transfer without a safeguard", _C, "processing_activity", ra.id, "/privacy")
@@ -105,17 +105,17 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
             add(f"ropa-dpia:{ra.id}", f"DPIA outstanding: {ra.reference}",
                 f"{ra.name} — DPIA required but not completed", _W, "processing_activity", ra.id, "/privacy")
 
-    for pol in (await db.scalars(select(Policy))).all():
+    for pol in (await db.scalars(select(Policy).where(Policy.deleted.is_(False)))).all():
         if pol.next_review_date and pol.next_review_date < today:
             add(f"policy-review:{pol.id}", f"Policy review overdue: {pol.reference}",
                 f"{pol.title} — review was due {pol.next_review_date}", _W, "policy", pol.id, "/policies")
 
-    for aw in (await db.scalars(select(AwarenessProgram))).all():
+    for aw in (await db.scalars(select(AwarenessProgram).where(AwarenessProgram.deleted.is_(False)))).all():
         if aw.next_due_date and aw.next_due_date < today:
             add(f"aw-due:{aw.id}", f"Awareness training due: {aw.reference}",
                 f"{aw.name} — due {aw.next_due_date}", _I, "awareness_program", aw.id, "/awareness")
 
-    for pr in (await db.scalars(select(Project))).all():
+    for pr in (await db.scalars(select(Project).where(Project.deleted.is_(False)))).all():
         if pr.deadline and pr.deadline < today and pr.status != ProjectStatus.completed:
             add(f"proj-overdue:{pr.id}", f"Project overdue: {pr.reference}",
                 f"{pr.title} — deadline {pr.deadline}", _W, "project", pr.id, "/projects")
@@ -131,7 +131,12 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
                 _W, etype, eid, "")
 
     _closed_finding = {AuditFindingStatus.closed, AuditFindingStatus.risk_accepted}
-    for f in (await db.scalars(select(AuditFinding))).all():
+    _fnd_stmt = (
+        select(AuditFinding)
+        .join(AuditEngagement, AuditEngagement.id == AuditFinding.engagement_id)
+        .where(AuditEngagement.deleted.is_(False))
+    )
+    for f in (await db.scalars(_fnd_stmt)).all():
         if f.status not in _closed_finding and f.due_date and f.due_date < today:
             add(f"iafinding-overdue:{f.id}", f"Audit finding overdue: {f.reference}",
                 f"{f.title} — remediation due {f.due_date} (owner {f.action_owner or 'n/a'})",
@@ -139,14 +144,19 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
                 "audit_finding", f.id, "/internal-audit")
 
     _closed_eng = {AuditEngagementStatus.closed, AuditEngagementStatus.cancelled}
-    for eng in (await db.scalars(select(AuditEngagement))).all():
+    for eng in (await db.scalars(select(AuditEngagement).where(AuditEngagement.deleted.is_(False)))).all():
         if eng.status not in _closed_eng and eng.planned_end and eng.planned_end < today:
             add(f"iaeng-overdue:{eng.id}", f"Audit engagement overdue: {eng.reference}",
                 f"{eng.title} — planned completion {eng.planned_end}", _W,
                 "audit_engagement", eng.id, "/internal-audit")
 
     _closed_snc = {ShariahFindingStatus.closed, ShariahFindingStatus.remediated}
-    for sf in (await db.scalars(select(ShariahFinding))).all():
+    _snc_stmt = (
+        select(ShariahFinding)
+        .join(ShariahReview, ShariahReview.id == ShariahFinding.review_id)
+        .where(ShariahReview.deleted.is_(False))
+    )
+    for sf in (await db.scalars(_snc_stmt)).all():
         if sf.status not in _closed_snc and sf.due_date and sf.due_date < today:
             add(f"snc-overdue:{sf.id}", f"Shariah non-compliance overdue: {sf.reference}",
                 f"{sf.title} — remediation due {sf.due_date}"
@@ -166,7 +176,12 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
                 f"{rc.title} — due {rc.due_date} ({rc.business_unit or 'n/a'})",
                 _W, "rcsa_assessment", rc.id, "/operational-risk")
 
-    for rr in (await db.scalars(select(RegulatoryReport))).all():
+    _rr_stmt = (
+        select(RegulatoryReport)
+        .join(Incident, Incident.id == RegulatoryReport.incident_id)
+        .where(Incident.deleted.is_(False))
+    )
+    for rr in (await db.scalars(_rr_stmt)).all():
         if rr.status == RegulatoryReportStatus.pending and rr.deadline and rr.deadline < today:
             add(f"regreport-overdue:{rr.id}",
                 f"Regulatory report overdue: {rr.regulator} {rr.report_type.value.replace('_', ' ')}",

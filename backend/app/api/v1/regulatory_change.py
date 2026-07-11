@@ -33,6 +33,7 @@ from app.schemas.regulatory_change import (
     RegulatoryReturnRead,
     RegulatoryReturnUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["regulatory change"])
@@ -42,13 +43,12 @@ _WRITE = Depends(require("regchange:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
@@ -56,7 +56,7 @@ async def _get(db, model, obj_id, name):
 # ================================================== regulatory changes ===
 async def _load_change(db, cid) -> RegulatoryChange:
     obj = await db.scalar(
-        select(RegulatoryChange).where(RegulatoryChange.id == cid).execution_options(populate_existing=True)
+        select(RegulatoryChange).where(RegulatoryChange.id == cid, RegulatoryChange.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Regulatory change not found")
@@ -147,7 +147,14 @@ async def list_obligations(
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ObligationRead]:
-    stmt: Select = select(Obligation)
+    # Exclude obligations whose parent change is archived; keep standalone ones (null parent).
+    stmt: Select = (
+        select(Obligation)
+        .outerjoin(RegulatoryChange, RegulatoryChange.id == Obligation.regulatory_change_id)
+        .where(
+            (Obligation.regulatory_change_id.is_(None)) | (RegulatoryChange.deleted.is_(False))
+        )
+    )
     if status_filter is not None:
         stmt = stmt.where(Obligation.status == status_filter)
     if search:
@@ -183,14 +190,15 @@ async def update_obligation(oid: uuid.UUID, body: ObligationUpdate, db: DbSessio
 @router.delete("/obligations/{oid}", status_code=204, dependencies=[_WRITE])
 async def delete_obligation(oid: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(Obligation).where(Obligation.id == oid))
-    if obj is not None:
-        await db.delete(obj)
-        await db.flush()
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
+    await db.flush()
 
 
 # ====================================================== regulatory returns ===
 async def _load_return(db, rid) -> RegulatoryReturn:
-    obj = await db.scalar(select(RegulatoryReturn).where(RegulatoryReturn.id == rid))
+    obj = await db.scalar(select(RegulatoryReturn).where(RegulatoryReturn.id == rid, RegulatoryReturn.deleted.is_(False)))
     if obj is None:
         raise HTTPException(status_code=404, detail="Regulatory return not found")
     return obj
@@ -259,7 +267,11 @@ async def reg_change_summary(db: DbSession) -> RegChangeSummary:
     changes_in_impl = by_status.get(RegChangeStatus.in_implementation.value, 0)
     changes_overdue = sum(1 for c in changes if c.is_overdue)
 
-    obligations = (await db.scalars(select(Obligation))).all()
+    obligations = (await db.scalars(
+        select(Obligation)
+        .outerjoin(RegulatoryChange, RegulatoryChange.id == Obligation.regulatory_change_id)
+        .where((Obligation.regulatory_change_id.is_(None)) | (RegulatoryChange.deleted.is_(False)))
+    )).all()
     obligations_open = sum(1 for o in obligations if o.status == ObligationStatus.open)
     obligations_met = sum(1 for o in obligations if o.status == ObligationStatus.met)
 

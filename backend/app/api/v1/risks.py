@@ -35,6 +35,7 @@ from app.schemas.risk import (
     RiskRead,
     RiskUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit
 from app.services.risk_scoring import next_review_date
 
@@ -66,8 +67,7 @@ async def _resolve(db, model, ids: Sequence[uuid.UUID]) -> list:
 
 
 async def _next_reference(db) -> str:
-    count = await db.scalar(select(func.count()).select_from(Risk)) or 0
-    return f"R-{count + 1:03d}"
+    return await next_reference(db, Risk, "R")
 
 
 # --------------------------------------------------------------------------- CRUD

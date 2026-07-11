@@ -39,6 +39,7 @@ from app.schemas.icfr import (
     IcfrTestCreate,
     IcfrTestRead,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["icfr"])
@@ -48,13 +49,12 @@ _WRITE = Depends(require("icfr:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
@@ -62,7 +62,7 @@ async def _get(db, model, obj_id, name):
 # ================================================================ processes ===
 async def _load_process(db, pid) -> IcfrProcess:
     obj = await db.scalar(
-        select(IcfrProcess).where(IcfrProcess.id == pid).execution_options(populate_existing=True)
+        select(IcfrProcess).where(IcfrProcess.id == pid, IcfrProcess.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="ICFR process not found")
@@ -147,8 +147,9 @@ async def update_control(cid: uuid.UUID, body: IcfrControlUpdate, db: DbSession)
 @router.delete("/icfr-controls/{cid}", status_code=204, dependencies=[_WRITE])
 async def delete_control(cid: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(IcfrControl).where(IcfrControl.id == cid))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # ================================================= control tests (nested) ===
@@ -184,6 +185,12 @@ async def list_deficiencies(
 
 @router.post("/icfr-deficiencies", response_model=IcfrDeficiencyRead, status_code=201, dependencies=[_WRITE])
 async def create_deficiency(body: IcfrDeficiencyCreate, db: DbSession, user: CurrentUser) -> IcfrDeficiencyRead:
+    # Validate optional parent links up front — an unknown id would otherwise only fail
+    # at flush with an unhandled 500 (FK violation).
+    if body.control_id:
+        await _get(db, IcfrControl, body.control_id, "ICFR control")
+    if body.process_id:
+        await _get(db, IcfrProcess, body.process_id, "ICFR process")
     obj = IcfrDeficiency(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db, IcfrDeficiency, "DEF")
     db.add(obj)
@@ -196,7 +203,12 @@ async def create_deficiency(body: IcfrDeficiencyCreate, db: DbSession, user: Cur
 @router.patch("/icfr-deficiencies/{did}", response_model=IcfrDeficiencyRead, dependencies=[_WRITE])
 async def update_deficiency(did: uuid.UUID, body: IcfrDeficiencyUpdate, db: DbSession) -> IcfrDeficiencyRead:
     obj = await _get(db, IcfrDeficiency, did, "Deficiency")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if data.get("control_id"):
+        await _get(db, IcfrControl, data["control_id"], "ICFR control")
+    if data.get("process_id"):
+        await _get(db, IcfrProcess, data["process_id"], "ICFR process")
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
     return IcfrDeficiencyRead.model_validate(obj)
@@ -227,8 +239,18 @@ class IcfrSummary(BaseModel):
             summary="ICFR RCM, testing and deficiency roll-up for the dashboard")
 async def icfr_summary(db: DbSession) -> IcfrSummary:
     processes = (await db.scalars(select(IcfrProcess).where(IcfrProcess.deleted.is_(False)))).all()
-    controls = (await db.scalars(select(IcfrControl))).all()
-    tests = (await db.scalars(select(IcfrTest))).all()
+    # Controls/tests carry no soft-delete of their own; exclude those whose parent
+    # process is archived so the roll-up doesn't count controls/tests nobody can see.
+    controls = (await db.scalars(
+        select(IcfrControl).join(IcfrProcess, IcfrProcess.id == IcfrControl.process_id)
+        .where(IcfrProcess.deleted.is_(False))
+    )).all()
+    tests = (await db.scalars(
+        select(IcfrTest)
+        .join(IcfrControl, IcfrControl.id == IcfrTest.control_id)
+        .join(IcfrProcess, IcfrProcess.id == IcfrControl.process_id)
+        .where(IcfrProcess.deleted.is_(False))
+    )).all()
     deficiencies = (await db.scalars(select(IcfrDeficiency).where(IcfrDeficiency.deleted.is_(False)))).all()
 
     by_op_eff: dict[str, int] = defaultdict(int)

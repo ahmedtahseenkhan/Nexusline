@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.models.vendor import Vendor
 from app.models.outsourcing import (
     OutsourcingArrangement,
     OutsourcingCategory,
@@ -35,6 +36,7 @@ from app.schemas.outsourcing import (
     OutsourcingReviewRead,
     OutsourcingReviewUpdate,
 )
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["outsourcing"])
@@ -44,20 +46,19 @@ _WRITE = Depends(require("outsourcing:write"))
 
 
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
 
 async def _load_arrangement(db, aid) -> OutsourcingArrangement:
     obj = await db.scalar(
-        select(OutsourcingArrangement).where(OutsourcingArrangement.id == aid).execution_options(populate_existing=True)
+        select(OutsourcingArrangement).where(OutsourcingArrangement.id == aid, OutsourcingArrangement.deleted.is_(False)).execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Outsourcing arrangement not found")
@@ -99,6 +100,12 @@ async def list_arrangements(
 
 @router.post("/outsourcing", response_model=OutsourcingArrangementRead, status_code=201, dependencies=[_WRITE])
 async def create_arrangement(body: OutsourcingArrangementCreate, db: DbSession, user: CurrentUser) -> OutsourcingArrangementRead:
+    if body.vendor_id is not None:
+        v = await db.scalar(
+            select(Vendor.id).where(Vendor.id == body.vendor_id, Vendor.deleted.is_(False))
+        )
+        if v is None:
+            raise HTTPException(status_code=400, detail=f"Unknown or archived vendor id: {body.vendor_id}")
     obj = OutsourcingArrangement(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db, OutsourcingArrangement, "OUT")
     db.add(obj)
@@ -123,10 +130,13 @@ async def update_arrangement(aid: uuid.UUID, body: OutsourcingArrangementUpdate,
 
 
 @router.delete("/outsourcing/{aid}", status_code=204, dependencies=[_WRITE])
-async def delete_arrangement(aid: uuid.UUID, db: DbSession) -> None:
+async def delete_arrangement(aid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_arrangement(db, aid)
     obj.deleted = True
     obj.deleted_date = date.today()
+    await db.flush()
+    await audit_log.record(db, actor=user, action="delete", entity_type="outsourcing_arrangement",
+                         entity_id=obj.id, summary=f"Archived outsourcing arrangement {obj.reference}")
     await db.flush()
 
 
@@ -153,8 +163,9 @@ async def update_review(rid: uuid.UUID, body: OutsourcingReviewUpdate, db: DbSes
 @router.delete("/outsourcing-reviews/{rid}", status_code=204, dependencies=[_WRITE])
 async def delete_review(rid: uuid.UUID, db: DbSession) -> None:
     obj = await db.scalar(select(OutsourcingReview).where(OutsourcingReview.id == rid))
-    if obj is not None:
-        await db.delete(obj)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await db.delete(obj)
 
 
 # ================================================================ summary ===

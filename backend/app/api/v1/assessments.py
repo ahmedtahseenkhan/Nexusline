@@ -19,6 +19,7 @@ from app.models.assessment import (
     Questionnaire,
 )
 from app.models.enums import FindingStatus, VendorAssessmentStatus
+from app.models.vendor import Vendor
 from app.schemas.assessment import (
     AssessmentCreate,
     AssessmentRead,
@@ -141,7 +142,19 @@ async def get_questionnaire(qid: uuid.UUID, db: DbSession) -> QuestionnaireRead:
     "/questionnaires/{qid}", status_code=204, dependencies=[Depends(require("assessment:write"))]
 )
 async def delete_questionnaire(qid: uuid.UUID, db: DbSession) -> None:
-    await db.delete(await _load_questionnaire(db, qid))
+    obj = await _load_questionnaire(db, qid)
+    # The assessments.questionnaire_id FK is RESTRICT. Without this check the DELETE
+    # only fails at commit — which happens after the response is sent — so the client
+    # would get a false 204 while the row survives. Reject up front instead.
+    in_use = await db.scalar(
+        select(func.count()).select_from(Assessment).where(Assessment.questionnaire_id == qid)
+    )
+    if in_use:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Questionnaire is used by {in_use} assessment(s); delete or repoint them first.",
+        )
+    await db.delete(obj)
 
 
 # ===================================================================== assessments
@@ -177,6 +190,12 @@ async def list_assessments(db: DbSession) -> list[AssessmentSummary]:
 async def create_assessment(body: AssessmentCreate, db: DbSession, user: CurrentUser) -> AssessmentRead:
     # validate questionnaire exists in this tenant
     await _load_questionnaire(db, body.questionnaire_id)
+    if body.vendor_id is not None:
+        v = await db.scalar(
+            select(Vendor.id).where(Vendor.id == body.vendor_id, Vendor.deleted.is_(False))
+        )
+        if v is None:
+            raise HTTPException(status_code=400, detail=f"Unknown or archived vendor id: {body.vendor_id}")
     obj = Assessment(
         tenant_id=user.tenant_id,
         title=body.title,

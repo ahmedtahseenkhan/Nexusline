@@ -29,6 +29,7 @@ from app.core.deps import CurrentUser, DbSession, require
 from app.models.ai_assist import AiExtraction, AiExtractionType, AiJobStatus
 from app.schemas.ai_assist import AiExtractionCreate, AiExtractionRead
 from app.schemas.common import Page
+from app.services.refs import next_reference
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["ai assist"])
@@ -259,8 +260,7 @@ async def _extract(extraction_type: AiExtractionType, title: str, input_text: st
 
 # ================================================================== helpers ===
 async def _next_ref(db, model, prefix: str) -> str:
-    count = await db.scalar(select(func.count()).select_from(model)) or 0
-    return f"{prefix}-{count + 1:03d}"
+    return await next_reference(db, model, prefix)
 
 
 async def _get(db, obj_id) -> AiExtraction:
