@@ -13,7 +13,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, insert, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
@@ -28,7 +28,7 @@ from app.models.asset import (
     AssetReview,
     AssetTag,
 )
-from app.models.enums import AssetClass, AssetReviewStatus
+from app.models.enums import AssetClass, AssetEnvironment, AssetReviewStatus
 from app.models.exception import ExceptionRecord
 from app.models.incident import Incident
 from app.models.compliance import Requirement
@@ -248,6 +248,8 @@ _ASSET_SORTABLE = {
     "business_value": Asset.business_value,
     "next_review_date": Asset.next_review_date,
     "self_assessed": Asset.self_assessed,
+    "replacement_cost": Asset.replacement_cost,
+    "environment": Asset.environment,
 }
 
 
@@ -289,26 +291,48 @@ async def asset_summary(
 ) -> dict:
     """Server-computed stat-card figures (correct at any scale — never derived from a
     truncated page fetch)."""
-    base = select(Asset).where(Asset.deleted.is_(False))
+    filters = [Asset.deleted.is_(False)]
     if asset_class:
-        base = base.where(Asset.asset_class == asset_class)
+        filters.append(Asset.asset_class == asset_class)
 
     def _count(extra=None):
-        stmt = base
-        if extra is not None:
-            stmt = stmt.where(extra)
-        return select(func.count()).select_from(stmt.subquery())
+        conds = filters + ([extra] if extra is not None else [])
+        return select(func.count()).select_from(Asset).where(*conds)
 
     total = await db.scalar(_count()) or 0
+    # --- information-asset figures ---
     high_val = await db.scalar(_count(Asset.business_value.in_([Criticality.high, Criticality.critical]))) or 0
     self_assessed = await db.scalar(_count(Asset.self_assessed.is_(True))) or 0
     with_pii = await db.scalar(_count(Asset.data_categories.ilike("%pii%"))) or 0
+    # --- IT-asset figures (server-computed so the stat cards are right at any scale) ---
+    production = await db.scalar(_count(Asset.environment == AssetEnvironment.production)) or 0
+    total_value = await db.scalar(
+        select(func.coalesce(func.sum(Asset.replacement_cost), 0)).where(*filters)
+    ) or 0
+    # effective criticality == critical iff cost band critical (>=10M) OR availability
+    # critical OR it hosts an information asset whose business value is critical.
+    info = aliased(Asset)
+    hosts_critical = (
+        select(AssetDependency.it_asset_id)
+        .join(info, AssetDependency.information_asset_id == info.id)
+        .where(info.business_value == Criticality.critical, info.deleted.is_(False))
+    )
+    effective_critical = await db.scalar(
+        _count(
+            (Asset.replacement_cost >= 10_000_000)
+            | (Asset.availability == Criticality.critical)
+            | Asset.id.in_(hosts_critical)
+        )
+    ) or 0
     return {
         "total": total,
         "high_or_critical_value": high_val,
         "self_assessed": self_assessed,
         "self_assessed_pct": round(self_assessed / total * 100, 1) if total else 0.0,
         "with_pii": with_pii,
+        "production": production,
+        "total_replacement_value": float(total_value),
+        "effective_critical": effective_critical,
     }
 
 
