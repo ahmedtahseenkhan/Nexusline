@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     enforce_license: bool = False
     license_file: str = "./deploy/license.key"
     license_public_key_path: str = "./deploy/license_pubkey.pem"
+    # Comma-separated module keys to hide on this installation even when
+    # licensed (see app/core/modules.py), e.g. "shariah" for a conventional
+    # bank or "esg,ai_assist". The license remains the entitlement ceiling.
+    disabled_modules: str = ""
     # Backups (pg_dump) target directory.
     backup_dir: str = "./var/backups"
 

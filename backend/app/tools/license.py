@@ -3,11 +3,18 @@
   python -m app.tools.license keygen  --out deploy
   python -m app.tools.license sign    --key deploy/license_signing_key.pem \
         --to "Habib Bank Ltd" --plan enterprise --seats 250 --days 365 \
-        --features internal_audit,ldap,mfa,operational_risk --out deploy/license.key
+        --modules financial_crime,enterprise_risk,islamic_banking --out deploy/license.key
   python -m app.tools.license verify  deploy/license.key
+  python -m app.tools.license modules   # list module keys and edition bundles
 
 `keygen` produces the vendor private key (KEEP SECRET) and the public key that ships
 with the deployment. `sign` mints a signed license token. `verify` checks one locally.
+
+`--modules` takes edition names and/or individual module keys (see the `modules`
+command), or "all". Omitting it unlocks every module — use "core" to license the
+base platform only. Example packagings:
+  conventional bank:  --modules financial_crime,enterprise_risk,resilience,audit
+  Islamic bank:       --modules islamic_banking,financial_crime,enterprise_risk,audit
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+from app.core.modules import EDITIONS, MODULES, expand_modules
 from app.services import license as lic
 
 
@@ -43,12 +51,36 @@ def _sign(args: argparse.Namespace) -> int:
         "expires": (date.today() + timedelta(days=args.days)).isoformat(),
         "deployment": args.deployment,
     }
+    if args.modules:
+        entries = [m.strip() for m in args.modules.split(",") if m.strip()]
+        known = set(EDITIONS) | set(MODULES) | {"all", "*"}
+        unknown = [e for e in entries if e.lower().replace("-", "_") not in known]
+        if unknown:
+            print(f"Unknown module/edition name(s): {', '.join(unknown)}", file=sys.stderr)
+            print("Run `python -m app.tools.license modules` for the catalog.", file=sys.stderr)
+            return 2
+        payload["modules"] = entries
     token = lic.sign_payload(payload, Path(args.key).read_bytes())
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(token)
     print(f"Signed license for '{args.to}' ({args.plan}, {args.seats} seats), "
           f"expires {payload['expires']}")
+    if args.modules:
+        expanded = sorted(expand_modules(payload["modules"]))
+        print(f"Modules ({len(expanded)}): {', '.join(expanded) or '(core platform only)'}")
+    else:
+        print("Modules: all (no restriction)")
     print(f"Wrote -> {args.out}")
+    return 0
+
+
+def _modules(args: argparse.Namespace) -> int:
+    print("Editions (bundles usable in --modules):")
+    for name, keys in EDITIONS.items():
+        print(f"  {name:16} {', '.join(keys) or '(base platform, no optional modules)'}")
+    print("\nIndividual module keys:")
+    for key, meta in MODULES.items():
+        print(f"  {key:22} {meta['title']} — {meta['category']}")
     return 0
 
 
@@ -75,9 +107,15 @@ def main(argv: list[str] | None = None) -> int:
     sg.add_argument("--seats", type=int, default=100)
     sg.add_argument("--days", type=int, default=365)
     sg.add_argument("--features", default="", help="Comma-separated feature flags")
+    sg.add_argument("--modules", default="",
+                    help="Comma-separated editions and/or module keys (or 'all'); "
+                         "omit for no module restriction")
     sg.add_argument("--deployment", default="on-prem")
     sg.add_argument("--out", default="deploy/license.key")
     sg.set_defaults(fn=_sign)
+
+    md = sub.add_parser("modules", help="List licensable modules and edition bundles")
+    md.set_defaults(fn=_modules)
 
     vf = sub.add_parser("verify", help="Verify a license token file")
     vf.add_argument("file")

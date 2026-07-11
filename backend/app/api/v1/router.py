@@ -1,5 +1,13 @@
-"""Aggregate all v1 routers."""
-from fastapi import APIRouter
+"""Aggregate all v1 routers.
+
+Licensable modules are registered through :func:`_gated`, which attaches a
+``require_module(<key>)`` dependency so a disabled/unlicensed module rejects API
+calls with 403 — hiding it in the UI alone is not enough. Keys must exist in
+``app.core.modules.MODULES``; core platform routers register plainly.
+"""
+from fastapi import APIRouter, Depends
+
+from app.services.modules import require_module
 
 from app.api.v1 import (
     access_reviews,
@@ -68,6 +76,12 @@ from app.api.v1 import (
 )
 
 api_router = APIRouter(prefix="/api/v1")
+
+
+def _gated(router, module_key: str) -> None:
+    api_router.include_router(router, dependencies=[Depends(require_module(module_key))])
+
+
 api_router.include_router(auth.router)
 api_router.include_router(sso.router)
 api_router.include_router(ldap.router)
@@ -86,34 +100,34 @@ api_router.include_router(evidence.router)
 api_router.include_router(exceptions.router)
 api_router.include_router(projects.router)
 api_router.include_router(goals.router)
-api_router.include_router(internal_audit.router)
-api_router.include_router(shariah.router)
-api_router.include_router(operational_risk.router)
-api_router.include_router(aml.router)
+_gated(internal_audit.router, "internal_audit")
+_gated(shariah.router, "shariah")
+_gated(operational_risk.router, "operational_risk")
+_gated(aml.router, "aml")
 # --- Banking-productionization modules (gap-analysis build) ---
 api_router.include_router(issues.router)
-api_router.include_router(regulatory_change.router)
-api_router.include_router(icfr.router)
-api_router.include_router(bia.router)
-api_router.include_router(fraud.router)
-api_router.include_router(authority.router)
-api_router.include_router(scenario.router)
-api_router.include_router(whistleblowing.router)
-api_router.include_router(vulnerability.router)
-api_router.include_router(esg.router)
-api_router.include_router(model_risk.router)
-api_router.include_router(declaration.router)
-api_router.include_router(governance.router)
-api_router.include_router(data_protection.router)
-api_router.include_router(outsourcing.router)
-api_router.include_router(integrations.router)
+_gated(regulatory_change.router, "regulatory_change")
+_gated(icfr.router, "icfr")
+_gated(bia.router, "bia")
+_gated(fraud.router, "fraud")
+_gated(authority.router, "authority")
+_gated(scenario.router, "scenario_analysis")
+_gated(whistleblowing.router, "whistleblowing")
+_gated(vulnerability.router, "vulnerability")
+_gated(esg.router, "esg")
+_gated(model_risk.router, "model_risk")
+_gated(declaration.router, "declarations")
+_gated(governance.router, "governance_meetings")
+_gated(data_protection.router, "data_protection")
+_gated(outsourcing.router, "outsourcing")
+_gated(integrations.router, "integrations_ccm")
 api_router.include_router(content_library.router)
-api_router.include_router(risk_quant.router)
-api_router.include_router(ai_assist.router)
-api_router.include_router(continuity.router)
-api_router.include_router(privacy.router)
-api_router.include_router(access_reviews.router)
-api_router.include_router(awareness.router)
+_gated(risk_quant.router, "risk_quantification")
+_gated(ai_assist.router, "ai_assist")
+_gated(continuity.router, "continuity")
+_gated(privacy.router, "privacy")
+_gated(access_reviews.router, "access_reviews")
+_gated(awareness.router, "awareness")
 api_router.include_router(notifications.router)
 api_router.include_router(approvals.router)
 api_router.include_router(custom_fields.router)

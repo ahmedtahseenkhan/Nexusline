@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.identity import User
 from app.models.risk import Risk
-from app.services import backup, license as lic, storage, support_bundle
+from app.services import backup, license as lic, modules as module_service, storage, support_bundle
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -47,6 +47,13 @@ async def system_info() -> dict:
 @router.get("/license", dependencies=[Depends(require("role:read"))])
 async def license_status() -> dict:
     return lic.load_current(refresh=True).to_public()
+
+
+@router.get("/modules")
+async def module_matrix(user: CurrentUser) -> list[dict]:
+    """Per-installation module entitlements. Auth-only (no admin permission):
+    every user's navigation is filtered by this, so all roles may read it."""
+    return module_service.module_states()
 
 
 @router.get("/health", dependencies=[Depends(require("role:read"))])
@@ -100,7 +107,9 @@ async def create_backup(user: CurrentUser) -> dict:
 async def download_support_bundle(db: DbSession, user: CurrentUser) -> Response:
     # Gather a little RLS-scoped context (counts) for triage.
     user_count = await db.scalar(select(func.count()).select_from(User)) or 0
-    risk_count = await db.scalar(select(func.count()).select_from(Risk)) or 0
+    risk_count = await db.scalar(
+        select(func.count()).select_from(Risk).where(Risk.deleted.is_(False))
+    ) or 0
     extra = {
         "tenant_id": str(user.tenant_id),
         "requested_by": user.email,

@@ -144,10 +144,21 @@ export interface LicenseInfo {
   plan: string;
   seats: number;
   features: string[];
+  modules: string[] | null;
   issued: string;
   expires: string;
   deployment: string;
   message: string;
+}
+export interface ModuleState {
+  key: string;
+  title: string;
+  category: string;
+  description: string;
+  routes: string[];
+  licensed: boolean;
+  disabled_by_config: boolean;
+  enabled: boolean;
 }
 export interface SystemInfo {
   app_version: string;
@@ -1401,6 +1412,7 @@ export const api = {
   saveLdapConfig: (payload: Record<string, unknown>) =>
     request<LdapConfig>("/auth/ldap/config", { method: "PUT", body: JSON.stringify(payload) }),
   systemInfo: () => request<SystemInfo>("/system/info"),
+  systemModules: () => request<ModuleState[]>("/system/modules"),
   systemHealth: () => request<SystemHealth>("/system/health"),
   listBackups: () => request<BackupItem[]>("/system/backups"),
   createBackup: () => request<BackupItem>("/system/backups", { method: "POST" }),
