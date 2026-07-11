@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type CustomFieldValueItem } from "@/lib/api";
+import CustomFieldsEditor from "@/components/CustomFieldsEditor";
 
 /** Renders an org's custom fields for a given record and saves their values. */
 export default function CustomFieldsPanel({ model, entityId }: { model: string; entityId: string }) {
@@ -46,40 +47,7 @@ export default function CustomFieldsPanel({ model, entityId }: { model: string; 
         <span className="sub">org-defined</span>
       </div>
       <div className="card-pad">
-        {items.map(({ field }) => {
-          const v = values[field.id] ?? "";
-          return (
-            <div key={field.id} style={{ marginBottom: 12 }}>
-              <label className="label">
-                {field.label}
-                {field.required && <span style={{ color: "var(--red)" }}> *</span>}
-              </label>
-              {field.field_type === "textarea" ? (
-                <textarea className="input" rows={2} value={v} onChange={(e) => set(field.id, e.target.value)} />
-              ) : field.field_type === "select" ? (
-                <select className="input" value={v} onChange={(e) => set(field.id, e.target.value)}>
-                  <option value="">—</option>
-                  {field.options.split("\n").filter(Boolean).map((o) => (
-                    <option key={o} value={o.trim()}>{o.trim()}</option>
-                  ))}
-                </select>
-              ) : field.field_type === "checkbox" ? (
-                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
-                  <input type="checkbox" checked={v === "true"} onChange={(e) => set(field.id, e.target.checked ? "true" : "false")} />
-                  Yes
-                </label>
-              ) : (
-                <input
-                  className="input"
-                  type={field.field_type === "number" ? "number" : field.field_type === "date" ? "date" : "text"}
-                  value={v}
-                  onChange={(e) => set(field.id, e.target.value)}
-                />
-              )}
-              {field.help_text && <div className="when" style={{ marginTop: 4 }}>{field.help_text}</div>}
-            </div>
-          );
-        })}
+        <CustomFieldsEditor fields={items.map((i) => i.field)} values={values} onChange={set} />
         <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 4 }}>
           <button className="btn sm" onClick={save} disabled={status === "saving"}>
             {status === "saving" ? "Saving…" : "Save fields"}
