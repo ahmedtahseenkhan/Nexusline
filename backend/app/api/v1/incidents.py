@@ -122,6 +122,7 @@ async def list_incidents(
     db: DbSession,
     status_filter: Annotated[IncidentStatus | None, Query(alias="status")] = None,
     severity: Severity | None = None,
+    search: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[IncidentRead]:
@@ -130,6 +131,8 @@ async def list_incidents(
         stmt = stmt.where(Incident.status == status_filter)
     if severity is not None:
         stmt = stmt.where(Incident.severity == severity)
+    if search:
+        stmt = stmt.where(Incident.title.ilike(f"%{search}%") | Incident.reference.ilike(f"%{search}%"))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (
         await db.scalars(stmt.options(*_loads()).order_by(Incident.created_at.desc()).limit(limit).offset(offset))

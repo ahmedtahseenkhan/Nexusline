@@ -1,14 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { api, apiCall, type CustomField, type RiskSetting, type StatusLabel } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { api, apiCall, type CustomField, type RiskSetting } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
 import CustomFieldsEditor from "@/components/CustomFieldsEditor";
+import DataTable, { type Column } from "@/components/DataTable";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
-import { Field, TextInput, TextArea, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
-import { IconGauge, IconPlus, IconRisk } from "@/components/icons";
+import { IconGauge, IconPlus } from "@/components/icons";
 
 // --------------------------------------------------------------- inline types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -121,13 +126,18 @@ type FormState = {
   treatment_deadline: string;
   treatment_cost: number | "";
   review_frequency: string;
-  asset_ids: string[];
-  control_ids: string[];
-  threat_ids: string[];
-  vulnerability_ids: string[];
-  policy_ids: string[];
-  incident_ids: string[];
+  asset_ids: AsyncOption[];
+  control_ids: AsyncOption[];
+  threat_ids: AsyncOption[];
+  vulnerability_ids: AsyncOption[];
+  policy_ids: AsyncOption[];
+  incident_ids: AsyncOption[];
 };
+
+const refToOpt = (x: Ref): AsyncOption => ({
+  value: x.id,
+  label: x.reference || x.title || x.name || x.id,
+});
 
 const BLANK: FormState = {
   title: "", description: "", category: "", status: "draft",
@@ -161,12 +171,12 @@ function fromRisk(r: RiskRow): FormState {
     treatment_deadline: r.treatment_deadline || "",
     treatment_cost: r.treatment_cost ?? "",
     review_frequency: r.review_frequency,
-    asset_ids: r.assets.map((x) => x.id),
-    control_ids: r.controls.map((x) => x.id),
-    threat_ids: r.threats.map((x) => x.id),
-    vulnerability_ids: r.vulnerabilities.map((x) => x.id),
-    policy_ids: r.policies.map((x) => x.id),
-    incident_ids: r.incidents.map((x) => x.id),
+    asset_ids: r.assets.map(refToOpt),
+    control_ids: r.controls.map(refToOpt),
+    threat_ids: r.threats.map(refToOpt),
+    vulnerability_ids: r.vulnerabilities.map(refToOpt),
+    policy_ids: r.policies.map(refToOpt),
+    incident_ids: r.incidents.map(refToOpt),
   };
 }
 
@@ -193,29 +203,20 @@ function toPayload(f: FormState): Record<string, unknown> {
     treatment_deadline: f.treatment_deadline || null,
     treatment_cost: num(f.treatment_cost),
     review_frequency: f.review_frequency,
-    asset_ids: f.asset_ids,
-    control_ids: f.control_ids,
-    threat_ids: f.threat_ids,
-    vulnerability_ids: f.vulnerability_ids,
-    policy_ids: f.policy_ids,
-    incident_ids: f.incident_ids,
+    asset_ids: f.asset_ids.map((o) => o.value),
+    control_ids: f.control_ids.map((o) => o.value),
+    threat_ids: f.threat_ids.map((o) => o.value),
+    vulnerability_ids: f.vulnerability_ids.map((o) => o.value),
+    policy_ids: f.policy_ids.map((o) => o.value),
+    incident_ids: f.incident_ids.map((o) => o.value),
   };
 }
 
 // --------------------------------------------------------------- page
 export default function RisksPage() {
-  const [risks, setRisks] = useState<RiskRow[]>([]);
-  const [labels, setLabels] = useState<Record<string, StatusLabel[]>>({});
   const [settings, setSettings] = useState<RiskSetting | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // option sources for link pickers
-  const [assets, setAssets] = useState<Named[]>([]);
-  const [controls, setControls] = useState<Named[]>([]);
-  const [threats, setThreats] = useState<Named[]>([]);
-  const [vulns, setVulns] = useState<Named[]>([]);
-  const [policies, setPolicies] = useState<Named[]>([]);
-  const [incidents, setIncidents] = useState<Named[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [users, setUsers] = useState<UserRow[]>([]);
 
   // appetite editor
@@ -234,32 +235,22 @@ export default function RisksPage() {
   const [cfDefs, setCfDefs] = useState<CustomField[]>([]);
   const [cfValues, setCfValues] = useState<Record<string, string>>({});
 
-  async function load() {
-    try {
-      const r = await apiCall<Page<RiskRow>>("GET", "/risks?limit=200");
-      setRisks(r.items);
-      if (r.items.length) {
-        api.evaluateStatus("risk", r.items.map((x) => x.id)).then(setLabels).catch(() => {});
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchRisks = useCallback((qs: string) => apiCall<PagedList<RiskRow>>("GET", `/risks?${qs}`), []);
+
+  // Server typeahead sources for the form's link pickers (replaces 6 capped preloads).
+  const linkSearch = (path: string) => (q: string) =>
+    apiCall<PagedList<Named>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((x) => ({ value: x.id, label: x.name || x.title || x.reference || x.id, sub: x.reference })),
+    );
 
   useEffect(() => {
-    load();
     api.riskSettings().then((s) => {
       setSettings(s);
       setAppetiteScore(s.appetite_score);
       setToleranceScore(s.tolerance_score);
     }).catch(() => {});
-    apiCall<Page<Named>>("GET", "/assets?limit=200").then((r) => setAssets(r.items)).catch(() => {});
-    apiCall<Page<Named>>("GET", "/controls?limit=200").then((r) => setControls(r.items)).catch(() => {});
-    apiCall<Page<Named>>("GET", "/threats?limit=500").then((r) => setThreats(r.items)).catch(() => {});
-    apiCall<Page<Named>>("GET", "/vulnerabilities?limit=500").then((r) => setVulns(r.items)).catch(() => {});
-    apiCall<Page<Named>>("GET", "/policies?limit=200").then((r) => setPolicies(r.items)).catch(() => {});
-    apiCall<Page<Named>>("GET", "/incidents?limit=200").then((r) => setIncidents(r.items)).catch(() => {});
-    apiCall<Page<UserRow>>("GET", "/users?limit=200").then((r) => setUsers(r.items)).catch(() => {});
+    apiCall<PagedList<UserRow>>("GET", "/users?limit=200").then((r) => setUsers(r.items)).catch(() => {});
     api.customFields("risk").then((d) => setCfDefs(d.filter((x) => x.enabled))).catch(() => {});
   }, []);
 
@@ -296,7 +287,8 @@ export default function RisksPage() {
         await api.setCustomFieldValues("risk", riskId, cfValues);
       }
       setShowForm(false);
-      await load();
+      reload();
+      toast(editing ? "Changes saved" : "Risk created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save risk");
     } finally {
@@ -305,11 +297,12 @@ export default function RisksPage() {
   }
 
   async function remove(r: RiskRow) {
-    if (!window.confirm(`Archive risk ${r.reference}? This soft-deletes it from the register.`)) return;
+    if (!(await confirmDialog({ title: `Archive risk ${r.reference}?`, message: "It will be soft-deleted from the register.", confirmLabel: "Archive", danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/risks/${r.id}`);
-      await load();
+      reload();
+      toast("Archived");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete risk");
     }
@@ -327,19 +320,7 @@ export default function RisksPage() {
     }
   }
 
-  // option lists
-  const named = (rows: Named[]): Option[] =>
-    rows.map((x) => ({ value: x.id, label: x.name || x.title || x.reference || x.id, sub: x.reference }));
-  const assetOpts = useMemo(() => named(assets), [assets]);
-  const controlOpts = useMemo(() => named(controls), [controls]);
-  const threatOpts = useMemo(() => named(threats), [threats]);
-  const vulnOpts = useMemo(() => named(vulns), [vulns]);
-  const policyOpts = useMemo(() => named(policies), [policies]);
-  const incidentOpts = useMemo(() => named(incidents), [incidents]);
-  const userOpts = useMemo<Option[]>(
-    () => users.map((u) => ({ value: u.id, label: u.full_name || u.email, sub: u.email })),
-    [users],
-  );
+  const userOpts: Option[] = users.map((u) => ({ value: u.id, label: u.full_name || u.email, sub: u.email }));
 
   const userName = (id: string | null) => {
     if (!id) return "—";
@@ -459,22 +440,22 @@ export default function RisksPage() {
   const linksTab = (
     <>
       <Field label="Assets" help="Assets exposed to or affected by this risk.">
-        <MultiSelect value={f.asset_ids} onChange={(v) => set("asset_ids", v)} options={assetOpts} />
+        <AsyncMultiSelect search={linkSearch("assets")} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} />
       </Field>
       <Field label="Controls" help="Controls that mitigate this risk (reduce residual likelihood/impact).">
-        <MultiSelect value={f.control_ids} onChange={(v) => set("control_ids", v)} options={controlOpts} />
+        <AsyncMultiSelect search={linkSearch("controls")} value={f.control_ids} onChange={(v) => set("control_ids", v)} />
       </Field>
       <Field label="Threats" help="Threats from the catalog that could trigger this risk.">
-        <MultiSelect value={f.threat_ids} onChange={(v) => set("threat_ids", v)} options={threatOpts} />
+        <AsyncMultiSelect search={linkSearch("threats")} value={f.threat_ids} onChange={(v) => set("threat_ids", v)} />
       </Field>
       <Field label="Vulnerabilities" help="Weaknesses a threat could exploit.">
-        <MultiSelect value={f.vulnerability_ids} onChange={(v) => set("vulnerability_ids", v)} options={vulnOpts} />
+        <AsyncMultiSelect search={linkSearch("vulnerabilities")} value={f.vulnerability_ids} onChange={(v) => set("vulnerability_ids", v)} />
       </Field>
       <Field label="Policies" help="Policies that govern or address this risk.">
-        <MultiSelect value={f.policy_ids} onChange={(v) => set("policy_ids", v)} options={policyOpts} />
+        <AsyncMultiSelect search={linkSearch("policies")} value={f.policy_ids} onChange={(v) => set("policy_ids", v)} />
       </Field>
       <Field label="Incidents" help="Incidents that materialised from this risk.">
-        <MultiSelect value={f.incident_ids} onChange={(v) => set("incident_ids", v)} options={incidentOpts} />
+        <AsyncMultiSelect search={linkSearch("incidents")} value={f.incident_ids} onChange={(v) => set("incident_ids", v)} />
       </Field>
     </>
   );
@@ -505,6 +486,21 @@ export default function RisksPage() {
     </>
   );
 
+  const riskColumns: Column<RiskRow>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference}</span> },
+    { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "category", header: "Category", sortable: true, render: (r) => <span className="muted">{r.category || "—"}</span> },
+    { key: "inherent_score", header: "Inherent", sortable: true, render: (r) => <><Severity value={r.inherent_severity} /> <span className="muted">({r.inherent_score ?? "—"})</span></> },
+    { key: "residual_score", header: "Residual", sortable: true, render: (r) => <><Severity value={r.residual_severity} /> <span className="muted">({r.residual_score ?? "—"})</span></> },
+    { key: "appetite", header: "Appetite", render: (r) => { const a = appetite(r, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; } },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
+    { key: "owner", header: "Owner", render: (r) => <span className="muted">{userName(r.owner_id)}</span> },
+    { key: "exposure", header: "Exposure", render: (r) => <span className="muted">{money(r.annual_loss_expectancy)}</span> },
+    { key: "links", header: "Links", align: "center", render: (r) => <span className="muted">{linkCount(r) || "—"}</span> },
+    { key: "next_review_date", header: "Review", sortable: true, render: (r) => (isOverdue(r.next_review_date) ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.next_review_date || "—"}</span>) },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(r)}>Delete</button></div> },
+  ];
+
   return (
     <>
       <div className="page-head row-between">
@@ -517,7 +513,7 @@ export default function RisksPage() {
             <IconGauge width={16} height={16} />
             Appetite
           </button>
-          <ImportExport resource="risks" label="Risks" onDone={load} />
+          <ImportExport resource="risks" label="Risks" onDone={reload} />
           <button className="btn secondary" onClick={() => api.pdfRiskRegister().catch(() => {})}>
             Register PDF
           </button>
@@ -555,79 +551,16 @@ export default function RisksPage() {
         </div>
       )}
 
-      <div className="card">
-        <div className="card-head">
-          <h3>All risks</h3>
-          <span className="sub">{risks.length} total</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Title</th>
-                <th>Category</th>
-                <th>Inherent</th>
-                <th>Residual</th>
-                <th>Appetite</th>
-                <th>Status</th>
-                <th>Owner</th>
-                <th>Exposure</th>
-                <th>Links</th>
-                <th>Review</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {risks.map((r) => {
-                const a = appetite(r, settings);
-                const overdue = isOverdue(r.next_review_date);
-                return (
-                  <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => openEdit(r)}>
-                    <td className="ref">{r.reference}</td>
-                    <td className="cell-title">{r.title}</td>
-                    <td className="muted">{r.category || "—"}</td>
-                    <td>
-                      <Severity value={r.inherent_severity} />{" "}
-                      <span className="muted">({r.inherent_score ?? "—"})</span>
-                    </td>
-                    <td>
-                      <Severity value={r.residual_severity} />{" "}
-                      <span className="muted">({r.residual_score ?? "—"})</span>
-                    </td>
-                    <td>{a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>}</td>
-                    <td><Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge></td>
-                    <td className="muted">{userName(r.owner_id)}</td>
-                    <td className="muted">{money(r.annual_loss_expectancy)}</td>
-                    <td className="muted">{linkCount(r) || "—"}</td>
-                    <td>
-                      {overdue
-                        ? <Badge tone="high">Overdue</Badge>
-                        : <span className="muted">{r.next_review_date || "—"}</span>}
-                    </td>
-                    <td>
-                      <div onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => remove(r)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-              {risks.length === 0 && (
-                <tr>
-                  <td colSpan={12}>
-                    <div className="empty">
-                      <span className="ico"><IconRisk width={24} height={24} /></span>
-                      <h3>No risks yet</h3>
-                      <p>Create your first risk to start building the register.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<RiskRow>
+        columns={riskColumns}
+        fetcher={fetchRisks}
+        rowKey={(r) => r.id}
+        onRowClick={openEdit}
+        searchPlaceholder="Search risks by title or reference…"
+        defaultSort={{ by: "inherent_score", dir: "desc" }}
+        emptyMessage="No risks yet. Create your first risk to start building the register."
+        refreshKey={refreshKey}
+      />
 
       {showForm && (
         <FormModal

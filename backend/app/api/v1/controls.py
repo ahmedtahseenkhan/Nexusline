@@ -124,10 +124,13 @@ async def _fresh(db, control_id: uuid.UUID) -> Control:
 @router.get("", response_model=Page[ControlRead], dependencies=[Depends(require("control:read"))])
 async def list_controls(
     db: DbSession,
+    search: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ControlRead]:
     stmt = select(Control).where(Control.deleted.is_(False))
+    if search:
+        stmt = stmt.where(Control.name.ilike(f"%{search}%") | Control.reference.ilike(f"%{search}%"))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (
         await db.scalars(stmt.options(*_loads()).order_by(Control.name).limit(limit).offset(offset))

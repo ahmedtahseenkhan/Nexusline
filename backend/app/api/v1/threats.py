@@ -57,11 +57,15 @@ def _read(schema, obj, counts):
 @router.get("/threats", response_model=Page[ThreatRead], dependencies=[Depends(require("risk:read"))])
 async def list_threats(
     db: DbSession,
+    search: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ThreatRead]:
-    total = await db.scalar(select(func.count()).select_from(Threat)) or 0
-    rows = (await db.scalars(select(Threat).order_by(Threat.name).limit(limit).offset(offset))).all()
+    tstmt = select(Threat)
+    if search:
+        tstmt = tstmt.where(Threat.name.ilike(f"%{search}%"))
+    total = await db.scalar(select(func.count()).select_from(tstmt.subquery())) or 0
+    rows = (await db.scalars(tstmt.order_by(Threat.name).limit(limit).offset(offset))).all()
     counts = await _usage_counts(db, risk_threats, risk_threats.c.threat_id)
     return Page(
         items=[_read(ThreatRead, r, counts) for r in rows],
@@ -109,12 +113,16 @@ async def delete_threat(obj_id: uuid.UUID, db: DbSession) -> None:
 )
 async def list_vulnerabilities(
     db: DbSession,
+    search: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[VulnerabilityRead]:
-    total = await db.scalar(select(func.count()).select_from(Vulnerability)) or 0
+    vstmt = select(Vulnerability)
+    if search:
+        vstmt = vstmt.where(Vulnerability.name.ilike(f"%{search}%"))
+    total = await db.scalar(select(func.count()).select_from(vstmt.subquery())) or 0
     rows = (
-        await db.scalars(select(Vulnerability).order_by(Vulnerability.name).limit(limit).offset(offset))
+        await db.scalars(vstmt.order_by(Vulnerability.name).limit(limit).offset(offset))
     ).all()
     counts = await _usage_counts(db, risk_vulnerabilities, risk_vulnerabilities.c.vulnerability_id)
     return Page(

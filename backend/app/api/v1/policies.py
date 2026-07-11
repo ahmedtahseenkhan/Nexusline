@@ -129,10 +129,13 @@ async def _next_ref(db) -> str:
 @router.get("", response_model=Page[PolicyRead], dependencies=[Depends(require("policy:read"))])
 async def list_policies(
     db: DbSession,
+    search: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[PolicyRead]:
     stmt = select(Policy).where(Policy.deleted.is_(False))
+    if search:
+        stmt = stmt.where(Policy.title.ilike(f"%{search}%") | Policy.reference.ilike(f"%{search}%"))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (
         await db.scalars(stmt.options(*_loads()).order_by(Policy.reference).limit(limit).offset(offset))
