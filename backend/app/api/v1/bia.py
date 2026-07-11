@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.bia import BiaAssessment, BiaDependency, BiaStatus
 from app.models.enums import Criticality
 from app.schemas.bia import (
@@ -52,24 +53,47 @@ async def _load_bia(db, bid) -> BiaAssessment:
 
 
 # ============================================================ BIA assessments ===
+_BIA_SORTABLE = {
+    "reference": BiaAssessment.reference,
+    "process_name": BiaAssessment.process_name,
+    "business_unit": BiaAssessment.business_unit,
+    "criticality": BiaAssessment.criticality,
+    "status": BiaAssessment.status,
+    "rto_hours": BiaAssessment.rto_hours,
+    "rpo_hours": BiaAssessment.rpo_hours,
+    "next_review_date": BiaAssessment.next_review_date,
+    "created_at": BiaAssessment.created_at,
+}
+
+
 @router.get("/bia", response_model=Page[BiaRead], dependencies=[_READ])
 async def list_bia(
     db: DbSession,
     search: str | None = None,
     criticality: Annotated[Criticality | None, Query()] = None,
     status_filter: Annotated[BiaStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[BiaRead]:
     stmt: Select = select(BiaAssessment).where(BiaAssessment.deleted.is_(False))
     if search:
-        stmt = stmt.where(BiaAssessment.process_name.ilike(f"%{search}%"))
+        like = f"%{search}%"
+        stmt = stmt.where(
+            BiaAssessment.process_name.ilike(like) | BiaAssessment.reference.ilike(like)
+        )
     if criticality is not None:
         stmt = stmt.where(BiaAssessment.criticality == criticality)
     if status_filter is not None:
         stmt = stmt.where(BiaAssessment.status == status_filter)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(BiaAssessment.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _BIA_SORTABLE, default=BiaAssessment.created_at)
+    else:
+        stmt = stmt.order_by(BiaAssessment.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[BiaRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

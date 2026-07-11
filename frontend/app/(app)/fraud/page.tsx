@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiCall, type Page } from "@/lib/api";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ local types
 interface FraudRisk {
@@ -392,14 +395,27 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "checklist", label: "SBP Control Checklist" },
 ];
 
-export default function FraudPage() {
+function FraudInner() {
   const [section, setSection] = useState<SectionId>("risks");
   const [error, setError] = useState<string | null>(null);
 
-  const [risks, setRisks] = useState<FraudRisk[]>([]);
-  const [cases, setCases] = useState<FraudCase[]>([]);
-  const [checks, setChecks] = useState<FraudControlCheck[]>([]);
   const [summary, setSummary] = useState<FraudSummary | null>(null);
+
+  const [riskKey, setRiskKey] = useState(0);
+  const [caseKey, setCaseKey] = useState(0);
+  const [checkKey, setCheckKey] = useState(0);
+  const reloadRisks = useCallback(() => setRiskKey((k) => k + 1), []);
+  const reloadCases = useCallback(() => setCaseKey((k) => k + 1), []);
+  const reloadChecks = useCallback(() => setCheckKey((k) => k + 1), []);
+
+  const fetchRisks = useCallback((qs: string) => apiCall<PagedList<FraudRisk>>("GET", `/fraud-risks?${qs}`), []);
+  const fetchCases = useCallback((qs: string) => apiCall<PagedList<FraudCase>>("GET", `/fraud-cases?${qs}`), []);
+  const fetchChecks = useCallback((qs: string) => apiCall<PagedList<FraudControlCheck>>("GET", `/fraud-control-checks?${qs}`), []);
+
+  const loadSummary = useCallback(() => {
+    apiCall<FraudSummary>("GET", "/fraud-summary").then(setSummary).catch((e) => setError(e instanceof Error ? e.message : "Failed to load fraud summary"));
+  }, []);
+  useEffect(() => { loadSummary(); }, [loadSummary]);
 
   // ---- risk dialog ----
   const [editingRisk, setEditingRisk] = useState<FraudRisk | null>(null);
@@ -422,43 +438,6 @@ export default function FraudPage() {
   const [kf, setKf] = useState<CheckForm>(BLANK_CHECK);
   const setK = <K extends keyof CheckForm>(k: K, v: CheckForm[K]) => setKf((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadRisks() {
-    try {
-      setRisks((await apiCall<Page<FraudRisk>>("GET", "/fraud-risks?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load fraud risks");
-    }
-  }
-  async function loadCases() {
-    try {
-      setCases((await apiCall<Page<FraudCase>>("GET", "/fraud-cases?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load fraud cases");
-    }
-  }
-  async function loadChecks() {
-    try {
-      setChecks((await apiCall<Page<FraudControlCheck>>("GET", "/fraud-control-checks?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load control checklist");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<FraudSummary>("GET", "/fraud-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load fraud summary");
-    }
-  }
-
-  useEffect(() => {
-    loadRisks();
-    loadCases();
-    loadChecks();
-    loadSummary();
-  }, []);
-
   // ------------------------------------------------------------- risk CRUD
   function openNewRisk() {
     setEditingRisk(null);
@@ -478,8 +457,9 @@ export default function FraudPage() {
       if (editingRisk) await apiCall<FraudRisk>("PATCH", `/fraud-risks/${editingRisk.id}`, payload);
       else await apiCall<FraudRisk>("POST", "/fraud-risks", payload);
       setShowRiskForm(false);
-      await loadRisks();
-      await loadSummary();
+      reloadRisks();
+      loadSummary();
+      toast(editingRisk ? "Changes saved" : "Fraud risk created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save fraud risk");
     } finally {
@@ -487,13 +467,14 @@ export default function FraudPage() {
     }
   }
   async function removeRisk(r: FraudRisk) {
-    if (!window.confirm(`Delete fraud risk ${r.reference || r.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete fraud risk ${r.reference || r.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/fraud-risks/${r.id}`);
       setShowRiskForm(false);
-      await loadRisks();
-      await loadSummary();
+      reloadRisks();
+      loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -518,8 +499,9 @@ export default function FraudPage() {
       if (editingCase) await apiCall<FraudCase>("PATCH", `/fraud-cases/${editingCase.id}`, payload);
       else await apiCall<FraudCase>("POST", "/fraud-cases", payload);
       setShowCaseForm(false);
-      await loadCases();
-      await loadSummary();
+      reloadCases();
+      loadSummary();
+      toast(editingCase ? "Changes saved" : "Fraud case created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save fraud case");
     } finally {
@@ -527,13 +509,14 @@ export default function FraudPage() {
     }
   }
   async function removeCase(c: FraudCase) {
-    if (!window.confirm(`Delete fraud case ${c.reference || c.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete fraud case ${c.reference || c.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/fraud-cases/${c.id}`);
       setShowCaseForm(false);
-      await loadCases();
-      await loadSummary();
+      reloadCases();
+      loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -558,8 +541,9 @@ export default function FraudPage() {
       if (editingCheck) await apiCall<FraudControlCheck>("PATCH", `/fraud-control-checks/${editingCheck.id}`, payload);
       else await apiCall<FraudControlCheck>("POST", "/fraud-control-checks", payload);
       setShowCheckForm(false);
-      await loadChecks();
-      await loadSummary();
+      reloadChecks();
+      loadSummary();
+      toast(editingCheck ? "Changes saved" : "Control check created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save control check");
     } finally {
@@ -567,13 +551,14 @@ export default function FraudPage() {
     }
   }
   async function removeCheck(k: FraudControlCheck) {
-    if (!window.confirm(`Delete control check ${k.reference}?`)) return;
+    if (!(await confirmDialog({ title: `Delete control check ${k.reference}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/fraud-control-checks/${k.id}`);
       setShowCheckForm(false);
-      await loadChecks();
-      await loadSummary();
+      reloadChecks();
+      loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -586,12 +571,50 @@ export default function FraudPage() {
         implemented: on,
         status: on ? "implemented" : "not_implemented",
       });
-      await loadChecks();
-      await loadSummary();
+      reloadChecks();
+      loadSummary();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update control check");
     }
   }
+
+  // ------------------------------------------------------------- columns
+  const riskColumns: Column<FraudRisk>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "scheme", header: "Scheme", sortable: true, render: (r) => <Badge tone="info">{cap(r.scheme)}</Badge> },
+    { key: "channel", header: "Channel", sortable: true, render: (r) => <span className="muted">{cap(r.channel)}</span> },
+    { key: "inherent", header: "Inherent LxI", render: (r) => <span className="muted">{r.inherent_likelihood}×{r.inherent_impact} ({r.inherent_score})</span> },
+    { key: "control_effectiveness", header: "Control", sortable: true, render: (r) => <EffBadge value={r.control_effectiveness} /> },
+    { key: "residual", header: "Residual", render: (r) => <BandBadge score={r.residual_score} /> },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={RISK_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeRisk(r)}>Delete</button></div> },
+  ];
+
+  const caseColumns: Column<FraudCase>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (c) => <span className="cell-title">{c.title}</span> },
+    { key: "scheme", header: "Scheme", sortable: true, render: (c) => <Badge tone="info">{cap(c.scheme)}</Badge> },
+    { key: "amount_involved", header: "Involved", sortable: true, render: (c) => <span className="muted">{num(c.amount_involved)} {c.currency}</span> },
+    { key: "amount_recovered", header: "Recovered", sortable: true, render: (c) => <span className="muted">{num(c.amount_recovered)}</span> },
+    { key: "net_loss", header: "Net loss", render: (c) => <span className="muted">{num(c.net_loss)}</span> },
+    { key: "perpetrator_type", header: "Perpetrator", sortable: true, render: (c) => <span className="muted">{cap(c.perpetrator_type)}</span> },
+    { key: "regulator", header: "Regulator", render: (c) => (c.reported_to_regulator ? <Badge tone="high">Reported{c.regulator_ref ? ` · ${c.regulator_ref}` : ""}</Badge> : <span className="muted">Not reported</span>) },
+    { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CASE_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
+    { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCase(c)}>Delete</button></div> },
+  ];
+
+  const checkColumns: Column<FraudControlCheck>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (k) => <span className="ref">{k.reference || "—"}</span> },
+    { key: "requirement", header: "Requirement", render: (k) => <span className="cell-title">{k.requirement}</span> },
+    { key: "category", header: "Category", sortable: true, render: (k) => <Badge tone="info">{cap(k.category)}</Badge> },
+    { key: "sbp_reference", header: "SBP ref", sortable: true, render: (k) => <span className="muted">{k.sbp_reference || "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (k) => <span className="muted">{k.owner || "—"}</span> },
+    { key: "target_date", header: "Target", sortable: true, render: (k) => <span className="muted">{k.target_date || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (k) => <Badge tone={CONTROL_STATUS_TONE[k.status] || "neutral"}>{cap(k.status)}</Badge> },
+    { key: "implemented", header: "Implemented", render: (k) => <span onClick={(e) => e.stopPropagation()}><Toggle checked={k.implemented} onChange={() => toggleImplemented(k)} /></span> },
+    { key: "actions", header: "", render: (k) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCheck(k)}>Delete</button></div> },
+  ];
 
   // ------------------------------------------------------------- risk form tabs
   const riskGeneral = (
@@ -839,193 +862,54 @@ export default function FraudPage() {
 
       {/* ============================================= FRAUD RISK REGISTER */}
       {section === "risks" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Fraud Risk Register</h3>
-            <span className="sub">{risks.length} total · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Title</th>
-                  <th>Scheme</th>
-                  <th>Channel</th>
-                  <th>Inherent LxI</th>
-                  <th>Control</th>
-                  <th>Residual</th>
-                  <th>Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {risks.map((r) => (
-                  <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => openEditRisk(r)}>
-                    <td className="ref">{r.reference || "—"}</td>
-                    <td className="cell-title">{r.title}</td>
-                    <td><Badge tone="info">{cap(r.scheme)}</Badge></td>
-                    <td className="muted">{cap(r.channel)}</td>
-                    <td className="muted">{r.inherent_likelihood}×{r.inherent_impact} ({r.inherent_score})</td>
-                    <td><EffBadge value={r.control_effectiveness} /></td>
-                    <td><BandBadge score={r.residual_score} /></td>
-                    <td><Badge tone={RISK_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge></td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeRisk(r)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {risks.length === 0 && (
-                  <tr>
-                    <td colSpan={9}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No fraud risks</h3>
-                        <p>Build the fraud risk register — score inherent and residual fraud exposure by scheme and channel.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<FraudRisk>
+          columns={riskColumns}
+          fetcher={fetchRisks}
+          rowKey={(r) => r.id}
+          onRowClick={(r) => openEditRisk(r)}
+          searchPlaceholder="Search fraud risks by title or reference…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No fraud risks. Build the register — score inherent and residual fraud exposure by scheme and channel."
+          refreshKey={riskKey}
+        />
       )}
 
       {/* ============================================= FRAUD CASES */}
       {section === "cases" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Fraud Cases</h3>
-            <span className="sub">{cases.length} total · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Title</th>
-                  <th>Scheme</th>
-                  <th>Involved</th>
-                  <th>Recovered</th>
-                  <th>Net loss</th>
-                  <th>Perpetrator</th>
-                  <th>Regulator</th>
-                  <th>Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {cases.map((c) => (
-                  <tr key={c.id} style={{ cursor: "pointer" }} onClick={() => openEditCase(c)}>
-                    <td className="ref">{c.reference || "—"}</td>
-                    <td className="cell-title">{c.title}</td>
-                    <td><Badge tone="info">{cap(c.scheme)}</Badge></td>
-                    <td className="muted">{num(c.amount_involved)} {c.currency}</td>
-                    <td className="muted">{num(c.amount_recovered)}</td>
-                    <td className="muted">{num(c.net_loss)}</td>
-                    <td className="muted">{cap(c.perpetrator_type)}</td>
-                    <td>
-                      {c.reported_to_regulator ? (
-                        <Badge tone="high">Reported{c.regulator_ref ? ` · ${c.regulator_ref}` : ""}</Badge>
-                      ) : (
-                        <span className="muted">Not reported</span>
-                      )}
-                    </td>
-                    <td><Badge tone={CASE_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge></td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeCase(c)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {cases.length === 0 && (
-                  <tr>
-                    <td colSpan={10}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No fraud cases</h3>
-                        <p>Log fraud incidents with gross / net loss, recovery, perpetrator type and SBP reporting.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<FraudCase>
+          columns={caseColumns}
+          fetcher={fetchCases}
+          rowKey={(c) => c.id}
+          onRowClick={(c) => openEditCase(c)}
+          searchPlaceholder="Search fraud cases by title or reference…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No fraud cases. Log incidents with gross / net loss, recovery, perpetrator type and SBP reporting."
+          refreshKey={caseKey}
+        />
       )}
 
       {/* ============================================= SBP CONTROL CHECKLIST */}
       {section === "checklist" && (
-        <div className="card">
-          <div className="card-head row-between">
-            <div>
-              <h3>SBP Digital-Fraud Control Checklist</h3>
-              <span className="sub">{checks.length} controls · click a row to edit</span>
-            </div>
-            {summary && (
+        <DataTable<FraudControlCheck>
+          columns={checkColumns}
+          fetcher={fetchChecks}
+          rowKey={(k) => k.id}
+          onRowClick={(k) => openEditCheck(k)}
+          searchPlaceholder="Search checklist by requirement, reference or SBP ref…"
+          defaultSort={{ by: "created_at", dir: "asc" }}
+          emptyMessage="No control checks. Track SBP digital-fraud control requirements and mark them implemented as evidence is collected."
+          refreshKey={checkKey}
+          toolbarRight={
+            summary ? (
               <div style={{ minWidth: 220 }}>
                 <div className="muted" style={{ fontSize: 12, marginBottom: 4, textAlign: "right" }}>
                   {summary.checklist_implemented} / {summary.checklist_total} implemented · {summary.checklist_pct}%
                 </div>
                 <div className="progress"><span style={{ width: `${summary.checklist_pct}%` }} /></div>
               </div>
-            )}
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Requirement</th>
-                  <th>Category</th>
-                  <th>SBP ref</th>
-                  <th>Owner</th>
-                  <th>Target</th>
-                  <th>Status</th>
-                  <th>Implemented</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {checks.map((k) => (
-                  <tr key={k.id} style={{ cursor: "pointer" }} onClick={() => openEditCheck(k)}>
-                    <td className="ref">{k.reference || "—"}</td>
-                    <td className="cell-title">{k.requirement}</td>
-                    <td><Badge tone="info">{cap(k.category)}</Badge></td>
-                    <td className="muted">{k.sbp_reference || "—"}</td>
-                    <td className="muted">{k.owner || "—"}</td>
-                    <td className="muted">{k.target_date || "—"}</td>
-                    <td><Badge tone={CONTROL_STATUS_TONE[k.status] || "neutral"}>{cap(k.status)}</Badge></td>
-                    <td onClick={(e) => e.stopPropagation()}>
-                      <Toggle checked={k.implemented} onChange={() => toggleImplemented(k)} />
-                    </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeCheck(k)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {checks.length === 0 && (
-                  <tr>
-                    <td colSpan={9}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No control checks</h3>
-                        <p>Track SBP digital-fraud control requirements and mark them implemented as evidence is collected.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+            ) : undefined
+          }
+        />
       )}
 
       {/* ============================================= MODALS */}
@@ -1096,5 +980,13 @@ export default function FraudPage() {
         />
       )}
     </>
+  );
+}
+
+export default function FraudPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <FraudInner />
+    </Suspense>
   );
 }

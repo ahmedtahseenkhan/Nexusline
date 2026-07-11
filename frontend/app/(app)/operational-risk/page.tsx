@@ -1,19 +1,25 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import {
   api,
+  apiCall,
   type RcsaAssessment,
   type RcsaRisk,
   type KeyRiskIndicator,
   type LossEvent,
   type LossSummary,
 } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -288,34 +294,36 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "losses", label: "Loss Database" },
 ];
 
-export default function OperationalRiskPage() {
+function OperationalRiskInner() {
   const [section, setSection] = useState<SectionId>("rcsa");
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  const [rcsas, setRcsas] = useState<RcsaAssessment[]>([]);
-  const [kris, setKris] = useState<KeyRiskIndicator[]>([]);
-  const [losses, setLosses] = useState<LossEvent[]>([]);
   const [summary, setSummary] = useState<LossSummary | null>(null);
 
-  // ---- RCSA dialog + expanded detail ----
+  // ---- URL-driven open record (RCSA detail / KRI detail live in the drawer) ----
+  const [openId, setOpenId] = useRecordParam("id");
+
+  // ---- RCSA dialog + drawer detail ----
   const [editingRcsa, setEditingRcsa] = useState<RcsaAssessment | null>(null);
   const [showRcsaForm, setShowRcsaForm] = useState(false);
   const [savingRcsa, setSavingRcsa] = useState(false);
   const [af, setAf] = useState<RcsaForm>(BLANK_RCSA);
   const setA = <K extends keyof RcsaForm>(k: K, v: RcsaForm[K]) => setAf((p) => ({ ...p, [k]: v }));
 
-  const [openRcsa, setOpenRcsa] = useState<RcsaAssessment | null>(null);
+  const [rcsaDetail, setRcsaDetail] = useState<RcsaAssessment | null>(null);
   const [rd, setRd] = useState<RiskDraft>(BLANK_RISK);
   const setRD = <K extends keyof RiskDraft>(k: K, v: RiskDraft[K]) => setRd((p) => ({ ...p, [k]: v }));
 
-  // ---- KRI dialog + expanded detail ----
+  // ---- KRI dialog + drawer detail ----
   const [editingKri, setEditingKri] = useState<KeyRiskIndicator | null>(null);
   const [showKriForm, setShowKriForm] = useState(false);
   const [savingKri, setSavingKri] = useState(false);
   const [kf, setKf] = useState<KriForm>(BLANK_KRI);
   const setK = <K extends keyof KriForm>(k: K, v: KriForm[K]) => setKf((p) => ({ ...p, [k]: v }));
 
-  const [openKri, setOpenKri] = useState<KeyRiskIndicator | null>(null);
+  const [kriDetail, setKriDetail] = useState<KeyRiskIndicator | null>(null);
   const [md, setMd] = useState<MeasureDraft>(BLANK_MEASURE);
   const setMD = <K extends keyof MeasureDraft>(k: K, v: MeasureDraft[K]) => setMd((p) => ({ ...p, [k]: v }));
 
@@ -326,33 +334,11 @@ export default function OperationalRiskPage() {
   const [lf, setLf] = useState<LossForm>(BLANK_LOSS);
   const setL = <K extends keyof LossForm>(k: K, v: LossForm[K]) => setLf((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadRcsas(keepOpen?: string) {
-    try {
-      const res = await api.rcsaList();
-      setRcsas(res.items);
-      if (keepOpen) setOpenRcsa(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load RCSA campaigns");
-    }
-  }
-  async function loadKris(keepOpen?: string) {
-    try {
-      const res = await api.kris();
-      setKris(res.items);
-      if (keepOpen) setOpenKri(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load KRIs");
-    }
-  }
-  async function loadLosses() {
-    try {
-      const res = await api.lossEvents();
-      setLosses(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load loss events");
-    }
-  }
+  // ------------------------------------------------------------- fetchers
+  const fetchRcsa = useCallback((qs: string) => apiCall<PagedList<RcsaAssessment>>("GET", `/rcsa?${qs}`), []);
+  const fetchKris = useCallback((qs: string) => apiCall<PagedList<KeyRiskIndicator>>("GET", `/kris?${qs}`), []);
+  const fetchLosses = useCallback((qs: string) => apiCall<PagedList<LossEvent>>("GET", `/loss-events?${qs}`), []);
+
   async function loadSummary() {
     try {
       setSummary(await api.lossSummary());
@@ -360,28 +346,45 @@ export default function OperationalRiskPage() {
       setError(e instanceof Error ? e.message : "Failed to load loss summary");
     }
   }
-  async function refreshRcsa(id: string) {
-    const r = await api.rcsaGet(id);
-    setOpenRcsa(r);
-    setRcsas((prev) => prev.map((x) => (x.id === id ? r : x)));
-  }
-
   useEffect(() => {
-    loadRcsas();
-    loadKris();
-    loadLosses();
     loadSummary();
   }, []);
+
+  // Load the open record's detail based on which section is active.
+  useEffect(() => {
+    if (!openId) {
+      setRcsaDetail(null);
+      setKriDetail(null);
+      return;
+    }
+    if (section === "rcsa") {
+      setRd(BLANK_RISK);
+      api.rcsaGet(openId).then(setRcsaDetail).catch(() => setRcsaDetail(null));
+    } else if (section === "kris") {
+      setMd(BLANK_MEASURE);
+      apiCall<KeyRiskIndicator>("GET", `/kris/${openId}`).then(setKriDetail).catch(() => setKriDetail(null));
+    }
+  }, [openId, section]);
+
+  // Switching section closes any open drawer (the id belongs to the old section).
+  function switchSection(id: SectionId) {
+    if (id !== section) {
+      setOpenId(null);
+      setSection(id);
+    }
+  }
 
   // ------------------------------------------------------------- RCSA CRUD
   function openNewRcsa() {
     setEditingRcsa(null);
     setAf(BLANK_RCSA);
+    setError(null);
     setShowRcsaForm(true);
   }
   function openEditRcsa(r: RcsaAssessment) {
     setEditingRcsa(r);
     setAf(fromRcsa(r));
+    setError(null);
     setShowRcsaForm(true);
   }
   async function saveRcsa() {
@@ -392,7 +395,9 @@ export default function OperationalRiskPage() {
       if (editingRcsa) await api.updateRcsa(editingRcsa.id, payload);
       else await api.createRcsa(payload);
       setShowRcsaForm(false);
-      await loadRcsas(openRcsa?.id);
+      reload();
+      if (openId) api.rcsaGet(openId).then(setRcsaDetail).catch(() => {});
+      toast(editingRcsa ? "Changes saved" : "RCSA created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save RCSA");
     } finally {
@@ -400,28 +405,23 @@ export default function OperationalRiskPage() {
     }
   }
   async function removeRcsa(r: RcsaAssessment) {
-    if (!window.confirm(`Delete RCSA ${r.reference || r.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete RCSA ${r.reference || r.title}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteRcsa(r.id);
       setShowRcsaForm(false);
-      if (openRcsa?.id === r.id) setOpenRcsa(null);
-      await loadRcsas();
+      if (openId === r.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleRcsa(r: RcsaAssessment) {
-    setRd(BLANK_RISK);
-    setOpenRcsa(openRcsa?.id === r.id ? null : r);
-  }
-
-  // ------------------------------------------------------------- RCSA risk lines (inline)
   async function addRisk() {
-    if (!openRcsa) return;
+    if (!rcsaDetail) return;
     setError(null);
     try {
-      await api.addRcsaRisk(openRcsa.id, {
+      const updated = await api.addRcsaRisk(rcsaDetail.id, {
         title: rd.title,
         category: rd.category,
         inherent_likelihood: rd.inherent_likelihood === "" ? 0 : Number(rd.inherent_likelihood),
@@ -435,18 +435,23 @@ export default function OperationalRiskPage() {
         due_date: rd.due_date || null,
       });
       setRd(BLANK_RISK);
-      await refreshRcsa(openRcsa.id);
+      setRcsaDetail(updated);
+      reload();
+      toast("Risk line added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add risk line");
     }
   }
   async function removeRisk(lineId: string) {
-    if (!openRcsa) return;
-    if (!window.confirm("Remove this risk line?")) return;
+    if (!rcsaDetail) return;
+    if (!(await confirmDialog({ title: "Remove this risk line?", danger: true }))) return;
     setError(null);
     try {
       await api.deleteRcsaRisk(lineId);
-      await refreshRcsa(openRcsa.id);
+      const fresh = await api.rcsaGet(rcsaDetail.id);
+      setRcsaDetail(fresh);
+      reload();
+      toast("Removed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to remove risk line");
     }
@@ -456,11 +461,13 @@ export default function OperationalRiskPage() {
   function openNewKri() {
     setEditingKri(null);
     setKf(BLANK_KRI);
+    setError(null);
     setShowKriForm(true);
   }
   function openEditKri(k: KeyRiskIndicator) {
     setEditingKri(k);
     setKf(fromKri(k));
+    setError(null);
     setShowKriForm(true);
   }
   async function saveKri() {
@@ -471,7 +478,9 @@ export default function OperationalRiskPage() {
       if (editingKri) await api.updateKri(editingKri.id, payload);
       else await api.createKri(payload);
       setShowKriForm(false);
-      await loadKris(openKri?.id);
+      reload();
+      if (openId) apiCall<KeyRiskIndicator>("GET", `/kris/${openId}`).then(setKriDetail).catch(() => {});
+      toast(editingKri ? "Changes saved" : "KRI created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save KRI");
     } finally {
@@ -479,32 +488,31 @@ export default function OperationalRiskPage() {
     }
   }
   async function removeKri(k: KeyRiskIndicator) {
-    if (!window.confirm(`Delete KRI ${k.reference || k.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete KRI ${k.reference || k.name}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteKri(k.id);
       setShowKriForm(false);
-      if (openKri?.id === k.id) setOpenKri(null);
-      await loadKris();
+      if (openId === k.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleKri(k: KeyRiskIndicator) {
-    setMd(BLANK_MEASURE);
-    setOpenKri(openKri?.id === k.id ? null : k);
-  }
   async function addMeasurement() {
-    if (!openKri) return;
+    if (!kriDetail) return;
     setError(null);
     try {
-      await api.addKriMeasurement(openKri.id, {
+      const updated = await api.addKriMeasurement(kriDetail.id, {
         value: md.value === "" ? 0 : Number(md.value),
         as_of_date: md.as_of_date || null,
         notes: md.notes,
       });
       setMd(BLANK_MEASURE);
-      await loadKris(openKri.id);
+      setKriDetail(updated);
+      reload();
+      toast("Measurement recorded");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to record measurement");
     }
@@ -514,11 +522,13 @@ export default function OperationalRiskPage() {
   function openNewLoss() {
     setEditingLoss(null);
     setLf(BLANK_LOSS);
+    setError(null);
     setShowLossForm(true);
   }
   function openEditLoss(l: LossEvent) {
     setEditingLoss(l);
     setLf(fromLoss(l));
+    setError(null);
     setShowLossForm(true);
   }
   async function saveLoss() {
@@ -529,8 +539,9 @@ export default function OperationalRiskPage() {
       if (editingLoss) await api.updateLossEvent(editingLoss.id, payload);
       else await api.createLossEvent(payload);
       setShowLossForm(false);
-      await loadLosses();
+      reload();
       await loadSummary();
+      toast(editingLoss ? "Changes saved" : "Loss event created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save loss event");
     } finally {
@@ -538,17 +549,58 @@ export default function OperationalRiskPage() {
     }
   }
   async function removeLoss(l: LossEvent) {
-    if (!window.confirm(`Delete loss event ${l.reference || l.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete loss event ${l.reference || l.title}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteLossEvent(l.id);
       setShowLossForm(false);
-      await loadLosses();
+      reload();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
+
+  // ------------------------------------------------------------- columns
+  const rcsaColumns: Column<RcsaAssessment>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "business_unit", header: "Business unit", sortable: true, render: (r) => <span className="muted">{r.business_unit || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={RCSA_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
+    { key: "risks", header: "Risks", render: (r) => <span className="muted">{r.risk_count}</span> },
+    { key: "due_date", header: "Due", sortable: true, render: (r) => (r.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.due_date || "—"}</span>) },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditRcsa(r)}>Edit</button> <button className="btn secondary sm" onClick={() => removeRcsa(r)}>Delete</button></div> },
+  ];
+
+  const kriColumns: Column<KeyRiskIndicator>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (k) => <span className="ref">{k.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, render: (k) => <span className="cell-title">{k.name}</span> },
+    { key: "category", header: "Category", sortable: true, render: (k) => <span className="muted">{k.category || "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (k) => <span className="muted">{k.owner || "—"}</span> },
+    { key: "current_value", header: "Current", sortable: true, render: (k) => <span className="muted">{k.current_value != null ? `${num(k.current_value)}${k.unit ? " " + k.unit : ""}` : "—"}</span> },
+    { key: "thresholds", header: "Warn / Limit", render: (k) => <span className="muted">{num(k.warning_threshold)} / {num(k.limit_threshold)}</span> },
+    { key: "status", header: "RAG status", render: (k) => (
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <Badge tone={RAG_TONE[k.status] || "neutral"}>{RAG_LABEL[k.status] || cap(k.status)}</Badge>
+        {k.is_breached && <Badge tone="critical">Breached</Badge>}
+      </div>
+    ) },
+    { key: "actions", header: "", render: (k) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditKri(k)}>Edit</button> <button className="btn secondary sm" onClick={() => removeKri(k)}>Delete</button></div> },
+  ];
+
+  const lossColumns: Column<LossEvent>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (l) => <span className="ref">{l.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (l) => <span className="cell-title">{l.title}</span> },
+    { key: "basel_event_type", header: "Basel event type", sortable: true, render: (l) => <Badge tone="info">{cap(l.basel_event_type)}</Badge> },
+    { key: "business_line", header: "Business line", sortable: true, render: (l) => <span className="muted">{l.business_line || "—"}</span> },
+    { key: "gross_loss", header: "Gross", sortable: true, render: (l) => <span className="muted">{num(l.gross_loss)} {l.currency}</span> },
+    { key: "recovery", header: "Recovery", sortable: true, render: (l) => <span className="muted">{num(l.recovery)}</span> },
+    { key: "net", header: "Net", render: (l) => <span className="muted">{num(l.net_loss)}</span> },
+    { key: "status", header: "Status", sortable: true, render: (l) => <Badge tone={LOSS_STATUS_TONE[l.status] || "neutral"}>{cap(l.status)}</Badge> },
+    { key: "occurrence_date", header: "Occurred", sortable: true, render: (l) => <span className="muted">{l.occurrence_date || "—"}</span> },
+    { key: "actions", header: "", render: (l) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeLoss(l)}>Delete</button></div> },
+  ];
 
   // ------------------------------------------------------------- RCSA form tabs
   const rcsaGeneral = (
@@ -729,7 +781,7 @@ export default function OperationalRiskPage() {
           <button
             key={s.id}
             className={`btn${section === s.id ? "" : " secondary"}`}
-            onClick={() => setSection(s.id)}
+            onClick={() => switchSection(s.id)}
             type="button"
           >
             {s.label}
@@ -741,335 +793,32 @@ export default function OperationalRiskPage() {
 
       {/* ============================================= RCSA */}
       {section === "rcsa" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <h3>Risk &amp; Control Self-Assessments</h3>
-              <span className="sub">{rcsas.length} total · click a row to manage risk &amp; control lines</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Title</th>
-                    <th>Business unit</th>
-                    <th>Status</th>
-                    <th>Risks</th>
-                    <th>Due</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rcsas.map((r) => (
-                    <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => toggleRcsa(r)}>
-                      <td className="ref">{r.reference || "—"}</td>
-                      <td className="cell-title">{r.title}</td>
-                      <td className="muted">{r.business_unit || "—"}</td>
-                      <td><Badge tone={RCSA_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge></td>
-                      <td className="muted">{r.risk_count}</td>
-                      <td>
-                        {r.is_overdue ? (
-                          <Badge tone="high">Overdue</Badge>
-                        ) : (
-                          <span className="muted">{r.due_date || "—"}</span>
-                        )}
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleRcsa(r)}>
-                            {openRcsa?.id === r.id ? "Hide" : "Manage"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => removeRcsa(r)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {rcsas.length === 0 && (
-                    <tr>
-                      <td colSpan={7}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No RCSA campaigns</h3>
-                          <p>Launch a risk &amp; control self-assessment to score inherent and residual risk.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openRcsa && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openRcsa.reference} — {openRcsa.title}</h3>
-                    <span className="sub">
-                      {cap(openRcsa.status)} · {openRcsa.business_unit || "no unit"}
-                      {openRcsa.assessor ? " · assessor " + openRcsa.assessor : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button className="btn secondary sm" onClick={() => openEditRcsa(openRcsa)}>Edit</button>
-                    <button className="btn secondary sm" onClick={() => removeRcsa(openRcsa)}>Delete</button>
-                  </div>
-                </div>
-
-                <div className="card-pad">
-                  <strong>Risk &amp; control lines</strong>
-                  <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                    Inherent risk, control effectiveness, and residual risk for each assessed item.
-                  </p>
-                  <form
-                    style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                    onSubmit={(ev) => { ev.preventDefault(); addRisk(); }}
-                  >
-                    <div style={{ flex: "1 1 180px" }}>
-                      <label className="label">Title</label>
-                      <input className="input" value={rd.title} onChange={(ev) => setRD("title", ev.target.value)} placeholder="Risk title" required />
-                    </div>
-                    <div style={{ width: 130 }}>
-                      <label className="label">Category</label>
-                      <input className="input" value={rd.category} onChange={(ev) => setRD("category", ev.target.value)} placeholder="Category" />
-                    </div>
-                    <div style={{ width: 90 }}>
-                      <label className="label">Inh. L</label>
-                      <input className="input" type="number" min={1} max={5} value={rd.inherent_likelihood} onChange={(ev) => setRD("inherent_likelihood", ev.target.value)} />
-                    </div>
-                    <div style={{ width: 90 }}>
-                      <label className="label">Inh. I</label>
-                      <input className="input" type="number" min={1} max={5} value={rd.inherent_impact} onChange={(ev) => setRD("inherent_impact", ev.target.value)} />
-                    </div>
-                    <div style={{ flex: "1 1 180px" }}>
-                      <label className="label">Control description</label>
-                      <input className="input" value={rd.control_description} onChange={(ev) => setRD("control_description", ev.target.value)} placeholder="Mitigating control" />
-                    </div>
-                    <div style={{ width: 170 }}>
-                      <label className="label">Control effectiveness</label>
-                      <select className="select" value={rd.control_effectiveness} onChange={(ev) => setRD("control_effectiveness", ev.target.value)}>
-                        {CONTROL_EFF.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 90 }}>
-                      <label className="label">Res. L</label>
-                      <input className="input" type="number" min={1} max={5} value={rd.residual_likelihood} onChange={(ev) => setRD("residual_likelihood", ev.target.value)} />
-                    </div>
-                    <div style={{ width: 90 }}>
-                      <label className="label">Res. I</label>
-                      <input className="input" type="number" min={1} max={5} value={rd.residual_impact} onChange={(ev) => setRD("residual_impact", ev.target.value)} />
-                    </div>
-                    <div style={{ flex: "1 1 180px" }}>
-                      <label className="label">Action</label>
-                      <input className="input" value={rd.action} onChange={(ev) => setRD("action", ev.target.value)} placeholder="Remediation action" />
-                    </div>
-                    <div style={{ width: 140 }}>
-                      <label className="label">Action owner</label>
-                      <input className="input" value={rd.action_owner} onChange={(ev) => setRD("action_owner", ev.target.value)} placeholder="Owner" />
-                    </div>
-                    <div style={{ width: 150 }}>
-                      <label className="label">Due date</label>
-                      <input className="input" type="date" value={rd.due_date} onChange={(ev) => setRD("due_date", ev.target.value)} />
-                    </div>
-                    <button className="btn">Add</button>
-                  </form>
-
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Title</th>
-                          <th>Category</th>
-                          <th>Inherent LxI</th>
-                          <th>Control</th>
-                          <th>Residual LxI</th>
-                          <th>Action owner</th>
-                          <th>Due</th>
-                          <th></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {openRcsa.risks.map((ri: RcsaRisk) => (
-                          <tr key={ri.id}>
-                            <td className="cell-title">{ri.title}</td>
-                            <td className="muted">{ri.category || "—"}</td>
-                            <td className="muted">{ri.inherent_likelihood}×{ri.inherent_impact} ({ri.inherent_score})</td>
-                            <td><EffBadge value={ri.control_effectiveness} /></td>
-                            <td className="muted">{ri.residual_likelihood}×{ri.residual_impact} ({ri.residual_score})</td>
-                            <td className="muted">{ri.action_owner || "—"}</td>
-                            <td className="muted">{ri.due_date || "—"}</td>
-                            <td>
-                              <button className="btn secondary sm" onClick={() => removeRisk(ri.id)}>Remove</button>
-                            </td>
-                          </tr>
-                        ))}
-                        {openRcsa.risks.length === 0 && (
-                          <tr><td colSpan={8}><span className="muted">No risk lines recorded yet.</span></td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <RecordPanels model="rcsa_assessment" entityId={openRcsa.id} />
-            </>
-          )}
-        </>
+        <DataTable<RcsaAssessment>
+          columns={rcsaColumns}
+          fetcher={fetchRcsa}
+          rowKey={(r) => r.id}
+          onRowClick={(r) => setOpenId(r.id)}
+          activeKey={openId}
+          searchPlaceholder="Search RCSA by title, reference or unit…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No RCSA campaigns. Launch a risk & control self-assessment to score inherent and residual risk."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= KRIs */}
       {section === "kris" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <h3>Key Risk Indicators</h3>
-              <span className="sub">{kris.length} total · click a row to record measurements</span>
-            </div>
-            <p className="muted" style={{ padding: "0 16px 12px", fontSize: 13 }}>
-              RAG status is computed from the current value versus the warning / limit thresholds and the KRI direction.
-            </p>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Name</th>
-                    <th>Category</th>
-                    <th>Owner</th>
-                    <th>Current</th>
-                    <th>Warn / Limit</th>
-                    <th>RAG status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {kris.map((k) => (
-                    <tr key={k.id} style={{ cursor: "pointer" }} onClick={() => toggleKri(k)}>
-                      <td className="ref">{k.reference || "—"}</td>
-                      <td className="cell-title">{k.name}</td>
-                      <td className="muted">{k.category || "—"}</td>
-                      <td className="muted">{k.owner || "—"}</td>
-                      <td className="muted">
-                        {k.current_value != null ? `${num(k.current_value)}${k.unit ? " " + k.unit : ""}` : "—"}
-                      </td>
-                      <td className="muted">{num(k.warning_threshold)} / {num(k.limit_threshold)}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          <Badge tone={RAG_TONE[k.status] || "neutral"}>{RAG_LABEL[k.status] || cap(k.status)}</Badge>
-                          {k.is_breached && <Badge tone="critical">Breached</Badge>}
-                        </div>
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleKri(k)}>
-                            {openKri?.id === k.id ? "Hide" : "Measure"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => openEditKri(k)}>Edit</button>
-                          <button className="btn secondary sm" onClick={() => removeKri(k)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {kris.length === 0 && (
-                    <tr>
-                      <td colSpan={8}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No KRIs</h3>
-                          <p>Define key risk indicators and record measurements to monitor RAG status.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openKri && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openKri.reference} — {openKri.name}</h3>
-                    <span className="sub">
-                      {RAG_LABEL[openKri.status] || cap(openKri.status)} · {cap(openKri.direction)}
-                      {openKri.last_measured_date ? " · last measured " + openKri.last_measured_date : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-                    <div style={{ textAlign: "right" }}>
-                      <div className="muted" style={{ fontSize: 12 }}>Current value</div>
-                      <strong style={{ fontSize: 18 }}>
-                        {openKri.current_value != null ? `${num(openKri.current_value)}${openKri.unit ? " " + openKri.unit : ""}` : "—"}
-                      </strong>
-                    </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button className="btn secondary sm" onClick={() => openEditKri(openKri)}>Edit</button>
-                      <button className="btn secondary sm" onClick={() => removeKri(openKri)}>Delete</button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="card-pad">
-                  <strong>Measurement history</strong>
-                  <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                    Recorded values over time. RAG status recomputes from the latest value.
-                  </p>
-                  <form
-                    style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                    onSubmit={(ev) => { ev.preventDefault(); addMeasurement(); }}
-                  >
-                    <div style={{ width: 160 }}>
-                      <label className="label">Value{openKri.unit ? ` (${openKri.unit})` : ""}</label>
-                      <input className="input" type="number" value={md.value} onChange={(ev) => setMD("value", ev.target.value)} placeholder="0" required />
-                    </div>
-                    <div style={{ width: 160 }}>
-                      <label className="label">As of date</label>
-                      <input className="input" type="date" value={md.as_of_date} onChange={(ev) => setMD("as_of_date", ev.target.value)} />
-                    </div>
-                    <div style={{ flex: "1 1 220px" }}>
-                      <label className="label">Notes</label>
-                      <input className="input" value={md.notes} onChange={(ev) => setMD("notes", ev.target.value)} placeholder="Context for this reading" />
-                    </div>
-                    <button className="btn">Record</button>
-                  </form>
-
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>As of date</th>
-                          <th>Value</th>
-                          <th>Notes</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {[...openKri.measurements]
-                          .sort((a, b) => (b.as_of_date || "").localeCompare(a.as_of_date || ""))
-                          .map((m) => (
-                            <tr key={m.id}>
-                              <td className="muted">{m.as_of_date || "—"}</td>
-                              <td className="cell-title">{num(m.value)}{openKri.unit ? " " + openKri.unit : ""}</td>
-                              <td className="muted">{m.notes || "—"}</td>
-                            </tr>
-                          ))}
-                        {openKri.measurements.length === 0 && (
-                          <tr><td colSpan={3}><span className="muted">No measurements recorded yet.</span></td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <RecordPanels model="key_risk_indicator" entityId={openKri.id} />
-            </>
-          )}
-        </>
+        <DataTable<KeyRiskIndicator>
+          columns={kriColumns}
+          fetcher={fetchKris}
+          rowKey={(k) => k.id}
+          onRowClick={(k) => setOpenId(k.id)}
+          activeKey={openId}
+          searchPlaceholder="Search KRIs by name, reference, category or owner…"
+          defaultSort={{ by: "name", dir: "asc" }}
+          emptyMessage="No KRIs. Define key risk indicators and record measurements to monitor RAG status."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= LOSS DATABASE */}
@@ -1096,63 +845,218 @@ export default function OperationalRiskPage() {
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head">
-              <h3>Loss Database</h3>
-              <span className="sub">{losses.length} total · click a row to edit</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Title</th>
-                    <th>Basel event type</th>
-                    <th>Business line</th>
-                    <th>Gross</th>
-                    <th>Recovery</th>
-                    <th>Net</th>
-                    <th>Status</th>
-                    <th>Occurred</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {losses.map((l) => (
-                    <tr key={l.id} style={{ cursor: "pointer" }} onClick={() => openEditLoss(l)}>
-                      <td className="ref">{l.reference || "—"}</td>
-                      <td className="cell-title">{l.title}</td>
-                      <td><Badge tone="info">{cap(l.basel_event_type)}</Badge></td>
-                      <td className="muted">{l.business_line || "—"}</td>
-                      <td className="muted">{num(l.gross_loss)} {l.currency}</td>
-                      <td className="muted">{num(l.recovery)}</td>
-                      <td className="muted">{num(l.net_loss)}</td>
-                      <td><Badge tone={LOSS_STATUS_TONE[l.status] || "neutral"}>{cap(l.status)}</Badge></td>
-                      <td className="muted">{l.occurrence_date || "—"}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => removeLoss(l)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {losses.length === 0 && (
-                    <tr>
-                      <td colSpan={10}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No loss events</h3>
-                          <p>Log operational losses against Basel event types to build the loss database.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <DataTable<LossEvent>
+            columns={lossColumns}
+            fetcher={fetchLosses}
+            rowKey={(l) => l.id}
+            onRowClick={(l) => openEditLoss(l)}
+            searchPlaceholder="Search loss events by title, reference or business line…"
+            defaultSort={{ by: "occurrence_date", dir: "desc" }}
+            emptyMessage="No loss events. Log operational losses against Basel event types to build the loss database."
+            refreshKey={refreshKey}
+          />
         </>
       )}
+
+      {/* ============================================= RCSA DRAWER */}
+      <RecordDrawer
+        open={section === "rcsa" && !!openId && !!rcsaDetail}
+        onClose={() => setOpenId(null)}
+        title={rcsaDetail ? `${rcsaDetail.reference || ""} ${rcsaDetail.title}`.trim() : "…"}
+        subtitle={rcsaDetail ? `${cap(rcsaDetail.status)} · ${rcsaDetail.business_unit || "no unit"}${rcsaDetail.assessor ? " · assessor " + rcsaDetail.assessor : ""}` : ""}
+        width={860}
+        actions={rcsaDetail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditRcsa(rcsaDetail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeRcsa(rcsaDetail)}>Delete</button>
+          </>
+        )}
+      >
+        {rcsaDetail && (
+          <>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-pad">
+                <strong>Risk &amp; control lines</strong>
+                <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
+                  Inherent risk, control effectiveness, and residual risk for each assessed item.
+                </p>
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(ev) => { ev.preventDefault(); addRisk(); }}
+                >
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Title</label>
+                    <input className="input" value={rd.title} onChange={(ev) => setRD("title", ev.target.value)} placeholder="Risk title" required />
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Category</label>
+                    <input className="input" value={rd.category} onChange={(ev) => setRD("category", ev.target.value)} placeholder="Category" />
+                  </div>
+                  <div style={{ width: 90 }}>
+                    <label className="label">Inh. L</label>
+                    <input className="input" type="number" min={1} max={5} value={rd.inherent_likelihood} onChange={(ev) => setRD("inherent_likelihood", ev.target.value)} />
+                  </div>
+                  <div style={{ width: 90 }}>
+                    <label className="label">Inh. I</label>
+                    <input className="input" type="number" min={1} max={5} value={rd.inherent_impact} onChange={(ev) => setRD("inherent_impact", ev.target.value)} />
+                  </div>
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Control description</label>
+                    <input className="input" value={rd.control_description} onChange={(ev) => setRD("control_description", ev.target.value)} placeholder="Mitigating control" />
+                  </div>
+                  <div style={{ width: 170 }}>
+                    <label className="label">Control effectiveness</label>
+                    <select className="select" value={rd.control_effectiveness} onChange={(ev) => setRD("control_effectiveness", ev.target.value)}>
+                      {CONTROL_EFF.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 90 }}>
+                    <label className="label">Res. L</label>
+                    <input className="input" type="number" min={1} max={5} value={rd.residual_likelihood} onChange={(ev) => setRD("residual_likelihood", ev.target.value)} />
+                  </div>
+                  <div style={{ width: 90 }}>
+                    <label className="label">Res. I</label>
+                    <input className="input" type="number" min={1} max={5} value={rd.residual_impact} onChange={(ev) => setRD("residual_impact", ev.target.value)} />
+                  </div>
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Action</label>
+                    <input className="input" value={rd.action} onChange={(ev) => setRD("action", ev.target.value)} placeholder="Remediation action" />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Action owner</label>
+                    <input className="input" value={rd.action_owner} onChange={(ev) => setRD("action_owner", ev.target.value)} placeholder="Owner" />
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label className="label">Due date</label>
+                    <input className="input" type="date" value={rd.due_date} onChange={(ev) => setRD("due_date", ev.target.value)} />
+                  </div>
+                  <button className="btn">Add</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Title</th>
+                        <th>Category</th>
+                        <th>Inherent LxI</th>
+                        <th>Control</th>
+                        <th>Residual LxI</th>
+                        <th>Action owner</th>
+                        <th>Due</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rcsaDetail.risks.map((ri: RcsaRisk) => (
+                        <tr key={ri.id}>
+                          <td className="cell-title">{ri.title}</td>
+                          <td className="muted">{ri.category || "—"}</td>
+                          <td className="muted">{ri.inherent_likelihood}×{ri.inherent_impact} ({ri.inherent_score})</td>
+                          <td><EffBadge value={ri.control_effectiveness} /></td>
+                          <td className="muted">{ri.residual_likelihood}×{ri.residual_impact} ({ri.residual_score})</td>
+                          <td className="muted">{ri.action_owner || "—"}</td>
+                          <td className="muted">{ri.due_date || "—"}</td>
+                          <td>
+                            <button className="btn secondary sm" onClick={() => removeRisk(ri.id)}>Remove</button>
+                          </td>
+                        </tr>
+                      ))}
+                      {rcsaDetail.risks.length === 0 && (
+                        <tr><td colSpan={8}><span className="muted">No risk lines recorded yet.</span></td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="rcsa_assessment" entityId={rcsaDetail.id} />
+          </>
+        )}
+      </RecordDrawer>
+
+      {/* ============================================= KRI DRAWER */}
+      <RecordDrawer
+        open={section === "kris" && !!openId && !!kriDetail}
+        onClose={() => setOpenId(null)}
+        title={kriDetail ? `${kriDetail.reference || ""} ${kriDetail.name}`.trim() : "…"}
+        subtitle={kriDetail ? `${RAG_LABEL[kriDetail.status] || cap(kriDetail.status)} · ${cap(kriDetail.direction)}${kriDetail.last_measured_date ? " · last measured " + kriDetail.last_measured_date : ""}` : ""}
+        width={720}
+        actions={kriDetail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditKri(kriDetail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeKri(kriDetail)}>Delete</button>
+          </>
+        )}
+      >
+        {kriDetail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
+              <Badge tone={RAG_TONE[kriDetail.status] || "neutral"}>{RAG_LABEL[kriDetail.status] || cap(kriDetail.status)}</Badge>
+              {kriDetail.is_breached && <Badge tone="critical">Breached</Badge>}
+              <span className="muted" style={{ fontSize: 13 }}>
+                Current value: <strong>{kriDetail.current_value != null ? `${num(kriDetail.current_value)}${kriDetail.unit ? " " + kriDetail.unit : ""}` : "—"}</strong>
+              </span>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-pad">
+                <strong>Measurement history</strong>
+                <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
+                  Recorded values over time. RAG status recomputes from the latest value.
+                </p>
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(ev) => { ev.preventDefault(); addMeasurement(); }}
+                >
+                  <div style={{ width: 160 }}>
+                    <label className="label">Value{kriDetail.unit ? ` (${kriDetail.unit})` : ""}</label>
+                    <input className="input" type="number" value={md.value} onChange={(ev) => setMD("value", ev.target.value)} placeholder="0" required />
+                  </div>
+                  <div style={{ width: 160 }}>
+                    <label className="label">As of date</label>
+                    <input className="input" type="date" value={md.as_of_date} onChange={(ev) => setMD("as_of_date", ev.target.value)} />
+                  </div>
+                  <div style={{ flex: "1 1 220px" }}>
+                    <label className="label">Notes</label>
+                    <input className="input" value={md.notes} onChange={(ev) => setMD("notes", ev.target.value)} placeholder="Context for this reading" />
+                  </div>
+                  <button className="btn">Record</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>As of date</th>
+                        <th>Value</th>
+                        <th>Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...kriDetail.measurements]
+                        .sort((a, b) => (b.as_of_date || "").localeCompare(a.as_of_date || ""))
+                        .map((m) => (
+                          <tr key={m.id}>
+                            <td className="muted">{m.as_of_date || "—"}</td>
+                            <td className="cell-title">{num(m.value)}{kriDetail.unit ? " " + kriDetail.unit : ""}</td>
+                            <td className="muted">{m.notes || "—"}</td>
+                          </tr>
+                        ))}
+                      {kriDetail.measurements.length === 0 && (
+                        <tr><td colSpan={3}><span className="muted">No measurements recorded yet.</span></td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="key_risk_indicator" entityId={kriDetail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showRcsaForm && (
@@ -1239,5 +1143,13 @@ export default function OperationalRiskPage() {
         />
       )}
     </>
+  );
+}
+
+export default function OperationalRiskPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <OperationalRiskInner />
+    </Suspense>
   );
 }

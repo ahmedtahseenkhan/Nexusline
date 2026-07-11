@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiCall, type Page } from "@/lib/api";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ local types
 interface ModelValidation {
@@ -202,14 +206,17 @@ const BLANK_VAL: ValDraft = {
   recommendations: "",
 };
 
-export default function ModelRiskPage() {
+function ModelRiskInner() {
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  const [models, setModels] = useState<ModelInventory[]>([]);
   const [summary, setSummary] = useState<ModelRiskSummary | null>(null);
 
+  const [openId, setOpenId] = useRecordParam("id");
+  const [modelDetail, setModelDetail] = useState<ModelInventory | null>(null);
+
   // ---- filters ----
-  const [search, setSearch] = useState("");
   const [fType, setFType] = useState("");
   const [fStatus, setFStatus] = useState("");
   const [fAiMl, setFAiMl] = useState(false);
@@ -222,27 +229,13 @@ export default function ModelRiskPage() {
   const [mf, setMf] = useState<ModelForm>(BLANK_MODEL);
   const setM = <K extends keyof ModelForm>(k: K, v: ModelForm[K]) => setMf((p) => ({ ...p, [k]: v }));
 
-  // ---- expanded detail + inline validation add-form ----
-  const [openModel, setOpenModel] = useState<ModelInventory | null>(null);
+  // ---- inline validation add-form ----
   const [vd, setVd] = useState<ValDraft>(BLANK_VAL);
   const setV = <K extends keyof ValDraft>(k: K, v: ValDraft[K]) => setVd((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadModels(keepOpen?: string) {
-    try {
-      const params = new URLSearchParams({ limit: "200" });
-      if (search.trim()) params.set("search", search.trim());
-      if (fType) params.set("model_type", fType);
-      if (fStatus) params.set("status", fStatus);
-      if (fAiMl) params.set("ai_ml", "true");
-      if (fOverdue) params.set("validation_overdue", "true");
-      const res = await apiCall<Page<ModelInventory>>("GET", `/model-risk?${params.toString()}`);
-      setModels(res.items);
-      if (keepOpen) setOpenModel(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load model inventory");
-    }
-  }
+  // ------------------------------------------------------------- fetcher + loaders
+  const fetchModels = useCallback((qs: string) => apiCall<PagedList<ModelInventory>>("GET", `/model-risk?${qs}`), []);
+
   async function loadSummary() {
     try {
       setSummary(await apiCall<ModelRiskSummary>("GET", "/model-risk-summary"));
@@ -250,27 +243,29 @@ export default function ModelRiskPage() {
       setError(e instanceof Error ? e.message : "Failed to load model-risk summary");
     }
   }
-  async function refreshModel(id: string) {
-    const m = await apiCall<ModelInventory>("GET", `/model-risk/${id}`);
-    setOpenModel(m);
-    setModels((prev) => prev.map((x) => (x.id === id ? m : x)));
-  }
-
   useEffect(() => {
-    loadModels();
     loadSummary();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const loadModelDetail = useCallback((id: string) => {
+    apiCall<ModelInventory>("GET", `/model-risk/${id}`).then(setModelDetail).catch(() => setModelDetail(null));
+  }, []);
+  useEffect(() => {
+    if (openId) { setVd(BLANK_VAL); loadModelDetail(openId); }
+    else setModelDetail(null);
+  }, [openId, loadModelDetail]);
 
   // ------------------------------------------------------------- model CRUD
   function openNewModel() {
     setEditingModel(null);
     setMf(BLANK_MODEL);
+    setError(null);
     setShowModelForm(true);
   }
   function openEditModel(m: ModelInventory) {
     setEditingModel(m);
     setMf(fromModel(m));
+    setError(null);
     setShowModelForm(true);
   }
   async function saveModel() {
@@ -281,8 +276,10 @@ export default function ModelRiskPage() {
       if (editingModel) await apiCall<ModelInventory>("PATCH", `/model-risk/${editingModel.id}`, payload);
       else await apiCall<ModelInventory>("POST", "/model-risk", payload);
       setShowModelForm(false);
-      await loadModels(openModel?.id);
+      reload();
+      if (openId) loadModelDetail(openId);
       await loadSummary();
+      toast(editingModel ? "Changes saved" : "Model created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save model");
     } finally {
@@ -290,29 +287,26 @@ export default function ModelRiskPage() {
     }
   }
   async function removeModel(m: ModelInventory) {
-    if (!window.confirm(`Delete model ${m.reference || m.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete model ${m.reference || m.name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/model-risk/${m.id}`);
       setShowModelForm(false);
-      if (openModel?.id === m.id) setOpenModel(null);
-      await loadModels();
+      if (openId === m.id) setOpenId(null);
+      reload();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleModel(m: ModelInventory) {
-    setVd(BLANK_VAL);
-    setOpenModel(openModel?.id === m.id ? null : m);
-  }
 
   // ------------------------------------------------------------- validations (inline)
   async function addValidation() {
-    if (!openModel) return;
+    if (!modelDetail) return;
     setError(null);
     try {
-      await apiCall<ModelInventory>("POST", `/model-risk/${openModel.id}/validations`, {
+      const updated = await apiCall<ModelInventory>("POST", `/model-risk/${modelDetail.id}/validations`, {
         validation_type: vd.validation_type,
         validator: vd.validator,
         validation_date: vd.validation_date || null,
@@ -323,24 +317,46 @@ export default function ModelRiskPage() {
         recommendations: vd.recommendations,
       });
       setVd(BLANK_VAL);
-      await refreshModel(openModel.id);
+      setModelDetail(updated);
+      reload();
       await loadSummary();
+      toast("Validation added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add validation");
     }
   }
   async function removeValidation(vid: string) {
-    if (!openModel) return;
-    if (!window.confirm("Remove this validation?")) return;
+    if (!modelDetail) return;
+    if (!(await confirmDialog({ title: "Remove this validation?", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/model-validations/${vid}`);
-      await refreshModel(openModel.id);
+      loadModelDetail(modelDetail.id);
+      reload();
       await loadSummary();
+      toast("Removed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to remove validation");
     }
   }
+
+  // ------------------------------------------------------------- columns
+  const columns: Column<ModelInventory>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (m) => <span className="ref">{m.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, render: (m) => <span className="cell-title">{m.name}</span> },
+    { key: "model_type", header: "Type", sortable: true, render: (m) => <Badge tone="info">{cap(m.model_type)}</Badge> },
+    { key: "owner", header: "Owner", sortable: true, render: (m) => <span className="muted">{m.owner || "—"}</span> },
+    { key: "materiality", header: "Materiality", sortable: true, render: (m) => <Badge tone={MATERIALITY_TONE[m.materiality] || "neutral"}>{cap(m.materiality)}</Badge> },
+    { key: "status", header: "Status", sortable: true, render: (m) => <Badge tone={STATUS_TONE[m.status] || "neutral"}>{cap(m.status)}</Badge> },
+    { key: "flags", header: "Flags", render: (m) => (
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {m.ai_ml && <Badge tone="info">AI/ML</Badge>}
+        {m.regulatory_relevant && <Badge tone="medium">Regulatory</Badge>}
+      </div>
+    ) },
+    { key: "next_validation_date", header: "Next validation", sortable: true, render: (m) => (m.is_validation_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{m.next_validation_date || "—"}</span>) },
+    { key: "actions", header: "", render: (m) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditModel(m)}>Edit</button> <button className="btn secondary sm" onClick={() => removeModel(m)}>Delete</button></div> },
+  ];
 
   // ------------------------------------------------------------- model form tabs
   const modelTab = (
@@ -415,9 +431,7 @@ export default function ModelRiskPage() {
           <p>Model inventory (IFRS 9 ECL, AML scoring, credit scoring, AI/ML) with materiality tiering and independent validation cycles (SR 11-7 / ISO 42001).</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button className="btn" onClick={openNewModel}>
-            <IconPlus width={16} height={16} /> New model
-          </button>
+          <button className="btn" onClick={openNewModel}>Add model</button>
         </div>
       </div>
 
@@ -442,220 +456,159 @@ export default function ModelRiskPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head row-between">
-          <div>
-            <h3>Model Inventory</h3>
-            <span className="sub">{models.length} shown · click a row to manage validations</span>
-          </div>
-        </div>
-
-        <form
-          className="card-pad"
-          style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", paddingBottom: 0 }}
-          onSubmit={(ev) => { ev.preventDefault(); loadModels(); }}
-        >
-          <div style={{ flex: "1 1 220px" }}>
-            <label className="label">Search</label>
-            <input className="input" value={search} onChange={(ev) => setSearch(ev.target.value)} placeholder="Name, reference, owner, vendor" />
-          </div>
-          <div style={{ width: 200 }}>
-            <label className="label">Model type</label>
-            <select className="select" value={fType} onChange={(ev) => setFType(ev.target.value)}>
+      <DataTable<ModelInventory>
+        columns={columns}
+        fetcher={fetchModels}
+        rowKey={(m) => m.id}
+        onRowClick={(m) => setOpenId(m.id)}
+        activeKey={openId}
+        searchPlaceholder="Search models by name, reference, owner or vendor…"
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        filters={{
+          model_type: fType || undefined,
+          status: fStatus || undefined,
+          ai_ml: fAiMl,
+          validation_overdue: fOverdue,
+        }}
+        toolbarRight={
+          <>
+            <select className="select" style={{ width: 180 }} value={fType} onChange={(e) => setFType(e.target.value)}>
               <option value="">All types</option>
               {MODEL_TYPE.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
-          </div>
-          <div style={{ width: 170 }}>
-            <label className="label">Status</label>
-            <select className="select" value={fStatus} onChange={(ev) => setFStatus(ev.target.value)}>
+            <select className="select" style={{ width: 160 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
               <option value="">All statuses</option>
               {MODEL_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
-          </div>
-          <label className="label" style={{ display: "flex", gap: 6, alignItems: "center", paddingBottom: 8 }}>
-            <input type="checkbox" checked={fAiMl} onChange={(ev) => setFAiMl(ev.target.checked)} /> AI / ML only
-          </label>
-          <label className="label" style={{ display: "flex", gap: 6, alignItems: "center", paddingBottom: 8 }}>
-            <input type="checkbox" checked={fOverdue} onChange={(ev) => setFOverdue(ev.target.checked)} /> Validation overdue
-          </label>
-          <button className="btn secondary sm" type="submit">Apply</button>
-        </form>
+            <label className="label" style={{ display: "flex", gap: 6, alignItems: "center", margin: 0 }}>
+              <input type="checkbox" checked={fAiMl} onChange={(e) => setFAiMl(e.target.checked)} /> AI / ML
+            </label>
+            <label className="label" style={{ display: "flex", gap: 6, alignItems: "center", margin: 0 }}>
+              <input type="checkbox" checked={fOverdue} onChange={(e) => setFOverdue(e.target.checked)} /> Overdue
+            </label>
+          </>
+        }
+        emptyMessage="No models. Register the bank's quantitative and AI/ML models to build a materiality-tiered inventory with validation cycles."
+        refreshKey={refreshKey}
+      />
 
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Owner</th>
-                <th>Materiality</th>
-                <th>Status</th>
-                <th>Flags</th>
-                <th>Next validation</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {models.map((m) => (
-                <tr key={m.id} style={{ cursor: "pointer" }} onClick={() => toggleModel(m)}>
-                  <td className="ref">{m.reference || "—"}</td>
-                  <td className="cell-title">{m.name}</td>
-                  <td><Badge tone="info">{cap(m.model_type)}</Badge></td>
-                  <td className="muted">{m.owner || "—"}</td>
-                  <td><Badge tone={MATERIALITY_TONE[m.materiality] || "neutral"}>{cap(m.materiality)}</Badge></td>
-                  <td><Badge tone={STATUS_TONE[m.status] || "neutral"}>{cap(m.status)}</Badge></td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      {m.ai_ml && <Badge tone="info">AI/ML</Badge>}
-                      {m.regulatory_relevant && <Badge tone="medium">Regulatory</Badge>}
-                    </div>
-                  </td>
-                  <td>
-                    {m.is_validation_overdue ? (
-                      <Badge tone="critical">Overdue</Badge>
-                    ) : (
-                      <span className="muted">{m.next_validation_date || "—"}</span>
-                    )}
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => toggleModel(m)}>
-                        {openModel?.id === m.id ? "Hide" : "Manage"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => openEditModel(m)}>Edit</button>
-                      <button className="btn secondary sm" onClick={() => removeModel(m)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {models.length === 0 && (
-                <tr>
-                  <td colSpan={9}>
-                    <div className="empty">
-                      <span className="ico"><IconCheck width={24} height={24} /></span>
-                      <h3>No models</h3>
-                      <p>Register the bank&apos;s quantitative and AI/ML models to build a materiality-tiered inventory with validation cycles.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {/* ============================================= MODEL DRAWER */}
+      <RecordDrawer
+        open={!!openId && !!modelDetail}
+        onClose={() => setOpenId(null)}
+        title={modelDetail ? `${modelDetail.reference || ""} ${modelDetail.name}`.trim() : "…"}
+        subtitle={modelDetail ? `${cap(modelDetail.model_type)} · ${cap(modelDetail.status)} · ${cap(modelDetail.materiality)} materiality${modelDetail.owner ? " · owner " + modelDetail.owner : ""}` : ""}
+        width={860}
+        actions={modelDetail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditModel(modelDetail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeModel(modelDetail)}>Delete</button>
+          </>
+        )}
+      >
+        {modelDetail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              {modelDetail.ai_ml && <Badge tone="info">AI/ML</Badge>}
+              {modelDetail.regulatory_relevant && <Badge tone="medium">Regulatory</Badge>}
+              {modelDetail.is_validation_overdue && <Badge tone="critical">Validation overdue</Badge>}
+            </div>
 
-      {openModel && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head row-between">
-              <div>
-                <h3>{openModel.reference} — {openModel.name}</h3>
-                <span className="sub">
-                  {cap(openModel.model_type)} · {cap(openModel.status)} · {cap(openModel.materiality)} materiality
-                  {openModel.owner ? " · owner " + openModel.owner : ""}
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button className="btn secondary sm" onClick={() => openEditModel(openModel)}>Edit</button>
-                <button className="btn secondary sm" onClick={() => removeModel(openModel)}>Delete</button>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-pad">
+                <strong>Validation cycles</strong>
+                <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
+                  Independent validation exercises (initial / periodic / targeted) with outcome, findings and recommendations.
+                </p>
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(ev) => { ev.preventDefault(); addValidation(); }}
+                >
+                  <div style={{ width: 130 }}>
+                    <label className="label">Type</label>
+                    <select className="select" value={vd.validation_type} onChange={(ev) => setV("validation_type", ev.target.value)}>
+                      {VAL_TYPE.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label className="label">Validator</label>
+                    <input className="input" value={vd.validator} onChange={(ev) => setV("validator", ev.target.value)} placeholder="Validator" />
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label className="label">Validation date</label>
+                    <input className="input" type="date" value={vd.validation_date} onChange={(ev) => setV("validation_date", ev.target.value)} />
+                  </div>
+                  <div style={{ width: 160 }}>
+                    <label className="label">Outcome</label>
+                    <select className="select" value={vd.outcome} onChange={(ev) => setV("outcome", ev.target.value)}>
+                      {VAL_OUTCOME.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Status</label>
+                    <select className="select" value={vd.status} onChange={(ev) => setV("status", ev.target.value)}>
+                      {VAL_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Findings</label>
+                    <input className="input" value={vd.findings} onChange={(ev) => setV("findings", ev.target.value)} placeholder="Key findings" />
+                  </div>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Performance metrics</label>
+                    <input className="input" value={vd.performance_metrics} onChange={(ev) => setV("performance_metrics", ev.target.value)} placeholder="AUC, Gini, PSI…" />
+                  </div>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Recommendations</label>
+                    <input className="input" value={vd.recommendations} onChange={(ev) => setV("recommendations", ev.target.value)} placeholder="Remediation" />
+                  </div>
+                  <button className="btn">Add</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Ref</th>
+                        <th>Type</th>
+                        <th>Validator</th>
+                        <th>Date</th>
+                        <th>Outcome</th>
+                        <th>Status</th>
+                        <th>Findings</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...modelDetail.validations]
+                        .sort((a, b) => (b.validation_date || "").localeCompare(a.validation_date || ""))
+                        .map((v) => (
+                          <tr key={v.id}>
+                            <td className="ref">{v.reference || "—"}</td>
+                            <td className="cell-title">{cap(v.validation_type)}</td>
+                            <td className="muted">{v.validator || "—"}</td>
+                            <td className="muted">{v.validation_date || "—"}</td>
+                            <td><OutcomeBadge value={v.outcome} /></td>
+                            <td><Badge tone={VAL_STATUS_TONE[v.status] || "neutral"}>{cap(v.status)}</Badge></td>
+                            <td className="muted">{v.findings || "—"}</td>
+                            <td>
+                              <button className="btn secondary sm" onClick={() => removeValidation(v.id)}>Remove</button>
+                            </td>
+                          </tr>
+                        ))}
+                      {modelDetail.validations.length === 0 && (
+                        <tr><td colSpan={8}><span className="muted">No validations recorded yet.</span></td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
 
-            <div className="card-pad">
-              <strong>Validation cycles</strong>
-              <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                Independent validation exercises (initial / periodic / targeted) with outcome, findings and recommendations.
-              </p>
-              <form
-                style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                onSubmit={(ev) => { ev.preventDefault(); addValidation(); }}
-              >
-                <div style={{ width: 130 }}>
-                  <label className="label">Type</label>
-                  <select className="select" value={vd.validation_type} onChange={(ev) => setV("validation_type", ev.target.value)}>
-                    {VAL_TYPE.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                  </select>
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Validator</label>
-                  <input className="input" value={vd.validator} onChange={(ev) => setV("validator", ev.target.value)} placeholder="Validator" />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Validation date</label>
-                  <input className="input" type="date" value={vd.validation_date} onChange={(ev) => setV("validation_date", ev.target.value)} />
-                </div>
-                <div style={{ width: 160 }}>
-                  <label className="label">Outcome</label>
-                  <select className="select" value={vd.outcome} onChange={(ev) => setV("outcome", ev.target.value)}>
-                    {VAL_OUTCOME.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                  </select>
-                </div>
-                <div style={{ width: 140 }}>
-                  <label className="label">Status</label>
-                  <select className="select" value={vd.status} onChange={(ev) => setV("status", ev.target.value)}>
-                    {VAL_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                  </select>
-                </div>
-                <div style={{ flex: "1 1 200px" }}>
-                  <label className="label">Findings</label>
-                  <input className="input" value={vd.findings} onChange={(ev) => setV("findings", ev.target.value)} placeholder="Key findings" />
-                </div>
-                <div style={{ flex: "1 1 200px" }}>
-                  <label className="label">Performance metrics</label>
-                  <input className="input" value={vd.performance_metrics} onChange={(ev) => setV("performance_metrics", ev.target.value)} placeholder="AUC, Gini, PSI…" />
-                </div>
-                <div style={{ flex: "1 1 200px" }}>
-                  <label className="label">Recommendations</label>
-                  <input className="input" value={vd.recommendations} onChange={(ev) => setV("recommendations", ev.target.value)} placeholder="Remediation" />
-                </div>
-                <button className="btn">Add</button>
-              </form>
-
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Ref</th>
-                      <th>Type</th>
-                      <th>Validator</th>
-                      <th>Date</th>
-                      <th>Outcome</th>
-                      <th>Status</th>
-                      <th>Findings</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...openModel.validations]
-                      .sort((a, b) => (b.validation_date || "").localeCompare(a.validation_date || ""))
-                      .map((v) => (
-                        <tr key={v.id}>
-                          <td className="ref">{v.reference || "—"}</td>
-                          <td className="cell-title">{cap(v.validation_type)}</td>
-                          <td className="muted">{v.validator || "—"}</td>
-                          <td className="muted">{v.validation_date || "—"}</td>
-                          <td><OutcomeBadge value={v.outcome} /></td>
-                          <td><Badge tone={VAL_STATUS_TONE[v.status] || "neutral"}>{cap(v.status)}</Badge></td>
-                          <td className="muted">{v.findings || "—"}</td>
-                          <td>
-                            <button className="btn secondary sm" onClick={() => removeValidation(v.id)}>Remove</button>
-                          </td>
-                        </tr>
-                      ))}
-                    {openModel.validations.length === 0 && (
-                      <tr><td colSpan={8}><span className="muted">No validations recorded yet.</span></td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
-          <RecordPanels model="model_inventory" entityId={openModel.id} />
-        </>
-      )}
+            <RecordPanels model="model_inventory" entityId={modelDetail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODAL */}
       {showModelForm && (
@@ -688,5 +641,13 @@ export default function ModelRiskPage() {
         />
       )}
     </>
+  );
+}
+
+export default function ModelRiskPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ModelRiskInner />
+    </Suspense>
   );
 }

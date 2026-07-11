@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.aml import AmlRiskAssessment, ScreeningCase, SuspiciousActivityReport
 from app.models.enums import SarStatus, ScreeningCaseStatus
 from app.schemas.aml import (
@@ -54,12 +55,39 @@ async def _soft_delete(db, model, obj_id, name):
 
 
 # ============================================================ screening cases ===
+_SCREENING_SORTABLE = {
+    "reference": ScreeningCase.reference,
+    "subject_name": ScreeningCase.subject_name,
+    "subject_type": ScreeningCase.subject_type,
+    "screening_type": ScreeningCase.screening_type,
+    "match_status": ScreeningCase.match_status,
+    "risk_rating": ScreeningCase.risk_rating,
+    "status": ScreeningCase.status,
+    "screened_date": ScreeningCase.screened_date,
+    "created_at": ScreeningCase.created_at,
+}
+
+
 @router.get("/aml/screening", response_model=Page[ScreeningRead], dependencies=[_READ])
-async def list_screening(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
-                         offset: Annotated[int, Query(ge=0)] = 0) -> Page[ScreeningRead]:
+async def list_screening(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[ScreeningRead]:
     stmt = select(ScreeningCase).where(ScreeningCase.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(ScreeningCase.subject_name.ilike(like) | ScreeningCase.reference.ilike(like))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(ScreeningCase.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _SCREENING_SORTABLE, default=ScreeningCase.created_at)
+    else:
+        stmt = stmt.order_by(ScreeningCase.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ScreeningRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -108,12 +136,41 @@ async def screening_summary(db: DbSession) -> ScreeningSummary:
 
 
 # ==================================================================== STR/SAR ===
+_SAR_SORTABLE = {
+    "reference": SuspiciousActivityReport.reference,
+    "subject": SuspiciousActivityReport.subject,
+    "priority": SuspiciousActivityReport.priority,
+    "amount": SuspiciousActivityReport.amount,
+    "detected_date": SuspiciousActivityReport.detected_date,
+    "deadline": SuspiciousActivityReport.deadline,
+    "filed_date": SuspiciousActivityReport.filed_date,
+    "status": SuspiciousActivityReport.status,
+    "created_at": SuspiciousActivityReport.created_at,
+}
+
+
 @router.get("/aml/sars", response_model=Page[SarRead], dependencies=[_READ])
-async def list_sars(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
-                    offset: Annotated[int, Query(ge=0)] = 0) -> Page[SarRead]:
+async def list_sars(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[SarRead]:
     stmt = select(SuspiciousActivityReport).where(SuspiciousActivityReport.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            SuspiciousActivityReport.subject.ilike(like) | SuspiciousActivityReport.reference.ilike(like)
+        )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(SuspiciousActivityReport.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _SAR_SORTABLE, default=SuspiciousActivityReport.created_at)
+    else:
+        stmt = stmt.order_by(SuspiciousActivityReport.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[SarRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -151,12 +208,42 @@ async def delete_sar(sid: uuid.UUID, db: DbSession) -> None:
 
 
 # ========================================================= AML risk assessments ===
+_AML_RISK_SORTABLE = {
+    "reference": AmlRiskAssessment.reference,
+    "title": AmlRiskAssessment.title,
+    "scope": AmlRiskAssessment.scope,
+    "subject": AmlRiskAssessment.subject,
+    "inherent_risk": AmlRiskAssessment.inherent_risk,
+    "residual_risk": AmlRiskAssessment.residual_risk,
+    "next_review_date": AmlRiskAssessment.next_review_date,
+    "created_at": AmlRiskAssessment.created_at,
+}
+
+
 @router.get("/aml/risk-assessments", response_model=Page[AmlRiskRead], dependencies=[_READ])
-async def list_aml_risks(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
-                         offset: Annotated[int, Query(ge=0)] = 0) -> Page[AmlRiskRead]:
+async def list_aml_risks(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[AmlRiskRead]:
     stmt = select(AmlRiskAssessment).where(AmlRiskAssessment.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            AmlRiskAssessment.title.ilike(like)
+            | AmlRiskAssessment.reference.ilike(like)
+            | AmlRiskAssessment.subject.ilike(like)
+        )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(AmlRiskAssessment.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _AML_RISK_SORTABLE, default=AmlRiskAssessment.created_at)
+    else:
+        stmt = stmt.order_by(AmlRiskAssessment.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[AmlRiskRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

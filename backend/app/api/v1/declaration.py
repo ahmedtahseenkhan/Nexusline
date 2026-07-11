@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.declaration import (
     CampaignStatus,
     Declaration,
@@ -66,12 +67,26 @@ async def _load_campaign(db, cid) -> DeclarationCampaign:
 
 
 # =============================================================== campaigns ===
+_CAMPAIGN_SORTABLE = {
+    "reference": DeclarationCampaign.reference,
+    "title": DeclarationCampaign.title,
+    "declaration_type": DeclarationCampaign.declaration_type,
+    "period": DeclarationCampaign.period,
+    "owner": DeclarationCampaign.owner,
+    "status": DeclarationCampaign.status,
+    "due_date": DeclarationCampaign.due_date,
+    "created_at": DeclarationCampaign.created_at,
+}
+
+
 @router.get("/declaration-campaigns", response_model=Page[CampaignRead], dependencies=[_READ])
 async def list_campaigns(
     db: DbSession,
     search: str | None = None,
     declaration_type: DeclarationType | None = None,
     status_filter: Annotated[CampaignStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[CampaignRead]:
@@ -86,9 +101,12 @@ async def list_campaigns(
             DeclarationCampaign.title.ilike(like) | DeclarationCampaign.reference.ilike(like)
         )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(
-        stmt.order_by(DeclarationCampaign.created_at.desc()).limit(limit).offset(offset)
-    )).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _CAMPAIGN_SORTABLE, default=DeclarationCampaign.created_at)
+    else:
+        stmt = stmt.order_by(DeclarationCampaign.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[CampaignRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -160,11 +178,25 @@ async def delete_declaration(did: uuid.UUID, db: DbSession) -> None:
 
 
 # =============================================== standalone declarations list ===
+_DECLARATION_SORTABLE = {
+    "reference": Declaration.reference,
+    "declarant_name": Declaration.declarant_name,
+    "declarant_role": Declaration.declarant_role,
+    "business_unit": Declaration.business_unit,
+    "status": Declaration.status,
+    "submitted_date": Declaration.submitted_date,
+    "created_at": Declaration.created_at,
+}
+
+
 @router.get("/declarations", response_model=Page[DeclarationRead], dependencies=[_READ])
 async def list_declarations(
     db: DbSession,
     has_disclosure: bool | None = None,
     status_filter: Annotated[DeclarationStatus | None, Query(alias="status")] = None,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[DeclarationRead]:
@@ -177,10 +209,18 @@ async def list_declarations(
         stmt = stmt.where(Declaration.has_disclosure.is_(has_disclosure))
     if status_filter is not None:
         stmt = stmt.where(Declaration.status == status_filter)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            Declaration.declarant_name.ilike(like) | Declaration.reference.ilike(like)
+        )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(
-        stmt.order_by(Declaration.created_at.desc()).limit(limit).offset(offset)
-    )).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _DECLARATION_SORTABLE, default=Declaration.created_at)
+    else:
+        stmt = stmt.order_by(Declaration.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[DeclarationRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

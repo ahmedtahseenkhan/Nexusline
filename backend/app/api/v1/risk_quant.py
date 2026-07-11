@@ -13,9 +13,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.risk import Risk
 from app.models.risk_quant import QuantStatus, RiskQuantification
 from app.schemas.common import Page
@@ -60,27 +61,42 @@ async def _load(db, qid) -> RiskQuantification:
 
 
 # ====================================================================== CRUD ===
+# `ale_point` is computed (tef_likely × lm_likely); the cached run columns are sortable.
+_QUANT_SORTABLE = {
+    "reference": RiskQuantification.reference,
+    "title": RiskQuantification.title,
+    "asset_at_risk": RiskQuantification.asset_at_risk,
+    "last_mean_ale": RiskQuantification.last_mean_ale,
+    "last_p90": RiskQuantification.last_p90,
+    "status": RiskQuantification.status,
+    "created_at": RiskQuantification.created_at,
+}
+
+
 @router.get("/risk-quantification", response_model=Page[RiskQuantRead], dependencies=[_READ])
 async def list_quantifications(
     db: DbSession,
     search: str | None = None,
     status_filter: Annotated[QuantStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[RiskQuantRead]:
     stmt: Select = select(RiskQuantification).where(RiskQuantification.deleted.is_(False))
     if search:
-        stmt = stmt.where(RiskQuantification.title.ilike(f"%{search}%"))
+        like = f"%{search}%"
+        stmt = stmt.where(or_(RiskQuantification.title.ilike(like), RiskQuantification.reference.ilike(like),
+                             RiskQuantification.asset_at_risk.ilike(like)))
     if status_filter is not None:
         stmt = stmt.where(RiskQuantification.status == status_filter)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(
-            stmt.order_by(RiskQuantification.last_mean_ale.desc(), RiskQuantification.created_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _QUANT_SORTABLE, default=RiskQuantification.last_mean_ale)
+    else:
+        stmt = stmt.order_by(RiskQuantification.last_mean_ale.desc(), RiskQuantification.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[RiskQuantRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

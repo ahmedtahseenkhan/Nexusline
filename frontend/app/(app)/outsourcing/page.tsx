@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiCall, type Page } from "@/lib/api";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ local types
 interface OutsourcingReview {
@@ -100,12 +105,6 @@ const SBP_TONE: Record<string, Tone> = {
   pending: "medium",
   approved: "low",
   rejected: "critical",
-};
-const STATUS_TONE: Record<string, Tone> = {
-  proposed: "neutral",
-  active: "low",
-  under_review: "medium",
-  terminated: "neutral",
 };
 const REVIEW_STATUS_TONE: Record<string, Tone> = {
   planned: "neutral",
@@ -239,15 +238,16 @@ const BLANK_REVIEW: ReviewDraft = {
   status: "planned",
 };
 
-export default function OutsourcingPage() {
+function OutsourcingInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<OutsourcingArrangement | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const [arrangements, setArrangements] = useState<OutsourcingArrangement[]>([]);
   const [summary, setSummary] = useState<OutsourcingSummary | null>(null);
   const [vendors, setVendors] = useState<VendorOption[]>([]);
 
   // ---- filters ----
-  const [search, setSearch] = useState("");
   const [fCategory, setFCategory] = useState("");
   const [fMateriality, setFMateriality] = useState("");
   const [fStatus, setFStatus] = useState("");
@@ -259,67 +259,52 @@ export default function OutsourcingPage() {
   const [af, setAf] = useState<ArrForm>(BLANK_ARR);
   const setA = <K extends keyof ArrForm>(k: K, v: ArrForm[K]) => setAf((p) => ({ ...p, [k]: v }));
 
-  // ---- expanded detail + inline review add-form ----
-  const [openArr, setOpenArr] = useState<OutsourcingArrangement | null>(null);
+  // ---- inline review add-form (in drawer) ----
   const [rd, setRd] = useState<ReviewDraft>(BLANK_REVIEW);
   const setRD = <K extends keyof ReviewDraft>(k: K, v: ReviewDraft[K]) => setRd((p) => ({ ...p, [k]: v }));
 
   const vendorName = (id: string | null) =>
     id ? vendors.find((v) => v.id === id)?.name || "Linked vendor" : "";
 
-  // ------------------------------------------------------------- loaders
-  async function loadArrangements(keepOpen?: string) {
-    try {
-      const params = new URLSearchParams({ limit: "200" });
-      if (search.trim()) params.set("search", search.trim());
-      if (fCategory) params.set("category", fCategory);
-      if (fMateriality) params.set("materiality", fMateriality);
-      if (fStatus) params.set("status", fStatus);
-      const res = await apiCall<Page<OutsourcingArrangement>>("GET", `/outsourcing?${params.toString()}`);
-      setArrangements(res.items);
-      if (keepOpen) setOpenArr(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load outsourcing arrangements");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<OutsourcingSummary>("GET", "/outsourcing-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load outsourcing summary");
-    }
-  }
-  async function loadVendors() {
-    try {
-      const res = await apiCall<Page<VendorOption>>("GET", "/vendors?limit=200");
-      setVendors(res.items);
-    } catch {
-      // Vendor linking is optional — a missing vendor list must not block the page.
-      setVendors([]);
-    }
-  }
-  async function refreshArr(id: string) {
-    const a = await apiCall<OutsourcingArrangement>("GET", `/outsourcing/${id}`);
-    setOpenArr(a);
-    setArrangements((prev) => prev.map((x) => (x.id === id ? a : x)));
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchArrangements = useCallback(
+    (qs: string) => apiCall<PagedList<OutsourcingArrangement>>("GET", `/outsourcing?${qs}`),
+    [],
+  );
 
-  useEffect(() => {
-    loadArrangements();
-    loadSummary();
-    loadVendors();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const loadDetail = useCallback((id: string) => {
+    apiCall<OutsourcingArrangement>("GET", `/outsourcing/${id}`).then(setDetail).catch(() => setDetail(null));
   }, []);
+  useEffect(() => {
+    if (openId) {
+      setRd(BLANK_REVIEW);
+      loadDetail(openId);
+    } else setDetail(null);
+  }, [openId, loadDetail]);
+
+  const loadSummary = useCallback(() => {
+    apiCall<OutsourcingSummary>("GET", "/outsourcing-summary")
+      .then(setSummary)
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load outsourcing summary"));
+  }, []);
+  useEffect(() => {
+    loadSummary();
+    apiCall<PagedList<VendorOption>>("GET", "/vendors?limit=200")
+      .then((r) => setVendors(r.items))
+      .catch(() => setVendors([]));
+  }, [loadSummary, refreshKey]);
 
   // ------------------------------------------------------------- arrangement CRUD
   function openNewArr() {
     setEditingArr(null);
     setAf(BLANK_ARR);
+    setError(null);
     setShowArrForm(true);
   }
   function openEditArr(a: OutsourcingArrangement) {
     setEditingArr(a);
     setAf(fromArr(a));
+    setError(null);
     setShowArrForm(true);
   }
   async function saveArr() {
@@ -330,8 +315,9 @@ export default function OutsourcingPage() {
       if (editingArr) await apiCall<OutsourcingArrangement>("PATCH", `/outsourcing/${editingArr.id}`, payload);
       else await apiCall<OutsourcingArrangement>("POST", "/outsourcing", payload);
       setShowArrForm(false);
-      await loadArrangements(openArr?.id);
-      await loadSummary();
+      reload();
+      if (openId) loadDetail(openId);
+      toast(editingArr ? "Changes saved" : "Arrangement created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save arrangement");
     } finally {
@@ -339,29 +325,25 @@ export default function OutsourcingPage() {
     }
   }
   async function removeArr(a: OutsourcingArrangement) {
-    if (!window.confirm(`Delete outsourcing arrangement ${a.reference || a.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete outsourcing arrangement ${a.reference || a.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/outsourcing/${a.id}`);
       setShowArrForm(false);
-      if (openArr?.id === a.id) setOpenArr(null);
-      await loadArrangements();
-      await loadSummary();
+      if (openId === a.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleArr(a: OutsourcingArrangement) {
-    setRd(BLANK_REVIEW);
-    setOpenArr(openArr?.id === a.id ? null : a);
-  }
 
   // ------------------------------------------------------------- reviews (inline)
   async function addReview() {
-    if (!openArr) return;
+    if (!detail) return;
     setError(null);
     try {
-      await apiCall<OutsourcingArrangement>("POST", `/outsourcing/${openArr.id}/reviews`, {
+      await apiCall<OutsourcingArrangement>("POST", `/outsourcing/${detail.id}/reviews`, {
         review_date: rd.review_date || null,
         reviewer: rd.reviewer,
         outcome: rd.outcome,
@@ -370,22 +352,28 @@ export default function OutsourcingPage() {
         status: rd.status,
       });
       setRd(BLANK_REVIEW);
-      await refreshArr(openArr.id);
+      loadDetail(detail.id);
+      reload();
+      toast("Review added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add review");
     }
   }
   async function removeReview(rid: string) {
-    if (!openArr) return;
-    if (!window.confirm("Remove this review?")) return;
+    if (!detail) return;
+    if (!(await confirmDialog({ title: "Remove this review?", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/outsourcing-reviews/${rid}`);
-      await refreshArr(openArr.id);
+      loadDetail(detail.id);
+      reload();
+      toast("Review removed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to remove review");
     }
   }
+
+  const vendorOpts: Option[] = useMemo(() => vendors.map((v) => ({ value: v.id, label: v.name })), [vendors]);
 
   // ------------------------------------------------------------- form tabs
   const arrangementTab = (
@@ -398,12 +386,7 @@ export default function OutsourcingPage() {
           <TextInput value={af.service_provider} onChange={(v) => setA("service_provider", v)} placeholder="Provider name" />
         </Field>
         <Field label="Linked vendor" help="Optional link to the vendor register.">
-          <Select
-            value={af.vendor_id}
-            onChange={(v) => setA("vendor_id", v)}
-            options={vendors.map((v) => ({ value: v.id, label: v.name }))}
-            placeholder="No linked vendor"
-          />
+          <Select value={af.vendor_id} onChange={(v) => setA("vendor_id", v)} options={vendorOpts} placeholder="No linked vendor" />
         </Field>
       </div>
       <Field label="Service description" help="What service is being outsourced.">
@@ -490,6 +473,72 @@ export default function OutsourcingPage() {
     </>
   );
 
+  // ------------------------------------------------------------- table columns
+  const columns: Column<OutsourcingArrangement>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (a) => <span className="ref">{a.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (a) => <span className="cell-title">{a.title}</span> },
+    { key: "service_provider", header: "Service provider", sortable: true, render: (a) => <span className="muted">{a.service_provider || vendorName(a.vendor_id) || "—"}</span> },
+    { key: "category", header: "Category", sortable: true, render: (a) => <Badge tone="info">{cap(a.category)}</Badge> },
+    { key: "materiality", header: "Materiality", sortable: true, render: (a) => <Badge tone={MATERIALITY_TONE[a.materiality] || "neutral"}>{cap(a.materiality)}</Badge> },
+    {
+      key: "cloud",
+      header: "Cloud",
+      render: (a) =>
+        a.is_cloud ? (
+          <Badge tone="info">{a.cloud_model && a.cloud_model !== "not_applicable" ? cloudLabel(a.cloud_model) : "Cloud"}</Badge>
+        ) : (
+          <span className="muted">—</span>
+        ),
+    },
+    { key: "sbp_approval", header: "SBP approval", render: (a) => <Badge tone={SBP_TONE[a.sbp_approval_status] || "neutral"}>{cap(a.sbp_approval_status)}</Badge> },
+    {
+      key: "contract_end",
+      header: "Contract end",
+      sortable: true,
+      render: (a) =>
+        a.is_contract_expiring ? (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <Badge tone="high">Expiring</Badge>
+            <span className="muted">{a.contract_end}</span>
+          </div>
+        ) : (
+          <span className="muted">{a.contract_end || "—"}</span>
+        ),
+    },
+    {
+      key: "actions",
+      header: "",
+      render: (a) => (
+        <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => openEditArr(a)}>Edit</button>
+          <button className="btn secondary sm" onClick={() => removeArr(a)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
+
+  const filters = useMemo(
+    () => ({ category: fCategory || undefined, materiality: fMateriality || undefined, status: fStatus || undefined }),
+    [fCategory, fMateriality, fStatus],
+  );
+
+  const toolbarRight = (
+    <>
+      <select className="select" style={{ width: 170 }} value={fCategory} onChange={(e) => setFCategory(e.target.value)}>
+        <option value="">All categories</option>
+        {CATEGORY.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+      </select>
+      <select className="select" style={{ width: 140 }} value={fMateriality} onChange={(e) => setFMateriality(e.target.value)}>
+        <option value="">All materiality</option>
+        {MATERIALITY.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+      </select>
+      <select className="select" style={{ width: 150 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
+        <option value="">All statuses</option>
+        {STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+      </select>
+    </>
+  );
+
   // ------------------------------------------------------------- render
   return (
     <>
@@ -525,255 +574,159 @@ export default function OutsourcingPage() {
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
-
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head row-between">
-          <div>
-            <h3>Outsourcing Arrangements</h3>
-            <span className="sub">
-              {arrangements.length} shown · click a row to manage reviews
-              {summary && summary.exit_plans_untested > 0 ? ` · ${summary.exit_plans_untested} material exit plan(s) untested` : ""}
-            </span>
-          </div>
+      {summary && summary.exit_plans_untested > 0 && (
+        <div className="card card-pad" style={{ marginBottom: 16 }}>
+          <span className="muted">{summary.exit_plans_untested} material exit plan(s) untested.</span>
         </div>
-
-        <form
-          className="card-pad"
-          style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", paddingBottom: 0 }}
-          onSubmit={(ev) => { ev.preventDefault(); loadArrangements(openArr?.id); }}
-        >
-          <div style={{ flex: "1 1 220px" }}>
-            <label className="label">Search</label>
-            <input className="input" value={search} onChange={(ev) => setSearch(ev.target.value)} placeholder="Title, reference, provider, owner" />
-          </div>
-          <div style={{ width: 190 }}>
-            <label className="label">Category</label>
-            <select className="select" value={fCategory} onChange={(ev) => setFCategory(ev.target.value)}>
-              <option value="">All categories</option>
-              {CATEGORY.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
-          </div>
-          <div style={{ width: 160 }}>
-            <label className="label">Materiality</label>
-            <select className="select" value={fMateriality} onChange={(ev) => setFMateriality(ev.target.value)}>
-              <option value="">All</option>
-              {MATERIALITY.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
-          </div>
-          <div style={{ width: 160 }}>
-            <label className="label">Status</label>
-            <select className="select" value={fStatus} onChange={(ev) => setFStatus(ev.target.value)}>
-              <option value="">All statuses</option>
-              {STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
-          </div>
-          <button className="btn secondary sm" type="submit">Apply</button>
-        </form>
-
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Title</th>
-                <th>Service provider</th>
-                <th>Category</th>
-                <th>Materiality</th>
-                <th>Cloud</th>
-                <th>SBP approval</th>
-                <th>Contract end</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {arrangements.map((a) => (
-                <tr key={a.id} style={{ cursor: "pointer" }} onClick={() => toggleArr(a)}>
-                  <td className="ref">{a.reference || "—"}</td>
-                  <td className="cell-title">{a.title}</td>
-                  <td className="muted">{a.service_provider || vendorName(a.vendor_id) || "—"}</td>
-                  <td><Badge tone="info">{cap(a.category)}</Badge></td>
-                  <td><Badge tone={MATERIALITY_TONE[a.materiality] || "neutral"}>{cap(a.materiality)}</Badge></td>
-                  <td>
-                    {a.is_cloud ? (
-                      <Badge tone="info">{a.cloud_model && a.cloud_model !== "not_applicable" ? cloudLabel(a.cloud_model) : "Cloud"}</Badge>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td>
-                    <Badge tone={SBP_TONE[a.sbp_approval_status] || "neutral"}>{cap(a.sbp_approval_status)}</Badge>
-                  </td>
-                  <td>
-                    {a.is_contract_expiring ? (
-                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <Badge tone="high">Expiring</Badge>
-                        <span className="muted">{a.contract_end}</span>
-                      </div>
-                    ) : (
-                      <span className="muted">{a.contract_end || "—"}</span>
-                    )}
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => toggleArr(a)}>
-                        {openArr?.id === a.id ? "Hide" : "Manage"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => openEditArr(a)}>Edit</button>
-                      <button className="btn secondary sm" onClick={() => removeArr(a)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {arrangements.length === 0 && (
-                <tr>
-                  <td colSpan={9}>
-                    <div className="empty">
-                      <span className="ico"><IconCheck width={24} height={24} /></span>
-                      <h3>No outsourcing arrangements</h3>
-                      <p>Register the bank&apos;s outsourcing and cloud arrangements to track SBP materiality, approvals, exit plans and concentration risk.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {openArr && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head row-between">
-              <div>
-                <h3>{openArr.reference} — {openArr.title}</h3>
-                <span className="sub">
-                  {cap(openArr.category)} · {cap(openArr.materiality)} · {cap(openArr.status)}
-                  {openArr.service_provider ? " · " + openArr.service_provider : ""}
-                  {openArr.is_cloud ? " · cloud (" + cloudLabel(openArr.cloud_model) + ")" : ""}
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button className="btn secondary sm" onClick={() => openEditArr(openArr)}>Edit</button>
-                <button className="btn secondary sm" onClick={() => removeArr(openArr)}>Delete</button>
-              </div>
-            </div>
-
-            <div className="card-pad">
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-                <Badge tone={MATERIALITY_TONE[openArr.materiality] || "neutral"}>{cap(openArr.materiality)}</Badge>
-                <Badge tone={SBP_TONE[openArr.sbp_approval_status] || "neutral"}>SBP: {cap(openArr.sbp_approval_status)}</Badge>
-                {openArr.sbp_approval_required && <Badge tone="medium">Approval required</Badge>}
-                {openArr.is_cloud && <Badge tone="info">Cloud · {cloudLabel(openArr.cloud_model)}</Badge>}
-                {openArr.data_offshored && <Badge tone="high">Data offshored{openArr.country ? " · " + openArr.country : ""}</Badge>}
-                <Badge tone={openArr.exit_plan_tested ? "low" : "medium"}>Exit plan {openArr.exit_plan_tested ? "tested" : "untested"}</Badge>
-                {openArr.is_contract_expiring && <Badge tone="high">Contract expiring ≤90d</Badge>}
-              </div>
-
-              <div className="field-row" style={{ marginBottom: 12 }}>
-                <div style={{ flex: 1 }}>
-                  <div className="label">Materiality assessment</div>
-                  <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
-                    {openArr.materiality_assessment || "—"}
-                  </p>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div className="label">Exit plan</div>
-                  <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
-                    {openArr.exit_plan || "—"}
-                  </p>
-                </div>
-              </div>
-              <div style={{ marginBottom: 16 }}>
-                <div className="label">Concentration note</div>
-                <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
-                  {openArr.concentration_note || "—"}
-                </p>
-                <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-                  {openArr.sbp_approval_ref ? `NOC ref ${openArr.sbp_approval_ref} · ` : ""}
-                  Contract {openArr.contract_start || "—"} → {openArr.contract_end || "—"}
-                  {openArr.vendor_id ? ` · linked vendor ${vendorName(openArr.vendor_id)}` : ""}
-                </div>
-              </div>
-
-              <strong>Monitoring reviews</strong>
-              <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                Periodic reviews of the arrangement — SLA performance, outcome and any issues noted.
-              </p>
-              <form
-                style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                onSubmit={(ev) => { ev.preventDefault(); addReview(); }}
-              >
-                <div style={{ width: 150 }}>
-                  <label className="label">Review date</label>
-                  <input className="input" type="date" value={rd.review_date} onChange={(ev) => setRD("review_date", ev.target.value)} />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Reviewer</label>
-                  <input className="input" value={rd.reviewer} onChange={(ev) => setRD("reviewer", ev.target.value)} placeholder="Reviewer" />
-                </div>
-                <div style={{ width: 140 }}>
-                  <label className="label">Status</label>
-                  <select className="select" value={rd.status} onChange={(ev) => setRD("status", ev.target.value)}>
-                    {REVIEW_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                  </select>
-                </div>
-                <label className="label" style={{ display: "flex", gap: 6, alignItems: "center", paddingBottom: 8 }}>
-                  <input type="checkbox" checked={rd.sla_met} onChange={(ev) => setRD("sla_met", ev.target.checked)} /> SLA met
-                </label>
-                <div style={{ flex: "1 1 200px" }}>
-                  <label className="label">Outcome</label>
-                  <input className="input" value={rd.outcome} onChange={(ev) => setRD("outcome", ev.target.value)} placeholder="Review outcome" />
-                </div>
-                <div style={{ flex: "1 1 200px" }}>
-                  <label className="label">Issues noted</label>
-                  <input className="input" value={rd.issues_noted} onChange={(ev) => setRD("issues_noted", ev.target.value)} placeholder="Issues / follow-ups" />
-                </div>
-                <button className="btn">Add</button>
-              </form>
-
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Ref</th>
-                      <th>Date</th>
-                      <th>Reviewer</th>
-                      <th>Status</th>
-                      <th>SLA</th>
-                      <th>Outcome</th>
-                      <th>Issues</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...openArr.reviews]
-                      .sort((a, b) => (b.review_date || "").localeCompare(a.review_date || ""))
-                      .map((rv) => (
-                        <tr key={rv.id}>
-                          <td className="ref">{rv.reference || "—"}</td>
-                          <td className="muted">{rv.review_date || "—"}</td>
-                          <td className="muted">{rv.reviewer || "—"}</td>
-                          <td><Badge tone={REVIEW_STATUS_TONE[rv.status] || "neutral"}>{cap(rv.status)}</Badge></td>
-                          <td>{rv.sla_met ? <Badge tone="low">Met</Badge> : <Badge tone="critical">Breached</Badge>}</td>
-                          <td className="muted">{rv.outcome || "—"}</td>
-                          <td className="muted">{rv.issues_noted || "—"}</td>
-                          <td>
-                            <button className="btn secondary sm" onClick={() => removeReview(rv.id)}>Remove</button>
-                          </td>
-                        </tr>
-                      ))}
-                    {openArr.reviews.length === 0 && (
-                      <tr><td colSpan={8}><span className="muted">No reviews recorded yet.</span></td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
-          <RecordPanels model="outsourcing_arrangement" entityId={openArr.id} />
-        </>
       )}
+
+      <DataTable<OutsourcingArrangement>
+        columns={columns}
+        fetcher={fetchArrangements}
+        rowKey={(a) => a.id}
+        onRowClick={(a) => setOpenId(a.id)}
+        activeKey={openId}
+        filters={filters}
+        toolbarRight={toolbarRight}
+        searchPlaceholder="Search title, reference, provider, owner…"
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        emptyMessage="No outsourcing arrangements. Register the bank's outsourcing and cloud arrangements to track SBP materiality, approvals, exit plans and concentration risk."
+        refreshKey={refreshKey}
+      />
+
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
+        subtitle={detail ? `${cap(detail.category)} · ${cap(detail.materiality)} · ${cap(detail.status)}${detail.service_provider ? " · " + detail.service_provider : ""}` : ""}
+        width={760}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditArr(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeArr(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+              <Badge tone={MATERIALITY_TONE[detail.materiality] || "neutral"}>{cap(detail.materiality)}</Badge>
+              <Badge tone={SBP_TONE[detail.sbp_approval_status] || "neutral"}>SBP: {cap(detail.sbp_approval_status)}</Badge>
+              {detail.sbp_approval_required && <Badge tone="medium">Approval required</Badge>}
+              {detail.is_cloud && <Badge tone="info">Cloud · {cloudLabel(detail.cloud_model)}</Badge>}
+              {detail.data_offshored && <Badge tone="high">Data offshored{detail.country ? " · " + detail.country : ""}</Badge>}
+              <Badge tone={detail.exit_plan_tested ? "low" : "medium"}>Exit plan {detail.exit_plan_tested ? "tested" : "untested"}</Badge>
+              {detail.is_contract_expiring && <Badge tone="high">Contract expiring ≤90d</Badge>}
+            </div>
+
+            <div className="field-row" style={{ marginBottom: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div className="label">Materiality assessment</div>
+                <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
+                  {detail.materiality_assessment || "—"}
+                </p>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div className="label">Exit plan</div>
+                <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
+                  {detail.exit_plan || "—"}
+                </p>
+              </div>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <div className="label">Concentration note</div>
+              <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
+                {detail.concentration_note || "—"}
+              </p>
+              <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                {detail.sbp_approval_ref ? `NOC ref ${detail.sbp_approval_ref} · ` : ""}
+                Contract {detail.contract_start || "—"} → {detail.contract_end || "—"}
+                {detail.vendor_id ? ` · linked vendor ${vendorName(detail.vendor_id)}` : ""}
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Monitoring reviews</h3><span className="sub">{detail.review_count} recorded</span></div>
+              <div className="card-pad">
+                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+                  Periodic reviews of the arrangement — SLA performance, outcome and any issues noted.
+                </p>
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(ev) => { ev.preventDefault(); addReview(); }}
+                >
+                  <div style={{ width: 150 }}>
+                    <label className="label">Review date</label>
+                    <input className="input" type="date" value={rd.review_date} onChange={(ev) => setRD("review_date", ev.target.value)} />
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label className="label">Reviewer</label>
+                    <input className="input" value={rd.reviewer} onChange={(ev) => setRD("reviewer", ev.target.value)} placeholder="Reviewer" />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Status</label>
+                    <select className="select" value={rd.status} onChange={(ev) => setRD("status", ev.target.value)}>
+                      {REVIEW_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+                    </select>
+                  </div>
+                  <label className="label" style={{ display: "flex", gap: 6, alignItems: "center", paddingBottom: 8 }}>
+                    <input type="checkbox" checked={rd.sla_met} onChange={(ev) => setRD("sla_met", ev.target.checked)} /> SLA met
+                  </label>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Outcome</label>
+                    <input className="input" value={rd.outcome} onChange={(ev) => setRD("outcome", ev.target.value)} placeholder="Review outcome" />
+                  </div>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Issues noted</label>
+                    <input className="input" value={rd.issues_noted} onChange={(ev) => setRD("issues_noted", ev.target.value)} placeholder="Issues / follow-ups" />
+                  </div>
+                  <button className="btn">Add</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Ref</th>
+                        <th>Date</th>
+                        <th>Reviewer</th>
+                        <th>Status</th>
+                        <th>SLA</th>
+                        <th>Outcome</th>
+                        <th>Issues</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...detail.reviews]
+                        .sort((a, b) => (b.review_date || "").localeCompare(a.review_date || ""))
+                        .map((rv) => (
+                          <tr key={rv.id}>
+                            <td className="ref">{rv.reference || "—"}</td>
+                            <td className="muted">{rv.review_date || "—"}</td>
+                            <td className="muted">{rv.reviewer || "—"}</td>
+                            <td><Badge tone={REVIEW_STATUS_TONE[rv.status] || "neutral"}>{cap(rv.status)}</Badge></td>
+                            <td>{rv.sla_met ? <Badge tone="low">Met</Badge> : <Badge tone="critical">Breached</Badge>}</td>
+                            <td className="muted">{rv.outcome || "—"}</td>
+                            <td className="muted">{rv.issues_noted || "—"}</td>
+                            <td>
+                              <button className="btn secondary sm" onClick={() => removeReview(rv.id)}>Remove</button>
+                            </td>
+                          </tr>
+                        ))}
+                      {detail.reviews.length === 0 && (
+                        <tr><td colSpan={8}><span className="muted">No reviews recorded yet.</span></td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="outsourcing_arrangement" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODAL */}
       {showArrForm && (
@@ -807,5 +760,13 @@ export default function OutsourcingPage() {
         />
       )}
     </>
+  );
+}
+
+export default function OutsourcingPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <OutsourcingInner />
+    </Suspense>
   );
 }

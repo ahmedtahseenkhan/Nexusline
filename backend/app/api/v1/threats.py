@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.risk import Risk
 from app.models.threat import (
     Threat,
@@ -54,10 +55,19 @@ def _read(schema, obj, counts):
 
 
 # ------------------------------------------------------------------- threats
+_THREAT_SORTABLE = {
+    "name": Threat.name,
+    "category": Threat.category,
+    "created_at": Threat.created_at,
+}
+
+
 @router.get("/threats", response_model=Page[ThreatRead], dependencies=[Depends(require("risk:read"))])
 async def list_threats(
     db: DbSession,
     search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ThreatRead]:
@@ -65,7 +75,12 @@ async def list_threats(
     if search:
         tstmt = tstmt.where(Threat.name.ilike(f"%{search}%"))
     total = await db.scalar(select(func.count()).select_from(tstmt.subquery())) or 0
-    rows = (await db.scalars(tstmt.order_by(Threat.name).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        tstmt = apply_sort(tstmt, params, _THREAT_SORTABLE, default=Threat.name)
+    else:
+        tstmt = tstmt.order_by(Threat.name)
+    rows = (await db.scalars(tstmt.limit(limit).offset(offset))).all()
     counts = await _usage_counts(db, risk_threats, risk_threats.c.threat_id)
     return Page(
         items=[_read(ThreatRead, r, counts) for r in rows],
@@ -108,12 +123,21 @@ async def delete_threat(obj_id: uuid.UUID, db: DbSession) -> None:
 
 
 # ------------------------------------------------------------- vulnerabilities
+_VULN_SORTABLE = {
+    "name": Vulnerability.name,
+    "category": Vulnerability.category,
+    "created_at": Vulnerability.created_at,
+}
+
+
 @router.get(
     "/vulnerabilities", response_model=Page[VulnerabilityRead], dependencies=[Depends(require("risk:read"))]
 )
 async def list_vulnerabilities(
     db: DbSession,
     search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[VulnerabilityRead]:
@@ -121,9 +145,12 @@ async def list_vulnerabilities(
     if search:
         vstmt = vstmt.where(Vulnerability.name.ilike(f"%{search}%"))
     total = await db.scalar(select(func.count()).select_from(vstmt.subquery())) or 0
-    rows = (
-        await db.scalars(vstmt.order_by(Vulnerability.name).limit(limit).offset(offset))
-    ).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        vstmt = apply_sort(vstmt, params, _VULN_SORTABLE, default=Vulnerability.name)
+    else:
+        vstmt = vstmt.order_by(Vulnerability.name)
+    rows = (await db.scalars(vstmt.limit(limit).offset(offset))).all()
     counts = await _usage_counts(db, risk_vulnerabilities, risk_vulnerabilities.c.vulnerability_id)
     return Page(
         items=[_read(VulnerabilityRead, r, counts) for r in rows],

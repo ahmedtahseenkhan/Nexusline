@@ -1,16 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconShield } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 type BiaDependency = {
   id: string;
   bia_id: string;
@@ -90,18 +93,8 @@ const DEP_TYPES = [
 ];
 
 // ------------------------------------------------------------------ tones
-const CRIT_TONE: Record<string, Tone> = {
-  low: "low",
-  medium: "medium",
-  high: "high",
-  critical: "critical",
-};
-const BIA_STATUS_TONE: Record<string, Tone> = {
-  draft: "neutral",
-  submitted: "info",
-  approved: "low",
-  retired: "neutral",
-};
+const CRIT_TONE: Record<string, Tone> = { low: "low", medium: "medium", high: "high", critical: "critical" };
+const BIA_STATUS_TONE: Record<string, Tone> = { draft: "neutral", submitted: "info", approved: "low", retired: "neutral" };
 
 function CritBadge({ value }: { value: string | null }) {
   if (!value) return <span className="muted">—</span>;
@@ -135,29 +128,11 @@ type BiaForm = {
   workflow_status: string;
 };
 const BLANK_BIA: BiaForm = {
-  process_name: "",
-  business_unit: "",
-  owner: "",
-  description: "",
-  criticality: "medium",
-  status: "draft",
-  assessment_date: "",
-  next_review_date: "",
-  peak_periods: "",
-  rto_hours: "",
-  rpo_hours: "",
-  mtpd_hours: "",
-  financial_impact_24h: "",
-  financial_impact_1week: "",
-  currency: "PKR",
-  operational_impact: "",
-  reputational_impact: "",
-  regulatory_impact: "",
-  legal_impact: "",
-  minimum_resources: "",
-  recovery_strategy: "",
-  workaround: "",
-  workflow_status: "draft",
+  process_name: "", business_unit: "", owner: "", description: "", criticality: "medium", status: "draft",
+  assessment_date: "", next_review_date: "", peak_periods: "", rto_hours: "", rpo_hours: "", mtpd_hours: "",
+  financial_impact_24h: "", financial_impact_1week: "", currency: "PKR", operational_impact: "",
+  reputational_impact: "", regulatory_impact: "", legal_impact: "", minimum_resources: "",
+  recovery_strategy: "", workaround: "", workflow_status: "draft",
 };
 function fromBia(b: BiaAssessment): BiaForm {
   return {
@@ -223,17 +198,20 @@ type DepDraft = {
   single_point_of_failure: boolean;
 };
 const BLANK_DEP: DepDraft = {
-  dependency_type: "application",
-  name: "",
-  criticality: "medium",
-  rto_hours: "",
-  single_point_of_failure: false,
+  dependency_type: "application", name: "", criticality: "medium", rto_hours: "", single_point_of_failure: false,
 };
 
-export default function BiaPage() {
-  const [error, setError] = useState<string | null>(null);
-  const [bias, setBias] = useState<BiaAssessment[]>([]);
+/* ================================================================ page ===== */
+function BiaInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<BiaAssessment | null>(null);
   const [summary, setSummary] = useState<BiaSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // filters
+  const [critFilter, setCritFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
 
   const [editing, setEditing] = useState<BiaAssessment | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -241,114 +219,75 @@ export default function BiaPage() {
   const [bf, setBf] = useState<BiaForm>(BLANK_BIA);
   const setB = <K extends keyof BiaForm>(k: K, v: BiaForm[K]) => setBf((p) => ({ ...p, [k]: v }));
 
-  const [open, setOpen] = useState<BiaAssessment | null>(null);
   const [dd, setDd] = useState<DepDraft>(BLANK_DEP);
   const setDD = <K extends keyof DepDraft>(k: K, v: DepDraft[K]) => setDd((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadBias(keepOpen?: string) {
-    try {
-      const res = await apiCall<Page<BiaAssessment>>("GET", "/bia?limit=200");
-      setBias(res.items);
-      if (keepOpen) setOpen(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load business impact analyses");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<BiaSummary>("GET", "/bia-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load BIA summary");
-    }
-  }
-  async function refreshBia(id: string) {
-    const b = await apiCall<BiaAssessment>("GET", `/bia/${id}`);
-    setOpen(b);
-    setBias((prev) => prev.map((x) => (x.id === id ? b : x)));
-  }
-
-  useEffect(() => {
-    loadBias();
-    loadSummary();
+  const loadSummary = useCallback(() => {
+    apiCall<BiaSummary>("GET", "/bia-summary").then(setSummary).catch(() => {});
+  }, []);
+  const reload = useCallback(() => { setRefreshKey((k) => k + 1); loadSummary(); }, [loadSummary]);
+  const fetchBias = useCallback((qs: string) => apiCall<PagedList<BiaAssessment>>("GET", `/bia?${qs}`), []);
+  const loadDetail = useCallback((id: string) => {
+    apiCall<BiaAssessment>("GET", `/bia/${id}`).then(setDetail).catch(() => setDetail(null));
   }, []);
 
+  useEffect(() => { loadSummary(); }, [loadSummary]);
+  useEffect(() => {
+    if (openId) { setDd(BLANK_DEP); loadDetail(openId); }
+    else setDetail(null);
+  }, [openId, loadDetail]);
+
   // ------------------------------------------------------------- BIA CRUD
-  function openNew() {
-    setEditing(null);
-    setBf(BLANK_BIA);
-    setShowForm(true);
-  }
-  function openEdit(b: BiaAssessment) {
-    setEditing(b);
-    setBf(fromBia(b));
-    setShowForm(true);
-  }
+  function openNew() { setEditing(null); setBf(BLANK_BIA); setError(null); setShowForm(true); }
+  function openEdit(b: BiaAssessment) { setEditing(b); setBf(fromBia(b)); setError(null); setShowForm(true); }
+
   async function save() {
-    setError(null);
-    setSaving(true);
+    setError(null); setSaving(true);
     try {
       const payload = biaPayload(bf);
       if (editing) await apiCall<BiaAssessment>("PATCH", `/bia/${editing.id}`, payload);
       else await apiCall<BiaAssessment>("POST", "/bia", payload);
-      setShowForm(false);
-      await loadBias(open?.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save BIA");
-    } finally {
-      setSaving(false);
-    }
+      setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "BIA created");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save BIA"); }
+    finally { setSaving(false); }
   }
   async function remove(b: BiaAssessment) {
-    if (!window.confirm(`Delete BIA ${b.reference || b.process_name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete BIA ${b.reference || b.process_name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/bia/${b.id}`);
       setShowForm(false);
-      if (open?.id === b.id) setOpen(null);
-      await loadBias();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
-  }
-  function toggle(b: BiaAssessment) {
-    setDd(BLANK_DEP);
-    setOpen(open?.id === b.id ? null : b);
+      if (openId === b.id) setOpenId(null);
+      reload(); toast("Deleted");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
   }
 
-  // ------------------------------------------------------------- dependencies (inline)
+  // ------------------------------------------------------------- dependencies (drawer)
   async function addDependency() {
-    if (!open) return;
+    if (!detail) return;
     setError(null);
     try {
-      await apiCall<BiaAssessment>("POST", `/bia/${open.id}/dependencies`, {
+      const fresh = await apiCall<BiaAssessment>("POST", `/bia/${detail.id}/dependencies`, {
         dependency_type: dd.dependency_type,
         name: dd.name,
         criticality: dd.criticality,
         rto_hours: dd.rto_hours === "" ? null : Number(dd.rto_hours),
         single_point_of_failure: dd.single_point_of_failure,
       });
-      setDd(BLANK_DEP);
-      await refreshBia(open.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to add dependency");
-    }
+      setDetail(fresh); setDd(BLANK_DEP); reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to add dependency"); }
   }
   async function removeDependency(lineId: string) {
-    if (!open) return;
-    if (!window.confirm("Remove this dependency?")) return;
+    if (!detail) return;
+    if (!(await confirmDialog({ title: "Remove this dependency?", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/bia-dependencies/${lineId}`);
-      await refreshBia(open.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to remove dependency");
-    }
+      loadDetail(detail.id); reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to remove dependency"); }
   }
+
+  const criticalCount = summary ? summary.by_criticality["critical"] || 0 : null;
 
   // ------------------------------------------------------------- form tabs
   const processTab = (
@@ -445,7 +384,20 @@ export default function BiaPage() {
     </>
   );
 
-  const criticalCount = summary ? summary.by_criticality["critical"] || 0 : null;
+  const columns: Column<BiaAssessment>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (b) => <span className="ref">{b.reference || "—"}</span> },
+    { key: "process_name", header: "Process", sortable: true, render: (b) => <span className="cell-title">{b.process_name}</span> },
+    { key: "business_unit", header: "Business unit", sortable: true, render: (b) => <span className="muted">{b.business_unit || "—"}</span> },
+    { key: "criticality", header: "Criticality", sortable: true, render: (b) => <CritBadge value={b.criticality} /> },
+    { key: "rto_hours", header: "RTO", sortable: true, render: (b) => <span className="muted">{hrs(b.rto_hours)}</span> },
+    { key: "rpo_hours", header: "RPO", sortable: true, render: (b) => <span className="muted">{hrs(b.rpo_hours)}</span> },
+    { key: "mtpd", header: "MTPD", render: (b) => <span className="muted">{hrs(b.mtpd_hours)}</span> },
+    { key: "status", header: "Status", sortable: true, render: (b) => <Badge tone={BIA_STATUS_TONE[b.status] || "neutral"}>{cap(b.status)}</Badge> },
+    { key: "next_review_date", header: "Review", sortable: true, render: (b) => (b.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{b.next_review_date || "—"}</span>) },
+    { key: "actions", header: "", render: (b) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(b)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(b)}>Delete</button></div> },
+  ];
+
+  const filters = { criticality: critFilter || undefined, status: statusFilter || undefined };
 
   // ------------------------------------------------------------- render
   return (
@@ -466,228 +418,142 @@ export default function BiaPage() {
 
       <div className="grid stat-grid">
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.total.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.total.toLocaleString() : "—"}</span></div>
           <span className="l">Processes analysed</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{criticalCount != null ? criticalCount.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{criticalCount != null ? criticalCount.toLocaleString() : "—"}</span></div>
           <span className="l">Critical processes</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.rto_within_24h.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.rto_within_24h.toLocaleString() : "—"}</span></div>
           <span className="l">RTO ≤ 24h</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.total_financial_exposure.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.total_financial_exposure.toLocaleString() : "—"}</span></div>
           <span className="l">Total financial exposure (PKR)</span>
         </div>
       </div>
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Business Impact Analyses</h3>
-          <span className="sub">{bias.length} total · click a row to manage dependencies</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Process</th>
-                <th>Business unit</th>
-                <th>Criticality</th>
-                <th>RTO</th>
-                <th>RPO</th>
-                <th>MTPD</th>
-                <th>Status</th>
-                <th>Review</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {bias.map((b) => (
-                <tr key={b.id} style={{ cursor: "pointer" }} onClick={() => toggle(b)}>
-                  <td className="ref">{b.reference || "—"}</td>
-                  <td className="cell-title">{b.process_name}</td>
-                  <td className="muted">{b.business_unit || "—"}</td>
-                  <td><CritBadge value={b.criticality} /></td>
-                  <td className="muted">{hrs(b.rto_hours)}</td>
-                  <td className="muted">{hrs(b.rpo_hours)}</td>
-                  <td className="muted">{hrs(b.mtpd_hours)}</td>
-                  <td><Badge tone={BIA_STATUS_TONE[b.status] || "neutral"}>{cap(b.status)}</Badge></td>
-                  <td>
-                    {b.is_review_overdue ? (
-                      <Badge tone="high">Overdue</Badge>
-                    ) : (
-                      <span className="muted">{b.next_review_date || "—"}</span>
-                    )}
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => toggle(b)}>
-                        {open?.id === b.id ? "Hide" : "Manage"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => remove(b)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {bias.length === 0 && (
-                <tr>
-                  <td colSpan={10}>
-                    <div className="empty">
-                      <span className="ico"><IconShield width={24} height={24} /></span>
-                      <h3>No business impact analyses</h3>
-                      <p>Assess a critical business process to capture RTO/RPO, impacts and dependencies for BCP.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<BiaAssessment>
+        columns={columns}
+        fetcher={fetchBias}
+        rowKey={(b) => b.id}
+        onRowClick={(b) => setOpenId(b.id)}
+        activeKey={openId}
+        searchPlaceholder="Search BIAs by process or reference…"
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        filters={filters}
+        emptyMessage="No business impact analyses yet. Assess a critical process to capture RTO/RPO, impacts and dependencies."
+        refreshKey={refreshKey}
+        toolbarRight={
+          <>
+            <select className="select" style={{ maxWidth: 150 }} value={critFilter} onChange={(e) => setCritFilter(e.target.value)}>
+              <option value="">All criticality</option>
+              {CRITICALITY.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <select className="select" style={{ maxWidth: 150 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="">All statuses</option>
+              {BIA_STATUS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </>
+        }
+      />
 
-      {open && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head row-between">
-              <div>
-                <h3>{open.reference} — {open.process_name}</h3>
-                <span className="sub">
-                  {cap(open.criticality)} · {open.business_unit || "no unit"}
-                  {open.owner ? " · owner " + open.owner : ""}
-                  {open.peak_periods ? " · peaks: " + open.peak_periods : ""}
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button className="btn secondary sm" onClick={() => openEdit(open)}>Edit</button>
-                <button className="btn secondary sm" onClick={() => remove(open)}>Delete</button>
-              </div>
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference || "BIA"} — ${detail.process_name}` : "…"}
+        subtitle={detail ? `${cap(detail.criticality)}${detail.business_unit ? " · " + detail.business_unit : ""}${detail.owner ? " · owner " + detail.owner : ""}` : ""}
+        width={780}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div className="grid stat-grid" style={{ marginBottom: 16 }}>
+              <div className="card stat"><div className="stat-top"><span className="n">{hrs(detail.rto_hours)}</span></div><span className="l">RTO ({detail.rto_band})</span></div>
+              <div className="card stat"><div className="stat-top"><span className="n">{hrs(detail.rpo_hours)}</span></div><span className="l">RPO</span></div>
+              <div className="card stat"><div className="stat-top"><span className="n">{hrs(detail.mtpd_hours)}</span></div><span className="l">MTPD</span></div>
+              <div className="card stat"><div className="stat-top"><span className="n">{num(detail.financial_impact_24h)}</span></div><span className="l">Impact @ 24h ({detail.currency})</span></div>
+              <div className="card stat"><div className="stat-top"><span className="n">{num(detail.financial_impact_1week)}</span></div><span className="l">Impact @ 1 week ({detail.currency})</span></div>
             </div>
 
-            <div className="card-pad">
-              <div className="grid stat-grid" style={{ marginBottom: 16 }}>
-                <div className="card stat">
-                  <div className="stat-top"><span className="n">{hrs(open.rto_hours)}</span></div>
-                  <span className="l">RTO ({open.rto_band})</span>
-                </div>
-                <div className="card stat">
-                  <div className="stat-top"><span className="n">{hrs(open.rpo_hours)}</span></div>
-                  <span className="l">RPO</span>
-                </div>
-                <div className="card stat">
-                  <div className="stat-top"><span className="n">{hrs(open.mtpd_hours)}</span></div>
-                  <span className="l">MTPD</span>
-                </div>
-                <div className="card stat">
-                  <div className="stat-top">
-                    <span className="n">{num(open.financial_impact_24h)}</span>
-                  </div>
-                  <span className="l">Impact @ 24h ({open.currency})</span>
-                </div>
-                <div className="card stat">
-                  <div className="stat-top">
-                    <span className="n">{num(open.financial_impact_1week)}</span>
-                  </div>
-                  <span className="l">Impact @ 1 week ({open.currency})</span>
-                </div>
+            <div className="table-wrap" style={{ marginBottom: 16 }}>
+              <table>
+                <tbody>
+                  <tr><td className="muted" style={{ width: 200 }}>Operational impact</td><td>{detail.operational_impact || "—"}</td></tr>
+                  <tr><td className="muted">Reputational impact</td><td>{detail.reputational_impact || "—"}</td></tr>
+                  <tr><td className="muted">Regulatory impact</td><td>{detail.regulatory_impact || "—"}</td></tr>
+                  <tr><td className="muted">Legal impact</td><td>{detail.legal_impact || "—"}</td></tr>
+                  <tr><td className="muted">Minimum resources</td><td>{detail.minimum_resources || "—"}</td></tr>
+                  <tr><td className="muted">Recovery strategy</td><td>{detail.recovery_strategy || "—"}</td></tr>
+                  <tr><td className="muted">Workaround</td><td>{detail.workaround || "—"}</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <strong>Dependencies</strong>
+            <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
+              Applications, IT &amp; information assets, vendors, people, facilities and utilities this process relies on.
+            </p>
+            <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); addDependency(); }}>
+              <div style={{ width: 180 }}>
+                <label className="label">Type</label>
+                <select className="select" value={dd.dependency_type} onChange={(ev) => setDD("dependency_type", ev.target.value)}>
+                  {DEP_TYPES.map((t) => (<option key={t} value={t}>{cap(t)}</option>))}
+                </select>
               </div>
-
-              <div className="table-wrap" style={{ marginBottom: 16 }}>
-                <table>
-                  <tbody>
-                    <tr><td className="muted" style={{ width: 200 }}>Operational impact</td><td>{open.operational_impact || "—"}</td></tr>
-                    <tr><td className="muted">Reputational impact</td><td>{open.reputational_impact || "—"}</td></tr>
-                    <tr><td className="muted">Regulatory impact</td><td>{open.regulatory_impact || "—"}</td></tr>
-                    <tr><td className="muted">Legal impact</td><td>{open.legal_impact || "—"}</td></tr>
-                    <tr><td className="muted">Minimum resources</td><td>{open.minimum_resources || "—"}</td></tr>
-                    <tr><td className="muted">Recovery strategy</td><td>{open.recovery_strategy || "—"}</td></tr>
-                    <tr><td className="muted">Workaround</td><td>{open.workaround || "—"}</td></tr>
-                  </tbody>
-                </table>
+              <div style={{ flex: "1 1 220px" }}>
+                <label className="label">Name</label>
+                <input className="input" value={dd.name} onChange={(ev) => setDD("name", ev.target.value)} placeholder="Core banking - CBS / SWIFT / DR site" required />
               </div>
+              <div style={{ width: 140 }}>
+                <label className="label">Criticality</label>
+                <select className="select" value={dd.criticality} onChange={(ev) => setDD("criticality", ev.target.value)}>
+                  {["low", "medium", "high", "critical"].map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                </select>
+              </div>
+              <div style={{ width: 110 }}>
+                <label className="label">RTO (h)</label>
+                <input className="input" type="number" value={dd.rto_hours} onChange={(ev) => setDD("rto_hours", ev.target.value)} placeholder="4" />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 8 }}>
+                <input id="dep-spof" type="checkbox" checked={dd.single_point_of_failure} onChange={(ev) => setDD("single_point_of_failure", ev.target.checked)} />
+                <label htmlFor="dep-spof" className="label" style={{ margin: 0 }}>SPOF</label>
+              </div>
+              <button className="btn" disabled={!dd.name.trim()}>Add</button>
+            </form>
 
-              <strong>Dependencies</strong>
-              <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                Applications, IT &amp; information assets, vendors, people, facilities and utilities this process relies on.
-              </p>
-              <form
-                style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                onSubmit={(ev) => { ev.preventDefault(); addDependency(); }}
-              >
-                <div style={{ width: 180 }}>
-                  <label className="label">Type</label>
-                  <select className="select" value={dd.dependency_type} onChange={(ev) => setDD("dependency_type", ev.target.value)}>
-                    {DEP_TYPES.map((t) => (<option key={t} value={t}>{cap(t)}</option>))}
-                  </select>
-                </div>
-                <div style={{ flex: "1 1 220px" }}>
-                  <label className="label">Name</label>
-                  <input className="input" value={dd.name} onChange={(ev) => setDD("name", ev.target.value)} placeholder="Core banking - CBS / SWIFT / DR site" required />
-                </div>
-                <div style={{ width: 140 }}>
-                  <label className="label">Criticality</label>
-                  <select className="select" value={dd.criticality} onChange={(ev) => setDD("criticality", ev.target.value)}>
-                    {["low", "medium", "high", "critical"].map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                  </select>
-                </div>
-                <div style={{ width: 110 }}>
-                  <label className="label">RTO (h)</label>
-                  <input className="input" type="number" value={dd.rto_hours} onChange={(ev) => setDD("rto_hours", ev.target.value)} placeholder="4" />
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 8 }}>
-                  <input id="dep-spof" type="checkbox" checked={dd.single_point_of_failure} onChange={(ev) => setDD("single_point_of_failure", ev.target.checked)} />
-                  <label htmlFor="dep-spof" className="label" style={{ margin: 0 }}>SPOF</label>
-                </div>
-                <button className="btn">Add</button>
-              </form>
-
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Type</th>
-                      <th>Name</th>
-                      <th>Criticality</th>
-                      <th>RTO</th>
-                      <th>SPOF</th>
-                      <th></th>
+            <div className="table-wrap" style={{ marginBottom: 16 }}>
+              <table>
+                <thead>
+                  <tr><th>Type</th><th>Name</th><th>Criticality</th><th>RTO</th><th>SPOF</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {detail.dependencies.map((d) => (
+                    <tr key={d.id}>
+                      <td><Badge tone="info">{cap(d.dependency_type)}</Badge></td>
+                      <td className="cell-title">{d.name}</td>
+                      <td><CritBadge value={d.criticality} /></td>
+                      <td className="muted">{hrs(d.rto_hours)}</td>
+                      <td>{d.single_point_of_failure ? <Badge tone="critical">SPOF</Badge> : <span className="muted">—</span>}</td>
+                      <td><button className="btn secondary sm" onClick={() => removeDependency(d.id)}>Remove</button></td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {open.dependencies.map((d) => (
-                      <tr key={d.id}>
-                        <td><Badge tone="info">{cap(d.dependency_type)}</Badge></td>
-                        <td className="cell-title">{d.name}</td>
-                        <td><CritBadge value={d.criticality} /></td>
-                        <td className="muted">{hrs(d.rto_hours)}</td>
-                        <td>{d.single_point_of_failure ? <Badge tone="critical">SPOF</Badge> : <span className="muted">—</span>}</td>
-                        <td>
-                          <button className="btn secondary sm" onClick={() => removeDependency(d.id)}>Remove</button>
-                        </td>
-                      </tr>
-                    ))}
-                    {open.dependencies.length === 0 && (
-                      <tr><td colSpan={6}><span className="muted">No dependencies recorded yet.</span></td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                  ))}
+                  {detail.dependencies.length === 0 && <tr><td colSpan={6}><span className="muted">No dependencies recorded yet.</span></td></tr>}
+                </tbody>
+              </table>
             </div>
-          </div>
 
-          <RecordPanels model="bia_assessment" entityId={open.id} />
-        </>
-      )}
+            <RecordPanels model="bia_assessment" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -703,21 +569,16 @@ export default function BiaPage() {
           saving={saving}
           error={error}
           saveLabel={editing ? "Save changes" : "Create BIA"}
-          footerLeft={
-            editing ? (
-              <button
-                className="btn secondary sm"
-                type="button"
-                onClick={() => remove(editing)}
-                disabled={saving}
-                style={{ color: "var(--danger, #c0392b)" }}
-              >
-                Delete
-              </button>
-            ) : undefined
-          }
         />
       )}
     </>
+  );
+}
+
+export default function BiaPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <BiaInner />
+    </Suspense>
   );
 }

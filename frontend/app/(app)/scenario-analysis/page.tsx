@@ -1,16 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus, IconGauge } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 type ScenarioAnalysis = {
   id: string;
   reference: string;
@@ -221,26 +224,27 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "capital", label: "Capital (SMA)" },
 ];
 
-export default function ScenarioAnalysisPage() {
+function ScenarioAnalysisInner() {
   const [section, setSection] = useState<SectionId>("scenarios");
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  const [scenarios, setScenarios] = useState<ScenarioAnalysis[]>([]);
-  const [capitals, setCapitals] = useState<CapitalCalculation[]>([]);
   const [summary, setSummary] = useState<ScenarioSummary | null>(null);
 
+  const [openId, setOpenId] = useRecordParam("id");
+  const [scenarioDetail, setScenarioDetail] = useState<ScenarioAnalysis | null>(null);
+
   // ---- scenario filters ----
-  const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
 
-  // ---- scenario dialog + expanded detail ----
+  // ---- scenario dialog ----
   const [editingScenario, setEditingScenario] = useState<ScenarioAnalysis | null>(null);
   const [showScenarioForm, setShowScenarioForm] = useState(false);
   const [savingScenario, setSavingScenario] = useState(false);
   const [sf, setSf] = useState<ScenarioForm>(BLANK_SCENARIO);
   const setS = <K extends keyof ScenarioForm>(k: K, v: ScenarioForm[K]) => setSf((p) => ({ ...p, [k]: v }));
-  const [openScenario, setOpenScenario] = useState<ScenarioAnalysis | null>(null);
 
   // ---- capital dialog ----
   const [editingCapital, setEditingCapital] = useState<CapitalCalculation | null>(null);
@@ -249,28 +253,10 @@ export default function ScenarioAnalysisPage() {
   const [cf, setCf] = useState<CapitalForm>(BLANK_CAPITAL);
   const setC = <K extends keyof CapitalForm>(k: K, v: CapitalForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadScenarios(keepOpen?: string) {
-    try {
-      const qs = new URLSearchParams({ limit: "200" });
-      if (search.trim()) qs.set("search", search.trim());
-      if (filterType) qs.set("basel_event_type", filterType);
-      if (filterStatus) qs.set("status", filterStatus);
-      const res = await apiCall<Page<ScenarioAnalysis>>("GET", `/scenario-analyses?${qs.toString()}`);
-      setScenarios(res.items);
-      if (keepOpen) setOpenScenario(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load scenarios");
-    }
-  }
-  async function loadCapitals() {
-    try {
-      const res = await apiCall<Page<CapitalCalculation>>("GET", "/capital-calculations?limit=200");
-      setCapitals(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load capital calculations");
-    }
-  }
+  // ------------------------------------------------------------- fetchers
+  const fetchScenarios = useCallback((qs: string) => apiCall<PagedList<ScenarioAnalysis>>("GET", `/scenario-analyses?${qs}`), []);
+  const fetchCapitals = useCallback((qs: string) => apiCall<PagedList<CapitalCalculation>>("GET", `/capital-calculations?${qs}`), []);
+
   async function loadSummary() {
     try {
       setSummary(await apiCall<ScenarioSummary>("GET", "/scenario-summary"));
@@ -278,29 +264,36 @@ export default function ScenarioAnalysisPage() {
       setError(e instanceof Error ? e.message : "Failed to load summary");
     }
   }
-
   useEffect(() => {
-    loadScenarios();
-    loadCapitals();
     loadSummary();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // re-query scenarios whenever a filter changes
+  const loadScenarioDetail = useCallback((id: string) => {
+    apiCall<ScenarioAnalysis>("GET", `/scenario-analyses/${id}`).then(setScenarioDetail).catch(() => setScenarioDetail(null));
+  }, []);
   useEffect(() => {
-    loadScenarios(openScenario?.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, filterType, filterStatus]);
+    if (openId) loadScenarioDetail(openId);
+    else setScenarioDetail(null);
+  }, [openId, loadScenarioDetail]);
+
+  function switchSection(id: SectionId) {
+    if (id !== section) {
+      setOpenId(null);
+      setSection(id);
+    }
+  }
 
   // ------------------------------------------------------------- scenario CRUD
   function openNewScenario() {
     setEditingScenario(null);
     setSf(BLANK_SCENARIO);
+    setError(null);
     setShowScenarioForm(true);
   }
   function openEditScenario(s: ScenarioAnalysis) {
     setEditingScenario(s);
     setSf(fromScenario(s));
+    setError(null);
     setShowScenarioForm(true);
   }
   async function saveScenario() {
@@ -311,8 +304,10 @@ export default function ScenarioAnalysisPage() {
       if (editingScenario) await apiCall("PATCH", `/scenario-analyses/${editingScenario.id}`, payload);
       else await apiCall("POST", "/scenario-analyses", payload);
       setShowScenarioForm(false);
-      await loadScenarios(openScenario?.id);
+      reload();
+      if (openId) loadScenarioDetail(openId);
       await loadSummary();
+      toast(editingScenario ? "Changes saved" : "Scenario created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save scenario");
     } finally {
@@ -320,31 +315,31 @@ export default function ScenarioAnalysisPage() {
     }
   }
   async function removeScenario(s: ScenarioAnalysis) {
-    if (!window.confirm(`Delete scenario ${s.reference || s.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete scenario ${s.reference || s.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/scenario-analyses/${s.id}`);
       setShowScenarioForm(false);
-      if (openScenario?.id === s.id) setOpenScenario(null);
-      await loadScenarios();
+      if (openId === s.id) setOpenId(null);
+      reload();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
-  }
-  function toggleScenario(s: ScenarioAnalysis) {
-    setOpenScenario(openScenario?.id === s.id ? null : s);
   }
 
   // ------------------------------------------------------------- capital CRUD
   function openNewCapital() {
     setEditingCapital(null);
     setCf(BLANK_CAPITAL);
+    setError(null);
     setShowCapitalForm(true);
   }
   function openEditCapital(c: CapitalCalculation) {
     setEditingCapital(c);
     setCf(fromCapital(c));
+    setError(null);
     setShowCapitalForm(true);
   }
   async function saveCapital() {
@@ -355,8 +350,9 @@ export default function ScenarioAnalysisPage() {
       if (editingCapital) await apiCall("PATCH", `/capital-calculations/${editingCapital.id}`, payload);
       else await apiCall("POST", "/capital-calculations", payload);
       setShowCapitalForm(false);
-      await loadCapitals();
+      reload();
       await loadSummary();
+      toast(editingCapital ? "Changes saved" : "Calculation created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save calculation");
     } finally {
@@ -364,17 +360,44 @@ export default function ScenarioAnalysisPage() {
     }
   }
   async function removeCapital(c: CapitalCalculation) {
-    if (!window.confirm(`Delete calculation ${c.reference || c.period}?`)) return;
+    if (!(await confirmDialog({ title: `Delete calculation ${c.reference || c.period}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/capital-calculations/${c.id}`);
       setShowCapitalForm(false);
-      await loadCapitals();
+      reload();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
+
+  // ------------------------------------------------------------- columns
+  const scenarioColumns: Column<ScenarioAnalysis>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (s) => <span className="ref">{s.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (s) => <span className="cell-title">{s.title}</span> },
+    { key: "basel_event_type", header: "Basel event type", sortable: true, render: (s) => <Badge tone="info">{cap(s.basel_event_type)}</Badge> },
+    { key: "business_line", header: "Business line", sortable: true, render: (s) => <span className="muted">{s.business_line || "—"}</span> },
+    { key: "frequency_per_year", header: "Freq/yr", sortable: true, render: (s) => <span className="muted">{num(s.frequency_per_year)}</span> },
+    { key: "expected_annual_loss", header: "Expected annual loss", render: (s) => <span className="muted">{num(s.expected_annual_loss)} {s.currency}</span> },
+    { key: "worst_case_loss", header: "Worst case", sortable: true, render: (s) => <span className="muted">{num(s.worst_case_loss)}</span> },
+    { key: "status", header: "Status", sortable: true, render: (s) => <Badge tone={SCENARIO_STATUS_TONE[s.status] || "neutral"}>{cap(s.status)}</Badge> },
+    { key: "actions", header: "", render: (s) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditScenario(s)}>Edit</button> <button className="btn secondary sm" onClick={() => removeScenario(s)}>Delete</button></div> },
+  ];
+
+  const capitalColumns: Column<CapitalCalculation>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "period", header: "Period", sortable: true, render: (c) => <span className="cell-title">{c.period || "—"}</span> },
+    { key: "business_indicator", header: "Business Indicator", sortable: true, render: (c) => <span className="muted">{num(c.business_indicator)} {c.currency}</span> },
+    { key: "avg_annual_loss", header: "Avg annual loss", sortable: true, render: (c) => <span className="muted">{num(c.avg_annual_loss)}</span> },
+    { key: "bic", header: "BIC", render: (c) => <span className="muted">{num(c.bic)}</span> },
+    { key: "loss_component", header: "Loss Component", render: (c) => <span className="muted">{num(c.loss_component)}</span> },
+    { key: "ilm", header: "ILM", render: (c) => <span className="muted">{num(c.ilm)}</span> },
+    { key: "orc", header: "ORC", render: (c) => <Badge tone="critical">{num(c.orc)} {c.currency}</Badge> },
+    { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CAPITAL_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
+    { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCapital(c)}>Delete</button></div> },
+  ];
 
   // ------------------------------------------------------------- scenario form tabs
   const scenarioTab = (
@@ -536,7 +559,7 @@ export default function ScenarioAnalysisPage() {
           <button
             key={s.id}
             className={`btn${section === s.id ? "" : " secondary"}`}
-            onClick={() => setSection(s.id)}
+            onClick={() => switchSection(s.id)}
             type="button"
           >
             {s.label}
@@ -548,216 +571,116 @@ export default function ScenarioAnalysisPage() {
 
       {/* ============================================= SCENARIO LIBRARY */}
       {section === "scenarios" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head row-between">
-              <div>
-                <h3>Scenario Library</h3>
-                <span className="sub">{scenarios.length} shown · click a row to expand</span>
-              </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <input
-                  className="input"
-                  style={{ width: 200 }}
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search scenarios…"
-                />
-                <select className="select" style={{ width: 200 }} value={filterType} onChange={(e) => setFilterType(e.target.value)}>
-                  <option value="">All event types</option>
-                  {BASEL_TYPES.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                </select>
-                <select className="select" style={{ width: 150 }} value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-                  <option value="">All statuses</option>
-                  {SCENARIO_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                </select>
-              </div>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Title</th>
-                    <th>Basel event type</th>
-                    <th>Business line</th>
-                    <th>Freq/yr</th>
-                    <th>Expected annual loss</th>
-                    <th>Worst case</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {scenarios.map((s) => (
-                    <tr key={s.id} style={{ cursor: "pointer" }} onClick={() => toggleScenario(s)}>
-                      <td className="ref">{s.reference || "—"}</td>
-                      <td className="cell-title">{s.title}</td>
-                      <td><Badge tone="info">{cap(s.basel_event_type)}</Badge></td>
-                      <td className="muted">{s.business_line || "—"}</td>
-                      <td className="muted">{num(s.frequency_per_year)}</td>
-                      <td className="muted">{num(s.expected_annual_loss)} {s.currency}</td>
-                      <td className="muted">{num(s.worst_case_loss)}</td>
-                      <td><Badge tone={SCENARIO_STATUS_TONE[s.status] || "neutral"}>{cap(s.status)}</Badge></td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleScenario(s)}>
-                            {openScenario?.id === s.id ? "Hide" : "Open"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => openEditScenario(s)}>Edit</button>
-                          <button className="btn secondary sm" onClick={() => removeScenario(s)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {scenarios.length === 0 && (
-                    <tr>
-                      <td colSpan={9}>
-                        <div className="empty">
-                          <span className="ico"><IconGauge width={24} height={24} /></span>
-                          <h3>No scenarios</h3>
-                          <p>Workshop forward-looking operational-risk scenarios against Basel event types.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openScenario && (
+        <DataTable<ScenarioAnalysis>
+          columns={scenarioColumns}
+          fetcher={fetchScenarios}
+          rowKey={(s) => s.id}
+          onRowClick={(s) => setOpenId(s.id)}
+          activeKey={openId}
+          searchPlaceholder="Search scenarios by title, reference, line or owner…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          filters={{ basel_event_type: filterType || undefined, status: filterStatus || undefined }}
+          toolbarRight={
             <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openScenario.reference} — {openScenario.title}</h3>
-                    <span className="sub">
-                      {cap(openScenario.status)} · {cap(openScenario.basel_event_type)}
-                      {openScenario.business_line ? " · " + openScenario.business_line : ""}
-                      {openScenario.owner ? " · owner " + openScenario.owner : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-                    <div style={{ textAlign: "right" }}>
-                      <div className="muted" style={{ fontSize: 12 }}>Expected annual loss</div>
-                      <strong style={{ fontSize: 18 }}>{num(openScenario.expected_annual_loss)} {openScenario.currency}</strong>
-                    </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button className="btn secondary sm" onClick={() => openEditScenario(openScenario)}>Edit</button>
-                      <button className="btn secondary sm" onClick={() => removeScenario(openScenario)}>Delete</button>
-                    </div>
-                  </div>
-                </div>
-                <div className="card-pad">
-                  <div className="field-row" style={{ gap: 24 }}>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Frequency / year</div>
-                      <strong>{num(openScenario.frequency_per_year)}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Typical loss</div>
-                      <strong>{num(openScenario.typical_loss)} {openScenario.currency}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Worst case</div>
-                      <strong>{num(openScenario.worst_case_loss)} {openScenario.currency}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Confidence</div>
-                      <strong>{openScenario.confidence_level || "—"}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Review date</div>
-                      <strong>{openScenario.review_date || "—"}</strong>
-                    </div>
-                  </div>
-                  {openScenario.description && (
-                    <p style={{ marginTop: 12 }}>{openScenario.description}</p>
-                  )}
-                  {openScenario.participants && (
-                    <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
-                      <strong>Participants:</strong> {openScenario.participants}
-                    </p>
-                  )}
-                  {openScenario.assumptions && (
-                    <p className="muted" style={{ marginTop: 4, fontSize: 13 }}>
-                      <strong>Assumptions:</strong> {openScenario.assumptions}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              <RecordPanels model="scenario_analysis" entityId={openScenario.id} />
+              <select className="select" style={{ width: 200 }} value={filterType} onChange={(e) => setFilterType(e.target.value)}>
+                <option value="">All event types</option>
+                {BASEL_TYPES.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              </select>
+              <select className="select" style={{ width: 150 }} value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+                <option value="">All statuses</option>
+                {SCENARIO_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              </select>
             </>
-          )}
-        </>
+          }
+          emptyMessage="No scenarios. Workshop forward-looking operational-risk scenarios against Basel event types."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= CAPITAL (SMA) */}
       {section === "capital" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Capital — Standardised Approach (SMA)</h3>
-            <span className="sub">{capitals.length} total · click a row to edit</span>
-          </div>
-          <p className="muted" style={{ padding: "0 16px 12px", fontSize: 13 }}>
+        <>
+          <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
             ORC = BIC × ILM, where BIC uses the 12% / 15% / 18% marginal buckets and the ILM scales it by internal
             loss experience (Loss Component = 15 × average annual loss).
           </p>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Period</th>
-                  <th>Business Indicator</th>
-                  <th>Avg annual loss</th>
-                  <th>BIC</th>
-                  <th>Loss Component</th>
-                  <th>ILM</th>
-                  <th>ORC</th>
-                  <th>Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {capitals.map((c) => (
-                  <tr key={c.id} style={{ cursor: "pointer" }} onClick={() => openEditCapital(c)}>
-                    <td className="ref">{c.reference || "—"}</td>
-                    <td className="cell-title">{c.period || "—"}</td>
-                    <td className="muted">{num(c.business_indicator)} {c.currency}</td>
-                    <td className="muted">{num(c.avg_annual_loss)}</td>
-                    <td className="muted">{num(c.bic)}</td>
-                    <td className="muted">{num(c.loss_component)}</td>
-                    <td className="muted">{num(c.ilm)}</td>
-                    <td>
-                      <Badge tone="critical">{num(c.orc)} {c.currency}</Badge>
-                    </td>
-                    <td><Badge tone={CAPITAL_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge></td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeCapital(c)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {capitals.length === 0 && (
-                  <tr>
-                    <td colSpan={10}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No capital calculations</h3>
-                        <p>Enter the Business Indicator and average annual losses to compute SMA operational-risk capital.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+          <DataTable<CapitalCalculation>
+            columns={capitalColumns}
+            fetcher={fetchCapitals}
+            rowKey={(c) => c.id}
+            onRowClick={(c) => openEditCapital(c)}
+            searchPlaceholder="Search calculations by period or reference…"
+            defaultSort={{ by: "created_at", dir: "desc" }}
+            emptyMessage="No capital calculations. Enter the Business Indicator and average annual losses to compute SMA operational-risk capital."
+            refreshKey={refreshKey}
+          />
+        </>
       )}
+
+      {/* ============================================= SCENARIO DRAWER */}
+      <RecordDrawer
+        open={section === "scenarios" && !!openId && !!scenarioDetail}
+        onClose={() => setOpenId(null)}
+        title={scenarioDetail ? `${scenarioDetail.reference || ""} ${scenarioDetail.title}`.trim() : "…"}
+        subtitle={scenarioDetail ? `${cap(scenarioDetail.status)} · ${cap(scenarioDetail.basel_event_type)}${scenarioDetail.business_line ? " · " + scenarioDetail.business_line : ""}${scenarioDetail.owner ? " · owner " + scenarioDetail.owner : ""}` : ""}
+        width={720}
+        actions={scenarioDetail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditScenario(scenarioDetail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeScenario(scenarioDetail)}>Delete</button>
+          </>
+        )}
+      >
+        {scenarioDetail && (
+          <>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-pad">
+                <div style={{ textAlign: "right", marginBottom: 12 }}>
+                  <div className="muted" style={{ fontSize: 12 }}>Expected annual loss</div>
+                  <strong style={{ fontSize: 18 }}>{num(scenarioDetail.expected_annual_loss)} {scenarioDetail.currency}</strong>
+                </div>
+                <div className="field-row" style={{ gap: 24, flexWrap: "wrap" }}>
+                  <div>
+                    <div className="muted" style={{ fontSize: 12 }}>Frequency / year</div>
+                    <strong>{num(scenarioDetail.frequency_per_year)}</strong>
+                  </div>
+                  <div>
+                    <div className="muted" style={{ fontSize: 12 }}>Typical loss</div>
+                    <strong>{num(scenarioDetail.typical_loss)} {scenarioDetail.currency}</strong>
+                  </div>
+                  <div>
+                    <div className="muted" style={{ fontSize: 12 }}>Worst case</div>
+                    <strong>{num(scenarioDetail.worst_case_loss)} {scenarioDetail.currency}</strong>
+                  </div>
+                  <div>
+                    <div className="muted" style={{ fontSize: 12 }}>Confidence</div>
+                    <strong>{scenarioDetail.confidence_level || "—"}</strong>
+                  </div>
+                  <div>
+                    <div className="muted" style={{ fontSize: 12 }}>Review date</div>
+                    <strong>{scenarioDetail.review_date || "—"}</strong>
+                  </div>
+                </div>
+                {scenarioDetail.description && (
+                  <p style={{ marginTop: 12 }}>{scenarioDetail.description}</p>
+                )}
+                {scenarioDetail.participants && (
+                  <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
+                    <strong>Participants:</strong> {scenarioDetail.participants}
+                  </p>
+                )}
+                {scenarioDetail.assumptions && (
+                  <p className="muted" style={{ marginTop: 4, fontSize: 13 }}>
+                    <strong>Assumptions:</strong> {scenarioDetail.assumptions}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <RecordPanels model="scenario_analysis" entityId={scenarioDetail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showScenarioForm && (
@@ -816,5 +739,13 @@ export default function ScenarioAnalysisPage() {
         />
       )}
     </>
+  );
+}
+
+export default function ScenarioAnalysisPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ScenarioAnalysisInner />
+    </Suspense>
   );
 }

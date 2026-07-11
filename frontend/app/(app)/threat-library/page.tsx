@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { apiCall, type Page as PageT } from "@/lib/api";
+import { Suspense, useCallback, useState } from "react";
+import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconRisk, IconShield, IconAlert } from "@/components/icons";
+import { IconPlus, IconShield, IconAlert } from "@/components/icons";
 
 // ---- inline types (backend ThreatRead / VulnerabilityRead) ----------------
 // Both catalogs share the same shape: name + description + category, plus a
@@ -67,29 +70,75 @@ const META: Record<Kind, KindMeta> = {
 // ---------------------------------------------------------------------------
 function CatalogSection({
   kind,
-  rows,
+  refreshKey,
   onEdit,
   onAdd,
+  onDelete,
   onImported,
 }: {
   kind: Kind;
-  rows: CatalogRow[];
+  refreshKey: number;
   onEdit: (r: CatalogRow) => void;
   onAdd: () => void;
+  onDelete: (r: CatalogRow) => void;
   onImported: () => void;
 }) {
   const m = META[kind];
-  const Icon = m.icon;
-  const linked = rows.reduce((n, r) => n + (r.used_by_risks_count > 0 ? 1 : 0), 0);
+
+  const fetcher = useCallback(
+    (qs: string) => apiCall<PagedList<CatalogRow>>("GET", `/${m.base}?${qs}`),
+    [m.base],
+  );
+
+  const columns: Column<CatalogRow>[] = [
+    { key: "name", header: "Name", sortable: true, render: (r) => <span className="cell-title">{r.name}</span> },
+    {
+      key: "category",
+      header: "Category",
+      sortable: true,
+      render: (r) => (r.category ? <Badge tone="info" plain>{r.category}</Badge> : <span className="muted">—</span>),
+    },
+    {
+      key: "description",
+      header: "Description",
+      render: (r) =>
+        r.description ? (
+          <span
+            className="muted"
+            style={{ display: "block", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            title={r.description}
+          >
+            {r.description}
+          </span>
+        ) : (
+          <span className="muted">—</span>
+        ),
+    },
+    {
+      key: "used_by_risks_count",
+      header: "Used by risks",
+      align: "center",
+      render: (r) =>
+        r.used_by_risks_count > 0 ? <Badge tone="medium" plain>{r.used_by_risks_count}</Badge> : <span className="muted">0</span>,
+    },
+    {
+      key: "actions",
+      header: "",
+      render: (r) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => onEdit(r)}>Edit</button>{" "}
+          <button className="btn secondary sm" onClick={() => onDelete(r)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
 
   return (
-    <div className="card">
-      <div className="card-head">
+    <div>
+      <div className="card-head" style={{ marginBottom: 8 }}>
         <div>
           <h3>{m.plural}</h3>
-          <span className="sub">
-            {rows.length} in catalog{rows.length ? ` · ${linked} linked to risks` : ""}
-          </span>
+          <span className="sub">Reusable catalog linked to risks.</span>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <ImportExport resource={m.base} label={m.plural} onDone={onImported} />
@@ -98,81 +147,24 @@ function CatalogSection({
           </button>
         </div>
       </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Category</th>
-              <th>Description</th>
-              <th>Used by risks</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => onEdit(r)}>
-                <td className="cell-title">{r.name}</td>
-                <td>
-                  {r.category ? (
-                    <Badge tone="info" plain>
-                      {r.category}
-                    </Badge>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
-                <td className="muted" style={{ maxWidth: 320 }}>
-                  {r.description ? (
-                    <span
-                      style={{
-                        display: "block",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                      title={r.description}
-                    >
-                      {r.description}
-                    </span>
-                  ) : (
-                    "—"
-                  )}
-                </td>
-                <td>
-                  {r.used_by_risks_count > 0 ? (
-                    <Badge tone="medium" plain>
-                      {r.used_by_risks_count}
-                    </Badge>
-                  ) : (
-                    <span className="muted">0</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={4}>
-                  <div className="empty">
-                    <span className="ico">
-                      <Icon width={22} height={22} />
-                    </span>
-                    <h3>No {m.plural.toLowerCase()}</h3>
-                    <p>Add your first {m.label.toLowerCase()} to seed the risk register.</p>
-                  </div>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <DataTable<CatalogRow>
+        columns={columns}
+        fetcher={fetcher}
+        rowKey={(r) => r.id}
+        onRowClick={onEdit}
+        searchPlaceholder={`Search ${m.plural.toLowerCase()} by name…`}
+        defaultSort={{ by: "name", dir: "asc" }}
+        emptyMessage={`No ${m.plural.toLowerCase()} yet. Add your first ${m.label.toLowerCase()} to seed the risk register.`}
+        refreshKey={refreshKey}
+      />
     </div>
   );
 }
 
-export default function ThreatLibraryPage() {
-  const [threats, setThreats] = useState<CatalogRow[]>([]);
-  const [vulns, setVulns] = useState<CatalogRow[]>([]);
+function ThreatLibraryInner() {
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   // single shared dialog, parameterised by kind + editing target
   const [kind, setKind] = useState<Kind>("threat");
@@ -183,22 +175,6 @@ export default function ThreatLibraryPage() {
   const [f, setF] = useState<FormState>(BLANK);
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
-
-  async function load() {
-    try {
-      const [t, v] = await Promise.all([
-        apiCall<PageT<CatalogRow>>("GET", "/threats?limit=500"),
-        apiCall<PageT<CatalogRow>>("GET", "/vulnerabilities?limit=500"),
-      ]);
-      setThreats(t.items);
-      setVulns(v.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-  }, []);
 
   function openNew(k: Kind) {
     setKind(k);
@@ -224,7 +200,8 @@ export default function ThreatLibraryPage() {
       if (editing) await apiCall("PATCH", `/${m.base}/${editing.id}`, payload);
       else await apiCall("POST", `/${m.base}`, payload);
       setShowForm(false);
-      await load();
+      reload();
+      toast(editing ? "Changes saved" : `${m.label} created`);
     } catch (e) {
       setError(e instanceof Error ? e.message : `Failed to save ${m.label.toLowerCase()}`);
     } finally {
@@ -232,15 +209,20 @@ export default function ThreatLibraryPage() {
     }
   }
 
-  async function remove() {
-    if (!editing) return;
-    const m = META[kind];
+  async function remove(k: Kind, r: CatalogRow) {
+    const m = META[k];
+    const warn =
+      r.used_by_risks_count > 0
+        ? `This ${m.label.toLowerCase()} is linked to ${r.used_by_risks_count} risk${r.used_by_risks_count === 1 ? "" : "s"}; deleting it removes those links.`
+        : "This cannot be undone.";
+    if (!(await confirmDialog({ title: `Delete ${m.label.toLowerCase()} "${r.name}"?`, message: warn, danger: true }))) return;
     setError(null);
     setDeleting(true);
     try {
-      await apiCall("DELETE", `/${m.base}/${editing.id}`);
-      setShowForm(false);
-      await load();
+      await apiCall("DELETE", `/${m.base}/${r.id}`);
+      if (editing?.id === r.id) setShowForm(false);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : `Failed to delete ${m.label.toLowerCase()}`);
     } finally {
@@ -306,21 +288,13 @@ export default function ThreatLibraryPage() {
     <button
       className="btn secondary sm"
       type="button"
-      onClick={remove}
+      onClick={() => remove(kind, editing)}
       disabled={deleting || saving}
       style={{ color: "var(--danger, #c0392b)" }}
     >
       {deleting ? "Deleting…" : "Delete"}
     </button>
   ) : undefined;
-
-  const total = threats.length + vulns.length;
-  const linkedTotal = useMemo(
-    () =>
-      threats.filter((r) => r.used_by_risks_count > 0).length +
-      vulns.filter((r) => r.used_by_risks_count > 0).length,
-    [threats, vulns],
-  );
 
   return (
     <>
@@ -345,28 +319,23 @@ export default function ThreatLibraryPage() {
         </div>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
-        <CatalogSection kind="threat" rows={threats} onEdit={(r) => openEdit("threat", r)} onAdd={() => openNew("threat")} onImported={load} />
+      <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", alignItems: "start" }}>
+        <CatalogSection
+          kind="threat"
+          refreshKey={refreshKey}
+          onEdit={(r) => openEdit("threat", r)}
+          onAdd={() => openNew("threat")}
+          onDelete={(r) => remove("threat", r)}
+          onImported={reload}
+        />
         <CatalogSection
           kind="vulnerability"
-          rows={vulns}
+          refreshKey={refreshKey}
           onEdit={(r) => openEdit("vulnerability", r)}
           onAdd={() => openNew("vulnerability")}
-          onImported={load}
+          onDelete={(r) => remove("vulnerability", r)}
+          onImported={reload}
         />
-      </div>
-
-      <div className="card card-pad" style={{ marginTop: 16 }}>
-        <div className="empty" style={{ padding: "8px 0" }}>
-          <span className="ico">
-            <IconRisk width={22} height={22} />
-          </span>
-          <p>
-            {total} catalog item{total === 1 ? "" : "s"}
-            {linkedTotal ? `, ${linkedTotal} linked to risks. ` : ". "}
-            Link threats &amp; vulnerabilities to risks when creating a risk in the Risk Register.
-          </p>
-        </div>
       </div>
 
       {showForm && (
@@ -382,5 +351,13 @@ export default function ThreatLibraryPage() {
         />
       )}
     </>
+  );
+}
+
+export default function ThreatLibraryPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ThreatLibraryInner />
+    </Suspense>
   );
 }

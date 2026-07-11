@@ -8,9 +8,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.operational_risk import (
     KeyRiskIndicator,
     KriMeasurement,
@@ -62,12 +63,34 @@ async def _load_rcsa(db, rid) -> RcsaAssessment:
     return obj
 
 
+_RCSA_SORTABLE = {
+    "reference": RcsaAssessment.reference,
+    "title": RcsaAssessment.title,
+    "business_unit": RcsaAssessment.business_unit,
+    "status": RcsaAssessment.status,
+    "due_date": RcsaAssessment.due_date,
+    "created_at": RcsaAssessment.created_at,
+}
+
+
 @router.get("/rcsa", response_model=Page[RcsaRead], dependencies=[_READ])
-async def list_rcsa(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
+async def list_rcsa(db: DbSession, search: str | None = None,
+                    sort_by: Annotated[str | None, Query()] = None,
+                    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+                    limit: Annotated[int, Query(ge=1, le=200)] = 100,
                     offset: Annotated[int, Query(ge=0)] = 0) -> Page[RcsaRead]:
     stmt = select(RcsaAssessment).where(RcsaAssessment.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(RcsaAssessment.title.ilike(like), RcsaAssessment.reference.ilike(like),
+                             RcsaAssessment.business_unit.ilike(like)))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(RcsaAssessment.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _RCSA_SORTABLE, default=RcsaAssessment.created_at)
+    else:
+        stmt = stmt.order_by(RcsaAssessment.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[RcsaRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -137,12 +160,37 @@ async def _load_kri(db, kid) -> KeyRiskIndicator:
     return obj
 
 
+# `status` / `is_breached` are computed from current_value vs thresholds, so they are not
+# DB columns and cannot be sorted server-side; current_value is the sortable proxy.
+_KRI_SORTABLE = {
+    "reference": KeyRiskIndicator.reference,
+    "name": KeyRiskIndicator.name,
+    "category": KeyRiskIndicator.category,
+    "owner": KeyRiskIndicator.owner,
+    "current_value": KeyRiskIndicator.current_value,
+    "last_measured_date": KeyRiskIndicator.last_measured_date,
+    "created_at": KeyRiskIndicator.created_at,
+}
+
+
 @router.get("/kris", response_model=Page[KriRead], dependencies=[_READ])
-async def list_kris(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
+async def list_kris(db: DbSession, search: str | None = None,
+                    sort_by: Annotated[str | None, Query()] = None,
+                    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+                    limit: Annotated[int, Query(ge=1, le=200)] = 100,
                     offset: Annotated[int, Query(ge=0)] = 0) -> Page[KriRead]:
     stmt = select(KeyRiskIndicator).where(KeyRiskIndicator.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(KeyRiskIndicator.name.ilike(like), KeyRiskIndicator.reference.ilike(like),
+                             KeyRiskIndicator.category.ilike(like), KeyRiskIndicator.owner.ilike(like)))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(KeyRiskIndicator.name).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _KRI_SORTABLE, default=KeyRiskIndicator.name)
+    else:
+        stmt = stmt.order_by(KeyRiskIndicator.name)
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[KriRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -153,6 +201,11 @@ async def create_kri(body: KriCreate, db: DbSession, user: CurrentUser) -> KriRe
     db.add(obj)
     await db.flush()
     return KriRead.model_validate(await _load_kri(db, obj.id))
+
+
+@router.get("/kris/{kid}", response_model=KriRead, dependencies=[_READ])
+async def get_kri(kid: uuid.UUID, db: DbSession) -> KriRead:
+    return KriRead.model_validate(await _load_kri(db, kid))
 
 
 @router.patch("/kris/{kid}", response_model=KriRead, dependencies=[_WRITE])
@@ -189,12 +242,38 @@ async def add_measurement(kid: uuid.UUID, body: MeasurementCreate, db: DbSession
 
 
 # =============================================================== loss events ===
+# `net_loss` is computed (gross − recovery), not a DB column, so it is not sortable.
+_LOSS_SORTABLE = {
+    "reference": LossEvent.reference,
+    "title": LossEvent.title,
+    "basel_event_type": LossEvent.basel_event_type,
+    "business_line": LossEvent.business_line,
+    "gross_loss": LossEvent.gross_loss,
+    "recovery": LossEvent.recovery,
+    "status": LossEvent.status,
+    "occurrence_date": LossEvent.occurrence_date,
+    "created_at": LossEvent.created_at,
+}
+
+
 @router.get("/loss-events", response_model=Page[LossEventRead], dependencies=[_READ])
-async def list_loss_events(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
+async def list_loss_events(db: DbSession, search: str | None = None,
+                           sort_by: Annotated[str | None, Query()] = None,
+                           sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+                           limit: Annotated[int, Query(ge=1, le=200)] = 100,
                            offset: Annotated[int, Query(ge=0)] = 0) -> Page[LossEventRead]:
     stmt = select(LossEvent).where(LossEvent.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(LossEvent.title.ilike(like), LossEvent.reference.ilike(like),
+                             LossEvent.business_line.ilike(like)))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(LossEvent.occurrence_date.is_(None), LossEvent.occurrence_date.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _LOSS_SORTABLE, default=LossEvent.occurrence_date)
+    else:
+        stmt = stmt.order_by(LossEvent.occurrence_date.is_(None), LossEvent.occurrence_date.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[LossEventRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

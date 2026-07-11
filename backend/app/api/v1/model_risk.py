@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.model_risk import (
     ModelInventory,
     ModelStatus,
@@ -62,6 +63,19 @@ async def _load_model(db, mid) -> ModelInventory:
 
 
 # ========================================================== model inventory ===
+# `is_validation_overdue` is computed; sort by the underlying next_validation_date column.
+_MODEL_SORTABLE = {
+    "reference": ModelInventory.reference,
+    "name": ModelInventory.name,
+    "model_type": ModelInventory.model_type,
+    "owner": ModelInventory.owner,
+    "materiality": ModelInventory.materiality,
+    "status": ModelInventory.status,
+    "next_validation_date": ModelInventory.next_validation_date,
+    "created_at": ModelInventory.created_at,
+}
+
+
 @router.get("/model-risk", response_model=Page[ModelRead], dependencies=[_READ])
 async def list_models(
     db: DbSession,
@@ -70,6 +84,8 @@ async def list_models(
     status: ModelStatus | None = None,
     validation_overdue: bool | None = None,
     ai_ml: bool | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ModelRead]:
@@ -97,7 +113,12 @@ async def list_models(
             ModelInventory.next_validation_date < date.today(),
         )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(ModelInventory.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _MODEL_SORTABLE, default=ModelInventory.created_at)
+    else:
+        stmt = stmt.order_by(ModelInventory.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ModelRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

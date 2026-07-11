@@ -10,6 +10,7 @@ from sqlalchemy import Select, delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.asset import Asset, assets_incidents
 from app.models.control import Control
 from app.models.enums import IncidentStatus, Severity, StageStatus
@@ -117,12 +118,25 @@ async def _next_ref(db) -> str:
     return await next_reference(db, Incident, "INC")
 
 
+_INCIDENT_SORTABLE = {
+    "reference": Incident.reference,
+    "title": Incident.title,
+    "category": Incident.category,
+    "severity": Incident.severity,
+    "status": Incident.status,
+    "detected_at": Incident.detected_at,
+    "created_at": Incident.created_at,
+}
+
+
 @router.get("", response_model=Page[IncidentRead], dependencies=[Depends(require("incident:read"))])
 async def list_incidents(
     db: DbSession,
     status_filter: Annotated[IncidentStatus | None, Query(alias="status")] = None,
     severity: Severity | None = None,
     search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[IncidentRead]:
@@ -134,8 +148,13 @@ async def list_incidents(
     if search:
         stmt = stmt.where(Incident.title.ilike(f"%{search}%") | Incident.reference.ilike(f"%{search}%"))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _INCIDENT_SORTABLE, default=Incident.created_at)
+    else:
+        stmt = stmt.order_by(Incident.created_at.desc())
     rows = (
-        await db.scalars(stmt.options(*_loads()).order_by(Incident.created_at.desc()).limit(limit).offset(offset))
+        await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))
     ).all()
     return Page(
         items=[IncidentRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset

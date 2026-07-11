@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import Select, func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.esg import EnvironmentalRiskRating, EnvRiskCategory, EsgAssessment, EsgPillar, EsgStatus
 from app.schemas.common import Page
 from app.schemas.esg import (
@@ -43,12 +44,26 @@ async def _get(db, model, obj_id, name):
 
 
 # ======================================================= ESG assessments ===
+_ESG_SORTABLE = {
+    "reference": EsgAssessment.reference,
+    "title": EsgAssessment.title,
+    "pillar": EsgAssessment.pillar,
+    "category": EsgAssessment.category,
+    "status": EsgAssessment.status,
+    "owner": EsgAssessment.owner,
+    "period": EsgAssessment.period,
+    "created_at": EsgAssessment.created_at,
+}
+
+
 @router.get("/esg-assessments", response_model=Page[EsgAssessmentRead], dependencies=[_READ])
 async def list_esg_assessments(
     db: DbSession,
     search: str | None = None,
     pillar: Annotated[EsgPillar | None, Query()] = None,
     status_filter: Annotated[EsgStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[EsgAssessmentRead]:
@@ -65,8 +80,13 @@ async def list_esg_assessments(
         stmt = stmt.where(EsgAssessment.pillar == pillar)
     if status_filter is not None:
         stmt = stmt.where(EsgAssessment.status == status_filter)
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _ESG_SORTABLE, default=EsgAssessment.created_at)
+    else:
+        stmt = stmt.order_by(EsgAssessment.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(EsgAssessment.created_at.desc()).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[EsgAssessmentRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -104,11 +124,24 @@ async def delete_esg_assessment(aid: uuid.UUID, db: DbSession) -> None:
 
 
 # ============================================== environmental risk ratings ===
+_ENV_SORTABLE = {
+    "reference": EnvironmentalRiskRating.reference,
+    "entity_name": EnvironmentalRiskRating.entity_name,
+    "sector": EnvironmentalRiskRating.sector,
+    "risk_category": EnvironmentalRiskRating.risk_category,
+    "assessor": EnvironmentalRiskRating.assessor,
+    "rating_date": EnvironmentalRiskRating.rating_date,
+    "created_at": EnvironmentalRiskRating.created_at,
+}
+
+
 @router.get("/environmental-risk-ratings", response_model=Page[EnvRatingRead], dependencies=[_READ])
 async def list_env_ratings(
     db: DbSession,
     search: str | None = None,
     risk_category: Annotated[EnvRiskCategory | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[EnvRatingRead]:
@@ -121,8 +154,13 @@ async def list_env_ratings(
         ))
     if risk_category is not None:
         stmt = stmt.where(EnvironmentalRiskRating.risk_category == risk_category)
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _ENV_SORTABLE, default=EnvironmentalRiskRating.created_at)
+    else:
+        stmt = stmt.order_by(EnvironmentalRiskRating.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(EnvironmentalRiskRating.created_at.desc()).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[EnvRatingRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

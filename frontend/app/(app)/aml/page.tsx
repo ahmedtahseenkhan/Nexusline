@@ -1,17 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import {
+  apiCall,
   api,
   type ScreeningCase,
   type ScreeningSummary,
   type Sar,
   type AmlRisk,
 } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -253,14 +257,28 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "risks", label: "AML Risk Assessments" },
 ];
 
-export default function AmlPage() {
+function AmlInner() {
   const [section, setSection] = useState<SectionId>("screening");
   const [error, setError] = useState<string | null>(null);
 
-  const [cases, setCases] = useState<ScreeningCase[]>([]);
   const [summary, setSummary] = useState<ScreeningSummary | null>(null);
-  const [sars, setSars] = useState<Sar[]>([]);
-  const [risks, setRisks] = useState<AmlRisk[]>([]);
+
+  // one refresh counter per register table
+  const [caseKey, setCaseKey] = useState(0);
+  const [sarKey, setSarKey] = useState(0);
+  const [riskKey, setRiskKey] = useState(0);
+  const reloadCases = useCallback(() => setCaseKey((k) => k + 1), []);
+  const reloadSars = useCallback(() => setSarKey((k) => k + 1), []);
+  const reloadRisks = useCallback(() => setRiskKey((k) => k + 1), []);
+
+  const fetchCases = useCallback((qs: string) => apiCall<PagedList<ScreeningCase>>("GET", `/aml/screening?${qs}`), []);
+  const fetchSars = useCallback((qs: string) => apiCall<PagedList<Sar>>("GET", `/aml/sars?${qs}`), []);
+  const fetchRisks = useCallback((qs: string) => apiCall<PagedList<AmlRisk>>("GET", `/aml/risk-assessments?${qs}`), []);
+
+  const loadSummary = useCallback(() => {
+    api.screeningSummary().then(setSummary).catch((e) => setError(e instanceof Error ? e.message : "Failed to load screening summary"));
+  }, []);
+  useEffect(() => { loadSummary(); }, [loadSummary]);
 
   // ---- screening dialog ----
   const [editingCase, setEditingCase] = useState<ScreeningCase | null>(null);
@@ -283,46 +301,6 @@ export default function AmlPage() {
   const [rf, setRf] = useState<RiskForm>(BLANK_RISK);
   const setR = <K extends keyof RiskForm>(k: K, v: RiskForm[K]) => setRf((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadCases() {
-    try {
-      const res = await api.amlScreening();
-      setCases(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load screening cases");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await api.screeningSummary());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load screening summary");
-    }
-  }
-  async function loadSars() {
-    try {
-      const res = await api.amlSars();
-      setSars(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load STR/SAR filings");
-    }
-  }
-  async function loadRisks() {
-    try {
-      const res = await api.amlRisks();
-      setRisks(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load risk assessments");
-    }
-  }
-
-  useEffect(() => {
-    loadCases();
-    loadSummary();
-    loadSars();
-    loadRisks();
-  }, []);
-
   // ------------------------------------------------------------- screening CRUD
   function openNewCase() {
     setEditingCase(null);
@@ -342,8 +320,9 @@ export default function AmlPage() {
       if (editingCase) await api.updateScreening(editingCase.id, payload);
       else await api.createScreening(payload);
       setShowCaseForm(false);
-      await loadCases();
-      await loadSummary();
+      reloadCases();
+      loadSummary();
+      toast(editingCase ? "Changes saved" : "Screening case created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save screening case");
     } finally {
@@ -351,13 +330,14 @@ export default function AmlPage() {
     }
   }
   async function removeCase(c: ScreeningCase) {
-    if (!window.confirm(`Delete screening case ${c.reference || c.subject_name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete screening case ${c.reference || c.subject_name}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteScreening(c.id);
       setShowCaseForm(false);
-      await loadCases();
-      await loadSummary();
+      reloadCases();
+      loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -382,7 +362,8 @@ export default function AmlPage() {
       if (editingSar) await api.updateSar(editingSar.id, payload);
       else await api.createSar(payload);
       setShowSarForm(false);
-      await loadSars();
+      reloadSars();
+      toast(editingSar ? "Changes saved" : "STR/SAR created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save STR/SAR");
     } finally {
@@ -390,12 +371,13 @@ export default function AmlPage() {
     }
   }
   async function removeSar(s: Sar) {
-    if (!window.confirm(`Delete STR/SAR ${s.reference || s.subject}?`)) return;
+    if (!(await confirmDialog({ title: `Delete STR/SAR ${s.reference || s.subject}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteSar(s.id);
       setShowSarForm(false);
-      await loadSars();
+      reloadSars();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -420,7 +402,8 @@ export default function AmlPage() {
       if (editingRisk) await api.updateAmlRisk(editingRisk.id, payload);
       else await api.createAmlRisk(payload);
       setShowRiskForm(false);
-      await loadRisks();
+      reloadRisks();
+      toast(editingRisk ? "Changes saved" : "Assessment created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save assessment");
     } finally {
@@ -428,12 +411,13 @@ export default function AmlPage() {
     }
   }
   async function removeRisk(r: AmlRisk) {
-    if (!window.confirm(`Delete assessment ${r.reference || r.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete assessment ${r.reference || r.title}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteAmlRisk(r.id);
       setShowRiskForm(false);
-      await loadRisks();
+      reloadRisks();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -442,6 +426,42 @@ export default function AmlPage() {
   const matchCount = summary
     ? (summary.by_match_status["potential_match"] || 0) + (summary.by_match_status["confirmed_match"] || 0)
     : 0;
+
+  // ------------------------------------------------------------- columns
+  const caseColumns: Column<ScreeningCase>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "subject_name", header: "Subject", sortable: true, render: (c) => <span className="cell-title">{c.subject_name}</span> },
+    { key: "subject_type", header: "Type", sortable: true, render: (c) => <span className="muted">{cap(c.subject_type)}</span> },
+    { key: "screening_type", header: "Screening", sortable: true, render: (c) => <Badge tone="info">{cap(c.screening_type)}</Badge> },
+    { key: "match_status", header: "Match", sortable: true, render: (c) => <Badge tone={MATCH_STATUS_TONE[c.match_status] || "neutral"}>{cap(c.match_status)}</Badge> },
+    { key: "risk_rating", header: "Risk", sortable: true, render: (c) => <SeverityBadge value={c.risk_rating} /> },
+    { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={SCREENING_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
+    { key: "screened_date", header: "Screened", sortable: true, render: (c) => <span className="muted">{c.screened_date || "—"}</span> },
+    { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCase(c)}>Delete</button></div> },
+  ];
+
+  const sarColumns: Column<Sar>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (s) => <span className="ref">{s.reference || "—"}</span> },
+    { key: "subject", header: "Subject", sortable: true, render: (s) => <span className="cell-title">{s.subject}</span> },
+    { key: "priority", header: "Priority", sortable: true, render: (s) => <SeverityBadge value={s.priority} /> },
+    { key: "amount", header: "Amount", sortable: true, render: (s) => <span className="muted">{num(s.amount)} {s.currency}</span> },
+    { key: "detected_date", header: "Detected", sortable: true, render: (s) => <span className="muted">{s.detected_date || "—"}</span> },
+    { key: "deadline", header: "Deadline", sortable: true, render: (s) => (s.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{s.deadline || "—"}</span>) },
+    { key: "status", header: "Status", sortable: true, render: (s) => <Badge tone={SAR_STATUS_TONE[s.status] || "neutral"}>{cap(s.status)}</Badge> },
+    { key: "fmu_reference", header: "FMU ref", render: (s) => <span className="muted">{s.fmu_reference || "—"}</span> },
+    { key: "actions", header: "", render: (s) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeSar(s)}>Delete</button></div> },
+  ];
+
+  const riskColumns: Column<AmlRisk>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "scope", header: "Scope", sortable: true, render: (r) => <Badge tone="info">{cap(r.scope)}</Badge> },
+    { key: "subject", header: "Subject", sortable: true, render: (r) => <span className="muted">{r.subject || "—"}</span> },
+    { key: "inherent_risk", header: "Inherent", sortable: true, render: (r) => <SeverityBadge value={r.inherent_risk} /> },
+    { key: "residual_risk", header: "Residual", sortable: true, render: (r) => <SeverityBadge value={r.residual_risk} /> },
+    { key: "next_review_date", header: "Next review", sortable: true, render: (r) => (r.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.next_review_date || "—"}</span>) },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeRisk(r)}>Delete</button></div> },
+  ];
 
   // ------------------------------------------------------------- screening form
   const screeningGeneral = (
@@ -664,187 +684,50 @@ export default function AmlPage() {
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head">
-              <h3>Sanctions &amp; PEP Screening</h3>
-              <span className="sub">{cases.length} total · click a row to edit</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Subject</th>
-                    <th>Type</th>
-                    <th>Screening</th>
-                    <th>Match</th>
-                    <th>Risk</th>
-                    <th>Status</th>
-                    <th>Screened</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cases.map((c) => (
-                    <tr key={c.id} style={{ cursor: "pointer" }} onClick={() => openEditCase(c)}>
-                      <td className="ref">{c.reference || "—"}</td>
-                      <td className="cell-title">{c.subject_name}</td>
-                      <td className="muted">{cap(c.subject_type)}</td>
-                      <td><Badge tone="info">{cap(c.screening_type)}</Badge></td>
-                      <td><Badge tone={MATCH_STATUS_TONE[c.match_status] || "neutral"}>{cap(c.match_status)}</Badge></td>
-                      <td><SeverityBadge value={c.risk_rating} /></td>
-                      <td><Badge tone={SCREENING_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge></td>
-                      <td className="muted">{c.screened_date || "—"}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => removeCase(c)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {cases.length === 0 && (
-                    <tr>
-                      <td colSpan={9}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No screening cases</h3>
-                          <p>Record sanctions and PEP screening results against watchlists.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <DataTable<ScreeningCase>
+            columns={caseColumns}
+            fetcher={fetchCases}
+            rowKey={(c) => c.id}
+            onRowClick={(c) => openEditCase(c)}
+            searchPlaceholder="Search screening by subject or reference…"
+            defaultSort={{ by: "created_at", dir: "desc" }}
+            emptyMessage="No screening cases. Record sanctions and PEP screening results against watchlists."
+            refreshKey={caseKey}
+          />
         </>
       )}
 
       {/* ============================================= STR / SAR FILINGS */}
       {section === "sars" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>STR / SAR Filings</h3>
-            <span className="sub">{sars.length} total · click a row to edit</span>
-          </div>
-          <p className="muted" style={{ padding: "0 16px 12px", fontSize: 13 }}>
+        <>
+          <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
             The FMU filing deadline is auto-computed as 7 days after the detection date when left blank.
           </p>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Subject</th>
-                  <th>Priority</th>
-                  <th>Amount</th>
-                  <th>Detected</th>
-                  <th>Deadline</th>
-                  <th>Status</th>
-                  <th>FMU ref</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {sars.map((s) => (
-                  <tr key={s.id} style={{ cursor: "pointer" }} onClick={() => openEditSar(s)}>
-                    <td className="ref">{s.reference || "—"}</td>
-                    <td className="cell-title">{s.subject}</td>
-                    <td><SeverityBadge value={s.priority} /></td>
-                    <td className="muted">{num(s.amount)} {s.currency}</td>
-                    <td className="muted">{s.detected_date || "—"}</td>
-                    <td>
-                      {s.is_overdue ? (
-                        <Badge tone="critical">Overdue</Badge>
-                      ) : (
-                        <span className="muted">{s.deadline || "—"}</span>
-                      )}
-                    </td>
-                    <td><Badge tone={SAR_STATUS_TONE[s.status] || "neutral"}>{cap(s.status)}</Badge></td>
-                    <td className="muted">{s.fmu_reference || "—"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeSar(s)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {sars.length === 0 && (
-                  <tr>
-                    <td colSpan={9}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No STR/SAR filings</h3>
-                        <p>Draft suspicious transaction / activity reports and track their FMU filing deadlines.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+          <DataTable<Sar>
+            columns={sarColumns}
+            fetcher={fetchSars}
+            rowKey={(s) => s.id}
+            onRowClick={(s) => openEditSar(s)}
+            searchPlaceholder="Search filings by subject or reference…"
+            defaultSort={{ by: "created_at", dir: "desc" }}
+            emptyMessage="No STR/SAR filings. Draft suspicious transaction / activity reports and track their FMU filing deadlines."
+            refreshKey={sarKey}
+          />
+        </>
       )}
 
       {/* ============================================= AML RISK ASSESSMENTS */}
       {section === "risks" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>AML Risk Assessments</h3>
-            <span className="sub">{risks.length} total · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Title</th>
-                  <th>Scope</th>
-                  <th>Subject</th>
-                  <th>Inherent</th>
-                  <th>Residual</th>
-                  <th>Next review</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {risks.map((r) => (
-                  <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => openEditRisk(r)}>
-                    <td className="ref">{r.reference || "—"}</td>
-                    <td className="cell-title">{r.title}</td>
-                    <td><Badge tone="info">{cap(r.scope)}</Badge></td>
-                    <td className="muted">{r.subject || "—"}</td>
-                    <td><SeverityBadge value={r.inherent_risk} /></td>
-                    <td><SeverityBadge value={r.residual_risk} /></td>
-                    <td>
-                      {r.is_review_overdue ? (
-                        <Badge tone="high">Overdue</Badge>
-                      ) : (
-                        <span className="muted">{r.next_review_date || "—"}</span>
-                      )}
-                    </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeRisk(r)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {risks.length === 0 && (
-                  <tr>
-                    <td colSpan={8}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No risk assessments</h3>
-                        <p>Assess money-laundering risk across customers, products, geographies and channels.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<AmlRisk>
+          columns={riskColumns}
+          fetcher={fetchRisks}
+          rowKey={(r) => r.id}
+          onRowClick={(r) => openEditRisk(r)}
+          searchPlaceholder="Search assessments by title, subject or reference…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No risk assessments. Assess money-laundering risk across customers, products, geographies and channels."
+          refreshKey={riskKey}
+        />
       )}
 
       {/* ============================================= MODALS */}
@@ -929,5 +812,13 @@ export default function AmlPage() {
         />
       )}
     </>
+  );
+}
+
+export default function AmlPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <AmlInner />
+    </Suspense>
   );
 }

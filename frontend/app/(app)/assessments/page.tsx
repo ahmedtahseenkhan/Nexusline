@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   api,
   apiCall,
@@ -10,10 +10,15 @@ import {
   type QuestionnaireSummary,
   type Vendor,
 } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconVendor, IconCheck } from "@/components/icons";
+import { IconPlus, IconCheck } from "@/components/icons";
 
 // the list endpoint now also returns the questionnaire ref + score totals
 type Row = AssessmentSummary & {
@@ -79,15 +84,16 @@ const BLANK_FINDING: FindingForm = {
   deadline: "",
 };
 
-export default function AssessmentsPage() {
-  const [items, setItems] = useState<Row[]>([]);
-  const [vendors, setVendors] = useState<Vendor[]>([]);
-  const [qs, setQs] = useState<QuestionnaireSummary[]>([]);
-  const [open, setOpen] = useState<Assessment | null>(null);
+function AssessmentsInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<Assessment | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [comments, setComments] = useState<Record<string, string>>({});
+
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [qs, setQs] = useState<QuestionnaireSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // header modal
   const [showForm, setShowForm] = useState(false);
@@ -103,35 +109,11 @@ export default function AssessmentsPage() {
   const [ff, setFf] = useState<FindingForm>(BLANK_FINDING);
   const setFF = <K extends keyof FindingForm>(k: K, v: FindingForm[K]) => setFf((p) => ({ ...p, [k]: v }));
 
-  async function load() {
-    try {
-      const [a, v, q] = await Promise.all([api.assessments(), api.vendors(), api.questionnaires()]);
-      setItems(a as Row[]);
-      setVendors(v.items);
-      setQs(q);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-  }, []);
-
-  async function openAssessment(id: string) {
-    if (open?.id === id) {
-      setOpen(null);
-      return;
-    }
-    try {
-      const a = await api.assessment(id);
-      hydrate(a);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchAssessments = useCallback((query: string) => apiCall<PagedList<Row>>("GET", `/assessments?${query}`), []);
 
   function hydrate(a: Assessment) {
-    setOpen(a);
+    setDetail(a);
     const m: Record<string, string> = {};
     const c: Record<string, string> = {};
     a.answers.forEach((ans) => {
@@ -142,15 +124,30 @@ export default function AssessmentsPage() {
     setComments(c);
   }
 
-  async function refreshOpen(id: string) {
-    const a = await api.assessment(id);
-    hydrate(a);
-    await load();
-  }
+  const loadDetail = useCallback((id: string) => {
+    api.assessment(id).then(hydrate).catch((e) => setError(e instanceof Error ? e.message : "Failed to load"));
+  }, []);
+
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else {
+      setDetail(null);
+      setAnswers({});
+      setComments({});
+    }
+  }, [openId, loadDetail]);
+
+  // reference data for the header form
+  useEffect(() => {
+    apiCall<PagedList<QuestionnaireSummary>>("GET", "/questionnaires?limit=200")
+      .then((r) => setQs(r.items))
+      .catch(() => setQs([]));
+    api.vendors().then((v) => setVendors(v.items)).catch(() => setVendors([]));
+  }, []);
 
   // ---- answers -------------------------------------------------------------------
   async function saveAnswers(submit: boolean) {
-    if (!open) return;
+    if (!detail) return;
     setError(null);
     try {
       const touched = new Set([...Object.keys(answers), ...Object.keys(comments)]);
@@ -159,9 +156,10 @@ export default function AssessmentsPage() {
         option_id: answers[question_id] || null,
         comment: comments[question_id] || "",
       }));
-      await api.submitAnswers(open.id, payload, submit);
-      await refreshOpen(open.id);
-      setNote(submit ? "Answers saved and assessment submitted." : "Answers saved.");
+      await api.submitAnswers(detail.id, payload, submit);
+      loadDetail(detail.id);
+      reload();
+      toast(submit ? "Answers saved and assessment submitted" : "Answers saved");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save");
     }
@@ -200,28 +198,23 @@ export default function AssessmentsPage() {
     }
     setSavingHeader(true);
     try {
+      const payload = {
+        title: hf.title.trim(),
+        vendor_id: hf.vendor_id || null,
+        questionnaire_id: hf.questionnaire_id,
+        due_date: hf.due_date || null,
+        status: hf.status,
+        review_notes: hf.review_notes,
+      };
       if (editingHeader) {
-        const updated = await apiCall<Assessment>("PATCH", `/assessments/${editingHeader.id}`, {
-          title: hf.title.trim(),
-          vendor_id: hf.vendor_id || null,
-          questionnaire_id: hf.questionnaire_id,
-          due_date: hf.due_date || null,
-          status: hf.status,
-          review_notes: hf.review_notes,
-        });
-        if (open?.id === editingHeader.id) hydrate(updated);
+        const updated = await apiCall<Assessment>("PATCH", `/assessments/${editingHeader.id}`, payload);
+        if (openId === editingHeader.id) hydrate(updated);
       } else {
-        await api.createAssessment({
-          title: hf.title.trim(),
-          vendor_id: hf.vendor_id || null,
-          questionnaire_id: hf.questionnaire_id,
-          due_date: hf.due_date || null,
-          status: hf.status,
-          review_notes: hf.review_notes,
-        });
+        await api.createAssessment(payload);
       }
       setShowForm(false);
-      await load();
+      reload();
+      toast(editingHeader ? "Changes saved" : "Assessment created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save assessment");
     } finally {
@@ -229,13 +222,14 @@ export default function AssessmentsPage() {
     }
   }
 
-  async function removeAssessment(id: string, title: string) {
-    if (!window.confirm(`Delete assessment "${title}"? This cannot be undone.`)) return;
+  async function removeAssessment(a: Row | Assessment) {
+    if (!(await confirmDialog({ title: `Delete assessment "${a.title}"?`, message: "This cannot be undone.", danger: true }))) return;
     setError(null);
     try {
-      await apiCall("DELETE", `/assessments/${id}`);
-      if (open?.id === id) setOpen(null);
-      await load();
+      await apiCall("DELETE", `/assessments/${a.id}`);
+      if (openId === a.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -261,7 +255,7 @@ export default function AssessmentsPage() {
     setShowFinding(true);
   }
   async function saveFinding() {
-    if (!open) return;
+    if (!detail) return;
     setError(null);
     if (!ff.title.trim()) {
       setError("Finding title is required");
@@ -277,12 +271,14 @@ export default function AssessmentsPage() {
         deadline: ff.deadline || null,
       };
       if (editingFinding) {
-        await apiCall("PATCH", `/assessments/${open.id}/findings/${editingFinding.id}`, payload);
+        await apiCall("PATCH", `/assessments/${detail.id}/findings/${editingFinding.id}`, payload);
       } else {
-        await api.addFinding(open.id, payload);
+        await api.addFinding(detail.id, payload);
       }
       setShowFinding(false);
-      await refreshOpen(open.id);
+      loadDetail(detail.id);
+      reload();
+      toast(editingFinding ? "Finding updated" : "Finding added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save finding");
     } finally {
@@ -290,15 +286,16 @@ export default function AssessmentsPage() {
     }
   }
   async function toggleFinding(f: AssessmentFinding) {
-    if (!open) return;
+    if (!detail) return;
     setError(null);
     try {
       if (f.status === "open") {
-        await api.closeFinding(open.id, f.id);
+        await api.closeFinding(detail.id, f.id);
       } else {
-        await apiCall("PATCH", `/assessments/${open.id}/findings/${f.id}`, { status: "open" });
+        await apiCall("PATCH", `/assessments/${detail.id}/findings/${f.id}`, { status: "open" });
       }
-      await refreshOpen(open.id);
+      loadDetail(detail.id);
+      reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update finding");
     }
@@ -366,6 +363,27 @@ export default function AssessmentsPage() {
     </>
   );
 
+  const columns: Column<Row>[] = [
+    { key: "title", header: "Title", sortable: true, render: (a) => <span className="cell-title">{a.title}</span> },
+    { key: "vendor", header: "Vendor", render: (a) => <span className="muted">{a.vendor ? a.vendor.name : "—"}</span> },
+    { key: "questionnaire", header: "Questionnaire", render: (a) => <span className="muted">{a.questionnaire ? a.questionnaire.name : "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (a) => <Badge tone={STATUS_TONE[a.status] || "neutral"}>{cap(a.status)}</Badge> },
+    { key: "due_date", header: "Due", sortable: true, render: (a) => <span className="muted">{a.due_date || "—"}</span> },
+    { key: "progress", header: "Progress", render: (a) => <span className="muted">{a.answered_count}/{a.question_count}</span> },
+    { key: "score", header: "Score", render: (a) => <Badge tone={scoreTone(a.score_pct)} plain>{a.score_pct}%</Badge> },
+    { key: "findings", header: "Findings", align: "center", render: (a) => (a.open_findings > 0 ? <Badge tone="high">{a.open_findings}</Badge> : <span className="muted">0</span>) },
+    {
+      key: "actions",
+      header: "",
+      render: (a) => (
+        <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => setOpenId(a.id)}>{openId === a.id ? "Hide" : "Open"}</button>
+          <button className="btn secondary sm" onClick={() => removeAssessment(a)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
+
   return (
     <>
       <div className="page-head row-between">
@@ -379,173 +397,130 @@ export default function AssessmentsPage() {
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
-      {note && (
-        <div className="card card-pad" style={{ marginBottom: 16, borderColor: "var(--primary)" }}>{note}</div>
-      )}
       {qs.length === 0 && (
         <div className="card card-pad" style={{ marginBottom: 16 }}>
           <span className="muted">Create a questionnaire first (Questionnaires page) to run assessments.</span>
         </div>
       )}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Assessments</h3>
-          <span className="sub">{items.length} total · click a row to answer</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Title</th>
-                <th>Vendor</th>
-                <th>Questionnaire</th>
-                <th>Status</th>
-                <th>Due</th>
-                <th>Progress</th>
-                <th>Score</th>
-                <th>Findings</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((a) => (
-                <tr key={a.id} style={{ cursor: "pointer" }} onClick={() => openAssessment(a.id)}>
-                  <td className="cell-title">{a.title}</td>
-                  <td className="muted">{a.vendor ? a.vendor.name : "—"}</td>
-                  <td className="muted">{a.questionnaire ? a.questionnaire.name : "—"}</td>
-                  <td><Badge tone={STATUS_TONE[a.status] || "neutral"}>{cap(a.status)}</Badge></td>
-                  <td className="muted">{a.due_date || "—"}</td>
-                  <td className="muted">{a.answered_count}/{a.question_count}</td>
-                  <td><Badge tone={scoreTone(a.score_pct)} plain>{a.score_pct}%</Badge></td>
-                  <td>{a.open_findings > 0 ? <Badge tone="high">{a.open_findings}</Badge> : <span className="muted">0</span>}</td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => openAssessment(a.id)}>
-                        {open?.id === a.id ? "Hide" : "Open"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => removeAssessment(a.id, a.title)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={9}>
-                    <div className="empty">
-                      <span className="ico"><IconVendor width={24} height={24} /></span>
-                      <h3>No assessments</h3>
-                      <p>Send your first scored questionnaire to a vendor.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<Row>
+        columns={columns}
+        fetcher={fetchAssessments}
+        rowKey={(a) => a.id}
+        onRowClick={(a) => setOpenId(a.id)}
+        activeKey={openId}
+        searchPlaceholder="Search assessments by title…"
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        emptyMessage="No assessments. Send your first scored questionnaire to a vendor."
+        refreshKey={refreshKey}
+      />
 
-      {open && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <div>
-                <h3>{open.title}</h3>
-                <span className="sub">
-                  {open.questionnaire?.name}
-                  {open.vendor ? ` · ${open.vendor.name}` : ""}
-                  {" · "}
-                  <Badge tone={STATUS_TONE[open.status] || "neutral"}>{cap(open.status)}</Badge>
-                  {open.due_date ? ` · due ${open.due_date}` : ""}
-                  {open.submitted_at ? ` · submitted ${open.submitted_at}` : ""}
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 22, fontWeight: 700 }}>{open.score_pct}%</div>
-                  <span className="muted" style={{ fontSize: 12 }}>{open.total_score} / {open.max_score}</span>
-                </div>
-                <button className="btn secondary sm" onClick={() => openEditHeader(open)}>
-                  <IconCheck width={14} height={14} /> Edit
-                </button>
-              </div>
-            </div>
-            <div className="card-pad">
-              {open.review_notes && (
-                <div className="card card-pad" style={{ marginBottom: 12, background: "var(--surface-2, transparent)" }}>
-                  <div className="label" style={{ margin: 0 }}>Review notes</div>
-                  <div className="muted" style={{ fontSize: 13 }}>{open.review_notes}</div>
-                </div>
-              )}
-              {[...(open.questionnaire?.questions || [])]
-                .sort((a, b) => a.order_index - b.order_index)
-                .map((q, i) => (
-                  <div key={q.id} style={{ padding: "12px 0", borderBottom: "1px solid var(--border)" }}>
-                    <div style={{ fontSize: 13.5, marginBottom: 2 }}>{i + 1}. {q.text}</div>
-                    {q.guidance && <div className="when" style={{ marginBottom: 6 }}>{q.guidance}</div>}
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
-                      {q.options.map((o) => {
-                        const on = answers[q.id] === o.id;
-                        return (
-                          <button
-                            key={o.id}
-                            type="button"
-                            className={`badge ${on ? "info" : "neutral"}`}
-                            style={{ cursor: "pointer", border: on ? "1px solid var(--primary)" : "1px solid var(--border)" }}
-                            onClick={() => setAnswers({ ...answers, [q.id]: o.id })}
-                          >
-                            {o.label} ({o.score})
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <input
-                      className="input"
-                      style={{ marginTop: 8 }}
-                      value={comments[q.id] || ""}
-                      placeholder="Comment (optional)…"
-                      onChange={(e) => setComments({ ...comments, [q.id]: e.target.value })}
-                    />
-                  </div>
-                ))}
-              <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-                <button className="btn secondary" onClick={() => saveAnswers(false)}>Save answers</button>
-                <button className="btn" onClick={() => saveAnswers(true)}>Save &amp; submit</button>
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail?.title || "…"}
+        subtitle={
+          detail
+            ? `${detail.questionnaire?.name || ""}${detail.vendor ? " · " + detail.vendor.name : ""} · ${cap(detail.status)}${detail.due_date ? " · due " + detail.due_date : ""}${detail.submitted_at ? " · submitted " + detail.submitted_at : ""}`
+            : ""
+        }
+        width={760}
+        actions={detail && (
+          <button className="btn secondary sm" onClick={() => openEditHeader(detail)}>
+            <IconCheck width={14} height={14} /> Edit
+          </button>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 14 }}>
+              <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 22, fontWeight: 700 }}>{detail.score_pct}%</div>
+                <span className="muted" style={{ fontSize: 12 }}>{detail.total_score} / {detail.max_score}</span>
               </div>
             </div>
-          </div>
 
-          <div className="card">
-            <div className="card-head">
-              <h3>Findings</h3>
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <span className="sub">{open.findings.length} total · {open.open_findings} open</span>
-                <button className="btn secondary sm" onClick={openNewFinding}>
-                  <IconPlus width={14} height={14} /> Add finding
-                </button>
+            {detail.review_notes && (
+              <div className="card card-pad" style={{ marginBottom: 12, background: "var(--surface-2, transparent)" }}>
+                <div className="label" style={{ margin: 0 }}>Review notes</div>
+                <div className="muted" style={{ fontSize: 13 }}>{detail.review_notes}</div>
+              </div>
+            )}
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Questions</h3><span className="sub">{detail.answered_count}/{detail.question_count} answered</span></div>
+              <div className="card-pad">
+                {[...(detail.questionnaire?.questions || [])]
+                  .sort((a, b) => a.order_index - b.order_index)
+                  .map((q, i) => (
+                    <div key={q.id} style={{ padding: "12px 0", borderBottom: "1px solid var(--border)" }}>
+                      <div style={{ fontSize: 13.5, marginBottom: 2 }}>{i + 1}. {q.text}</div>
+                      {q.guidance && <div className="when" style={{ marginBottom: 6 }}>{q.guidance}</div>}
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+                        {q.options.map((o) => {
+                          const on = answers[q.id] === o.id;
+                          return (
+                            <button
+                              key={o.id}
+                              type="button"
+                              className={`badge ${on ? "info" : "neutral"}`}
+                              style={{ cursor: "pointer", border: on ? "1px solid var(--primary)" : "1px solid var(--border)" }}
+                              onClick={() => setAnswers({ ...answers, [q.id]: o.id })}
+                            >
+                              {o.label} ({o.score})
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <input
+                        className="input"
+                        style={{ marginTop: 8 }}
+                        value={comments[q.id] || ""}
+                        placeholder="Comment (optional)…"
+                        onChange={(e) => setComments({ ...comments, [q.id]: e.target.value })}
+                      />
+                    </div>
+                  ))}
+                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                  <button className="btn secondary" onClick={() => saveAnswers(false)}>Save answers</button>
+                  <button className="btn" onClick={() => saveAnswers(true)}>Save &amp; submit</button>
+                </div>
               </div>
             </div>
-            <div className="card-pad">
-              {open.findings.map((f) => (
-                <div key={f.id} className="activity-item">
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13 }}>{f.title}</div>
-                    {f.description && <div className="when">{f.description}</div>}
-                    {f.deadline && <div className="when">Deadline: {f.deadline}</div>}
-                  </div>
-                  <Badge tone={SEV_TONE[f.severity] || "neutral"}>{f.severity}</Badge>
-                  <Badge tone={f.status === "open" ? "high" : "neutral"}>{f.status}</Badge>
-                  <button className="btn secondary sm" onClick={() => openEditFinding(f)}>Edit</button>
-                  <button className="btn secondary sm" onClick={() => toggleFinding(f)}>
-                    {f.status === "open" ? "Close" : "Reopen"}
+
+            <div className="card">
+              <div className="card-head">
+                <h3>Findings</h3>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <span className="sub">{detail.findings.length} total · {detail.open_findings} open</span>
+                  <button className="btn secondary sm" onClick={openNewFinding}>
+                    <IconPlus width={14} height={14} /> Add finding
                   </button>
                 </div>
-              ))}
-              {open.findings.length === 0 && <span className="muted">No findings recorded.</span>}
+              </div>
+              <div className="card-pad">
+                {detail.findings.map((f) => (
+                  <div key={f.id} className="activity-item">
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13 }}>{f.title}</div>
+                      {f.description && <div className="when">{f.description}</div>}
+                      {f.deadline && <div className="when">Deadline: {f.deadline}</div>}
+                    </div>
+                    <Badge tone={SEV_TONE[f.severity] || "neutral"}>{f.severity}</Badge>
+                    <Badge tone={f.status === "open" ? "high" : "neutral"}>{f.status}</Badge>
+                    <button className="btn secondary sm" onClick={() => openEditFinding(f)}>Edit</button>
+                    <button className="btn secondary sm" onClick={() => toggleFinding(f)}>
+                      {f.status === "open" ? "Close" : "Reopen"}
+                    </button>
+                  </div>
+                ))}
+                {detail.findings.length === 0 && <span className="muted">No findings recorded.</span>}
+              </div>
             </div>
-          </div>
-        </>
-      )}
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -571,5 +546,13 @@ export default function AssessmentsPage() {
         />
       )}
     </>
+  );
+}
+
+export default function AssessmentsPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <AssessmentsInner />
+    </Suspense>
   );
 }

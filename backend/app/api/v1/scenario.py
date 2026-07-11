@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Select, func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.enums import BaselEventType
 from app.models.scenario import CapitalCalculation, ScenarioAnalysis, ScenarioStatus
 from app.schemas.common import Page
@@ -54,12 +55,29 @@ async def _get(db, model, obj_id, name):
 
 
 # ===================================================== scenario analyses ===
+# `expected_annual_loss` is computed (frequency × typical loss); its component columns
+# are sortable instead.
+_SCENARIO_SORTABLE = {
+    "reference": ScenarioAnalysis.reference,
+    "title": ScenarioAnalysis.title,
+    "basel_event_type": ScenarioAnalysis.basel_event_type,
+    "business_line": ScenarioAnalysis.business_line,
+    "frequency_per_year": ScenarioAnalysis.frequency_per_year,
+    "typical_loss": ScenarioAnalysis.typical_loss,
+    "worst_case_loss": ScenarioAnalysis.worst_case_loss,
+    "status": ScenarioAnalysis.status,
+    "created_at": ScenarioAnalysis.created_at,
+}
+
+
 @router.get("/scenario-analyses", response_model=Page[ScenarioRead], dependencies=[_READ])
 async def list_scenarios(
     db: DbSession,
     search: Annotated[str | None, Query()] = None,
     basel_event_type: Annotated[BaselEventType | None, Query()] = None,
     status_filter: Annotated[ScenarioStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ScenarioRead]:
@@ -79,7 +97,12 @@ async def list_scenarios(
     if status_filter is not None:
         stmt = stmt.where(ScenarioAnalysis.status == status_filter)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(ScenarioAnalysis.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _SCENARIO_SORTABLE, default=ScenarioAnalysis.created_at)
+    else:
+        stmt = stmt.order_by(ScenarioAnalysis.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ScenarioRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -117,12 +140,35 @@ async def delete_scenario(sid: uuid.UUID, db: DbSession) -> None:
 
 
 # ===================================================== capital calculations ===
+# BIC / Loss Component / ILM / ORC are all computed server-side, so only the input
+# columns are sortable.
+_CAPITAL_SORTABLE = {
+    "reference": CapitalCalculation.reference,
+    "period": CapitalCalculation.period,
+    "business_indicator": CapitalCalculation.business_indicator,
+    "avg_annual_loss": CapitalCalculation.avg_annual_loss,
+    "status": CapitalCalculation.status,
+    "created_at": CapitalCalculation.created_at,
+}
+
+
 @router.get("/capital-calculations", response_model=Page[CapitalRead], dependencies=[_READ])
-async def list_capital(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
+async def list_capital(db: DbSession, search: str | None = None,
+                       sort_by: Annotated[str | None, Query()] = None,
+                       sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+                       limit: Annotated[int, Query(ge=1, le=200)] = 100,
                        offset: Annotated[int, Query(ge=0)] = 0) -> Page[CapitalRead]:
     stmt = select(CapitalCalculation).where(CapitalCalculation.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(CapitalCalculation.period.ilike(like), CapitalCalculation.reference.ilike(like)))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(CapitalCalculation.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _CAPITAL_SORTABLE, default=CapitalCalculation.created_at)
+    else:
+        stmt = stmt.order_by(CapitalCalculation.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[CapitalRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Select, func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.enums import Severity
 from app.models.issue import (
     ActionStatus,
@@ -67,6 +68,19 @@ async def _load_issue(db, iid) -> Issue:
     return obj
 
 
+_ISSUE_SORTABLE = {
+    "reference": Issue.reference,
+    "title": Issue.title,
+    "severity": Issue.severity,
+    "status": Issue.status,
+    "source_type": Issue.source_type,
+    "owner": Issue.owner,
+    "due_date": Issue.due_date,
+    "identified_date": Issue.identified_date,
+    "created_at": Issue.created_at,
+}
+
+
 # ================================================================== issues ===
 @router.get("/issues", response_model=Page[IssueRead], dependencies=[_READ])
 async def list_issues(
@@ -78,6 +92,8 @@ async def list_issues(
     overdue: Annotated[bool | None, Query()] = None,
     regulator_related: Annotated[bool | None, Query()] = None,
     repeat_finding: Annotated[bool | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[IssueRead]:
@@ -111,8 +127,13 @@ async def list_issues(
         )
 
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _ISSUE_SORTABLE, default=Issue.created_at)
+    else:
+        stmt = stmt.order_by(Issue.created_at.desc())
     rows = (
-        await db.scalars(stmt.order_by(Issue.created_at.desc()).limit(limit).offset(offset))
+        await db.scalars(stmt.limit(limit).offset(offset))
     ).all()
     return Page(items=[IssueRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 

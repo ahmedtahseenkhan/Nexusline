@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Select, func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.control import Control
 from app.models.enums import ProjectStatus
 from app.models.policy import Policy
@@ -73,20 +74,40 @@ async def _task_or_404(db, project_id, task_id) -> ProjectTask:
 
 
 # ------------------------------------------------------------------- projects
+_PROJECT_SORTABLE = {
+    "reference": Project.reference,
+    "title": Project.title,
+    "status": Project.status,
+    "owner": Project.owner,
+    "start_date": Project.start_date,
+    "deadline": Project.deadline,
+    "created_at": Project.created_at,
+}
+
+
 @router.get("", response_model=Page[ProjectRead], dependencies=[Depends(require("project:read"))])
 async def list_projects(
     db: DbSession,
     status_filter: Annotated[ProjectStatus | None, Query(alias="status")] = None,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ProjectRead]:
     stmt: Select = select(Project).where(Project.deleted.is_(False))
     if status_filter is not None:
         stmt = stmt.where(Project.status == status_filter)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(Project.title.ilike(like) | Project.reference.ilike(like))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(stmt.order_by(Project.created_at.desc()).limit(limit).offset(offset))
-    ).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _PROJECT_SORTABLE, default=Project.created_at)
+    else:
+        stmt = stmt.order_by(Project.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ProjectRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

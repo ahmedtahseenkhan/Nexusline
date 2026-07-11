@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.awareness import (
     AwarenessOption,
     AwarenessProgram,
@@ -24,6 +26,7 @@ from app.schemas.awareness import (
     ProgramUpdate,
     QuizSubmit,
 )
+from app.schemas.common import Page
 from app.services.refs import next_reference
 from app.services import audit
 from app.services.risk_scoring import next_review_date
@@ -52,12 +55,43 @@ async def _next_ref(db) -> str:
     return await next_reference(db, AwarenessProgram, "AW")
 
 
-@router.get("", response_model=list[ProgramSummary], dependencies=[Depends(require("awareness:read"))])
-async def list_programs(db: DbSession) -> list[ProgramSummary]:
-    rows = (await db.scalars(
-        select(AwarenessProgram).where(AwarenessProgram.deleted.is_(False)).order_by(AwarenessProgram.name)
-    )).all()
-    return [ProgramSummary.model_validate(r) for r in rows]
+_PROGRAM_SORTABLE = {
+    "reference": AwarenessProgram.reference,
+    "name": AwarenessProgram.name,
+    "status": AwarenessProgram.status,
+    "frequency": AwarenessProgram.frequency,
+    "passing_score": AwarenessProgram.passing_score,
+    "next_due_date": AwarenessProgram.next_due_date,
+    "due_date": AwarenessProgram.due_date,
+    "created_at": AwarenessProgram.created_at,
+}
+
+
+@router.get("", response_model=Page[ProgramSummary], dependencies=[Depends(require("awareness:read"))])
+async def list_programs(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[ProgramSummary]:
+    stmt = select(AwarenessProgram).where(AwarenessProgram.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            AwarenessProgram.name.ilike(like) | AwarenessProgram.reference.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _PROGRAM_SORTABLE, default=AwarenessProgram.name)
+    else:
+        stmt = stmt.order_by(AwarenessProgram.name)
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    return Page(
+        items=[ProgramSummary.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
+    )
 
 
 def _build_questions(tenant_id, question_specs) -> list[AwarenessQuestion]:

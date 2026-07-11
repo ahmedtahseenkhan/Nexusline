@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.compliance import Requirement, requirement_policies
 from app.models.control import Control, control_policies
 from app.models.enums import PolicyStatus
@@ -126,19 +127,39 @@ async def _next_ref(db) -> str:
     return await next_reference(db, Policy, "POL")
 
 
+_POLICY_SORTABLE = {
+    "reference": Policy.reference,
+    "title": Policy.title,
+    "category": Policy.category,
+    "document_type": Policy.document_type,
+    "version": Policy.version,
+    "status": Policy.status,
+    "owner": Policy.owner,
+    "next_review_date": Policy.next_review_date,
+    "created_at": Policy.created_at,
+}
+
+
 @router.get("", response_model=Page[PolicyRead], dependencies=[Depends(require("policy:read"))])
 async def list_policies(
     db: DbSession,
     search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[PolicyRead]:
     stmt = select(Policy).where(Policy.deleted.is_(False))
     if search:
         stmt = stmt.where(Policy.title.ilike(f"%{search}%") | Policy.reference.ilike(f"%{search}%"))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _POLICY_SORTABLE, default=Policy.reference)
+    else:
+        stmt = stmt.order_by(Policy.reference)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (
-        await db.scalars(stmt.options(*_loads()).order_by(Policy.reference).limit(limit).offset(offset))
+        await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))
     ).all()
     return Page(
         items=[PolicyRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset

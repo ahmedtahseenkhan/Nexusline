@@ -1,14 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
-import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus, IconAlert } from "@/components/icons";
+import { IconCheck, IconPlus } from "@/components/icons";
 
 // ----- inline types (api.ts is shared / read-only) -----------------------------
 type LinkRef = { id: string; reference?: string; title?: string; name?: string };
@@ -40,14 +47,6 @@ type Exception = {
   created_at: string;
 };
 
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-type Ctrl = { id: string; name: string; reference: string };
-type Rk = { id: string; reference: string; title: string };
-type Pol = { id: string; reference: string; title: string };
-type Req = { id: string; reference: string; title: string };
-type Ast = { id: string; name: string };
-type Framework = { id: string; name: string };
-
 const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
   approved: "low",
   pending: "medium",
@@ -63,6 +62,8 @@ const TYPE = opts(["risk", "policy", "compliance", "other"]);
 const STATUS = opts(["pending", "approved", "rejected", "expired", "closed"]);
 const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 
+const refToOpt = (x: LinkRef): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
+
 type FormState = {
   title: string;
   description: string;
@@ -76,11 +77,11 @@ type FormState = {
   expires_at: string;
   closure_date: string;
   compensating_controls: string;
-  control_ids: string[];
-  risk_ids: string[];
-  policy_ids: string[];
-  requirement_ids: string[];
-  asset_ids: string[];
+  control_ids: AsyncOption[];
+  risk_ids: AsyncOption[];
+  policy_ids: AsyncOption[];
+  requirement_ids: AsyncOption[];
+  asset_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
@@ -104,11 +105,11 @@ function fromException(x: Exception): FormState {
     expires_at: x.expires_at || "",
     closure_date: x.closure_date || "",
     compensating_controls: x.compensating_controls || "",
-    control_ids: x.controls.map((r) => r.id),
-    risk_ids: x.risks.map((r) => r.id),
-    policy_ids: x.policies.map((r) => r.id),
-    requirement_ids: x.requirements.map((r) => r.id),
-    asset_ids: x.assets.map((r) => r.id),
+    control_ids: x.controls.map(refToOpt),
+    risk_ids: x.risks.map(refToOpt),
+    policy_ids: x.policies.map(refToOpt),
+    requirement_ids: x.requirements.map(refToOpt),
+    asset_ids: x.assets.map(refToOpt),
   };
 }
 
@@ -128,130 +129,95 @@ function toPayload(f: FormState, editing: boolean): Record<string, unknown> {
     start_date: f.start_date || null,
     expires_at: f.expires_at || null,
     closure_date: f.closure_date || null,
-    control_ids: f.control_ids,
-    risk_ids: f.risk_ids,
-    policy_ids: f.policy_ids,
-    requirement_ids: f.requirement_ids,
-    asset_ids: f.asset_ids,
+    control_ids: f.control_ids.map((o) => o.value),
+    risk_ids: f.risk_ids.map((o) => o.value),
+    policy_ids: f.policy_ids.map((o) => o.value),
+    requirement_ids: f.requirement_ids.map((o) => o.value),
+    asset_ids: f.asset_ids.map((o) => o.value),
     ...(editing ? { status: f.status } : {}),
   };
 }
 
-export default function ExceptionsPage() {
-  const [items, setItems] = useState<Exception[]>([]);
-  const [controls, setControls] = useState<Ctrl[]>([]);
-  const [risks, setRisks] = useState<Rk[]>([]);
-  const [policies, setPolicies] = useState<Pol[]>([]);
-  const [requirements, setRequirements] = useState<Req[]>([]);
-  const [assets, setAssets] = useState<Ast[]>([]);
-
+/* ================================================================ page ===== */
+function ExceptionsInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<Exception | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // filters
+  const [fStatus, setFStatus] = useState("");
+  const [fType, setFType] = useState("");
+
   const [editing, setEditing] = useState<Exception | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
-  const [detailId, setDetailId] = useState<string | null>(null);
-
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  async function load() {
-    try {
-      setItems((await apiCall<Page<Exception>>("GET", "/exceptions?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchExceptions = useCallback((qs: string) => apiCall<PagedList<Exception>>("GET", `/exceptions?${qs}`), []);
+  const loadDetail = useCallback((id: string) => { apiCall<Exception>("GET", `/exceptions/${id}`).then(setDetail).catch(() => setDetail(null)); }, []);
+  useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
 
-  async function loadRequirements() {
-    try {
-      const fws = await apiCall<Page<Framework>>("GET", "/frameworks?limit=200");
-      const lists = await Promise.all(
-        fws.items.map((fw) =>
-          apiCall<Req[]>("GET", `/frameworks/${fw.id}/requirements`).catch(() => [] as Req[]),
-        ),
-      );
-      setRequirements(lists.flat());
-    } catch {
-      /* requirements are optional links */
-    }
-  }
+  // server typeahead sources for the form link pickers
+  const searchControls = (q: string) => apiCall<PagedList<{ id: string; name: string; reference: string }>>("GET", `/controls?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.reference })));
+  const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
+  const searchPolicies = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/policies?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
+  const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name })));
+  const searchRequirements = (q: string) => apiCall<{ id: string; reference: string; title: string; framework: string }[]>("GET", `/requirements?search=${encodeURIComponent(q)}&limit=20`).then((rows) => rows.map((r) => ({ value: r.id, label: `${r.reference ? r.reference + " · " : ""}${r.title}`, sub: r.framework })));
 
-  useEffect(() => {
-    load();
-    apiCall<Page<Ctrl>>("GET", "/controls?limit=200").then((r) => setControls(r.items)).catch(() => {});
-    apiCall<Page<Rk>>("GET", "/risks?limit=200").then((r) => setRisks(r.items)).catch(() => {});
-    apiCall<Page<Pol>>("GET", "/policies?limit=200").then((r) => setPolicies(r.items)).catch(() => {});
-    apiCall<Page<Ast>>("GET", "/assets?limit=200").then((r) => setAssets(r.items)).catch(() => {});
-    loadRequirements();
-  }, []);
-
-  function openNew() {
-    setEditing(null);
-    setF(BLANK);
-    setShowForm(true);
-  }
-  function openEdit(x: Exception) {
-    setEditing(x);
-    setF(fromException(x));
-    setShowForm(true);
-  }
+  function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
+  function openEdit(x: Exception) { setEditing(x); setF(fromException(x)); setError(null); setShowForm(true); }
 
   async function save() {
-    setError(null);
-    setSaving(true);
+    setError(null); setSaving(true);
     try {
       const payload = toPayload(f, !!editing);
       if (editing) await apiCall("PATCH", `/exceptions/${editing.id}`, payload);
       else await apiCall("POST", "/exceptions", payload);
-      setShowForm(false);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save exception");
-    } finally {
-      setSaving(false);
-    }
+      setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "Exception requested");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save exception"); }
+    finally { setSaving(false); }
   }
 
-  async function act(fn: Promise<unknown>) {
+  async function act(fn: Promise<unknown>, message: string) {
     setError(null);
     try {
       await fn;
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Action failed");
-    }
+      reload(); if (openId) loadDetail(openId); toast(message);
+    } catch (e) { setError(e instanceof Error ? e.message : "Action failed"); }
   }
-
   const decide = (id: string, approve: boolean) =>
-    act(apiCall("POST", `/exceptions/${id}/decision`, { approve, note: "" }));
-  const close = (id: string) => act(apiCall("POST", `/exceptions/${id}/close`));
-  const remove = (id: string) => act(apiCall("DELETE", `/exceptions/${id}`));
-
-  const controlOpts: Option[] = useMemo(
-    () => controls.map((c) => ({ value: c.id, label: c.name, sub: c.reference })),
-    [controls],
-  );
-  const riskOpts: Option[] = useMemo(
-    () => risks.map((r) => ({ value: r.id, label: r.title, sub: r.reference })),
-    [risks],
-  );
-  const policyOpts: Option[] = useMemo(
-    () => policies.map((p) => ({ value: p.id, label: p.title, sub: p.reference })),
-    [policies],
-  );
-  const requirementOpts: Option[] = useMemo(
-    () => requirements.map((r) => ({ value: r.id, label: r.title, sub: r.reference })),
-    [requirements],
-  );
-  const assetOpts: Option[] = useMemo(
-    () => assets.map((a) => ({ value: a.id, label: a.name })),
-    [assets],
-  );
+    act(apiCall("POST", `/exceptions/${id}/decision`, { approve, note: "" }), approve ? "Approved" : "Rejected");
+  const close = (id: string) => act(apiCall("POST", `/exceptions/${id}/close`), "Closed");
+  async function remove(x: Exception) {
+    if (!(await confirmDialog({ title: `Delete exception ${x.reference}?`, danger: true }))) return;
+    setError(null);
+    try {
+      await apiCall("DELETE", `/exceptions/${x.id}`);
+      if (openId === x.id) setOpenId(null);
+      reload(); toast("Deleted");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
+  }
 
   const linkCount = (x: Exception) =>
     x.risks.length + x.policies.length + x.requirements.length + x.controls.length + x.assets.length;
-
   const isPast = (d: string | null) => !!d && new Date(d) < new Date(new Date().toDateString());
+
+  const columns: Column<Exception>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (x) => <span className="ref">{x.reference}</span> },
+    { key: "title", header: "Title", sortable: true, render: (x) => <span className="cell-title">{x.title}</span> },
+    { key: "exception_type", header: "Type", sortable: true, render: (x) => <Badge tone="info" plain>{cap(x.exception_type)}</Badge> },
+    { key: "status", header: "Status", sortable: true, render: (x) => <><Badge tone={STATUS_TONE[x.status] || "neutral"}>{cap(x.status)}</Badge>{x.is_expired && <span style={{ marginLeft: 6 }}><Badge tone="high">Expired</Badge></span>}</> },
+    { key: "start_date", header: "Start", sortable: true, render: (x) => <span className="muted">{x.start_date || "—"}</span> },
+    { key: "expires_at", header: "Expires", sortable: true, render: (x) => (x.expires_at ? (isPast(x.expires_at) ? <Badge tone="high">{x.expires_at}</Badge> : <span className="muted">{x.expires_at}</span>) : <span className="muted">—</span>) },
+    { key: "controls", header: "Controls", align: "center", render: (x) => <span className="muted">{x.controls.length || "—"}</span> },
+    { key: "links", header: "Links", align: "center", render: (x) => <span className="muted">{linkCount(x) || "—"}</span> },
+    { key: "actions", header: "", render: (x) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(x)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(x)}>Delete</button></div> },
+  ];
+
+  const filters = { status: fStatus || undefined, type: fType || undefined };
 
   const generalTab = (
     <>
@@ -317,19 +283,19 @@ export default function ExceptionsPage() {
         <TextArea value={f.compensating_controls} onChange={(v) => set("compensating_controls", v)} rows={3} placeholder="e.g. WAF rule + quarterly review of access logs" />
       </Field>
       <Field label="Linked Controls" help="Controls that mitigate or relate to this exception.">
-        <MultiSelect value={f.control_ids} onChange={(v) => set("control_ids", v)} options={controlOpts} />
+        <AsyncMultiSelect search={searchControls} value={f.control_ids} onChange={(v) => set("control_ids", v)} />
       </Field>
       <Field label="Linked Risks" help="Risks being formally accepted by this exception.">
-        <MultiSelect value={f.risk_ids} onChange={(v) => set("risk_ids", v)} options={riskOpts} />
+        <AsyncMultiSelect search={searchRisks} value={f.risk_ids} onChange={(v) => set("risk_ids", v)} />
       </Field>
       <Field label="Linked Policies" help="Policies whose requirements are being excepted.">
-        <MultiSelect value={f.policy_ids} onChange={(v) => set("policy_ids", v)} options={policyOpts} />
+        <AsyncMultiSelect search={searchPolicies} value={f.policy_ids} onChange={(v) => set("policy_ids", v)} />
       </Field>
       <Field label="Linked Requirements" help="Compliance requirements covered by this exception.">
-        <MultiSelect value={f.requirement_ids} onChange={(v) => set("requirement_ids", v)} options={requirementOpts} />
+        <AsyncMultiSelect search={searchRequirements} value={f.requirement_ids} onChange={(v) => set("requirement_ids", v)} />
       </Field>
       <Field label="Linked Assets" help="Assets affected by this exception.">
-        <MultiSelect value={f.asset_ids} onChange={(v) => set("asset_ids", v)} options={assetOpts} />
+        <AsyncMultiSelect search={searchAssets} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} />
       </Field>
     </>
   );
@@ -342,7 +308,7 @@ export default function ExceptionsPage() {
           <p>Formal, time-boxed acceptance of risk, policy or compliance gaps with an approval workflow.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <ImportExport resource="exceptions" label="Exceptions" onDone={load} />
+          <ImportExport resource="exceptions" label="Exceptions" onDone={reload} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add exception
           </button>
@@ -351,88 +317,81 @@ export default function ExceptionsPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card">
-        <div className="card-head">
-          <h3>Exception register</h3>
-          <span className="sub">{items.length} total</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Title</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Start</th>
-                <th>Expires</th>
-                <th>Controls</th>
-                <th>Risks</th>
-                <th>Links</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((x) => (
-                <tr key={x.id} style={{ cursor: "pointer" }} onClick={() => openEdit(x)}>
-                  <td className="ref">{x.reference}</td>
-                  <td className="cell-title">{x.title}</td>
-                  <td><Badge tone="info" plain>{cap(x.exception_type)}</Badge></td>
-                  <td>
-                    <Badge tone={STATUS_TONE[x.status] || "neutral"}>{cap(x.status)}</Badge>
-                    {x.is_expired && <span style={{ marginLeft: 6 }}><Badge tone="high">Expired</Badge></span>}
-                  </td>
-                  <td className="muted">{x.start_date || "—"}</td>
-                  <td>
-                    {x.expires_at
-                      ? (
-                        <span className={isPast(x.expires_at) ? "" : "muted"}>
-                          {isPast(x.expires_at) ? <Badge tone="high">{x.expires_at}</Badge> : x.expires_at}
-                        </span>
-                      )
-                      : <span className="muted">—</span>}
-                  </td>
-                  <td className="muted">{x.controls.length || "—"}</td>
-                  <td className="muted">{x.risks.length || "—"}</td>
-                  <td className="muted">{linkCount(x) || "—"}</td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      {x.status === "pending" && (
-                        <>
-                          <button className="btn sm" onClick={() => decide(x.id, true)}>
-                            <IconCheck width={13} height={13} /> Approve
-                          </button>
-                          <button className="btn secondary sm" onClick={() => decide(x.id, false)}>Reject</button>
-                        </>
-                      )}
-                      {x.status === "approved" && (
-                        <button className="btn secondary sm" onClick={() => close(x.id)}>Close</button>
-                      )}
-                      <button className="btn secondary sm" onClick={() => setDetailId(detailId === x.id ? null : x.id)}>
-                        Details
-                      </button>
-                      <button className="btn secondary sm" onClick={() => remove(x.id)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={10}>
-                    <div className="empty">
-                      <span className="ico"><IconAlert width={24} height={24} /></span>
-                      <h3>No exceptions</h3>
-                      <p>Request an exception to formally accept a gap with an expiry date.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<Exception>
+        columns={columns}
+        fetcher={fetchExceptions}
+        rowKey={(x) => x.id}
+        onRowClick={(x) => setOpenId(x.id)}
+        activeKey={openId}
+        searchPlaceholder="Search exceptions by title or reference…"
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        filters={filters}
+        toolbarRight={
+          <>
+            <select className="select" style={{ maxWidth: 160 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
+              <option value="">All statuses</option>
+              {STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+            </select>
+            <select className="select" style={{ maxWidth: 150 }} value={fType} onChange={(e) => setFType(e.target.value)}>
+              <option value="">All types</option>
+              {TYPE.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+            </select>
+          </>
+        }
+        emptyMessage="No exceptions. Request an exception to formally accept a gap with an expiry date."
+        refreshKey={refreshKey}
+      />
 
-      {detailId && <RecordPanels model="exception" entityId={detailId} />}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
+        subtitle={detail ? `${cap(detail.exception_type)} · ${cap(detail.status)}${detail.business_owner ? " · " + detail.business_owner : ""}` : ""}
+        width={720}
+        actions={detail && (
+          <>
+            {detail.status === "pending" && (
+              <>
+                <button className="btn sm" onClick={() => decide(detail.id, true)}><IconCheck width={13} height={13} /> Approve</button>
+                <button className="btn secondary sm" onClick={() => decide(detail.id, false)}>Reject</button>
+              </>
+            )}
+            {detail.status === "approved" && <button className="btn secondary sm" onClick={() => close(detail.id)}>Close</button>}
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+              <Badge tone="info" plain>{cap(detail.exception_type)}</Badge>
+              <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              {detail.is_expired && <Badge tone="high">Expired</Badge>}
+              {linkCount(detail) > 0 && <Badge tone="neutral" plain>{linkCount(detail)} links</Badge>}
+            </div>
+
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <div><div className="muted" style={{ fontSize: 12 }}>Start</div><div style={{ marginTop: 4 }}>{detail.start_date || "—"}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Expires</div><div style={{ marginTop: 4 }}>{detail.expires_at || "—"}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Closure</div><div style={{ marginTop: 4 }}>{detail.closure_date || "—"}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Decided</div><div style={{ marginTop: 4 }}>{detail.decided_at || "—"}</div></div>
+            </div>
+
+            {detail.description && (
+              <div style={{ marginBottom: 12 }}><span className="muted" style={{ fontSize: 12 }}>Description</span><div style={{ fontSize: 13 }}>{detail.description}</div></div>
+            )}
+            {detail.rationale && (
+              <div style={{ marginBottom: 12 }}><span className="muted" style={{ fontSize: 12 }}>Rationale</span><div style={{ fontSize: 13 }} dangerouslySetInnerHTML={{ __html: detail.rationale }} /></div>
+            )}
+            {detail.compensating_controls && (
+              <div style={{ marginBottom: 16 }}><span className="muted" style={{ fontSize: 12 }}>Compensating controls</span><div style={{ fontSize: 13 }}>{detail.compensating_controls}</div></div>
+            )}
+
+            <RecordPanels model="exception" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -450,5 +409,13 @@ export default function ExceptionsPage() {
         />
       )}
     </>
+  );
+}
+
+export default function ExceptionsPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ExceptionsInner />
+    </Suspense>
   );
 }

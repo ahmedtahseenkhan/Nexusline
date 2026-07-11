@@ -1,12 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconGauge } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
 type RiskQuant = {
@@ -52,7 +58,6 @@ type QuantSummary = {
   top: { id: string; title: string; last_mean_ale: number; last_p90: number }[];
 };
 
-type Paged<T> = { items: T[]; total: number; limit: number; offset: number };
 type RiskRef = { id: string; reference: string; title: string };
 
 // ------------------------------------------------------------------ helpers
@@ -78,6 +83,7 @@ type QuantForm = {
   title: string;
   scenario: string;
   risk_id: string;
+  risk_label: string;
   asset_at_risk: string;
   tef_min: string;
   tef_likely: string;
@@ -96,6 +102,7 @@ const BLANK: QuantForm = {
   title: "",
   scenario: "",
   risk_id: "",
+  risk_label: "",
   asset_at_risk: "",
   tef_min: "0.1",
   tef_likely: "1",
@@ -115,6 +122,7 @@ function fromQuant(q: RiskQuant): QuantForm {
     title: q.title,
     scenario: q.scenario || "",
     risk_id: q.risk_id || "",
+    risk_label: "",
     asset_at_risk: q.asset_at_risk || "",
     tef_min: String(q.tef_min ?? 0),
     tef_likely: String(q.tef_likely ?? 0),
@@ -186,13 +194,15 @@ function SimBars({ p50, p90, max, currency }: { p50: number; p90: number; max: n
 }
 
 // ------------------------------------------------------------------ page
-export default function RiskQuantificationPage() {
+function RiskQuantificationInner() {
   const [error, setError] = useState<string | null>(null);
-  const [rows, setRows] = useState<RiskQuant[]>([]);
-  const [summary, setSummary] = useState<QuantSummary | null>(null);
-  const [risks, setRisks] = useState<RiskRef[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [summary, setSummary] = useState<QuantSummary | null>(null);
+
+  const [openId, setOpenId] = useRecordParam("id");
+  const [quantDetail, setQuantDetail] = useState<RiskQuant | null>(null);
   const [results, setResults] = useState<Record<string, SimResult>>({});
   const [simulating, setSimulating] = useState<string | null>(null);
 
@@ -202,15 +212,9 @@ export default function RiskQuantificationPage() {
   const [f, setF] = useState<QuantForm>(BLANK);
   const set = <K extends keyof QuantForm>(k: K, v: QuantForm[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadRows() {
-    try {
-      const res = await apiCall<Paged<RiskQuant>>("GET", "/risk-quantification");
-      setRows(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load quantifications");
-    }
-  }
+  // ------------------------------------------------------------- fetcher + loaders
+  const fetchRows = useCallback((qs: string) => apiCall<PagedList<RiskQuant>>("GET", `/risk-quantification?${qs}`), []);
+
   async function loadSummary() {
     try {
       setSummary(await apiCall<QuantSummary>("GET", "/risk-quantification-summary"));
@@ -218,38 +222,42 @@ export default function RiskQuantificationPage() {
       setError(e instanceof Error ? e.message : "Failed to load summary");
     }
   }
-  async function loadRisks() {
-    // Best-effort: populate the optional risk-register link. Silently ignore if the
-    // user lacks risk:read — the record simply stays unlinked.
-    try {
-      const res = await apiCall<Paged<RiskRef>>("GET", "/risks?limit=200");
-      setRisks(res.items);
-    } catch {
-      /* no risk-register access — leave the link picker empty */
-    }
-  }
-
   useEffect(() => {
-    loadRows();
     loadSummary();
-    loadRisks();
   }, []);
 
-  const riskOptions: Option[] = risks.map((r) => ({
-    value: r.id,
-    label: `${r.reference || "—"} — ${r.title}`,
-  }));
+  const loadDetail = useCallback((id: string) => {
+    apiCall<RiskQuant>("GET", `/risk-quantification/${id}`).then(setQuantDetail).catch(() => setQuantDetail(null));
+  }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setQuantDetail(null);
+  }, [openId, loadDetail]);
+
+  // server typeahead over the risk register (any of a 100k-row register is linkable)
+  const searchRisks = (q: string) =>
+    apiCall<PagedList<RiskRef>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`)
+      .then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })))
+      .catch(() => [] as AsyncOption[]);
 
   // ------------------------------------------------------------- CRUD
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    setError(null);
     setShowForm(true);
   }
   function openEdit(q: RiskQuant) {
     setEditing(q);
     setF(fromQuant(q));
+    setError(null);
     setShowForm(true);
+    // Best-effort: seed the risk-picker label from the register (record only stores the id).
+    if (q.risk_id) {
+      apiCall<{ id: string; reference: string; title: string }>("GET", `/risks/${q.risk_id}`)
+        .then((r) => setF((p) => (p.risk_id === q.risk_id ? { ...p, risk_label: r.title } : p)))
+        .catch(() => {});
+    }
   }
   async function save() {
     setError(null);
@@ -259,8 +267,10 @@ export default function RiskQuantificationPage() {
       if (editing) await apiCall("PATCH", `/risk-quantification/${editing.id}`, body);
       else await apiCall("POST", "/risk-quantification", body);
       setShowForm(false);
-      await loadRows();
+      reload();
+      if (openId) loadDetail(openId);
       await loadSummary();
+      toast(editing ? "Changes saved" : "Quantification created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save quantification");
     } finally {
@@ -268,20 +278,18 @@ export default function RiskQuantificationPage() {
     }
   }
   async function remove(q: RiskQuant) {
-    if (!window.confirm(`Delete quantification ${q.reference || q.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete quantification ${q.reference || q.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/risk-quantification/${q.id}`);
       setShowForm(false);
       if (openId === q.id) setOpenId(null);
-      await loadRows();
+      reload();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
-  }
-  function toggle(id: string) {
-    setOpenId(openId === id ? null : id);
   }
   async function runSimulate(id: string) {
     setError(null);
@@ -290,14 +298,36 @@ export default function RiskQuantificationPage() {
       const res = await apiCall<SimResult>("POST", `/risk-quantification/${id}/simulate`);
       setResults((prev) => ({ ...prev, [id]: res }));
       setOpenId(id);
-      await loadRows();
+      loadDetail(id);
+      reload();
       await loadSummary();
+      toast("Simulation complete");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to run simulation");
     } finally {
       setSimulating(null);
     }
   }
+
+  // ------------------------------------------------------------- columns
+  const columns: Column<RiskQuant>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (q) => <span className="ref">{q.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (q) => <span className="cell-title">{q.title}</span> },
+    { key: "asset_at_risk", header: "Asset at risk", sortable: true, render: (q) => <span className="muted">{q.asset_at_risk || "—"}</span> },
+    { key: "ale_point", header: "ALE point", render: (q) => <span className="muted">{pkr(q.ale_point, q.currency)}</span> },
+    { key: "last_mean_ale", header: "Mean ALE", sortable: true, render: (q) => <span className="muted">{q.last_simulated ? pkr(q.last_mean_ale, q.currency) : "—"}</span> },
+    { key: "last_p90", header: "P90", sortable: true, render: (q) => <span className="muted">{q.last_simulated ? pkr(q.last_p90, q.currency) : "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (q) => <Badge tone={STATUS_TONE[q.status] || "neutral"}>{cap(q.status)}</Badge> },
+    { key: "actions", header: "", render: (q) => (
+      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+        <button className="btn secondary sm" onClick={() => runSimulate(q.id)} disabled={simulating === q.id}>
+          {simulating === q.id ? "Simulating…" : "Simulate"}
+        </button>
+        <button className="btn secondary sm" onClick={() => openEdit(q)}>Edit</button>
+        <button className="btn secondary sm" onClick={() => remove(q)}>Delete</button>
+      </div>
+    ) },
+  ];
 
   // ------------------------------------------------------------- form tabs
   const scenarioTab = (
@@ -376,11 +406,12 @@ export default function RiskQuantificationPage() {
         </Field>
       </div>
       <Field label="Linked risk (optional)" help="Attach this quantification to a risk-register entry.">
-        <Select
-          value={f.risk_id}
-          onChange={(v) => set("risk_id", v)}
-          options={riskOptions}
-          placeholder={risks.length ? "No linked risk" : "No risk register access"}
+        <AsyncSelect
+          search={searchRisks}
+          value={f.risk_id || null}
+          selectedLabel={f.risk_label || f.risk_id}
+          onChange={(v, o) => setF((p) => ({ ...p, risk_id: v || "", risk_label: o?.label || "" }))}
+          placeholder="Search the risk register…"
         />
       </Field>
       <Field label="Workflow" help="Approval lifecycle for this quantification record.">
@@ -388,6 +419,9 @@ export default function RiskQuantificationPage() {
       </Field>
     </>
   );
+
+  const fresh = quantDetail ? results[quantDetail.id] : undefined;
+  const hasCurve = fresh || quantDetail?.last_simulated;
 
   // ------------------------------------------------------------- render
   return (
@@ -423,103 +457,51 @@ export default function RiskQuantificationPage() {
         </div>
       </div>
 
-      <div className="card">
-        <div className="card-head">
-          <h3>Quantified loss scenarios</h3>
-          <span className="sub">{rows.length} total · click a row to view the loss curve · Simulate runs a fresh Monte Carlo</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Title</th>
-                <th>Asset at risk</th>
-                <th>ALE point</th>
-                <th>Mean ALE</th>
-                <th>P90</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((q) => (
-                <tr key={q.id} style={{ cursor: "pointer" }} onClick={() => toggle(q.id)}>
-                  <td className="ref">{q.reference || "—"}</td>
-                  <td className="cell-title">{q.title}</td>
-                  <td className="muted">{q.asset_at_risk || "—"}</td>
-                  <td className="muted">{pkr(q.ale_point, q.currency)}</td>
-                  <td className="muted">{q.last_simulated ? pkr(q.last_mean_ale, q.currency) : "—"}</td>
-                  <td className="muted">{q.last_simulated ? pkr(q.last_p90, q.currency) : "—"}</td>
-                  <td><Badge tone={STATUS_TONE[q.status] || "neutral"}>{cap(q.status)}</Badge></td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => runSimulate(q.id)} disabled={simulating === q.id}>
-                        {simulating === q.id ? "Simulating…" : "Simulate"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => toggle(q.id)}>
-                        {openId === q.id ? "Hide" : "View"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => openEdit(q)}>Edit</button>
-                      <button className="btn secondary sm" onClick={() => remove(q)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {rows.length === 0 && (
-                <tr>
-                  <td colSpan={8}>
-                    <div className="empty">
-                      <span className="ico"><IconGauge width={24} height={24} /></span>
-                      <h3>No quantified risks</h3>
-                      <p>Frame a loss scenario with frequency and magnitude estimates, then run a Monte Carlo to size the exposure in PKR.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<RiskQuant>
+        columns={columns}
+        fetcher={fetchRows}
+        rowKey={(q) => q.id}
+        onRowClick={(q) => setOpenId(q.id)}
+        activeKey={openId}
+        searchPlaceholder="Search quantifications by title, reference or asset…"
+        defaultSort={{ by: "last_mean_ale", dir: "desc" }}
+        emptyMessage="No quantified risks. Frame a loss scenario with frequency and magnitude estimates, then run a Monte Carlo to size the exposure in PKR."
+        refreshKey={refreshKey}
+      />
 
-      {openId && (() => {
-        const q = rows.find((x) => x.id === openId);
-        if (!q) return null;
-        const fresh = results[q.id];
-        const hasCurve = fresh || q.last_simulated;
-        return (
+      {/* ============================================= DRAWER */}
+      <RecordDrawer
+        open={!!openId && !!quantDetail}
+        onClose={() => setOpenId(null)}
+        title={quantDetail ? `${quantDetail.reference || ""} ${quantDetail.title}`.trim() : "…"}
+        subtitle={quantDetail ? `${cap(quantDetail.status)} · ${quantDetail.asset_at_risk || "no asset"}${quantDetail.last_simulated ? " · last simulated " + quantDetail.last_simulated : " · not yet simulated"}` : ""}
+        width={720}
+        actions={quantDetail && (
           <>
-            <div className="card" style={{ margin: "16px 0" }}>
-              <div className="card-head row-between">
-                <div>
-                  <h3>{q.reference} — {q.title}</h3>
-                  <span className="sub">
-                    {cap(q.status)} · {q.asset_at_risk || "no asset"}
-                    {q.last_simulated ? " · last simulated " + q.last_simulated : " · not yet simulated"}
-                  </span>
-                </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button className="btn" onClick={() => runSimulate(q.id)} disabled={simulating === q.id}>
-                    {simulating === q.id ? "Simulating…" : "Run simulation"}
-                  </button>
-                  <button className="btn secondary sm" onClick={() => openEdit(q)}>Edit</button>
-                  <button className="btn secondary sm" onClick={() => remove(q)}>Delete</button>
-                </div>
-              </div>
-
+            <button className="btn sm" onClick={() => runSimulate(quantDetail.id)} disabled={simulating === quantDetail.id}>
+              {simulating === quantDetail.id ? "Simulating…" : "Run simulation"}
+            </button>
+            <button className="btn secondary sm" onClick={() => openEdit(quantDetail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(quantDetail)}>Delete</button>
+          </>
+        )}
+      >
+        {quantDetail && (
+          <>
+            <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-pad">
-                <div className="field-row" style={{ marginBottom: 12 }}>
+                <div className="field-row" style={{ marginBottom: 12, flexWrap: "wrap" }}>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Threat Event Frequency (events/yr)</div>
-                    <strong>{num(q.tef_min)} · {num(q.tef_likely)} · {num(q.tef_max)}</strong>
+                    <strong>{num(quantDetail.tef_min)} · {num(quantDetail.tef_likely)} · {num(quantDetail.tef_max)}</strong>
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Loss Magnitude / event</div>
-                    <strong>{pkr(q.lm_min, q.currency)} · {pkr(q.lm_likely, q.currency)} · {pkr(q.lm_max, q.currency)}</strong>
+                    <strong>{pkr(quantDetail.lm_min, quantDetail.currency)} · {pkr(quantDetail.lm_likely, quantDetail.currency)} · {pkr(quantDetail.lm_max, quantDetail.currency)}</strong>
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Point ALE · iterations</div>
-                    <strong>{pkr(q.ale_point, q.currency)} · {num(q.iterations)}</strong>
+                    <strong>{pkr(quantDetail.ale_point, quantDetail.currency)} · {num(quantDetail.iterations)}</strong>
                   </div>
                 </div>
 
@@ -533,38 +515,38 @@ export default function RiskQuantificationPage() {
                 {fresh && (
                   <>
                     <div className="grid stat-grid" style={{ marginTop: 12 }}>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p10, q.currency)}</span></div><span className="l">P10</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p50, q.currency)}</span></div><span className="l">P50 (median)</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p90, q.currency)}</span></div><span className="l">P90</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.mean, q.currency)}</span></div><span className="l">Mean ALE</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.max, q.currency)}</span></div><span className="l">Max</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p10, quantDetail.currency)}</span></div><span className="l">P10</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p50, quantDetail.currency)}</span></div><span className="l">P50 (median)</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p90, quantDetail.currency)}</span></div><span className="l">P90</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.mean, quantDetail.currency)}</span></div><span className="l">Mean ALE</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.max, quantDetail.currency)}</span></div><span className="l">Max</span></div>
                     </div>
-                    <SimBars p50={fresh.p50} p90={fresh.p90} max={fresh.max} currency={q.currency} />
+                    <SimBars p50={fresh.p50} p90={fresh.p90} max={fresh.max} currency={quantDetail.currency} />
                     <p className="muted" style={{ marginTop: 10, fontSize: 12 }}>
                       Based on {num(fresh.iterations)} Monte Carlo iterations.
                     </p>
                   </>
                 )}
 
-                {!fresh && q.last_simulated && (
+                {!fresh && quantDetail.last_simulated && (
                   <>
                     <div className="grid stat-grid" style={{ marginTop: 12 }}>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(q.last_mean_ale, q.currency)}</span></div><span className="l">Mean ALE (cached)</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(q.last_p90, q.currency)}</span></div><span className="l">P90 (cached)</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(quantDetail.last_mean_ale, quantDetail.currency)}</span></div><span className="l">Mean ALE (cached)</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(quantDetail.last_p90, quantDetail.currency)}</span></div><span className="l">P90 (cached)</span></div>
                     </div>
-                    <SimBars p50={q.last_mean_ale} p90={q.last_p90} max={q.last_p90} currency={q.currency} />
+                    <SimBars p50={quantDetail.last_mean_ale} p90={quantDetail.last_p90} max={quantDetail.last_p90} currency={quantDetail.currency} />
                     <p className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-                      Cached from the run on {q.last_simulated}. Run again for the full P10 / P50 / max breakdown.
+                      Cached from the run on {quantDetail.last_simulated}. Run again for the full P10 / P50 / max breakdown.
                     </p>
                   </>
                 )}
               </div>
             </div>
 
-            <RecordPanels model="risk_quantification" entityId={q.id} />
+            <RecordPanels model="risk_quantification" entityId={quantDetail.id} />
           </>
-        );
-      })()}
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -597,5 +579,13 @@ export default function RiskQuantificationPage() {
         />
       )}
     </>
+  );
+}
+
+export default function RiskQuantificationPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <RiskQuantificationInner />
+    </Suspense>
   );
 }

@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconAlert } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -70,7 +75,6 @@ type Issue = {
   created_at?: string;
 };
 
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 type IssuesSummary = {
   by_status: Record<string, number>;
   by_source_type: Record<string, number>;
@@ -113,12 +117,6 @@ const SEV_TONE: Record<string, Tone> = {
   medium: "medium",
   high: "high",
   critical: "critical",
-};
-const ACTION_STATUS_TONE: Record<string, Tone> = {
-  open: "high",
-  in_progress: "info",
-  done: "low",
-  cancelled: "neutral",
 };
 
 function StatusBadge({ value }: { value: string }) {
@@ -238,170 +236,127 @@ type UpdateDraft = {
 };
 const BLANK_UPDATE: UpdateDraft = { note: "", author: "", update_date: "", status_change: "" };
 
-export default function IssuesPage() {
+/* ================================================================ page ===== */
+function IssuesInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<Issue | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [issues, setIssues] = useState<Issue[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<IssuesSummary | null>(null);
 
   // ---- filters ----
-  const [fSearch, setFSearch] = useState("");
   const [fStatus, setFStatus] = useState("");
   const [fSource, setFSource] = useState("");
   const [fOverdue, setFOverdue] = useState(false);
   const [fRegulator, setFRegulator] = useState(false);
 
-  // ---- issue dialog + expanded detail ----
+  // ---- issue dialog ----
   const [editing, setEditing] = useState<Issue | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<IssueForm>(BLANK_ISSUE);
   const setFF = <K extends keyof IssueForm>(k: K, v: IssueForm[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  const [open, setOpen] = useState<Issue | null>(null);
+  // ---- inline drafts (drawer) ----
   const [ad, setAd] = useState<ActionDraft>(BLANK_ACTION);
   const setAD = <K extends keyof ActionDraft>(k: K, v: ActionDraft[K]) => setAd((p) => ({ ...p, [k]: v }));
   const [ud, setUd] = useState<UpdateDraft>(BLANK_UPDATE);
   const setUD = <K extends keyof UpdateDraft>(k: K, v: UpdateDraft[K]) => setUd((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadIssues(keepOpen?: string) {
-    try {
-      const params = new URLSearchParams({ limit: "200" });
-      if (fSearch.trim()) params.set("search", fSearch.trim());
-      if (fStatus) params.set("status", fStatus);
-      if (fSource) params.set("source_type", fSource);
-      if (fOverdue) params.set("overdue", "true");
-      if (fRegulator) params.set("regulator_related", "true");
-      const res = await apiCall<Page<Issue>>("GET", `/issues?${params.toString()}`);
-      setIssues(res.items);
-      if (keepOpen) setOpen(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load issues");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<IssuesSummary>("GET", "/issues-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load summary");
-    }
-  }
-  async function refreshIssue(id: string) {
-    const i = await apiCall<Issue>("GET", `/issues/${id}`);
-    setOpen(i);
-    setIssues((prev) => prev.map((x) => (x.id === id ? i : x)));
-  }
-
-  useEffect(() => {
-    loadIssues();
-    loadSummary();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchIssues = useCallback((qs: string) => apiCall<PagedList<Issue>>("GET", `/issues?${qs}`), []);
+  const loadSummary = useCallback(() => {
+    apiCall<IssuesSummary>("GET", "/issues-summary").then(setSummary).catch(() => {});
   }, []);
+  const loadDetail = useCallback((id: string) => {
+    setAd(BLANK_ACTION); setUd(BLANK_UPDATE);
+    apiCall<Issue>("GET", `/issues/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
+  useEffect(() => { loadSummary(); }, [loadSummary]);
 
   // ------------------------------------------------------------- issue CRUD
-  function openNew() {
-    setEditing(null);
-    setF(BLANK_ISSUE);
-    setShowForm(true);
-  }
-  function openEdit(i: Issue) {
-    setEditing(i);
-    setF(fromIssue(i));
-    setShowForm(true);
-  }
+  function openNew() { setEditing(null); setF(BLANK_ISSUE); setError(null); setShowForm(true); }
+  function openEdit(i: Issue) { setEditing(i); setF(fromIssue(i)); setError(null); setShowForm(true); }
   async function save() {
-    setError(null);
-    setSaving(true);
+    setError(null); setSaving(true);
     try {
       const payload = issuePayload(f);
       if (editing) await apiCall<Issue>("PATCH", `/issues/${editing.id}`, payload);
       else await apiCall<Issue>("POST", "/issues", payload);
-      setShowForm(false);
-      await loadIssues(open?.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save issue");
-    } finally {
-      setSaving(false);
-    }
+      setShowForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
+      toast(editing ? "Changes saved" : "Issue raised");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save issue"); }
+    finally { setSaving(false); }
   }
   async function remove(i: Issue) {
-    if (!window.confirm(`Delete issue ${i.reference || i.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete issue ${i.reference || i.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/issues/${i.id}`);
       setShowForm(false);
-      if (open?.id === i.id) setOpen(null);
-      await loadIssues();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
-  }
-  function toggle(i: Issue) {
-    setAd(BLANK_ACTION);
-    setUd(BLANK_UPDATE);
-    setOpen(open?.id === i.id ? null : i);
+      if (openId === i.id) setOpenId(null);
+      reload(); loadSummary(); toast("Deleted");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
   }
 
   // ------------------------------------------------------------- CAPA actions (inline)
   async function addAction() {
-    if (!open) return;
-    setError(null);
+    if (!detail) return; setError(null);
     try {
-      await apiCall<Issue>("POST", `/issues/${open.id}/actions`, {
-        title: ad.title,
-        action_type: ad.action_type,
-        owner: ad.owner,
-        due_date: ad.due_date || null,
-        status: ad.status,
+      await apiCall<Issue>("POST", `/issues/${detail.id}/actions`, {
+        title: ad.title, action_type: ad.action_type, owner: ad.owner,
+        due_date: ad.due_date || null, status: ad.status,
       });
-      setAd(BLANK_ACTION);
-      await refreshIssue(open.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to add action");
-    }
+      setAd(BLANK_ACTION); loadDetail(detail.id); reload(); loadSummary();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to add action"); }
   }
   async function setActionStatus(lineId: string, status: string) {
-    if (!open) return;
-    setError(null);
+    if (!detail) return; setError(null);
     try {
       await apiCall<IssueAction>("PATCH", `/issue-actions/${lineId}`, { status });
-      await refreshIssue(open.id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update action");
-    }
+      loadDetail(detail.id); reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to update action"); }
   }
   async function removeAction(lineId: string) {
-    if (!open) return;
-    if (!window.confirm("Remove this action?")) return;
+    if (!detail) return;
+    if (!(await confirmDialog({ title: "Remove this action?", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/issue-actions/${lineId}`);
-      await refreshIssue(open.id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to remove action");
-    }
+      loadDetail(detail.id); reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to remove action"); }
   }
 
   // ------------------------------------------------------------- updates (inline)
   async function addUpdate() {
-    if (!open) return;
-    setError(null);
+    if (!detail) return; setError(null);
     try {
-      await apiCall<Issue>("POST", `/issues/${open.id}/updates`, {
-        note: ud.note,
-        author: ud.author,
-        update_date: ud.update_date || null,
-        status_change: ud.status_change,
+      await apiCall<Issue>("POST", `/issues/${detail.id}/updates`, {
+        note: ud.note, author: ud.author, update_date: ud.update_date || null, status_change: ud.status_change,
       });
-      setUd(BLANK_UPDATE);
-      await refreshIssue(open.id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to add update");
-    }
+      setUd(BLANK_UPDATE); loadDetail(detail.id); reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to add update"); }
   }
+
+  const columns: Column<Issue>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (i) => <span className="ref">{i.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (i) => <span className="cell-title">{i.title}{i.repeat_finding && <> <Badge tone="medium">Repeat</Badge></>}{i.regulator_related && <> <Badge tone="info">Regulator</Badge></>}</span> },
+    { key: "source_type", header: "Source", sortable: true, render: (i) => <Badge tone="info">{cap(i.source_type)}</Badge> },
+    { key: "severity", header: "Severity", sortable: true, render: (i) => <SevBadge value={i.severity} /> },
+    { key: "owner", header: "Owner", sortable: true, render: (i) => <span className="muted">{i.owner || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (i) => <StatusBadge value={i.status} /> },
+    { key: "actions_count", header: "Actions", align: "center", render: (i) => <span className="muted">{i.open_action_count}/{i.action_count}</span> },
+    { key: "due_date", header: "Due", sortable: true, render: (i) => (i.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{i.due_date || "—"}</span>) },
+    { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button></div> },
+  ];
+
+  const filters = {
+    status: fStatus || undefined,
+    source_type: fSource || undefined,
+    overdue: fOverdue || undefined,
+    regulator_related: fRegulator || undefined,
+  };
 
   // ------------------------------------------------------------- form tabs
   const generalTab = (
@@ -499,318 +454,188 @@ export default function IssuesPage() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       {/* ============================================= stats */}
-      <div className="grid stat-grid">
+      <div className="grid stat-grid" style={{ marginBottom: 16 }}>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.total_open.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.total_open.toLocaleString() : "—"}</span></div>
           <span className="l">Open issues</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.overdue_count.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.overdue_count.toLocaleString() : "—"}</span></div>
           <span className="l">Overdue</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.repeat_finding_count.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.repeat_finding_count.toLocaleString() : "—"}</span></div>
           <span className="l">Repeat findings</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.regulator_related_open.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.regulator_related_open.toLocaleString() : "—"}</span></div>
           <span className="l">Regulator-related open</span>
         </div>
       </div>
 
-      {/* ============================================= filters + register */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Issues</h3>
-          <span className="sub">{issues.length} shown · click a row to manage actions &amp; progress</span>
-        </div>
-
-        <form
-          className="card-pad"
-          style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", paddingBottom: 4 }}
-          onSubmit={(ev) => { ev.preventDefault(); loadIssues(open?.id); }}
-        >
-          <div style={{ flex: "1 1 220px" }}>
-            <label className="label">Search</label>
-            <input className="input" value={fSearch} onChange={(ev) => setFSearch(ev.target.value)} placeholder="Title, reference, owner…" />
-          </div>
-          <div style={{ width: 170 }}>
-            <label className="label">Status</label>
-            <select className="select" value={fStatus} onChange={(ev) => setFStatus(ev.target.value)}>
+      <DataTable<Issue>
+        columns={columns}
+        fetcher={fetchIssues}
+        rowKey={(i) => i.id}
+        onRowClick={(i) => setOpenId(i.id)}
+        activeKey={openId}
+        searchPlaceholder="Search title, reference, owner…"
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        filters={filters}
+        toolbarRight={
+          <>
+            <select className="select" style={{ maxWidth: 170 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
               <option value="">All statuses</option>
               {ISSUE_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
-          </div>
-          <div style={{ width: 190 }}>
-            <label className="label">Source</label>
-            <select className="select" value={fSource} onChange={(ev) => setFSource(ev.target.value)}>
+            <select className="select" style={{ maxWidth: 190 }} value={fSource} onChange={(e) => setFSource(e.target.value)}>
               <option value="">All sources</option>
               {SOURCE_TYPES.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
-          </div>
-          <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-            <input type="checkbox" checked={fOverdue} onChange={(ev) => setFOverdue(ev.target.checked)} /> Overdue only
-          </label>
-          <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-            <input type="checkbox" checked={fRegulator} onChange={(ev) => setFRegulator(ev.target.checked)} /> Regulator-related
-          </label>
-          <button className="btn secondary sm" type="submit">Apply</button>
-        </form>
+            <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+              <input type="checkbox" checked={fOverdue} onChange={(e) => setFOverdue(e.target.checked)} /> Overdue
+            </label>
+            <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+              <input type="checkbox" checked={fRegulator} onChange={(e) => setFRegulator(e.target.checked)} /> Regulator
+            </label>
+          </>
+        }
+        emptyMessage="No issues. Raise an issue, or feed findings from audit, compliance, RCSA, Shariah, incidents and inspections into one register."
+        refreshKey={refreshKey}
+      />
 
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Title</th>
-                <th>Source</th>
-                <th>Severity</th>
-                <th>Owner</th>
-                <th>Status</th>
-                <th>Actions</th>
-                <th>Due</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {issues.map((i) => (
-                <tr key={i.id} style={{ cursor: "pointer" }} onClick={() => toggle(i)}>
-                  <td className="ref">{i.reference || "—"}</td>
-                  <td className="cell-title">
-                    {i.title}
-                    {i.repeat_finding && <> <Badge tone="medium">Repeat</Badge></>}
-                    {i.regulator_related && <> <Badge tone="info">Regulator</Badge></>}
-                  </td>
-                  <td><Badge tone="info">{cap(i.source_type)}</Badge></td>
-                  <td><SevBadge value={i.severity} /></td>
-                  <td className="muted">{i.owner || "—"}</td>
-                  <td><StatusBadge value={i.status} /></td>
-                  <td className="muted">{i.open_action_count}/{i.action_count}</td>
-                  <td>
-                    {i.is_overdue ? (
-                      <Badge tone="high">Overdue</Badge>
-                    ) : (
-                      <span className="muted">{i.due_date || "—"}</span>
-                    )}
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => toggle(i)}>
-                        {open?.id === i.id ? "Hide" : "Manage"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button>
-                      <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {issues.length === 0 && (
-                <tr>
-                  <td colSpan={9}>
-                    <div className="empty">
-                      <span className="ico"><IconAlert width={24} height={24} /></span>
-                      <h3>No issues</h3>
-                      <p>Raise an issue, or feed findings from audit, compliance, RCSA, Shariah, incidents and inspections into one register.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* ============================================= detail */}
-      {open && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head row-between">
-              <div>
-                <h3>{open.reference} — {open.title}</h3>
-                <span className="sub">
-                  {cap(open.status)} · {cap(open.source_type)}
-                  {open.source_reference ? " · " + open.source_reference : ""}
-                  {open.owner ? " · owner " + open.owner : ""} · {open.age_days}d old
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <SevBadge value={open.severity} />
-                  <StatusBadge value={open.status} />
-                  {open.is_overdue && <Badge tone="high">Overdue</Badge>}
-                </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button className="btn secondary sm" onClick={() => openEdit(open)}>Edit</button>
-                  <button className="btn secondary sm" onClick={() => remove(open)}>Delete</button>
-                </div>
-              </div>
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
+        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.source_type)}${detail.owner ? " · owner " + detail.owner : ""} · ${detail.age_days}d old` : ""}
+        width={820}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+              <SevBadge value={detail.severity} />
+              <StatusBadge value={detail.status} />
+              {detail.is_overdue && <Badge tone="high">Overdue</Badge>}
             </div>
 
-            <div className="card-pad">
-              {(open.description || open.root_cause || open.management_response) && (
-                <div style={{ marginBottom: 16, display: "grid", gap: 8 }}>
-                  {open.description && (
-                    <div><span className="muted" style={{ fontSize: 12 }}>Description</span><div>{open.description}</div></div>
-                  )}
-                  {open.root_cause && (
-                    <div><span className="muted" style={{ fontSize: 12 }}>Root cause</span><div>{open.root_cause}</div></div>
-                  )}
-                  {open.management_response && (
-                    <div><span className="muted" style={{ fontSize: 12 }}>Management response</span><div>{open.management_response}</div></div>
-                  )}
-                </div>
-              )}
-
-              {/* -------- CAPA actions -------- */}
-              <strong>Corrective &amp; preventive actions (CAPA)</strong>
-              <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                The remediation plan for this issue. Marking an action done stamps its completion date.
-              </p>
-              <form
-                style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                onSubmit={(ev) => { ev.preventDefault(); addAction(); }}
-              >
-                <div style={{ flex: "1 1 220px" }}>
-                  <label className="label">Action title</label>
-                  <input className="input" value={ad.title} onChange={(ev) => setAD("title", ev.target.value)} placeholder="Corrective action" required />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Type</label>
-                  <select className="select" value={ad.action_type} onChange={(ev) => setAD("action_type", ev.target.value)}>
-                    {CAPA_TYPE.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                  </select>
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Owner</label>
-                  <input className="input" value={ad.owner} onChange={(ev) => setAD("owner", ev.target.value)} placeholder="Owner" />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Due date</label>
-                  <input className="input" type="date" value={ad.due_date} onChange={(ev) => setAD("due_date", ev.target.value)} />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Status</label>
-                  <select className="select" value={ad.status} onChange={(ev) => setAD("status", ev.target.value)}>
-                    {ACTION_STATUS.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                  </select>
-                </div>
-                <button className="btn">Add</button>
-              </form>
-
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Title</th>
-                      <th>Type</th>
-                      <th>Owner</th>
-                      <th>Due</th>
-                      <th>Completed</th>
-                      <th>Status</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {open.actions.map((a) => (
-                      <tr key={a.id}>
-                        <td className="cell-title">{a.title}</td>
-                        <td><Badge tone={a.action_type === "preventive" ? "info" : "neutral"}>{cap(a.action_type)}</Badge></td>
-                        <td className="muted">{a.owner || "—"}</td>
-                        <td>
-                          {a.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{a.due_date || "—"}</span>}
-                        </td>
-                        <td className="muted">{a.completed_date || "—"}</td>
-                        <td>
-                          <select
-                            className="select"
-                            value={a.status}
-                            onChange={(ev) => setActionStatus(a.id, ev.target.value)}
-                            style={{ padding: "2px 6px", height: "auto" }}
-                          >
-                            {ACTION_STATUS.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                          </select>
-                        </td>
-                        <td>
-                          <button className="btn secondary sm" onClick={() => removeAction(a.id)}>Remove</button>
-                        </td>
-                      </tr>
-                    ))}
-                    {open.actions.length === 0 && (
-                      <tr><td colSpan={7}><span className="muted">No actions recorded yet.</span></td></tr>
-                    )}
-                  </tbody>
-                </table>
+            {(detail.description || detail.root_cause || detail.management_response) && (
+              <div style={{ marginBottom: 16, display: "grid", gap: 8 }}>
+                {detail.description && <div><span className="muted" style={{ fontSize: 12 }}>Description</span><div>{detail.description}</div></div>}
+                {detail.root_cause && <div><span className="muted" style={{ fontSize: 12 }}>Root cause</span><div>{detail.root_cause}</div></div>}
+                {detail.management_response && <div><span className="muted" style={{ fontSize: 12 }}>Management response</span><div>{detail.management_response}</div></div>}
               </div>
+            )}
 
-              {/* -------- progress log -------- */}
-              <strong style={{ display: "block", marginTop: 20 }}>Progress log</strong>
-              <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                Chronological remediation updates and status changes.
-              </p>
-              <form
-                style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                onSubmit={(ev) => { ev.preventDefault(); addUpdate(); }}
-              >
-                <div style={{ flex: "1 1 260px" }}>
-                  <label className="label">Update note</label>
-                  <input className="input" value={ud.note} onChange={(ev) => setUD("note", ev.target.value)} placeholder="Progress note" required />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Author</label>
-                  <input className="input" value={ud.author} onChange={(ev) => setUD("author", ev.target.value)} placeholder="Author" />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Date</label>
-                  <input className="input" type="date" value={ud.update_date} onChange={(ev) => setUD("update_date", ev.target.value)} />
-                </div>
-                <div style={{ width: 170 }}>
-                  <label className="label">Status change</label>
-                  <input className="input" value={ud.status_change} onChange={(ev) => setUD("status_change", ev.target.value)} placeholder="e.g. open → in_progress" />
-                </div>
-                <button className="btn">Log</button>
-              </form>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Corrective &amp; preventive actions (CAPA)</h3></div>
+              <div className="card-pad">
+                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+                  The remediation plan for this issue. Marking an action done stamps its completion date.
+                </p>
+                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); addAction(); }}>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Action title</label>
+                    <input className="input" value={ad.title} onChange={(ev) => setAD("title", ev.target.value)} placeholder="Corrective action" required />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Type</label>
+                    <select className="select" value={ad.action_type} onChange={(ev) => setAD("action_type", ev.target.value)}>
+                      {CAPA_TYPE.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Owner</label>
+                    <input className="input" value={ad.owner} onChange={(ev) => setAD("owner", ev.target.value)} placeholder="Owner" />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Due date</label>
+                    <input className="input" type="date" value={ad.due_date} onChange={(ev) => setAD("due_date", ev.target.value)} />
+                  </div>
+                  <button className="btn">Add</button>
+                </form>
 
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Author</th>
-                      <th>Note</th>
-                      <th>Status change</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...open.updates]
-                      .sort((a, b) => (b.update_date || "").localeCompare(a.update_date || ""))
-                      .map((u) => (
-                        <tr key={u.id}>
-                          <td className="muted">{u.update_date || "—"}</td>
-                          <td className="muted">{u.author || "—"}</td>
-                          <td className="cell-title">{u.note || "—"}</td>
-                          <td className="muted">{u.status_change || "—"}</td>
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>Title</th><th>Type</th><th>Owner</th><th>Due</th><th>Completed</th><th>Status</th><th></th></tr></thead>
+                    <tbody>
+                      {detail.actions.map((a) => (
+                        <tr key={a.id}>
+                          <td className="cell-title">{a.title}</td>
+                          <td><Badge tone={a.action_type === "preventive" ? "info" : "neutral"}>{cap(a.action_type)}</Badge></td>
+                          <td className="muted">{a.owner || "—"}</td>
+                          <td>{a.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{a.due_date || "—"}</span>}</td>
+                          <td className="muted">{a.completed_date || "—"}</td>
+                          <td>
+                            <select className="select" value={a.status} onChange={(ev) => setActionStatus(a.id, ev.target.value)} style={{ padding: "2px 6px", height: "auto" }}>
+                              {ACTION_STATUS.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                            </select>
+                          </td>
+                          <td><button className="btn secondary sm" onClick={() => removeAction(a.id)}>Remove</button></td>
                         </tr>
                       ))}
-                    {open.updates.length === 0 && (
-                      <tr><td colSpan={4}><span className="muted">No progress logged yet.</span></td></tr>
-                    )}
-                  </tbody>
-                </table>
+                      {detail.actions.length === 0 && (<tr><td colSpan={7}><span className="muted">No actions recorded yet.</span></td></tr>)}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
-          </div>
 
-          <RecordPanels model="issue" entityId={open.id} />
-        </>
-      )}
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Progress log</h3></div>
+              <div className="card-pad">
+                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>Chronological remediation updates and status changes.</p>
+                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); addUpdate(); }}>
+                  <div style={{ flex: "1 1 220px" }}>
+                    <label className="label">Update note</label>
+                    <input className="input" value={ud.note} onChange={(ev) => setUD("note", ev.target.value)} placeholder="Progress note" required />
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Author</label>
+                    <input className="input" value={ud.author} onChange={(ev) => setUD("author", ev.target.value)} placeholder="Author" />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Date</label>
+                    <input className="input" type="date" value={ud.update_date} onChange={(ev) => setUD("update_date", ev.target.value)} />
+                  </div>
+                  <div style={{ width: 160 }}>
+                    <label className="label">Status change</label>
+                    <input className="input" value={ud.status_change} onChange={(ev) => setUD("status_change", ev.target.value)} placeholder="open → in_progress" />
+                  </div>
+                  <button className="btn">Log</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>Date</th><th>Author</th><th>Note</th><th>Status change</th></tr></thead>
+                    <tbody>
+                      {[...detail.updates]
+                        .sort((a, b) => (b.update_date || "").localeCompare(a.update_date || ""))
+                        .map((u) => (
+                          <tr key={u.id}>
+                            <td className="muted">{u.update_date || "—"}</td>
+                            <td className="muted">{u.author || "—"}</td>
+                            <td className="cell-title">{u.note || "—"}</td>
+                            <td className="muted">{u.status_change || "—"}</td>
+                          </tr>
+                        ))}
+                      {detail.updates.length === 0 && (<tr><td colSpan={4}><span className="muted">No progress logged yet.</span></td></tr>)}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="issue" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= modal */}
       {showForm && (
@@ -829,13 +654,7 @@ export default function IssuesPage() {
           saveLabel={editing ? "Save changes" : "Create issue"}
           footerLeft={
             editing ? (
-              <button
-                className="btn secondary sm"
-                type="button"
-                onClick={() => remove(editing)}
-                disabled={saving}
-                style={{ color: "var(--danger, #c0392b)" }}
-              >
+              <button className="btn secondary sm" type="button" onClick={() => remove(editing)} disabled={saving} style={{ color: "var(--danger, #c0392b)" }}>
                 Delete
               </button>
             ) : undefined
@@ -843,5 +662,13 @@ export default function IssuesPage() {
         />
       )}
     </>
+  );
+}
+
+export default function IssuesPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <IssuesInner />
+    </Suspense>
   );
 }

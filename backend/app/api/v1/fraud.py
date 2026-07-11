@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.fraud import (
     FraudCase,
     FraudCaseStatus,
@@ -61,12 +62,27 @@ async def _get(db, model, obj_id, name):
 
 
 # ============================================================ fraud risks ===
+_FRAUD_RISK_SORTABLE = {
+    "reference": FraudRisk.reference,
+    "title": FraudRisk.title,
+    "scheme": FraudRisk.scheme,
+    "channel": FraudRisk.channel,
+    "business_line": FraudRisk.business_line,
+    "control_effectiveness": FraudRisk.control_effectiveness,
+    "status": FraudRisk.status,
+    "created_at": FraudRisk.created_at,
+}
+
+
 @router.get("/fraud-risks", response_model=Page[FraudRiskRead], dependencies=[_READ])
 async def list_fraud_risks(
     db: DbSession,
     status: FraudRiskStatus | None = None,
     scheme: FraudScheme | None = None,
     channel: FraudChannel | None = None,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[FraudRiskRead]:
@@ -77,8 +93,16 @@ async def list_fraud_risks(
         stmt = stmt.where(FraudRisk.scheme == scheme)
     if channel is not None:
         stmt = stmt.where(FraudRisk.channel == channel)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(FraudRisk.title.ilike(like) | FraudRisk.reference.ilike(like))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(FraudRisk.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _FRAUD_RISK_SORTABLE, default=FraudRisk.created_at)
+    else:
+        stmt = stmt.order_by(FraudRisk.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[FraudRiskRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -114,6 +138,20 @@ async def delete_fraud_risk(rid: uuid.UUID, db: DbSession) -> None:
 
 
 # ============================================================ fraud cases ===
+_FRAUD_CASE_SORTABLE = {
+    "reference": FraudCase.reference,
+    "title": FraudCase.title,
+    "scheme": FraudCase.scheme,
+    "channel": FraudCase.channel,
+    "status": FraudCase.status,
+    "amount_involved": FraudCase.amount_involved,
+    "amount_recovered": FraudCase.amount_recovered,
+    "perpetrator_type": FraudCase.perpetrator_type,
+    "reported_date": FraudCase.reported_date,
+    "created_at": FraudCase.created_at,
+}
+
+
 @router.get("/fraud-cases", response_model=Page[FraudCaseRead], dependencies=[_READ])
 async def list_fraud_cases(
     db: DbSession,
@@ -121,6 +159,9 @@ async def list_fraud_cases(
     scheme: FraudScheme | None = None,
     perpetrator_type: PerpetratorType | None = None,
     reported_to_regulator: bool | None = None,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[FraudCaseRead]:
@@ -133,11 +174,18 @@ async def list_fraud_cases(
         stmt = stmt.where(FraudCase.perpetrator_type == perpetrator_type)
     if reported_to_regulator is not None:
         stmt = stmt.where(FraudCase.reported_to_regulator.is_(reported_to_regulator))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(FraudCase.title.ilike(like) | FraudCase.reference.ilike(like))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(
-        stmt.order_by(FraudCase.reported_date.is_(None), FraudCase.reported_date.desc(), FraudCase.created_at.desc())
-        .limit(limit).offset(offset)
-    )).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _FRAUD_CASE_SORTABLE, default=FraudCase.created_at)
+    else:
+        stmt = stmt.order_by(
+            FraudCase.reported_date.is_(None), FraudCase.reported_date.desc(), FraudCase.created_at.desc()
+        )
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[FraudCaseRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -175,12 +223,26 @@ async def delete_fraud_case(cid: uuid.UUID, db: DbSession) -> None:
 
 
 # ============================================ SBP digital-fraud checklist ===
+_FRAUD_CHECK_SORTABLE = {
+    "reference": FraudControlCheck.reference,
+    "sbp_reference": FraudControlCheck.sbp_reference,
+    "category": FraudControlCheck.category,
+    "status": FraudControlCheck.status,
+    "owner": FraudControlCheck.owner,
+    "target_date": FraudControlCheck.target_date,
+    "created_at": FraudControlCheck.created_at,
+}
+
+
 @router.get("/fraud-control-checks", response_model=Page[FraudControlCheckRead], dependencies=[_READ])
 async def list_fraud_control_checks(
     db: DbSession,
     category: FraudControlCategory | None = None,
     status: FraudControlStatus | None = None,
     implemented: bool | None = None,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[FraudControlCheckRead]:
@@ -191,8 +253,20 @@ async def list_fraud_control_checks(
         stmt = stmt.where(FraudControlCheck.status == status)
     if implemented is not None:
         stmt = stmt.where(FraudControlCheck.implemented.is_(implemented))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            FraudControlCheck.requirement.ilike(like)
+            | FraudControlCheck.reference.ilike(like)
+            | FraudControlCheck.sbp_reference.ilike(like)
+        )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(FraudControlCheck.created_at).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _FRAUD_CHECK_SORTABLE, default=FraudControlCheck.created_at)
+    else:
+        stmt = stmt.order_by(FraudControlCheck.created_at)
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[FraudControlCheckRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

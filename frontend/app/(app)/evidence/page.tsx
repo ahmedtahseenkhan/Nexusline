@@ -1,7 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
+import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import FileAttachments from "@/components/FileAttachments";
@@ -28,7 +32,6 @@ type Evidence = {
 };
 
 type ControlListItem = { id: string; name: string; reference: string };
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
@@ -44,6 +47,7 @@ const STATUS_TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
 
 type FormState = {
   control_id: string;
+  control_label: string;
   title: string;
   description: string;
   evidence_type: string;
@@ -55,6 +59,7 @@ type FormState = {
 
 const BLANK: FormState = {
   control_id: "",
+  control_label: "",
   title: "",
   description: "",
   evidence_type: "document",
@@ -67,6 +72,7 @@ const BLANK: FormState = {
 function fromEvidence(e: Evidence): FormState {
   return {
     control_id: e.control_id,
+    control_label: e.control ? e.control.reference || e.control.name : "",
     title: e.title,
     description: e.description || "",
     evidence_type: e.evidence_type,
@@ -91,10 +97,9 @@ function toPayload(f: FormState) {
   };
 }
 
-export default function EvidencePage() {
-  const [items, setItems] = useState<Evidence[]>([]);
-  const [controls, setControls] = useState<ControlListItem[]>([]);
+function EvidenceInner() {
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const [editing, setEditing] = useState<Evidence | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -104,23 +109,21 @@ export default function EvidencePage() {
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setF((p) => ({ ...p, [k]: v }));
 
-  async function load() {
-    try {
-      setItems((await apiCall<Page<Evidence>>("GET", "/evidence")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-    apiCall<Page<ControlListItem>>("GET", "/controls")
-      .then((r) => setControls(r.items))
-      .catch(() => {});
-  }, []);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchEvidence = useCallback(
+    (qs: string) => apiCall<PagedList<Evidence>>("GET", `/evidence?${qs}`),
+    [],
+  );
+
+  // server typeahead over the control catalog — any control is reachable, not just the first page
+  const searchControls = (q: string) =>
+    apiCall<PagedList<ControlListItem>>("GET", `/controls?search=${encodeURIComponent(q)}&limit=20`).then(
+      (r) => r.items.map((c) => ({ value: c.id, label: c.name, sub: c.reference })),
+    );
 
   function openNew() {
     setEditing(null);
-    setF({ ...BLANK, control_id: controls[0]?.id ?? "" });
+    setF(BLANK);
     setError(null);
     setShowForm(true);
   }
@@ -143,13 +146,15 @@ export default function EvidencePage() {
       if (editing) {
         await apiCall<Evidence>("PATCH", `/evidence/${editing.id}`, payload);
         setShowForm(false);
+        toast("Changes saved");
       } else {
         // Convert to edit mode after creating so the Files tab becomes usable and
         // the user can immediately upload the actual artifact.
         const created = await apiCall<Evidence>("POST", "/evidence", payload);
         setEditing(created);
+        toast("Evidence collected");
       }
-      await load();
+      reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save evidence");
     } finally {
@@ -157,28 +162,80 @@ export default function EvidencePage() {
     }
   }
 
-  async function remove(id: string) {
+  async function remove(ev: Evidence) {
+    if (!(await confirmDialog({ title: `Delete evidence "${ev.title}"?`, message: "This cannot be undone.", danger: true }))) return;
     setError(null);
     try {
-      await apiCall<void>("DELETE", `/evidence/${id}`);
-      await load();
+      await apiCall<void>("DELETE", `/evidence/${ev.id}`);
+      if (editing?.id === ev.id) setShowForm(false);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
 
-  const controlOpts: Option[] = useMemo(
-    () => controls.map((c) => ({ value: c.id, label: c.name, sub: c.reference })),
-    [controls],
-  );
+  const controlLabel = (e: Evidence) => (e.control ? e.control.reference || e.control.name : "—");
 
-  const controlLabel = (e: Evidence) =>
-    e.control ? e.control.reference || e.control.name : "—";
+  const columns: Column<Evidence>[] = [
+    {
+      key: "reference",
+      header: "Ref",
+      sortable: true,
+      render: (ev) => (
+        <span style={{ display: "inline-block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "bottom" }}>
+          {ev.reference ? (
+            <a href={ev.reference} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+              {ev.reference}
+            </a>
+          ) : (
+            <span className="muted">—</span>
+          )}
+        </span>
+      ),
+    },
+    { key: "title", header: "Title", sortable: true, render: (ev) => <span className="cell-title">{ev.title}</span> },
+    { key: "evidence_type", header: "Type", sortable: true, render: (ev) => <Badge tone="info" plain>{cap(ev.evidence_type)}</Badge> },
+    {
+      key: "status",
+      header: "Status",
+      sortable: true,
+      render: (ev) => (
+        <Badge tone={ev.is_expired ? "critical" : STATUS_TONE[ev.status] || "neutral"}>
+          {ev.is_expired && ev.status !== "expired" ? "Expired" : cap(ev.status)}
+        </Badge>
+      ),
+    },
+    { key: "control", header: "Control", render: (ev) => <span className="muted">{controlLabel(ev)}</span> },
+    { key: "collected_at", header: "Collected", sortable: true, render: (ev) => <span className="muted">{ev.collected_at || "—"}</span> },
+    {
+      key: "valid_until",
+      header: "Valid until",
+      sortable: true,
+      render: (ev) => (ev.valid_until ? (ev.is_expired ? <Badge tone="high">{ev.valid_until}</Badge> : <span className="muted">{ev.valid_until}</span>) : <span className="muted">—</span>),
+    },
+    {
+      key: "actions",
+      header: "",
+      render: (ev) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => openEdit(ev)}>Edit</button>{" "}
+          <button className="btn secondary sm" onClick={() => remove(ev)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
 
   const generalTab = (
     <>
       <Field label="Control" required help="Evidence is collected against a control — collect once, satisfy every requirement that control maps to.">
-        <Select value={f.control_id} onChange={(v) => set("control_id", v)} options={controlOpts} placeholder="Select a control…" />
+        <AsyncSelect
+          search={searchControls}
+          value={f.control_id || null}
+          selectedLabel={f.control_label}
+          onChange={(v, o) => setF((p) => ({ ...p, control_id: v || "", control_label: o?.label || "" }))}
+          placeholder="Search controls…"
+        />
       </Field>
       <Field label="Title" required help="For example: Q2 access review export, Firewall ruleset screenshot.">
         <TextInput value={f.title} onChange={(v) => set("title", v)} placeholder="Q2 access review export" required />
@@ -230,8 +287,8 @@ export default function EvidencePage() {
           <p>Audit-ready artifacts attached to controls — collect once, satisfy many.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <ImportExport resource="evidence" label="Evidence" onDone={load} />
-          <button className="btn" onClick={openNew} disabled={!controls.length}>
+          <ImportExport resource="evidence" label="Evidence" onDone={reload} />
+          <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add evidence
           </button>
         </div>
@@ -239,73 +296,17 @@ export default function EvidencePage() {
 
       {error && !showForm && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card">
-        <div className="card-head">
-          <h3>Collected evidence</h3>
-          <span className="sub">{items.length} items</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Title</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Control</th>
-                <th>Collected</th>
-                <th>Valid until</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((ev) => (
-                <tr key={ev.id} style={{ cursor: "pointer" }} onClick={() => openEdit(ev)}>
-                  <td className="muted" style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {ev.reference ? (
-                      <a href={ev.reference} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
-                        {ev.reference}
-                      </a>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                  <td className="cell-title">{ev.title}</td>
-                  <td><Badge tone="info" plain>{cap(ev.evidence_type)}</Badge></td>
-                  <td>
-                    <Badge tone={ev.is_expired ? "critical" : STATUS_TONE[ev.status] || "neutral"}>
-                      {ev.is_expired && ev.status !== "expired" ? "Expired" : cap(ev.status)}
-                    </Badge>
-                  </td>
-                  <td className="muted">{controlLabel(ev)}</td>
-                  <td className="muted">{ev.collected_at || "—"}</td>
-                  <td className="muted">
-                    {ev.valid_until
-                      ? (ev.is_expired ? <Badge tone="high">{ev.valid_until}</Badge> : ev.valid_until)
-                      : "—"}
-                  </td>
-                  <td>
-                    <div onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => remove(ev.id)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={8}>
-                    <div className="empty">
-                      <span className="ico"><IconEvidence width={24} height={24} /></span>
-                      <h3>No evidence yet</h3>
-                      <p>Attach evidence to a control to demonstrate compliance.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<Evidence>
+        columns={columns}
+        fetcher={fetchEvidence}
+        rowKey={(e) => e.id}
+        onRowClick={(e) => openEdit(e)}
+        searchPlaceholder="Search evidence by title or reference…"
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        emptyMessage="No evidence yet. Attach evidence to a control to demonstrate compliance."
+        refreshKey={refreshKey}
+        toolbarRight={<span className="muted" style={{ fontSize: 13, display: "inline-flex", gap: 6, alignItems: "center" }}><IconEvidence width={16} height={16} /> collect once, satisfy many</span>}
+      />
 
       {showForm && (
         <FormModal
@@ -323,5 +324,13 @@ export default function EvidencePage() {
         />
       )}
     </>
+  );
+}
+
+export default function EvidencePage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <EvidenceInner />
+    </Suspense>
   );
 }

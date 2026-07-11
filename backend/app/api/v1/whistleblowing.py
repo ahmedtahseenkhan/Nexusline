@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.whistleblowing import (
     WhistleblowingReport,
     WhistleCategory,
@@ -59,6 +60,17 @@ async def _load_report(db, rid) -> WhistleblowingReport:
     return obj
 
 
+_WHISTLE_SORTABLE = {
+    "reference": WhistleblowingReport.reference,
+    "title": WhistleblowingReport.title,
+    "category": WhistleblowingReport.category,
+    "severity": WhistleblowingReport.severity,
+    "status": WhistleblowingReport.status,
+    "received_date": WhistleblowingReport.received_date,
+    "created_at": WhistleblowingReport.created_at,
+}
+
+
 # ============================================================== reports ===
 @router.get("/whistleblowing", response_model=Page[WhistleReportRead], dependencies=[_READ])
 async def list_reports(
@@ -66,6 +78,8 @@ async def list_reports(
     search: str | None = None,
     status: WhistleStatus | None = None,
     category: WhistleCategory | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[WhistleReportRead]:
@@ -86,13 +100,16 @@ async def list_reports(
     if category is not None:
         stmt = stmt.where(WhistleblowingReport.category == category)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(
-        stmt.order_by(
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _WHISTLE_SORTABLE, default=WhistleblowingReport.received_date)
+    else:
+        stmt = stmt.order_by(
             WhistleblowingReport.received_date.is_(None),
             WhistleblowingReport.received_date.desc(),
             WhistleblowingReport.created_at.desc(),
-        ).limit(limit).offset(offset)
-    )).all()
+        )
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[WhistleReportRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -167,6 +184,7 @@ class WhistleSummary(BaseModel):
     open_investigations: int
     substantiated: int
     substantiated_rate: float
+    anonymous_rate: float
 
 
 @router.get("/whistleblowing-summary", response_model=WhistleSummary, dependencies=[_READ],
@@ -181,6 +199,7 @@ async def whistleblowing_summary(db: DbSession) -> WhistleSummary:
     open_investigations = 0
     substantiated = 0
     concluded = 0
+    anonymous = 0
     for r in reports:
         by_status[r.status.value] += 1
         by_category[r.category.value] += 1
@@ -190,9 +209,13 @@ async def whistleblowing_summary(db: DbSession) -> WhistleSummary:
             concluded += 1
         if r.status == WhistleStatus.substantiated:
             substantiated += 1
+        if r.anonymous:
+            anonymous += 1
 
     # Rate = substantiated as a share of concluded investigations.
     substantiated_rate = round(substantiated / concluded * 100, 1) if concluded else 0.0
+    # Share of all reports received through an anonymous channel.
+    anonymous_rate = round(anonymous / len(reports) * 100, 1) if reports else 0.0
 
     return WhistleSummary(
         total=len(reports),
@@ -201,4 +224,5 @@ async def whistleblowing_summary(db: DbSession) -> WhistleSummary:
         open_investigations=open_investigations,
         substantiated=substantiated,
         substantiated_rate=substantiated_rate,
+        anonymous_rate=anonymous_rate,
     )

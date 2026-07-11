@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.assessment import (
     Assessment,
     AssessmentAnswer,
@@ -20,6 +21,7 @@ from app.models.assessment import (
 )
 from app.models.enums import FindingStatus, VendorAssessmentStatus
 from app.models.vendor import Vendor
+from app.schemas.common import Page
 from app.schemas.assessment import (
     AssessmentCreate,
     AssessmentRead,
@@ -39,14 +41,41 @@ router = APIRouter(tags=["assessments"])
 
 
 # ============================================================ questionnaire builder
+_QUESTIONNAIRE_SORTABLE = {
+    "name": Questionnaire.name,
+    "created_at": Questionnaire.created_at,
+}
+
+
 @router.get(
     "/questionnaires",
-    response_model=list[QuestionnaireSummary],
+    response_model=Page[QuestionnaireSummary],
     dependencies=[Depends(require("assessment:read"))],
 )
-async def list_questionnaires(db: DbSession) -> list[QuestionnaireSummary]:
-    rows = (await db.scalars(select(Questionnaire).order_by(Questionnaire.name))).all()
-    return [QuestionnaireSummary.model_validate(r) for r in rows]
+async def list_questionnaires(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[QuestionnaireSummary]:
+    stmt = select(Questionnaire)
+    if search:
+        stmt = stmt.where(Questionnaire.name.ilike(f"%{search}%"))
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _QUESTIONNAIRE_SORTABLE, default=Questionnaire.name)
+    else:
+        stmt = stmt.order_by(Questionnaire.name)
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    return Page(
+        items=[QuestionnaireSummary.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 async def _load_questionnaire(db, qid: uuid.UUID) -> Questionnaire:
@@ -171,14 +200,43 @@ async def _fresh(db, aid: uuid.UUID) -> Assessment:
     )
 
 
+_ASSESSMENT_SORTABLE = {
+    "title": Assessment.title,
+    "status": Assessment.status,
+    "due_date": Assessment.due_date,
+    "created_at": Assessment.created_at,
+}
+
+
 @router.get(
     "/assessments",
-    response_model=list[AssessmentSummary],
+    response_model=Page[AssessmentSummary],
     dependencies=[Depends(require("assessment:read"))],
 )
-async def list_assessments(db: DbSession) -> list[AssessmentSummary]:
-    rows = (await db.scalars(select(Assessment).order_by(Assessment.created_at.desc()))).all()
-    return [AssessmentSummary.model_validate(r) for r in rows]
+async def list_assessments(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[AssessmentSummary]:
+    stmt = select(Assessment)
+    if search:
+        stmt = stmt.where(Assessment.title.ilike(f"%{search}%"))
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _ASSESSMENT_SORTABLE, default=Assessment.created_at)
+    else:
+        stmt = stmt.order_by(Assessment.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    return Page(
+        items=[AssessmentSummary.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(

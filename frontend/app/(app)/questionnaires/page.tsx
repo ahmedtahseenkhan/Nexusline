@@ -1,16 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   api,
   apiCall,
   type Questionnaire,
   type QuestionnaireSummary,
 } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, NumberInput } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconPolicy, IconCheck } from "@/components/icons";
+import { IconPlus, IconCheck } from "@/components/icons";
 
 // ---- builder draft types (mirror the backend create/update schema) --------------
 type OptionDraft = { label: string; score: number | ""; order_index: number };
@@ -56,10 +61,11 @@ const draftQMax = (q: QuestionDraft) =>
   q.options.reduce((m, o) => Math.max(m, typeof o.score === "number" ? o.score : 0), 0);
 const draftMax = (qs: QuestionDraft[]) => qs.reduce((s, q) => s + draftQMax(q), 0);
 
-export default function QuestionnairesPage() {
-  const [items, setItems] = useState<QuestionnaireSummary[]>([]);
-  const [open, setOpen] = useState<Questionnaire | null>(null);
+function QuestionnairesInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<Questionnaire | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Questionnaire | null>(null);
@@ -69,28 +75,19 @@ export default function QuestionnairesPage() {
   const [description, setDescription] = useState("");
   const [questions, setQuestions] = useState<QuestionDraft[]>([blankQuestion(0)]);
 
-  async function load() {
-    try {
-      setItems(await api.questionnaires());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-  }, []);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchQuestionnaires = useCallback(
+    (query: string) => apiCall<PagedList<QuestionnaireSummary>>("GET", `/questionnaires?${query}`),
+    [],
+  );
 
-  async function view(id: string) {
-    if (open?.id === id) {
-      setOpen(null);
-      return;
-    }
-    try {
-      setOpen(await api.questionnaire(id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
+  const loadDetail = useCallback((id: string) => {
+    api.questionnaire(id).then(setDetail).catch((e) => setError(e instanceof Error ? e.message : "Failed to load"));
+  }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setDetail(null);
+  }, [openId, loadDetail]);
 
   function openNew() {
     setEditing(null);
@@ -190,12 +187,13 @@ export default function QuestionnairesPage() {
           description: description.trim(),
           questions: clean,
         });
-        if (open?.id === editing.id) setOpen(await api.questionnaire(editing.id));
+        if (openId === editing.id) loadDetail(editing.id);
       } else {
         await api.createQuestionnaire({ name: name.trim(), description: description.trim(), questions: clean });
       }
       setShowForm(false);
-      await load();
+      reload();
+      toast(editing ? "Changes saved" : "Questionnaire created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save");
     } finally {
@@ -204,18 +202,37 @@ export default function QuestionnairesPage() {
   }
 
   async function remove(id: string, label: string) {
-    if (!window.confirm(`Delete questionnaire "${label}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog({ title: `Delete questionnaire "${label}"?`, message: "This cannot be undone.", danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/questionnaires/${id}`);
-      if (open?.id === id) setOpen(null);
-      await load();
+      if (openId === id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
 
   const liveMax = useMemo(() => draftMax(questions), [questions]);
+
+  const columns: Column<QuestionnaireSummary>[] = [
+    { key: "name", header: "Name", sortable: true, render: (q) => <span className="cell-title">{q.name}</span> },
+    { key: "description", header: "Description", render: (q) => <span className="muted">{q.description || "—"}</span> },
+    { key: "question_count", header: "Questions", align: "center", render: (q) => <span className="muted">{q.question_count}</span> },
+    { key: "max_score", header: "Max score", align: "center", render: (q) => <Badge tone="info" plain>{q.max_score}</Badge> },
+    {
+      key: "actions",
+      header: "",
+      render: (q) => (
+        <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => setOpenId(q.id)}>{openId === q.id ? "Hide" : "Preview"}</button>
+          <button className="btn secondary sm" onClick={() => openEdit(q.id)}>Edit</button>
+          <button className="btn secondary sm" onClick={() => remove(q.id, q.name)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
 
   const builder = (
     <>
@@ -300,66 +317,34 @@ export default function QuestionnairesPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Templates</h3>
-          <span className="sub">{items.length} total</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Description</th>
-                <th>Questions</th>
-                <th>Max score</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((q) => (
-                <tr key={q.id} style={{ cursor: "pointer" }} onClick={() => openEdit(q.id)}>
-                  <td className="cell-title">{q.name}</td>
-                  <td className="muted">{q.description || "—"}</td>
-                  <td className="muted">{q.question_count}</td>
-                  <td><Badge tone="info" plain>{q.max_score}</Badge></td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => view(q.id)}>
-                        {open?.id === q.id ? "Hide" : "Preview"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => remove(q.id, q.name)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={5}>
-                    <div className="empty">
-                      <span className="ico"><IconPolicy width={24} height={24} /></span>
-                      <h3>No questionnaires</h3>
-                      <p>Create your first reusable template to start assessing vendors.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<QuestionnaireSummary>
+        columns={columns}
+        fetcher={fetchQuestionnaires}
+        rowKey={(q) => q.id}
+        onRowClick={(q) => setOpenId(q.id)}
+        activeKey={openId}
+        searchPlaceholder="Search questionnaires by name…"
+        defaultSort={{ by: "name", dir: "asc" }}
+        emptyMessage="No questionnaires. Create your first reusable template to start assessing vendors."
+        refreshKey={refreshKey}
+      />
 
-      {open && (
-        <div className="card">
-          <div className="card-head">
-            <div>
-              <h3>{open.name}</h3>
-              {open.description && <span className="sub">{open.description}</span>}
-            </div>
-            <span className="sub">{open.question_count} questions · max score {open.max_score}</span>
-          </div>
-          <div className="card-pad">
-            {[...open.questions]
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail?.name || "…"}
+        subtitle={detail ? `${detail.question_count} questions · max score ${detail.max_score}` : ""}
+        width={640}
+        actions={detail && (
+          <button className="btn secondary sm" onClick={() => openEdit(detail.id)}>
+            <IconCheck width={14} height={14} /> Edit template
+          </button>
+        )}
+      >
+        {detail && (
+          <>
+            {detail.description && <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>{detail.description}</p>}
+            {[...detail.questions]
               .sort((a, b) => a.order_index - b.order_index)
               .map((q, i) => (
                 <div key={q.id} style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
@@ -372,14 +357,9 @@ export default function QuestionnairesPage() {
                   </div>
                 </div>
               ))}
-            <div style={{ marginTop: 12 }}>
-              <button className="btn secondary sm" onClick={() => openEdit(open.id)}>
-                <IconCheck width={14} height={14} /> Edit template
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -395,5 +375,13 @@ export default function QuestionnairesPage() {
         />
       )}
     </>
+  );
+}
+
+export default function QuestionnairesPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <QuestionnairesInner />
+    </Suspense>
   );
 }

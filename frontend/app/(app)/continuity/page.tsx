@@ -1,14 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconShield, IconCheck } from "@/components/icons";
+import { IconPlus, IconCheck } from "@/components/icons";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
@@ -63,8 +68,6 @@ type ContinuityPlan = {
   tasks: ContinuityTask[];
   tests: ContinuityTest[];
 };
-
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 
 // ----------------------------------------------------------------- option sets
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -156,12 +159,14 @@ function toPayload(f: FormState) {
 const BLANK_TASK = { step: 0, action: "", actor: "", timing: "", location: "", method: "" };
 const BLANK_TEST = { result: "passed", planned_date: "", conducted_date: "", result_description: "", tester: "" };
 
-export default function ContinuityPage() {
-  const [items, setItems] = useState<ContinuityPlan[]>([]);
+/* ================================================================ page ===== */
+function ContinuityInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<ContinuityPlan | null>(null);
   const [units, setUnits] = useState<Ref[]>([]);
   const [processes, setProcesses] = useState<Ref[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [detailId, setDetailId] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const [editing, setEditing] = useState<ContinuityPlan | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -169,117 +174,102 @@ export default function ContinuityPage() {
   const [f, setF] = useState<FormState>(BLANK);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  // child-record draft inputs (only used while editing an existing plan)
+  // child-record draft inputs (drawer)
   const [task, setTask] = useState({ ...BLANK_TASK });
   const [test, setTest] = useState({ ...BLANK_TEST });
 
-  async function load(keepEditing?: string) {
-    try {
-      const p = await apiCall<Page<ContinuityPlan>>("GET", "/continuity-plans?limit=200");
-      setItems(p.items);
-      if (keepEditing) {
-        const fresh = p.items.find((x) => x.id === keepEditing) || null;
-        setEditing(fresh);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchPlans = useCallback((qs: string) => apiCall<PagedList<ContinuityPlan>>("GET", `/continuity-plans?${qs}`), []);
+  const loadDetail = useCallback((id: string) => {
+    apiCall<ContinuityPlan>("GET", `/continuity-plans/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setDetail(null);
+  }, [openId, loadDetail]);
 
   useEffect(() => {
-    load();
-    apiCall<Page<Ref>>("GET", "/business-units?limit=200").then((r) => setUnits(r.items)).catch(() => {});
-    apiCall<Page<Ref>>("GET", "/processes?limit=200").then((r) => setProcesses(r.items)).catch(() => {});
+    apiCall<PagedList<Ref>>("GET", "/business-units?limit=200").then((r) => setUnits(r.items)).catch(() => {});
+    apiCall<PagedList<Ref>>("GET", "/processes?limit=200").then((r) => setProcesses(r.items)).catch(() => {});
   }, []);
 
   function openNew() {
-    setEditing(null);
-    setF(BLANK);
-    setTask({ ...BLANK_TASK });
-    setTest({ ...BLANK_TEST });
-    setError(null);
-    setShowForm(true);
+    setEditing(null); setF(BLANK); setError(null); setShowForm(true);
   }
   function openEdit(p: ContinuityPlan) {
-    setEditing(p);
-    setF(fromPlan(p));
-    setTask({ ...BLANK_TASK });
-    setTest({ ...BLANK_TEST });
-    setError(null);
-    setShowForm(true);
+    setEditing(p); setF(fromPlan(p)); setError(null); setShowForm(true);
   }
 
   async function save() {
-    setError(null);
-    setSaving(true);
+    setError(null); setSaving(true);
     try {
       const payload = toPayload(f);
       if (editing) await apiCall<ContinuityPlan>("PATCH", `/continuity-plans/${editing.id}`, payload);
       else await apiCall<ContinuityPlan>("POST", "/continuity-plans", payload);
-      setShowForm(false);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save plan");
-    } finally {
-      setSaving(false);
-    }
+      setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "Plan created");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save plan"); }
+    finally { setSaving(false); }
   }
 
-  async function deletePlan(p: ContinuityPlan) {
-    if (!confirm(`Delete continuity plan ${p.reference}? This removes its tasks and tests.`)) return;
+  async function remove(p: ContinuityPlan) {
+    if (!(await confirmDialog({ title: `Delete continuity plan ${p.reference}?`, message: "This removes its tasks and tests.", danger: true }))) return;
     setError(null);
     try {
       await apiCall<unknown>("DELETE", `/continuity-plans/${p.id}`);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
+      if (openId === p.id) setOpenId(null);
+      reload(); toast("Deleted");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
   }
 
-  // -------- child-record actions (operate on the plan being edited) --------
+  // child-record actions on the open (drawer) plan; endpoints return the fresh PlanRead.
   async function child(fn: Promise<unknown>) {
-    if (!editing) return;
+    if (!detail) return;
     setError(null);
     try {
-      await fn;
-      await load(editing.id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Action failed");
-    }
+      const updated = (await fn) as ContinuityPlan;
+      if (updated && updated.id) setDetail(updated);
+      else loadDetail(detail.id);
+      reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "Action failed"); }
   }
 
   function addTask() {
-    if (!editing || !task.action.trim()) return;
-    const step = task.step || editing.tasks.length + 1;
-    child(apiCall("POST", `/continuity-plans/${editing.id}/tasks`, { ...task, step }));
+    if (!detail || !task.action.trim()) return;
+    const step = task.step || detail.tasks.length + 1;
+    child(apiCall<ContinuityPlan>("POST", `/continuity-plans/${detail.id}/tasks`, { ...task, step }));
     setTask({ ...BLANK_TASK });
   }
-  function removeTask(id: string) {
-    if (!editing) return;
-    child(apiCall("DELETE", `/continuity-plans/${editing.id}/tasks/${id}`));
-  }
   function addTest() {
-    if (!editing) return;
-    child(
-      apiCall("POST", `/continuity-plans/${editing.id}/tests`, {
-        result: test.result,
-        planned_date: test.planned_date || null,
-        conducted_date: test.conducted_date || null,
-        result_description: test.result_description,
-        tester: test.tester,
-      }),
-    );
+    if (!detail) return;
+    child(apiCall<ContinuityPlan>("POST", `/continuity-plans/${detail.id}/tests`, {
+      result: test.result,
+      planned_date: test.planned_date || null,
+      conducted_date: test.conducted_date || null,
+      result_description: test.result_description,
+      tester: test.tester,
+    }));
     setTest({ ...BLANK_TEST });
-  }
-  function removeTest(id: string) {
-    if (!editing) return;
-    child(apiCall("DELETE", `/continuity-plans/${editing.id}/tests/${id}`));
   }
 
   const unitOpts: Option[] = useMemo(() => units.map((u) => ({ value: u.id, label: u.name })), [units]);
   const procOpts: Option[] = useMemo(() => processes.map((p) => ({ value: p.id, label: p.name })), [processes]);
 
-  // ------------------------------------------------------------------ tabs
+  const columns: Column<ContinuityPlan>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (p) => <span className="ref">{p.reference}</span> },
+    { key: "name", header: "Plan", sortable: true, render: (p) => <span className="cell-title">{p.name}</span> },
+    { key: "scope", header: "Scope", render: (p) => <span className="muted">{p.process?.name || p.business_unit?.name || "—"}</span> },
+    { key: "criticality", header: "Criticality", sortable: true, render: (p) => <Badge tone={STATUS_TONE[p.criticality] || "neutral"}>{cap(p.criticality)}</Badge> },
+    { key: "rto", header: "RTO", render: (p) => <span className="muted">{p.rto_hours != null ? `${p.rto_hours}h` : "—"}</span> },
+    { key: "rpo", header: "RPO", render: (p) => <span className="muted">{p.rpo_hours != null ? `${p.rpo_hours}h` : "—"}</span> },
+    { key: "owner", header: "Owner", render: (p) => <span className="muted">{p.owner || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (p) => <Badge tone={STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge> },
+    { key: "tasks", header: "Tasks", align: "center", render: (p) => <Badge tone="info" plain>{p.task_count}</Badge> },
+    { key: "tests", header: "Tests", align: "center", render: (p) => (p.last_test_result ? <Badge tone={RESULT_TONE[p.last_test_result] || "neutral"}>{p.test_count}</Badge> : <Badge tone="neutral" plain>{p.test_count}</Badge>) },
+    { key: "next_test_date", header: "Next test", sortable: true, render: (p) => (p.is_test_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{p.next_test_date || "—"}</span>) },
+    { key: "actions", header: "", render: (p) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(p)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(p)}>Delete</button></div> },
+  ];
+
+  // ------------------------------------------------------------------ form tabs
   const generalTab = (
     <>
       <Field label="Name" required help="For example: Data Centre Failover Plan, Pandemic Response Plan.">
@@ -289,15 +279,9 @@ export default function ContinuityPage() {
         <TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="What this plan covers and its objective." />
       </Field>
       <div className="field-row">
-        <Field label="Owner">
-          <TextInput value={f.owner} onChange={(v) => set("owner", v)} placeholder="BCM Coordinator" />
-        </Field>
-        <Field label="Status">
-          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
-        </Field>
-        <Field label="Workflow">
-          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-        </Field>
+        <Field label="Owner"><TextInput value={f.owner} onChange={(v) => set("owner", v)} placeholder="BCM Coordinator" /></Field>
+        <Field label="Status"><Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} /></Field>
+        <Field label="Workflow"><Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} /></Field>
       </div>
     </>
   );
@@ -341,99 +325,10 @@ export default function ContinuityPage() {
     </>
   );
 
-  const tasksTab = !editing ? (
-    <div className="muted" style={{ padding: 8 }}>Save the plan first, then reopen it to build the recovery playbook.</div>
-  ) : (
-    <>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr><th>#</th><th>Action (what)</th><th>Actor (who)</th><th>Timing (when)</th><th>Location (where)</th><th>Method (how)</th><th></th></tr>
-          </thead>
-          <tbody>
-            {editing.tasks.map((t) => (
-              <tr key={t.id}>
-                <td className="ref">{t.step}</td>
-                <td className="cell-title">{t.action}</td>
-                <td className="muted">{t.actor || "—"}</td>
-                <td className="muted">{t.timing || "—"}</td>
-                <td className="muted">{t.location || "—"}</td>
-                <td className="muted">{t.method || "—"}</td>
-                <td>
-                  <button className="btn secondary sm" type="button" onClick={() => removeTask(t.id)}>Remove</button>
-                </td>
-              </tr>
-            ))}
-            {editing.tasks.length === 0 && (
-              <tr><td colSpan={7} className="muted" style={{ padding: 16 }}>No recovery steps yet.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      <div className="field-row" style={{ marginTop: 14 }}>
-        <Field label="Step #"><NumberInput value={task.step || ""} onChange={(v) => setTask((p) => ({ ...p, step: v === "" ? 0 : Number(v) }))} min={0} placeholder="auto" /></Field>
-        <Field label="Action (what)"><TextInput value={task.action} onChange={(v) => setTask((p) => ({ ...p, action: v }))} placeholder="Fail over to DR site" /></Field>
-        <Field label="Actor (who)"><TextInput value={task.actor} onChange={(v) => setTask((p) => ({ ...p, actor: v }))} placeholder="Infra team" /></Field>
-      </div>
-      <div className="field-row">
-        <Field label="Timing (when)"><TextInput value={task.timing} onChange={(v) => setTask((p) => ({ ...p, timing: v }))} placeholder="Within 1h" /></Field>
-        <Field label="Location (where)"><TextInput value={task.location} onChange={(v) => setTask((p) => ({ ...p, location: v }))} placeholder="DR datacentre" /></Field>
-        <Field label="Method (how)"><TextInput value={task.method} onChange={(v) => setTask((p) => ({ ...p, method: v }))} placeholder="Runbook DR-01" /></Field>
-      </div>
-      <button className="btn sm" type="button" onClick={addTask} disabled={!task.action.trim()} style={{ marginTop: 4 }}>
-        <IconPlus width={14} height={14} /> Add step
-      </button>
-    </>
-  );
-
-  const testsTab = !editing ? (
-    <div className="muted" style={{ padding: 8 }}>Save the plan first, then reopen it to record exercises.</div>
-  ) : (
-    <>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Result</th><th>Planned</th><th>Conducted</th><th>Tester</th><th>Notes</th><th></th></tr>
-          </thead>
-          <tbody>
-            {editing.tests.map((t) => (
-              <tr key={t.id}>
-                <td><Badge tone={RESULT_TONE[t.result] || "neutral"}>{cap(t.result)}</Badge></td>
-                <td className="muted">{t.planned_date || "—"}</td>
-                <td className="muted">{t.conducted_date || "—"}</td>
-                <td className="muted">{t.tester || "—"}</td>
-                <td className="muted">{t.result_description || "—"}</td>
-                <td>
-                  <button className="btn secondary sm" type="button" onClick={() => removeTest(t.id)}>Remove</button>
-                </td>
-              </tr>
-            ))}
-            {editing.tests.length === 0 && (
-              <tr><td colSpan={6} className="muted" style={{ padding: 16 }}>No exercises recorded yet.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      <div className="field-row" style={{ marginTop: 14 }}>
-        <Field label="Result"><Select value={test.result} onChange={(v) => setTest((p) => ({ ...p, result: v }))} options={RESULT} /></Field>
-        <Field label="Planned date"><TextInput type="date" value={test.planned_date} onChange={(v) => setTest((p) => ({ ...p, planned_date: v }))} /></Field>
-        <Field label="Conducted date"><TextInput type="date" value={test.conducted_date} onChange={(v) => setTest((p) => ({ ...p, conducted_date: v }))} /></Field>
-      </div>
-      <Field label="Tester"><TextInput value={test.tester} onChange={(v) => setTest((p) => ({ ...p, tester: v }))} placeholder="Exercise lead" /></Field>
-      <Field label="Outcome notes"><TextArea value={test.result_description} onChange={(v) => setTest((p) => ({ ...p, result_description: v }))} rows={2} placeholder="What happened, findings, gaps." /></Field>
-      <div className="help" style={{ marginBottom: 8 }}>Recording an exercise updates the plan&apos;s last/next test dates.</div>
-      <button className="btn sm" type="button" onClick={addTest} style={{ marginTop: 4 }}>
-        <IconCheck width={14} height={14} /> Record exercise
-      </button>
-    </>
-  );
-
   const tabs = [
     { id: "general", label: "General", content: generalTab, required: true },
     { id: "bia", label: "BIA & Recovery", content: biaTab },
     { id: "links", label: "Links", content: linksTab },
-    { id: "tasks", label: `Recovery Tasks${editing ? ` (${editing.task_count})` : ""}`, content: tasksTab },
-    { id: "tests", label: `Tests${editing ? ` (${editing.test_count})` : ""}`, content: testsTab },
   ];
 
   return (
@@ -444,7 +339,7 @@ export default function ContinuityPage() {
           <p>Continuity plans with BIA, recovery objectives, a 5W recovery playbook and an exercise calendar.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <ImportExport resource="continuity-plans" label="Continuity Plans" onDone={() => load()} />
+          <ImportExport resource="continuity-plans" label="Continuity Plans" onDone={reload} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add plan
           </button>
@@ -453,74 +348,118 @@ export default function ContinuityPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Continuity plans</h3>
-          <span className="sub">{items.length} total · click a row to edit</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Plan</th>
-                <th>Scope</th>
-                <th>Criticality</th>
-                <th>RTO</th>
-                <th>RPO</th>
-                <th>Owner</th>
-                <th>Status</th>
-                <th>Tasks</th>
-                <th>Tests</th>
-                <th>Next test</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((p) => (
-                <tr key={p.id} style={{ cursor: "pointer" }} onClick={() => openEdit(p)}>
-                  <td className="ref">{p.reference}</td>
-                  <td className="cell-title">{p.name}</td>
-                  <td className="muted">{p.process?.name || p.business_unit?.name || "—"}</td>
-                  <td><Badge tone={STATUS_TONE[p.criticality] || "neutral"}>{cap(p.criticality)}</Badge></td>
-                  <td className="muted">{p.rto_hours != null ? `${p.rto_hours}h` : "—"}</td>
-                  <td className="muted">{p.rpo_hours != null ? `${p.rpo_hours}h` : "—"}</td>
-                  <td className="muted">{p.owner || "—"}</td>
-                  <td><Badge tone={STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge></td>
-                  <td><Badge tone="info" plain>{p.task_count}</Badge></td>
-                  <td>
-                    {p.last_test_result
-                      ? <Badge tone={RESULT_TONE[p.last_test_result] || "neutral"}>{p.test_count}</Badge>
-                      : <Badge tone="neutral" plain>{p.test_count}</Badge>}
-                  </td>
-                  <td className="muted">
-                    {p.is_test_overdue ? <Badge tone="high">Overdue</Badge> : (p.next_test_date || "—")}
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => setDetailId(detailId === p.id ? null : p.id)}>Details</button>
-                      <button className="btn secondary sm" onClick={() => deletePlan(p)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={12}>
-                    <div className="empty">
-                      <span className="ico"><IconShield width={24} height={24} /></span>
-                      <h3>No continuity plans</h3>
-                      <p>Create your first plan to build the recovery playbook.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<ContinuityPlan>
+        columns={columns}
+        fetcher={fetchPlans}
+        rowKey={(p) => p.id}
+        onRowClick={(p) => setOpenId(p.id)}
+        activeKey={openId}
+        searchPlaceholder="Search plans by name or reference…"
+        defaultSort={{ by: "name", dir: "asc" }}
+        emptyMessage="No continuity plans yet. Create your first plan to build the recovery playbook."
+        refreshKey={refreshKey}
+      />
 
-      {detailId && <RecordPanels model="continuity_plan" entityId={detailId} />}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? detail.reference : "…"}
+        subtitle={detail ? `${detail.name} · ${cap(detail.criticality)}` : ""}
+        width={760}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
+              <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              <Badge tone={STATUS_TONE[detail.criticality] || "neutral"}>{cap(detail.criticality)}</Badge>
+              <span className="muted" style={{ fontSize: 13 }}>
+                RTO {detail.rto_hours != null ? `${detail.rto_hours}h` : "—"} · RPO {detail.rpo_hours != null ? `${detail.rpo_hours}h` : "—"}
+              </span>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Recovery playbook</h3><span className="sub">5W steps · {detail.task_count}</span></div>
+              <div className="card-pad">
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr><th>#</th><th>Action (what)</th><th>Actor (who)</th><th>Timing (when)</th><th>Location (where)</th><th>Method (how)</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      {detail.tasks.map((t) => (
+                        <tr key={t.id}>
+                          <td className="ref">{t.step}</td>
+                          <td className="cell-title">{t.action}</td>
+                          <td className="muted">{t.actor || "—"}</td>
+                          <td className="muted">{t.timing || "—"}</td>
+                          <td className="muted">{t.location || "—"}</td>
+                          <td className="muted">{t.method || "—"}</td>
+                          <td><button className="btn secondary sm" type="button" onClick={() => child(apiCall<ContinuityPlan>("DELETE", `/continuity-plans/${detail.id}/tasks/${t.id}`))}>Remove</button></td>
+                        </tr>
+                      ))}
+                      {detail.tasks.length === 0 && <tr><td colSpan={7} className="muted" style={{ padding: 16 }}>No recovery steps yet.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="field-row" style={{ marginTop: 14 }}>
+                  <Field label="Step #"><NumberInput value={task.step || ""} onChange={(v) => setTask((p) => ({ ...p, step: v === "" ? 0 : Number(v) }))} min={0} placeholder="auto" /></Field>
+                  <Field label="Action (what)"><TextInput value={task.action} onChange={(v) => setTask((p) => ({ ...p, action: v }))} placeholder="Fail over to DR site" /></Field>
+                  <Field label="Actor (who)"><TextInput value={task.actor} onChange={(v) => setTask((p) => ({ ...p, actor: v }))} placeholder="Infra team" /></Field>
+                </div>
+                <div className="field-row">
+                  <Field label="Timing (when)"><TextInput value={task.timing} onChange={(v) => setTask((p) => ({ ...p, timing: v }))} placeholder="Within 1h" /></Field>
+                  <Field label="Location (where)"><TextInput value={task.location} onChange={(v) => setTask((p) => ({ ...p, location: v }))} placeholder="DR datacentre" /></Field>
+                  <Field label="Method (how)"><TextInput value={task.method} onChange={(v) => setTask((p) => ({ ...p, method: v }))} placeholder="Runbook DR-01" /></Field>
+                </div>
+                <button className="btn sm" type="button" onClick={addTask} disabled={!task.action.trim()} style={{ marginTop: 4 }}><IconPlus width={14} height={14} /> Add step</button>
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Exercises</h3><span className="sub">every {detail.test_frequency}</span></div>
+              <div className="card-pad">
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr><th>Result</th><th>Planned</th><th>Conducted</th><th>Tester</th><th>Notes</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      {detail.tests.map((t) => (
+                        <tr key={t.id}>
+                          <td><Badge tone={RESULT_TONE[t.result] || "neutral"}>{cap(t.result)}</Badge></td>
+                          <td className="muted">{t.planned_date || "—"}</td>
+                          <td className="muted">{t.conducted_date || "—"}</td>
+                          <td className="muted">{t.tester || "—"}</td>
+                          <td className="muted">{t.result_description || "—"}</td>
+                          <td><button className="btn secondary sm" type="button" onClick={() => child(apiCall<ContinuityPlan>("DELETE", `/continuity-plans/${detail.id}/tests/${t.id}`))}>Remove</button></td>
+                        </tr>
+                      ))}
+                      {detail.tests.length === 0 && <tr><td colSpan={6} className="muted" style={{ padding: 16 }}>No exercises recorded yet.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="field-row" style={{ marginTop: 14 }}>
+                  <Field label="Result"><Select value={test.result} onChange={(v) => setTest((p) => ({ ...p, result: v }))} options={RESULT} /></Field>
+                  <Field label="Planned date"><TextInput type="date" value={test.planned_date} onChange={(v) => setTest((p) => ({ ...p, planned_date: v }))} /></Field>
+                  <Field label="Conducted date"><TextInput type="date" value={test.conducted_date} onChange={(v) => setTest((p) => ({ ...p, conducted_date: v }))} /></Field>
+                </div>
+                <Field label="Tester"><TextInput value={test.tester} onChange={(v) => setTest((p) => ({ ...p, tester: v }))} placeholder="Exercise lead" /></Field>
+                <Field label="Outcome notes"><TextArea value={test.result_description} onChange={(v) => setTest((p) => ({ ...p, result_description: v }))} rows={2} placeholder="What happened, findings, gaps." /></Field>
+                <div className="help" style={{ marginBottom: 8 }}>Recording an exercise updates the plan&apos;s last/next test dates.</div>
+                <button className="btn sm" type="button" onClick={addTest} style={{ marginTop: 4 }}><IconCheck width={14} height={14} /> Record exercise</button>
+              </div>
+            </div>
+
+            <RecordPanels model="continuity_plan" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -535,5 +474,13 @@ export default function ContinuityPage() {
         />
       )}
     </>
+  );
+}
+
+export default function ContinuityPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ContinuityInner />
+    </Suspense>
   );
 }

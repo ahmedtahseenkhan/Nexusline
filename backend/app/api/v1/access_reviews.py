@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.access_review import AccessReview, AccessReviewItem
 from app.models.enums import AccessDecision, AccessReviewStatus
 from app.schemas.access_review import (
@@ -57,17 +58,40 @@ async def _next_ref(db) -> str:
     return await next_reference(db, AccessReview, "AR")
 
 
+_REVIEW_SORTABLE = {
+    "reference": AccessReview.reference,
+    "name": AccessReview.name,
+    "system_name": AccessReview.system_name,
+    "status": AccessReview.status,
+    "due_date": AccessReview.due_date,
+    "created_at": AccessReview.created_at,
+}
+
+
 @router.get("", response_model=Page[ReviewRead], dependencies=[Depends(require("review:read"))])
 async def list_reviews(
     db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ReviewRead]:
     stmt = select(AccessReview).where(AccessReview.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            AccessReview.name.ilike(like)
+            | AccessReview.reference.ilike(like)
+            | AccessReview.system_name.ilike(like)
+        )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(stmt.order_by(AccessReview.created_at.desc()).limit(limit).offset(offset))
-    ).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _REVIEW_SORTABLE, default=AccessReview.created_at)
+    else:
+        stmt = stmt.order_by(AccessReview.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ReviewRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

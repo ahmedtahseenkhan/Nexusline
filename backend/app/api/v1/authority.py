@@ -18,9 +18,10 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.authority import (
     AuthorityCategory,
     AuthorityMatrix,
@@ -58,27 +59,50 @@ async def _get(db, model, obj_id, name):
 
 
 # ==================================================== delegation-of-authority matrix ===
+_MATRIX_SORTABLE = {
+    "reference": AuthorityMatrix.reference,
+    "activity": AuthorityMatrix.activity,
+    "category": AuthorityMatrix.category,
+    "role_title": AuthorityMatrix.role_title,
+    "approval_level": AuthorityMatrix.approval_level,
+    "amount_from": AuthorityMatrix.amount_from,
+    "status": AuthorityMatrix.status,
+    "effective_date": AuthorityMatrix.effective_date,
+    "created_at": AuthorityMatrix.created_at,
+}
+
+
 @router.get("/authority-matrix", response_model=Page[AuthorityMatrixRead], dependencies=[_READ])
 async def list_authority_matrix(
     db: DbSession,
+    search: str | None = None,
     category: AuthorityCategory | None = None,
     matrix_status: Annotated[AuthorityStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[AuthorityMatrixRead]:
     stmt = select(AuthorityMatrix).where(AuthorityMatrix.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            AuthorityMatrix.activity.ilike(like),
+            AuthorityMatrix.reference.ilike(like),
+            AuthorityMatrix.role_title.ilike(like),
+            AuthorityMatrix.description.ilike(like),
+        ))
     if category is not None:
         stmt = stmt.where(AuthorityMatrix.category == category)
     if matrix_status is not None:
         stmt = stmt.where(AuthorityMatrix.status == matrix_status)
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _MATRIX_SORTABLE, default=AuthorityMatrix.approval_level)
+    else:
+        stmt = stmt.order_by(AuthorityMatrix.approval_level, AuthorityMatrix.activity)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(
-            stmt.order_by(AuthorityMatrix.approval_level, AuthorityMatrix.activity)
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[AuthorityMatrixRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -116,27 +140,51 @@ async def delete_authority_matrix(aid: uuid.UUID, db: DbSession) -> None:
 
 
 # ================================================== maker-checker / dual-control rules ===
+_RULE_SORTABLE = {
+    "reference": DualControlRule.reference,
+    "module": DualControlRule.module,
+    "action": DualControlRule.action,
+    "maker_role": DualControlRule.maker_role,
+    "checker_role": DualControlRule.checker_role,
+    "threshold_amount": DualControlRule.threshold_amount,
+    "status": DualControlRule.status,
+    "created_at": DualControlRule.created_at,
+}
+
+
 @router.get("/dual-control-rules", response_model=Page[DualControlRuleRead], dependencies=[_READ])
 async def list_dual_control_rules(
     db: DbSession,
+    search: str | None = None,
     module: str | None = None,
     enabled: bool | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[DualControlRuleRead]:
     stmt = select(DualControlRule).where(DualControlRule.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            DualControlRule.module.ilike(like),
+            DualControlRule.action.ilike(like),
+            DualControlRule.reference.ilike(like),
+            DualControlRule.maker_role.ilike(like),
+            DualControlRule.checker_role.ilike(like),
+            DualControlRule.description.ilike(like),
+        ))
     if module:
         stmt = stmt.where(DualControlRule.module == module)
     if enabled is not None:
         stmt = stmt.where(DualControlRule.enabled.is_(enabled))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _RULE_SORTABLE, default=DualControlRule.module)
+    else:
+        stmt = stmt.order_by(DualControlRule.module, DualControlRule.action)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(
-            stmt.order_by(DualControlRule.module, DualControlRule.action)
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[DualControlRuleRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

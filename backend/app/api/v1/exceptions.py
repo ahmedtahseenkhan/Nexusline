@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Select, delete, func, insert, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.asset import Asset, assets_exceptions
 from app.models.compliance import Requirement
 from app.models.control import Control
@@ -89,11 +90,25 @@ async def _next_ref(db) -> str:
     return await next_reference(db, ExceptionRecord, "EXC")
 
 
+_EXCEPTION_SORTABLE = {
+    "reference": ExceptionRecord.reference,
+    "title": ExceptionRecord.title,
+    "exception_type": ExceptionRecord.exception_type,
+    "status": ExceptionRecord.status,
+    "start_date": ExceptionRecord.start_date,
+    "expires_at": ExceptionRecord.expires_at,
+    "created_at": ExceptionRecord.created_at,
+}
+
+
 @router.get("", response_model=Page[ExceptionRead], dependencies=[Depends(require("exception:read"))])
 async def list_exceptions(
     db: DbSession,
     status_filter: Annotated[ExceptionStatus | None, Query(alias="status")] = None,
     type_filter: Annotated[ExceptionType | None, Query(alias="type")] = None,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ExceptionRead]:
@@ -110,9 +125,17 @@ async def list_exceptions(
         stmt = stmt.where(ExceptionRecord.status == status_filter)
     if type_filter is not None:
         stmt = stmt.where(ExceptionRecord.exception_type == type_filter)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(ExceptionRecord.title.ilike(like) | ExceptionRecord.reference.ilike(like))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _EXCEPTION_SORTABLE, default=ExceptionRecord.created_at)
+    else:
+        stmt = stmt.order_by(ExceptionRecord.created_at.desc())
     rows = (
-        await db.scalars(stmt.order_by(ExceptionRecord.created_at.desc()).limit(limit).offset(offset))
+        await db.scalars(stmt.limit(limit).offset(offset))
     ).all()
     return Page(items=[ExceptionRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 

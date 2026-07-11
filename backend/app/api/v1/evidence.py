@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.compliance import Requirement
 from app.models.control import Control
 from app.models.evidence import Evidence
@@ -34,16 +35,37 @@ async def _control_or_400(db, control_id: uuid.UUID) -> Control:
     return control
 
 
+_EVIDENCE_SORTABLE = {
+    "title": Evidence.title,
+    "reference": Evidence.reference,
+    "evidence_type": Evidence.evidence_type,
+    "status": Evidence.status,
+    "collected_at": Evidence.collected_at,
+    "valid_until": Evidence.valid_until,
+    "created_at": Evidence.created_at,
+}
+
+
 @router.get("/evidence", response_model=Page[EvidenceRead], dependencies=[Depends(require("control:read"))])
 async def list_evidence(
     db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[EvidenceRead]:
-    total = await db.scalar(select(func.count()).select_from(Evidence)) or 0
-    rows = (
-        await db.scalars(select(Evidence).order_by(Evidence.created_at.desc()).limit(limit).offset(offset))
-    ).all()
+    stmt = select(Evidence)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(Evidence.title.ilike(like) | Evidence.reference.ilike(like))
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _EVIDENCE_SORTABLE, default=Evidence.created_at)
+    else:
+        stmt = stmt.order_by(Evidence.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(
         items=[EvidenceRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
     )

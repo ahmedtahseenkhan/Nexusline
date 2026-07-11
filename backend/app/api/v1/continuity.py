@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.continuity import ContinuityPlan, ContinuityTask, ContinuityTest
 from app.schemas.common import Page
 from app.schemas.continuity import (
@@ -72,17 +73,36 @@ async def _test_or_404(db, plan_id, test_id) -> ContinuityTest:
     return obj
 
 
+_PLAN_SORTABLE = {
+    "reference": ContinuityPlan.reference,
+    "name": ContinuityPlan.name,
+    "criticality": ContinuityPlan.criticality,
+    "status": ContinuityPlan.status,
+    "next_test_date": ContinuityPlan.next_test_date,
+    "created_at": ContinuityPlan.created_at,
+}
+
+
 @router.get("", response_model=Page[PlanRead], dependencies=[Depends(require("bcp:read"))])
 async def list_plans(
     db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[PlanRead]:
     stmt = select(ContinuityPlan).where(ContinuityPlan.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(ContinuityPlan.name.ilike(like) | ContinuityPlan.reference.ilike(like))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(stmt.order_by(ContinuityPlan.name).limit(limit).offset(offset))
-    ).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _PLAN_SORTABLE, default=ContinuityPlan.name)
+    else:
+        stmt = stmt.order_by(ContinuityPlan.name)
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[PlanRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

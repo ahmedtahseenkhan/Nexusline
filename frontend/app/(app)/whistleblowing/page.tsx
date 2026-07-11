@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiCall, type Page } from "@/lib/api";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconShield } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ local types
 interface WhistleUpdate {
@@ -48,6 +53,7 @@ interface WhistleSummary {
   open_investigations: number;
   substantiated: number;
   substantiated_rate: number;
+  anonymous_rate: number;
 }
 
 // ------------------------------------------------------------------ helpers
@@ -172,11 +178,17 @@ type UpdateDraft = {
 };
 const BLANK_UPDATE: UpdateDraft = { note: "", author: "", update_date: "", status_change: "" };
 
-export default function WhistleblowingPage() {
+/* ================================================================ page ===== */
+function WhistleblowingInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<WhistleReport | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const [reports, setReports] = useState<WhistleReport[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<WhistleSummary | null>(null);
+
+  // filters
+  const [fStatus, setFStatus] = useState("");
+  const [fCategory, setFCategory] = useState("");
 
   // ---- report dialog ----
   const [editingReport, setEditingReport] = useState<WhistleReport | null>(null);
@@ -185,109 +197,83 @@ export default function WhistleblowingPage() {
   const [rf, setRf] = useState<ReportForm>(BLANK_REPORT);
   const setR = <K extends keyof ReportForm>(k: K, v: ReportForm[K]) => setRf((p) => ({ ...p, [k]: v }));
 
-  // ---- expanded case detail + inline case-log ----
-  const [openReport, setOpenReport] = useState<WhistleReport | null>(null);
+  // ---- inline case-log draft ----
   const [ud, setUd] = useState<UpdateDraft>(BLANK_UPDATE);
   const setU = <K extends keyof UpdateDraft>(k: K, v: UpdateDraft[K]) => setUd((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadReports(keepOpen?: string) {
-    try {
-      const res = await apiCall<Page<WhistleReport>>("GET", "/whistleblowing?limit=200");
-      setReports(res.items);
-      if (keepOpen) setOpenReport(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load reports");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<WhistleSummary>("GET", "/whistleblowing-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load summary");
-    }
-  }
-  async function refreshReport(id: string) {
-    const r = await apiCall<WhistleReport>("GET", `/whistleblowing/${id}`);
-    setOpenReport(r);
-    setReports((prev) => prev.map((x) => (x.id === id ? r : x)));
-  }
-
-  useEffect(() => {
-    loadReports();
-    loadSummary();
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchReports = useCallback((qs: string) => apiCall<PagedList<WhistleReport>>("GET", `/whistleblowing?${qs}`), []);
+  const loadSummary = useCallback(() => {
+    apiCall<WhistleSummary>("GET", "/whistleblowing-summary").then(setSummary).catch(() => {});
   }, []);
+  const loadDetail = useCallback((id: string) => {
+    setUd(BLANK_UPDATE);
+    apiCall<WhistleReport>("GET", `/whistleblowing/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
+  useEffect(() => { loadSummary(); }, [loadSummary]);
 
   // ------------------------------------------------------------- report CRUD
-  function openNewReport() {
-    setEditingReport(null);
-    setRf(BLANK_REPORT);
-    setShowReportForm(true);
-  }
-  function openEditReport(r: WhistleReport) {
-    setEditingReport(r);
-    setRf(fromReport(r));
-    setShowReportForm(true);
-  }
+  function openNewReport() { setEditingReport(null); setRf(BLANK_REPORT); setError(null); setShowReportForm(true); }
+  function openEditReport(r: WhistleReport) { setEditingReport(r); setRf(fromReport(r)); setError(null); setShowReportForm(true); }
   async function saveReport() {
-    setError(null);
-    setSavingReport(true);
+    setError(null); setSavingReport(true);
     try {
       const payload = reportPayload(rf);
       if (editingReport) await apiCall<WhistleReport>("PATCH", `/whistleblowing/${editingReport.id}`, payload);
       else await apiCall<WhistleReport>("POST", "/whistleblowing", payload);
-      setShowReportForm(false);
-      await loadReports(openReport?.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save report");
-    } finally {
-      setSavingReport(false);
-    }
+      setShowReportForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
+      toast(editingReport ? "Changes saved" : "Report received");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save report"); }
+    finally { setSavingReport(false); }
   }
   async function removeReport(r: WhistleReport) {
-    if (!window.confirm(`Delete whistleblowing report ${r.reference || r.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete whistleblowing report ${r.reference || r.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/whistleblowing/${r.id}`);
       setShowReportForm(false);
-      if (openReport?.id === r.id) setOpenReport(null);
-      await loadReports();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
-  }
-  function toggleReport(r: WhistleReport) {
-    setUd(BLANK_UPDATE);
-    setOpenReport(openReport?.id === r.id ? null : r);
+      if (openId === r.id) setOpenId(null);
+      reload(); loadSummary(); toast("Deleted");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
   }
 
   // ------------------------------------------------------------- case-log (inline)
   async function addUpdate() {
-    if (!openReport) return;
-    setError(null);
+    if (!detail) return; setError(null);
     try {
-      await apiCall<WhistleReport>("POST", `/whistleblowing/${openReport.id}/updates`, {
-        note: ud.note,
-        author: ud.author,
-        update_date: ud.update_date || null,
-        status_change: ud.status_change,
+      await apiCall<WhistleReport>("POST", `/whistleblowing/${detail.id}/updates`, {
+        note: ud.note, author: ud.author, update_date: ud.update_date || null, status_change: ud.status_change,
       });
-      setUd(BLANK_UPDATE);
-      await refreshReport(openReport.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to add case-log entry");
-    }
+      setUd(BLANK_UPDATE); loadDetail(detail.id); reload(); loadSummary();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to add case-log entry"); }
   }
 
   // ------------------------------------------------------------- derived stats
-  const anonymousPct =
-    reports.length > 0
-      ? Math.round((reports.filter((r) => r.anonymous).length / reports.length) * 100)
-      : null;
+  const anonymousPct = summary ? Math.round(summary.anonymous_rate) : null;
   const investigating = summary ? summary.by_status["investigating"] || 0 : null;
+
+  const columns: Column<WhistleReport>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "category", header: "Category", sortable: true, render: (r) => <Badge tone="info">{cap(r.category)}</Badge> },
+    { key: "channel", header: "Channel", render: (r) => <span className="muted">{cap(r.channel)}</span> },
+    {
+      key: "reporter", header: "Reporter", render: (r) => (
+        r.anonymous ? (
+          <span><Badge tone="neutral">Anonymous</Badge>{r.tracking_code ? <span className="muted" style={{ marginLeft: 6 }}>{r.tracking_code}</span> : null}</span>
+        ) : (
+          <span className="muted">{r.reporter_name || "—"}</span>
+        )
+      ),
+    },
+    { key: "severity", header: "Severity", sortable: true, render: (r) => <Badge tone={SEVERITY_TONE[r.severity] || "neutral"}>{cap(r.severity)}</Badge> },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
+    { key: "log", header: "Log", align: "center", render: (r) => <span className="muted">{r.update_count}</span> },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditReport(r)}>Edit</button> <button className="btn secondary sm" onClick={() => removeReport(r)}>Delete</button></div> },
+  ];
+
+  const filters = { status: fStatus || undefined, category: fCategory || undefined };
 
   // ------------------------------------------------------------- form tabs
   const reportTab = (
@@ -394,165 +380,112 @@ export default function WhistleblowingPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Disclosure Register</h3>
-          <span className="sub">{reports.length} total · click a row to open the case</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Title</th>
-                <th>Category</th>
-                <th>Channel</th>
-                <th>Reporter</th>
-                <th>Severity</th>
-                <th>Status</th>
-                <th>Log</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {reports.map((r) => (
-                <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => toggleReport(r)}>
-                  <td className="ref">{r.reference || "—"}</td>
-                  <td className="cell-title">{r.title}</td>
-                  <td><Badge tone="info">{cap(r.category)}</Badge></td>
-                  <td className="muted">{cap(r.channel)}</td>
-                  <td>
-                    {r.anonymous ? (
-                      <span>
-                        <Badge tone="neutral">Anonymous</Badge>
-                        {r.tracking_code ? <span className="muted" style={{ marginLeft: 6 }}>{r.tracking_code}</span> : null}
-                      </span>
-                    ) : (
-                      <span className="muted">{r.reporter_name || "—"}</span>
-                    )}
-                  </td>
-                  <td><Badge tone={SEVERITY_TONE[r.severity] || "neutral"}>{cap(r.severity)}</Badge></td>
-                  <td><Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge></td>
-                  <td className="muted">{r.update_count}</td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => toggleReport(r)}>
-                        {openReport?.id === r.id ? "Hide" : "Open"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => removeReport(r)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {reports.length === 0 && (
-                <tr>
-                  <td colSpan={9}>
-                    <div className="empty">
-                      <span className="ico"><IconShield width={24} height={24} /></span>
-                      <h3>No reports</h3>
-                      <p>Log a confidential disclosure to open a whistleblowing case. Anonymous reporters are masked and reachable via a tracking code.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<WhistleReport>
+        columns={columns}
+        fetcher={fetchReports}
+        rowKey={(r) => r.id}
+        onRowClick={(r) => setOpenId(r.id)}
+        activeKey={openId}
+        searchPlaceholder="Search title, reference, tracking code…"
+        defaultSort={{ by: "received_date", dir: "desc" }}
+        filters={filters}
+        toolbarRight={
+          <>
+            <select className="select" style={{ maxWidth: 170 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
+              <option value="">All statuses</option>
+              {STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+            </select>
+            <select className="select" style={{ maxWidth: 180 }} value={fCategory} onChange={(e) => setFCategory(e.target.value)}>
+              <option value="">All categories</option>
+              {CATEGORY.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+            </select>
+          </>
+        }
+        emptyMessage="No reports. Log a confidential disclosure to open a whistleblowing case."
+        refreshKey={refreshKey}
+      />
 
-      {openReport && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head row-between">
-              <div>
-                <h3>{openReport.reference} — {openReport.title}</h3>
-                <span className="sub">
-                  {cap(openReport.status)} · {cap(openReport.category)}
-                  {openReport.anonymous
-                    ? ` · Anonymous${openReport.tracking_code ? " · " + openReport.tracking_code : ""}`
-                    : openReport.reporter_name
-                      ? " · " + openReport.reporter_name
-                      : ""}
-                  {openReport.assigned_to ? " · handler " + openReport.assigned_to : ""}
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button className="btn secondary sm" onClick={() => openEditReport(openReport)}>Edit</button>
-                <button className="btn secondary sm" onClick={() => removeReport(openReport)}>Delete</button>
-              </div>
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
+        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.category)}${detail.anonymous ? ` · Anonymous${detail.tracking_code ? " · " + detail.tracking_code : ""}` : detail.reporter_name ? " · " + detail.reporter_name : ""}${detail.assigned_to ? " · handler " + detail.assigned_to : ""}` : ""}
+        width={760}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditReport(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeReport(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+              <Badge tone={SEVERITY_TONE[detail.severity] || "neutral"}>{cap(detail.severity)}</Badge>
+              <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              {detail.anonymous && <Badge tone="neutral">Anonymous</Badge>}
             </div>
 
-            <div className="card-pad">
-              {openReport.description && (
-                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>{openReport.description}</p>
-              )}
-              {openReport.confidentiality_note && (
-                <p style={{ margin: "0 0 12px", fontSize: 13 }}>
-                  <Badge tone="high">Confidential</Badge>{" "}
-                  <span className="muted">{openReport.confidentiality_note}</span>
-                </p>
-              )}
-
-              <strong>Case log</strong>
-              <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                Investigation notes and status changes for this disclosure.
+            {detail.description && <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>{detail.description}</p>}
+            {detail.confidentiality_note && (
+              <p style={{ margin: "0 0 12px", fontSize: 13 }}>
+                <Badge tone="high">Confidential</Badge>{" "}
+                <span className="muted">{detail.confidentiality_note}</span>
               </p>
-              <form
-                style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                onSubmit={(e) => { e.preventDefault(); addUpdate(); }}
-              >
-                <div style={{ flex: "1 1 260px" }}>
-                  <label className="label">Note</label>
-                  <input className="input" value={ud.note} onChange={(e) => setU("note", e.target.value)} placeholder="Case-log entry" required />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Author</label>
-                  <input className="input" value={ud.author} onChange={(e) => setU("author", e.target.value)} placeholder="Handler" />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Status change</label>
-                  <input className="input" value={ud.status_change} onChange={(e) => setU("status_change", e.target.value)} placeholder="e.g. investigating" />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Date</label>
-                  <input className="input" type="date" value={ud.update_date} onChange={(e) => setU("update_date", e.target.value)} />
-                </div>
-                <button className="btn">Add</button>
-              </form>
+            )}
+            {detail.outcome && (
+              <div style={{ marginBottom: 14 }}><span className="muted" style={{ fontSize: 12 }}>Outcome</span><div style={{ fontSize: 13 }}>{detail.outcome}</div></div>
+            )}
 
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Note</th>
-                      <th>Status change</th>
-                      <th>Author</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...openReport.updates]
-                      .sort((a, b) => (b.update_date || b.created_at).localeCompare(a.update_date || a.created_at))
-                      .map((u) => (
-                        <tr key={u.id}>
-                          <td className="muted">{u.update_date || "—"}</td>
-                          <td className="cell-title">{u.note || "—"}</td>
-                          <td>{u.status_change ? <Badge tone="info">{cap(u.status_change)}</Badge> : <span className="muted">—</span>}</td>
-                          <td className="muted">{u.author || "—"}</td>
-                        </tr>
-                      ))}
-                    {openReport.updates.length === 0 && (
-                      <tr><td colSpan={4}><span className="muted">No case-log entries yet.</span></td></tr>
-                    )}
-                  </tbody>
-                </table>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Case log</h3><span className="sub">{detail.update_count} entries</span></div>
+              <div className="card-pad">
+                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>Investigation notes and status changes for this disclosure.</p>
+                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(e) => { e.preventDefault(); addUpdate(); }}>
+                  <div style={{ flex: "1 1 220px" }}>
+                    <label className="label">Note</label>
+                    <input className="input" value={ud.note} onChange={(e) => setU("note", e.target.value)} placeholder="Case-log entry" required />
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Author</label>
+                    <input className="input" value={ud.author} onChange={(e) => setU("author", e.target.value)} placeholder="Handler" />
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label className="label">Status change</label>
+                    <input className="input" value={ud.status_change} onChange={(e) => setU("status_change", e.target.value)} placeholder="investigating" />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Date</label>
+                    <input className="input" type="date" value={ud.update_date} onChange={(e) => setU("update_date", e.target.value)} />
+                  </div>
+                  <button className="btn">Add</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>Date</th><th>Note</th><th>Status change</th><th>Author</th></tr></thead>
+                    <tbody>
+                      {[...detail.updates]
+                        .sort((a, b) => (b.update_date || b.created_at).localeCompare(a.update_date || a.created_at))
+                        .map((u) => (
+                          <tr key={u.id}>
+                            <td className="muted">{u.update_date || "—"}</td>
+                            <td className="cell-title">{u.note || "—"}</td>
+                            <td>{u.status_change ? <Badge tone="info">{cap(u.status_change)}</Badge> : <span className="muted">—</span>}</td>
+                            <td className="muted">{u.author || "—"}</td>
+                          </tr>
+                        ))}
+                      {detail.updates.length === 0 && (<tr><td colSpan={4}><span className="muted">No case-log entries yet.</span></td></tr>)}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
-          </div>
 
-          <RecordPanels model="whistleblowing_report" entityId={openReport.id} />
-        </>
-      )}
+            <RecordPanels model="whistleblowing_report" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODAL */}
       {showReportForm && (
@@ -571,13 +504,7 @@ export default function WhistleblowingPage() {
           saveLabel={editingReport ? "Save changes" : "Create report"}
           footerLeft={
             editingReport ? (
-              <button
-                className="btn secondary sm"
-                type="button"
-                onClick={() => removeReport(editingReport)}
-                disabled={savingReport}
-                style={{ color: "var(--danger, #c0392b)" }}
-              >
+              <button className="btn secondary sm" type="button" onClick={() => removeReport(editingReport)} disabled={savingReport} style={{ color: "var(--danger, #c0392b)" }}>
                 Delete
               </button>
             ) : undefined
@@ -585,5 +512,13 @@ export default function WhistleblowingPage() {
         />
       )}
     </>
+  );
+}
+
+export default function WhistleblowingPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <WhistleblowingInner />
+    </Suspense>
   );
 }

@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
 interface EsgAssessment {
@@ -50,12 +54,6 @@ interface EsgSummary {
   env_by_category: Record<string, number>;
   high_env_risk: number;
 }
-interface Page<T> {
-  items: T[];
-  total: number;
-  limit: number;
-  offset: number;
-}
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -70,98 +68,42 @@ const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const ENV_RISK = opts(["high", "medium", "low"]);
 
 // ------------------------------------------------------------------ tones
-const PILLAR_TONE: Record<string, Tone> = {
-  environmental: "low",
-  social: "info",
-  governance: "medium",
-};
-const ESG_STATUS_TONE: Record<string, Tone> = {
-  not_started: "neutral",
-  in_progress: "info",
-  achieved: "low",
-  off_track: "critical",
-};
-const ENV_RISK_TONE: Record<string, Tone> = {
-  high: "critical",
-  medium: "medium",
-  low: "low",
-};
+const PILLAR_TONE: Record<string, Tone> = { environmental: "low", social: "info", governance: "medium" };
+const ESG_STATUS_TONE: Record<string, Tone> = { not_started: "neutral", in_progress: "info", achieved: "low", off_track: "critical" };
+const ENV_RISK_TONE: Record<string, Tone> = { high: "critical", medium: "medium", low: "low" };
 
 // ------------------------------------------------------------------ form state
 type EsgForm = {
-  title: string;
-  description: string;
-  pillar: string;
-  category: string;
-  metric: string;
-  target_value: string;
-  current_value: string;
-  unit: string;
-  status: string;
-  owner: string;
-  period: string;
-  sbp_green_banking_ref: string;
-  workflow_status: string;
+  title: string; description: string; pillar: string; category: string; metric: string;
+  target_value: string; current_value: string; unit: string; status: string; owner: string;
+  period: string; sbp_green_banking_ref: string; workflow_status: string;
 };
 const BLANK_ESG: EsgForm = {
-  title: "",
-  description: "",
-  pillar: "environmental",
-  category: "",
-  metric: "",
-  target_value: "",
-  current_value: "",
-  unit: "",
-  status: "not_started",
-  owner: "",
-  period: "",
-  sbp_green_banking_ref: "",
-  workflow_status: "draft",
+  title: "", description: "", pillar: "environmental", category: "", metric: "",
+  target_value: "", current_value: "", unit: "", status: "not_started", owner: "",
+  period: "", sbp_green_banking_ref: "", workflow_status: "draft",
 };
 function fromEsg(a: EsgAssessment): EsgForm {
   return {
-    title: a.title,
-    description: a.description || "",
-    pillar: a.pillar || "environmental",
-    category: a.category || "",
-    metric: a.metric || "",
-    target_value: a.target_value || "",
-    current_value: a.current_value || "",
-    unit: a.unit || "",
-    status: a.status || "not_started",
-    owner: a.owner || "",
-    period: a.period || "",
-    sbp_green_banking_ref: a.sbp_green_banking_ref || "",
+    title: a.title, description: a.description || "", pillar: a.pillar || "environmental",
+    category: a.category || "", metric: a.metric || "", target_value: a.target_value || "",
+    current_value: a.current_value || "", unit: a.unit || "", status: a.status || "not_started",
+    owner: a.owner || "", period: a.period || "", sbp_green_banking_ref: a.sbp_green_banking_ref || "",
     workflow_status: a.workflow_status || "draft",
   };
 }
 
 type EnvForm = {
-  entity_name: string;
-  sector: string;
-  risk_category: string;
-  assessment: string;
-  mitigation: string;
-  rating_date: string;
-  assessor: string;
+  entity_name: string; sector: string; risk_category: string; assessment: string;
+  mitigation: string; rating_date: string; assessor: string;
 };
 const BLANK_ENV: EnvForm = {
-  entity_name: "",
-  sector: "",
-  risk_category: "low",
-  assessment: "",
-  mitigation: "",
-  rating_date: "",
-  assessor: "",
+  entity_name: "", sector: "", risk_category: "low", assessment: "", mitigation: "", rating_date: "", assessor: "",
 };
 function fromEnv(r: EnvRating): EnvForm {
   return {
-    entity_name: r.entity_name,
-    sector: r.sector || "",
-    risk_category: r.risk_category || "low",
-    assessment: r.assessment || "",
-    mitigation: r.mitigation || "",
-    rating_date: r.rating_date || "",
+    entity_name: r.entity_name, sector: r.sector || "", risk_category: r.risk_category || "low",
+    assessment: r.assessment || "", mitigation: r.mitigation || "", rating_date: r.rating_date || "",
     assessor: r.assessor || "",
   };
 }
@@ -172,21 +114,22 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "ratings", label: "Environmental Risk Ratings" },
 ];
 
-export default function EsgPage() {
+/* ================================================================ page ===== */
+function EsgInner() {
   const [section, setSection] = useState<SectionId>("assessments");
   const [error, setError] = useState<string | null>(null);
-
-  const [assessments, setAssessments] = useState<EsgAssessment[]>([]);
-  const [ratings, setRatings] = useState<EnvRating[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<EsgSummary | null>(null);
 
-  // ---- ESG dialog + expanded detail ----
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<EsgAssessment | null>(null);
+
+  // ---- ESG dialog ----
   const [editingEsg, setEditingEsg] = useState<EsgAssessment | null>(null);
   const [showEsgForm, setShowEsgForm] = useState(false);
   const [savingEsg, setSavingEsg] = useState(false);
   const [ef, setEf] = useState<EsgForm>(BLANK_ESG);
   const setE = <K extends keyof EsgForm>(k: K, v: EsgForm[K]) => setEf((p) => ({ ...p, [k]: v }));
-  const [openEsg, setOpenEsg] = useState<EsgAssessment | null>(null);
 
   // ---- Env rating dialog ----
   const [editingEnv, setEditingEnv] = useState<EnvRating | null>(null);
@@ -195,120 +138,82 @@ export default function EsgPage() {
   const [rf, setRf] = useState<EnvForm>(BLANK_ENV);
   const setR = <K extends keyof EnvForm>(k: K, v: EnvForm[K]) => setRf((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadAssessments(keepOpen?: string) {
-    try {
-      const res = await apiCall<Page<EsgAssessment>>("GET", "/esg-assessments?limit=200");
-      setAssessments(res.items);
-      if (keepOpen) setOpenEsg(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load ESG assessments");
-    }
-  }
-  async function loadRatings() {
-    try {
-      const res = await apiCall<Page<EnvRating>>("GET", "/environmental-risk-ratings?limit=200");
-      setRatings(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load environmental risk ratings");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<EsgSummary>("GET", "/esg-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load ESG summary");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchAssessments = useCallback((qs: string) => apiCall<PagedList<EsgAssessment>>("GET", `/esg-assessments?${qs}`), []);
+  const fetchRatings = useCallback((qs: string) => apiCall<PagedList<EnvRating>>("GET", `/environmental-risk-ratings?${qs}`), []);
 
-  useEffect(() => {
-    loadAssessments();
-    loadRatings();
-    loadSummary();
-  }, []);
+  const loadSummary = useCallback(() => { apiCall<EsgSummary>("GET", "/esg-summary").then(setSummary).catch(() => {}); }, []);
+  const loadDetail = useCallback((id: string) => { apiCall<EsgAssessment>("GET", `/esg-assessments/${id}`).then(setDetail).catch(() => setDetail(null)); }, []);
+
+  useEffect(() => { loadSummary(); }, [loadSummary]);
+  useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
 
   // ------------------------------------------------------------- ESG CRUD
-  function openNewEsg() {
-    setEditingEsg(null);
-    setEf(BLANK_ESG);
-    setShowEsgForm(true);
-  }
-  function openEditEsg(a: EsgAssessment) {
-    setEditingEsg(a);
-    setEf(fromEsg(a));
-    setShowEsgForm(true);
-  }
+  function openNewEsg() { setEditingEsg(null); setEf(BLANK_ESG); setError(null); setShowEsgForm(true); }
+  function openEditEsg(a: EsgAssessment) { setEditingEsg(a); setEf(fromEsg(a)); setError(null); setShowEsgForm(true); }
   async function saveEsg() {
-    setError(null);
-    setSavingEsg(true);
+    setError(null); setSavingEsg(true);
     try {
       if (editingEsg) await apiCall("PATCH", `/esg-assessments/${editingEsg.id}`, ef);
       else await apiCall("POST", "/esg-assessments", ef);
-      setShowEsgForm(false);
-      await loadAssessments(openEsg?.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save ESG assessment");
-    } finally {
-      setSavingEsg(false);
-    }
+      setShowEsgForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
+      toast(editingEsg ? "Changes saved" : "ESG assessment created");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save ESG assessment"); }
+    finally { setSavingEsg(false); }
   }
   async function removeEsg(a: EsgAssessment) {
-    if (!window.confirm(`Delete ESG assessment ${a.reference || a.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete ESG assessment ${a.reference || a.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/esg-assessments/${a.id}`);
-      setShowEsgForm(false);
-      if (openEsg?.id === a.id) setOpenEsg(null);
-      await loadAssessments();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
-  }
-  function toggleEsg(a: EsgAssessment) {
-    setOpenEsg(openEsg?.id === a.id ? null : a);
+      setShowEsgForm(false); if (openId === a.id) setOpenId(null); reload(); loadSummary(); toast("Deleted");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
   }
 
   // ------------------------------------------------------------- Env rating CRUD
-  function openNewEnv() {
-    setEditingEnv(null);
-    setRf(BLANK_ENV);
-    setShowEnvForm(true);
-  }
-  function openEditEnv(r: EnvRating) {
-    setEditingEnv(r);
-    setRf(fromEnv(r));
-    setShowEnvForm(true);
-  }
+  function openNewEnv() { setEditingEnv(null); setRf(BLANK_ENV); setError(null); setShowEnvForm(true); }
+  function openEditEnv(r: EnvRating) { setEditingEnv(r); setRf(fromEnv(r)); setError(null); setShowEnvForm(true); }
   async function saveEnv() {
-    setError(null);
-    setSavingEnv(true);
+    setError(null); setSavingEnv(true);
     try {
       const payload = { ...rf, rating_date: rf.rating_date || null };
       if (editingEnv) await apiCall("PATCH", `/environmental-risk-ratings/${editingEnv.id}`, payload);
       else await apiCall("POST", "/environmental-risk-ratings", payload);
-      setShowEnvForm(false);
-      await loadRatings();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save environmental risk rating");
-    } finally {
-      setSavingEnv(false);
-    }
+      setShowEnvForm(false); reload(); loadSummary();
+      toast(editingEnv ? "Changes saved" : "Rating created");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save environmental risk rating"); }
+    finally { setSavingEnv(false); }
   }
   async function removeEnv(r: EnvRating) {
-    if (!window.confirm(`Delete environmental risk rating ${r.reference || r.entity_name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete environmental risk rating ${r.reference || r.entity_name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/environmental-risk-ratings/${r.id}`);
-      setShowEnvForm(false);
-      await loadRatings();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
+      setShowEnvForm(false); reload(); loadSummary(); toast("Deleted");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
   }
+
+  // ------------------------------------------------------------- columns
+  const esgColumns: Column<EsgAssessment>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (a) => <span className="ref">{a.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (a) => <span className="cell-title">{a.title}</span> },
+    { key: "pillar", header: "Pillar", sortable: true, render: (a) => <Badge tone={PILLAR_TONE[a.pillar] || "neutral"}>{cap(a.pillar)}</Badge> },
+    { key: "category", header: "Category", sortable: true, render: (a) => <span className="muted">{a.category || "—"}</span> },
+    { key: "target", header: "Target", render: (a) => <span className="muted">{a.target_value ? `${a.target_value}${a.unit ? " " + a.unit : ""}` : "—"}</span> },
+    { key: "current", header: "Current", render: (a) => <span className="muted">{a.current_value ? `${a.current_value}${a.unit ? " " + a.unit : ""}` : "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (a) => <Badge tone={ESG_STATUS_TONE[a.status] || "neutral"}>{cap(a.status)}</Badge> },
+    { key: "actions", header: "", render: (a) => <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditEsg(a)}>Edit</button><button className="btn secondary sm" onClick={() => removeEsg(a)}>Delete</button></div> },
+  ];
+
+  const envColumns: Column<EnvRating>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "entity_name", header: "Entity", sortable: true, render: (r) => <span className="cell-title">{r.entity_name}</span> },
+    { key: "sector", header: "Sector", sortable: true, render: (r) => <span className="muted">{r.sector || "—"}</span> },
+    { key: "risk_category", header: "Risk category", sortable: true, render: (r) => <Badge tone={ENV_RISK_TONE[r.risk_category] || "neutral"}>{cap(r.risk_category)}</Badge> },
+    { key: "assessor", header: "Assessor", sortable: true, render: (r) => <span className="muted">{r.assessor || "—"}</span> },
+    { key: "rating_date", header: "Rating date", sortable: true, render: (r) => <span className="muted">{r.rating_date || "—"}</span> },
+    { key: "actions", header: "", render: (r) => <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditEnv(r)}>Edit</button><button className="btn secondary sm" onClick={() => removeEnv(r)}>Delete</button></div> },
+  ];
 
   // ------------------------------------------------------------- ESG form tabs
   const esgGeneral = (
@@ -365,7 +270,6 @@ export default function EsgPage() {
     </>
   );
 
-  // ------------------------------------------------------------- Env form tabs
   const envGeneral = (
     <>
       <Field label="Entity name" required help="Borrower, client, or vendor being rated.">
@@ -409,12 +313,12 @@ export default function EsgPage() {
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {section === "assessments" && (
             <button className="btn" onClick={openNewEsg}>
-              <IconPlus width={16} height={16} /> New ESG assessment
+              New ESG assessment
             </button>
           )}
           {section === "ratings" && (
             <button className="btn" onClick={openNewEnv}>
-              <IconPlus width={16} height={16} /> New environmental rating
+              New environmental rating
             </button>
           )}
         </div>
@@ -422,39 +326,26 @@ export default function EsgPage() {
 
       <div className="grid stat-grid">
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.total_assessments.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.total_assessments.toLocaleString() : "—"}</span></div>
           <span className="l">ESG assessments</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.achieved.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.achieved.toLocaleString() : "—"}</span></div>
           <span className="l">Targets achieved{summary ? ` (${summary.achieved_pct}%)` : ""}</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{offTrack != null ? offTrack.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{offTrack != null ? offTrack.toLocaleString() : "—"}</span></div>
           <span className="l">Off track</span>
         </div>
         <div className="card stat">
-          <div className="stat-top">
-            <span className="n">{summary ? summary.high_env_risk.toLocaleString() : "—"}</span>
-          </div>
+          <div className="stat-top"><span className="n">{summary ? summary.high_env_risk.toLocaleString() : "—"}</span></div>
           <span className="l">High env-risk entities</span>
         </div>
       </div>
 
       <div style={{ display: "flex", gap: 8, margin: "16px 0", flexWrap: "wrap" }}>
         {SECTIONS.map((s) => (
-          <button
-            key={s.id}
-            className={`btn${section === s.id ? "" : " secondary"}`}
-            onClick={() => setSection(s.id)}
-            type="button"
-          >
+          <button key={s.id} className={`btn${section === s.id ? "" : " secondary"}`} onClick={() => setSection(s.id)} type="button">
             {s.label}
           </button>
         ))}
@@ -462,173 +353,63 @@ export default function EsgPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      {/* ============================================= ESG ASSESSMENTS */}
       {section === "assessments" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <h3>ESG Assessments</h3>
-              <span className="sub">{assessments.length} total · click a row to expand</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Title</th>
-                    <th>Pillar</th>
-                    <th>Category</th>
-                    <th>Target</th>
-                    <th>Current</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {assessments.map((a) => (
-                    <tr key={a.id} style={{ cursor: "pointer" }} onClick={() => toggleEsg(a)}>
-                      <td className="ref">{a.reference || "—"}</td>
-                      <td className="cell-title">{a.title}</td>
-                      <td><Badge tone={PILLAR_TONE[a.pillar] || "neutral"}>{cap(a.pillar)}</Badge></td>
-                      <td className="muted">{a.category || "—"}</td>
-                      <td className="muted">{a.target_value ? `${a.target_value}${a.unit ? " " + a.unit : ""}` : "—"}</td>
-                      <td className="muted">{a.current_value ? `${a.current_value}${a.unit ? " " + a.unit : ""}` : "—"}</td>
-                      <td><Badge tone={ESG_STATUS_TONE[a.status] || "neutral"}>{cap(a.status)}</Badge></td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleEsg(a)}>
-                            {openEsg?.id === a.id ? "Hide" : "Open"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => openEditEsg(a)}>Edit</button>
-                          <button className="btn secondary sm" onClick={() => removeEsg(a)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {assessments.length === 0 && (
-                    <tr>
-                      <td colSpan={8}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No ESG assessments</h3>
-                          <p>Track ESG metrics and targets aligned to the SBP Green Banking Guidelines.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openEsg && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openEsg.reference} — {openEsg.title}</h3>
-                    <span className="sub">
-                      {cap(openEsg.pillar)} · {openEsg.progress_note}
-                      {openEsg.owner ? " · owner " + openEsg.owner : ""}
-                      {openEsg.period ? " · " + openEsg.period : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button className="btn secondary sm" onClick={() => openEditEsg(openEsg)}>Edit</button>
-                    <button className="btn secondary sm" onClick={() => removeEsg(openEsg)}>Delete</button>
-                  </div>
-                </div>
-
-                <div className="card-pad">
-                  <div className="field-row" style={{ marginBottom: 12 }}>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Metric</div>
-                      <strong>{openEsg.metric || "—"}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Target</div>
-                      <strong>{openEsg.target_value ? `${openEsg.target_value}${openEsg.unit ? " " + openEsg.unit : ""}` : "—"}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Current</div>
-                      <strong>{openEsg.current_value ? `${openEsg.current_value}${openEsg.unit ? " " + openEsg.unit : ""}` : "—"}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Status</div>
-                      <Badge tone={ESG_STATUS_TONE[openEsg.status] || "neutral"}>{cap(openEsg.status)}</Badge>
-                    </div>
-                  </div>
-                  {openEsg.sbp_green_banking_ref && (
-                    <p className="muted" style={{ fontSize: 13, margin: "0 0 8px" }}>
-                      SBP Green Banking ref: <strong>{openEsg.sbp_green_banking_ref}</strong>
-                    </p>
-                  )}
-                  {openEsg.description && (
-                    <p style={{ fontSize: 13, margin: 0 }}>{openEsg.description}</p>
-                  )}
-                </div>
-              </div>
-
-              <RecordPanels model="esg_assessment" entityId={openEsg.id} />
-            </>
-          )}
-        </>
+        <DataTable<EsgAssessment>
+          columns={esgColumns}
+          fetcher={fetchAssessments}
+          rowKey={(a) => a.id}
+          onRowClick={(a) => setOpenId(a.id)}
+          activeKey={openId}
+          searchPlaceholder="Search assessments by title, category, metric or owner…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No ESG assessments. Track ESG metrics and targets aligned to the SBP Green Banking Guidelines."
+          refreshKey={refreshKey}
+        />
       )}
 
-      {/* ============================================= ENV RISK RATINGS */}
       {section === "ratings" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Environmental Risk Ratings</h3>
-            <span className="sub">{ratings.length} total · borrower / client / vendor E-risk register · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Entity</th>
-                  <th>Sector</th>
-                  <th>Risk category</th>
-                  <th>Assessor</th>
-                  <th>Rating date</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {ratings.map((r) => (
-                  <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => openEditEnv(r)}>
-                    <td className="ref">{r.reference || "—"}</td>
-                    <td className="cell-title">{r.entity_name}</td>
-                    <td className="muted">{r.sector || "—"}</td>
-                    <td><Badge tone={ENV_RISK_TONE[r.risk_category] || "neutral"}>{cap(r.risk_category)}</Badge></td>
-                    <td className="muted">{r.assessor || "—"}</td>
-                    <td className="muted">{r.rating_date || "—"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeEnv(r)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {ratings.length === 0 && (
-                  <tr>
-                    <td colSpan={7}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No environmental risk ratings</h3>
-                        <p>Rate the environmental risk of credit and vendor exposures for green-banking due diligence.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<EnvRating>
+          columns={envColumns}
+          fetcher={fetchRatings}
+          rowKey={(r) => r.id}
+          onRowClick={(r) => openEditEnv(r)}
+          searchPlaceholder="Search ratings by entity or sector…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No environmental risk ratings. Rate the environmental risk of credit and vendor exposures."
+          refreshKey={refreshKey}
+        />
       )}
 
-      {/* ============================================= MODALS */}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference || ""} ${detail.title}`.trim() : "…"}
+        subtitle={detail ? `${cap(detail.pillar)}${detail.owner ? " · owner " + detail.owner : ""}${detail.period ? " · " + detail.period : ""}` : ""}
+        width={720}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditEsg(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeEsg(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <div><div className="muted" style={{ fontSize: 12 }}>Metric</div><div style={{ marginTop: 4 }}><strong>{detail.metric || "—"}</strong></div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Target</div><div style={{ marginTop: 4 }}><strong>{detail.target_value ? `${detail.target_value}${detail.unit ? " " + detail.unit : ""}` : "—"}</strong></div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Current</div><div style={{ marginTop: 4 }}><strong>{detail.current_value ? `${detail.current_value}${detail.unit ? " " + detail.unit : ""}` : "—"}</strong></div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Status</div><div style={{ marginTop: 4 }}><Badge tone={ESG_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge></div></div>
+            </div>
+            {detail.sbp_green_banking_ref && (
+              <p className="muted" style={{ fontSize: 13, margin: "0 0 8px" }}>SBP Green Banking ref: <strong>{detail.sbp_green_banking_ref}</strong></p>
+            )}
+            {detail.description && <p style={{ fontSize: 13, margin: "0 0 14px" }}>{detail.description}</p>}
+            <RecordPanels model="esg_assessment" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
+
       {showEsgForm && (
         <FormModal
           title={editingEsg ? `Edit ESG assessment — ${editingEsg.reference || editingEsg.title}` : "New ESG assessment"}
@@ -642,19 +423,9 @@ export default function EsgPage() {
           saving={savingEsg}
           error={error}
           saveLabel={editingEsg ? "Save changes" : "Create ESG assessment"}
-          footerLeft={
-            editingEsg ? (
-              <button
-                className="btn secondary sm"
-                type="button"
-                onClick={() => removeEsg(editingEsg)}
-                disabled={savingEsg}
-                style={{ color: "var(--danger, #c0392b)" }}
-              >
-                Delete
-              </button>
-            ) : undefined
-          }
+          footerLeft={editingEsg ? (
+            <button className="btn secondary sm" type="button" onClick={() => removeEsg(editingEsg)} disabled={savingEsg} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
+          ) : undefined}
         />
       )}
 
@@ -668,21 +439,19 @@ export default function EsgPage() {
           saving={savingEnv}
           error={error}
           saveLabel={editingEnv ? "Save changes" : "Create rating"}
-          footerLeft={
-            editingEnv ? (
-              <button
-                className="btn secondary sm"
-                type="button"
-                onClick={() => removeEnv(editingEnv)}
-                disabled={savingEnv}
-                style={{ color: "var(--danger, #c0392b)" }}
-              >
-                Delete
-              </button>
-            ) : undefined
-          }
+          footerLeft={editingEnv ? (
+            <button className="btn secondary sm" type="button" onClick={() => removeEnv(editingEnv)} disabled={savingEnv} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
+          ) : undefined}
         />
       )}
     </>
+  );
+}
+
+export default function EsgPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <EsgInner />
+    </Suspense>
   );
 }

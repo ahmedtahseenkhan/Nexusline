@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.vendor import Vendor
 from app.models.outsourcing import (
     OutsourcingArrangement,
@@ -66,6 +67,18 @@ async def _load_arrangement(db, aid) -> OutsourcingArrangement:
 
 
 # ====================================================== outsourcing register ===
+_ARRANGEMENT_SORTABLE = {
+    "reference": OutsourcingArrangement.reference,
+    "title": OutsourcingArrangement.title,
+    "service_provider": OutsourcingArrangement.service_provider,
+    "category": OutsourcingArrangement.category,
+    "materiality": OutsourcingArrangement.materiality,
+    "status": OutsourcingArrangement.status,
+    "contract_end": OutsourcingArrangement.contract_end,
+    "created_at": OutsourcingArrangement.created_at,
+}
+
+
 @router.get("/outsourcing", response_model=Page[OutsourcingArrangementRead], dependencies=[_READ])
 async def list_arrangements(
     db: DbSession,
@@ -73,6 +86,8 @@ async def list_arrangements(
     category: OutsourcingCategory | None = None,
     materiality: OutsourcingMateriality | None = None,
     status: OutsourcingStatus | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[OutsourcingArrangementRead]:
@@ -94,7 +109,12 @@ async def list_arrangements(
     if status is not None:
         stmt = stmt.where(OutsourcingArrangement.status == status)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(OutsourcingArrangement.created_at.desc()).limit(limit).offset(offset))).all()
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _ARRANGEMENT_SORTABLE, default=OutsourcingArrangement.created_at)
+    else:
+        stmt = stmt.order_by(OutsourcingArrangement.created_at.desc())
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[OutsourcingArrangementRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
