@@ -5,6 +5,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.common import GraphRef
+
 from app.models.base import WorkflowState
 from app.models.enums import PolicyDocType, PolicyStatus, ReviewFrequency
 
@@ -95,6 +97,11 @@ class PolicyRead(PolicyBase):
     requirements: list[PolicyRefItem] = []
     risks: list[PolicyRefItem] = []
     reviews: list[PolicyReviewRead] = []
+    # Reverse links (read-only).
+    exceptions: list[GraphRef] = []
+    projects: list[GraphRef] = []
+    goals: list[GraphRef] = []
+    processing_activities: list[GraphRef] = []
     created_at: datetime
 
 

@@ -95,6 +95,18 @@ class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     assets: Mapped[list["Asset"]] = relationship("Asset", secondary=vendor_assets, lazy="selectin",
         secondaryjoin="and_(vendor_assets.c.asset_id == Asset.id, Asset.deleted == False)",
     )  # noqa: F821
+    # Reverse (read-only) links into the graph.
+    incidents: Mapped[list["Incident"]] = relationship(  # noqa: F821
+        "Incident", secondary="incident_vendors", lazy="selectin", viewonly=True,
+    )
+    assessments: Mapped[list["Assessment"]] = relationship(  # noqa: F821
+        "Assessment", primaryjoin="Assessment.vendor_id == Vendor.id",
+        foreign_keys="Assessment.vendor_id", lazy="selectin", viewonly=True,
+    )
+    outsourcing_arrangements: Mapped[list["OutsourcingArrangement"]] = relationship(  # noqa: F821
+        "OutsourcingArrangement", primaryjoin="OutsourcingArrangement.vendor_id == Vendor.id",
+        foreign_keys="OutsourcingArrangement.vendor_id", lazy="selectin", viewonly=True,
+    )
 
     @property
     def contract_count(self) -> int:

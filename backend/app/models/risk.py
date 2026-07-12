@@ -164,6 +164,28 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
         "Incident", secondary=risk_incidents, lazy="selectin",
         secondaryjoin="and_(risk_incidents.c.incident_id == Incident.id, Incident.deleted == False)",
     )
+
+    # Reverse (read-only) links — records elsewhere that point at this risk. These make
+    # the risk detail show the *full* graph (eramba-style), not just its outbound links.
+    requirements: Mapped[list["Requirement"]] = relationship(  # noqa: F821
+        "Requirement", secondary="requirement_risks", lazy="selectin", viewonly=True,
+    )
+    exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
+        "ExceptionRecord", secondary="exception_risks", lazy="selectin", viewonly=True,
+    )
+    vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
+        "Vendor", secondary="vendor_risks", lazy="selectin", viewonly=True,
+    )
+    projects: Mapped[list["Project"]] = relationship(  # noqa: F821
+        "Project", secondary="project_risks", lazy="selectin", viewonly=True,
+    )
+    goals: Mapped[list["Goal"]] = relationship(  # noqa: F821
+        "Goal", secondary="goal_risks", lazy="selectin", viewonly=True,
+    )
+    processing_activities: Mapped[list["ProcessingActivity"]] = relationship(  # noqa: F821
+        "ProcessingActivity", secondary="ropa_risks", lazy="selectin", viewonly=True,
+    )
+
     acceptances: Mapped[list["RiskAcceptance"]] = relationship(
         back_populates="risk",
         cascade="all, delete-orphan",

@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from app.models.base import WorkflowState
+from app.schemas.common import GraphRef
 from app.models.enums import (
     AcceptanceStatus,
     ReviewFrequency,
@@ -160,6 +161,14 @@ class RiskRead(BaseModel):
     policies: list[RiskLinkRef] = []
     incidents: list[RiskLinkRef] = []
     acceptances: list[RiskAcceptanceRead] = []
+
+    # Reverse links — records elsewhere that point at this risk (read-only).
+    requirements: list[GraphRef] = []
+    exceptions: list[GraphRef] = []
+    vendors: list[GraphRef] = []
+    projects: list[GraphRef] = []
+    goals: list[GraphRef] = []
+    processing_activities: list[GraphRef] = []
 
     created_at: datetime
     updated_at: datetime

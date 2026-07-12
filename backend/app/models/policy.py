@@ -84,6 +84,19 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
         "Risk", secondary="risk_policies", lazy="selectin", viewonly=True,
         secondaryjoin="and_(risk_policies.c.risk_id == Risk.id, Risk.deleted == False)",
     )
+    # Reverse (read-only) links into the graph.
+    exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
+        "ExceptionRecord", secondary="exception_policies", lazy="selectin", viewonly=True,
+    )
+    projects: Mapped[list["Project"]] = relationship(  # noqa: F821
+        "Project", secondary="project_policies", lazy="selectin", viewonly=True,
+    )
+    goals: Mapped[list["Goal"]] = relationship(  # noqa: F821
+        "Goal", secondary="goal_policies", lazy="selectin", viewonly=True,
+    )
+    processing_activities: Mapped[list["ProcessingActivity"]] = relationship(  # noqa: F821
+        "ProcessingActivity", secondary="ropa_policies", lazy="selectin", viewonly=True,
+    )
 
     @property
     def acknowledgment_count(self) -> int:

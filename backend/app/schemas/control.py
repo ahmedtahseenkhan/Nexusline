@@ -5,6 +5,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.common import GraphRef
+
 from app.models.base import WorkflowState
 from app.models.enums import (
     ControlEffectiveness,
@@ -96,6 +98,10 @@ class ControlRead(ControlBase):
     policies: list[ControlLinkRef] = []
     requirements: list[ControlLinkRef] = []
     risks: list[ControlLinkRef] = []
+    # Reverse links (read-only).
+    incidents: list[GraphRef] = []
+    exceptions: list[GraphRef] = []
+    projects: list[GraphRef] = []
 
 
 class ControlRef(BaseModel):

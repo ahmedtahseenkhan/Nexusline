@@ -5,6 +5,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.common import GraphRef
+
 from app.models.base import WorkflowState
 from app.models.enums import AssessmentStatus, Criticality, ReviewFrequency, Severity, VendorStatus
 
@@ -105,6 +107,10 @@ class VendorRead(VendorBase):
     contracts: list[ServiceContractRead] = []
     risks: list[VendorRefItem] = []
     assets: list[VendorRefItem] = []
+    # Reverse links (read-only).
+    incidents: list[GraphRef] = []
+    assessments: list[GraphRef] = []
+    outsourcing_arrangements: list[GraphRef] = []
     contract_count: int = 0
     active_contract_value: float = 0.0
     created_at: datetime

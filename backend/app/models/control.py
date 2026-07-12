@@ -101,6 +101,16 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     requirements: Mapped[list["Requirement"]] = relationship(  # noqa: F821
         "Requirement", secondary="requirement_controls", lazy="selectin", viewonly=True
     )
+    # Reverse (read-only) links into the graph.
+    incidents: Mapped[list["Incident"]] = relationship(  # noqa: F821
+        "Incident", secondary="incident_controls", lazy="selectin", viewonly=True,
+    )
+    exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
+        "ExceptionRecord", secondary="exception_controls", lazy="selectin", viewonly=True,
+    )
+    projects: Mapped[list["Project"]] = relationship(  # noqa: F821
+        "Project", secondary="project_controls", lazy="selectin", viewonly=True,
+    )
 
     @staticmethod
     def _last_result(items) -> TestResult | None:

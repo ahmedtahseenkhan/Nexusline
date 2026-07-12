@@ -5,6 +5,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.common import GraphRef
+
 from app.models.enums import (
     AssetClass,
     AssetDependencyType,
@@ -322,6 +324,9 @@ class AssetRead(BaseModel):
     exceptions: list[LinkRef] = []
     related_assets: list[LinkRef] = []
     risks: list[LinkRef] = []
+    # Reverse links (read-only).
+    vendors: list[GraphRef] = []
+    access_reviews: list[GraphRef] = []
     reviews: list[AssetReviewRead] = []
     risk_count: int = 0
     review_count: int = 0

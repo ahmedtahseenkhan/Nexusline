@@ -127,6 +127,13 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
         secondaryjoin="and_(requirement_policies.c.policy_id == Policy.id, Policy.deleted == False)",
     )
     legal: Mapped["Legal | None"] = relationship(lazy="selectin")  # noqa: F821
+    # Reverse (read-only) links into the graph.
+    assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
+        "Asset", secondary="assets_requirements", lazy="selectin", viewonly=True,
+    )
+    exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
+        "ExceptionRecord", secondary="exception_requirements", lazy="selectin", viewonly=True,
+    )
     findings: Mapped[list["ComplianceFinding"]] = relationship(
         back_populates="requirement", cascade="all, delete-orphan", lazy="selectin",
         order_by="ComplianceFinding.created_at.desc()",

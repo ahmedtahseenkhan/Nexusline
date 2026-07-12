@@ -5,6 +5,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.common import GraphRef
+
 from app.models.base import WorkflowState
 from app.models.enums import (
     ComplianceStatus,
@@ -124,6 +126,9 @@ class RequirementRead(RequirementBase):
     controls: list[ControlRef] = []
     risks: list[CompRef] = []
     policies: list[CompRef] = []
+    # Reverse links (read-only).
+    assets: list[GraphRef] = []
+    exceptions: list[GraphRef] = []
     legal: CompRef | None = None
     findings: list[ComplianceFindingRead] = []
     is_covered: bool

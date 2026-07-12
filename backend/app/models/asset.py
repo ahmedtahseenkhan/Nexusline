@@ -349,6 +349,14 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         "Risk", secondary="risk_assets", lazy="selectin", viewonly=True,
         secondaryjoin="and_(risk_assets.c.risk_id == Risk.id, Risk.deleted == False)",
     )
+    # Reverse (read-only) links into the graph.
+    vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
+        "Vendor", secondary="vendor_assets", lazy="selectin", viewonly=True,
+    )
+    access_reviews: Mapped[list["AccessReview"]] = relationship(  # noqa: F821
+        "AccessReview", primaryjoin="AccessReview.asset_id == Asset.id",
+        foreign_keys="AccessReview.asset_id", lazy="selectin", viewonly=True,
+    )
 
     @property
     def classification(self) -> Criticality:
