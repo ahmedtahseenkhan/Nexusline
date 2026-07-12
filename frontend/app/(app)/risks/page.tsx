@@ -7,6 +7,8 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import CustomFieldsEditor from "@/components/CustomFieldsEditor";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import RecordPanels from "@/components/RecordPanels";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
@@ -220,6 +222,8 @@ function RisksPage() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [users, setUsers] = useState<UserRow[]>([]);
   const [recordId, setRecordId] = useRecordParam("id");
+  // Read-only detail loaded for the view drawer (?id=). Edit is a separate action.
+  const [detail, setDetail] = useState<RiskRow | null>(null);
 
   // appetite editor
   const [showSettings, setShowSettings] = useState(false);
@@ -277,12 +281,15 @@ function RisksPage() {
     setShowForm(true);
   }
 
-  // Deep-link: open the record named by ?id= (e.g. from global search / ⌘K).
+  // Deep-link view: ?id= (row click, global search, ⌘K) loads the record's full detail
+  // into the read-only drawer. Editing is a separate action from there.
+  const loadDetail = useCallback((id: string) => {
+    apiCall<RiskRow>("GET", `/risks/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
   useEffect(() => {
-    if (!recordId || editing?.id === recordId) return;
-    apiCall<RiskRow>("GET", `/risks/${recordId}`).then(openEdit).catch(() => setRecordId(null));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recordId]);
+    if (recordId) loadDetail(recordId);
+    else setDetail(null);
+  }, [recordId, loadDetail]);
 
   async function save() {
     setError(null);
@@ -297,6 +304,7 @@ function RisksPage() {
       }
       setShowForm(false);
       reload();
+      if (recordId) loadDetail(recordId);  // refresh the open view drawer
       toast(editing ? "Changes saved" : "Risk created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save risk");
@@ -310,6 +318,7 @@ function RisksPage() {
     setError(null);
     try {
       await apiCall("DELETE", `/risks/${r.id}`);
+      if (recordId === r.id) setRecordId(null);
       reload();
       toast("Archived");
     } catch (e) {
@@ -338,6 +347,24 @@ function RisksPage() {
   };
   const linkCount = (r: RiskRow) =>
     r.assets.length + r.controls.length + r.threats.length + r.vulnerabilities.length + r.policies.length + r.incidents.length;
+
+  // read-only helpers for the view drawer
+  const chips = (items: Ref[]) =>
+    items.length ? (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {items.map((x) => (
+          <span key={x.id} className="chip">{x.reference || x.title || x.name || x.id}</span>
+        ))}
+      </div>
+    ) : (
+      <span className="muted">—</span>
+    );
+  const field = (label: string, value: React.ReactNode) => (
+    <div style={{ minWidth: 140 }}>
+      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+      <div style={{ marginTop: 3 }}>{value ?? <span className="muted">—</span>}</div>
+    </div>
+  );
 
   // computed previews
   const inhScore = f.inherent_likelihood === "" || f.inherent_impact === "" ? null : Number(f.inherent_likelihood) * Number(f.inherent_impact);
@@ -564,13 +591,87 @@ function RisksPage() {
         columns={riskColumns}
         fetcher={fetchRisks}
         rowKey={(r) => r.id}
-        onRowClick={(r) => { setRecordId(r.id); openEdit(r); }}
+        onRowClick={(r) => setRecordId(r.id)}
         activeKey={recordId ?? undefined}
         searchPlaceholder="Search risks by title or reference…"
         defaultSort={{ by: "inherent_score", dir: "desc" }}
         emptyMessage="No risks yet. Create your first risk to start building the register."
         refreshKey={refreshKey}
       />
+
+      {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}
+      <RecordDrawer
+        open={!!recordId && !!detail}
+        onClose={() => setRecordId(null)}
+        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
+        subtitle={detail ? cap(detail.status) + (detail.category ? ` · ${detail.category}` : "") : ""}
+        width={680}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-end", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Inherent</div><div style={{ marginTop: 4 }}><Severity value={detail.inherent_severity} /> <span className="muted">({detail.inherent_score ?? "—"})</span></div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Residual</div><div style={{ marginTop: 4 }}><Severity value={detail.residual_severity} /> <span className="muted">({detail.residual_score ?? "—"})</span></div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Appetite</div><div style={{ marginTop: 4 }}>{(() => { const a = appetite(detail, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; })()}</div></div>
+              <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Exposure (ALE)</div><div style={{ marginTop: 4 }}>{money(detail.annual_loss_expectancy)}</div></div>
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Owner", userName(detail.owner_id))}
+              {field("Status", <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>)}
+              {field("Workflow", cap(detail.workflow_status))}
+              {field("Workflow owner", detail.workflow_owner || "—")}
+            </div>
+
+            {detail.description && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
+                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.description}</div>
+              </div>
+            )}
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13 }}>Treatment</strong>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
+                {field("Strategy", detail.treatment_strategy ? cap(detail.treatment_strategy) : "—")}
+                {field("Owner", detail.treatment_owner || "—")}
+                {field("Deadline", detail.treatment_deadline || "—")}
+                {field("Cost", money(detail.treatment_cost))}
+              </div>
+              {detail.treatment_description && (
+                <div style={{ fontSize: 13.5, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: detail.treatment_description }} />
+              )}
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 18 }}>
+              {field("Review frequency", cap(detail.review_frequency))}
+              {field("Last review", detail.last_review_date || "—")}
+              {field("Next review", isOverdue(detail.next_review_date) ? <Badge tone="high">Overdue · {detail.next_review_date}</Badge> : (detail.next_review_date || "—"))}
+              {field("Expired reviews", String(detail.expired_reviews))}
+            </div>
+
+            <strong style={{ fontSize: 13 }}>Related records</strong>
+            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
+              {field("Assets", chips(detail.assets))}
+              {field("Controls", chips(detail.controls))}
+              {field("Threats", chips(detail.threats))}
+              {field("Vulnerabilities", chips(detail.vulnerabilities))}
+              {field("Policies", chips(detail.policies))}
+              {field("Incidents", chips(detail.incidents))}
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+              <RecordPanels model="risk" entityId={detail.id} />
+            </div>
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
