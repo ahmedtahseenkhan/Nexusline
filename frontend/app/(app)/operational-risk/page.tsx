@@ -16,6 +16,9 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips from "@/components/RelatedChips";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -23,6 +26,23 @@ import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
+
+// ------------------------------------------------------------------ graph-link types
+// The shared lib/api types don't carry the new relation fields yet, so we extend
+// them locally (all optional, so plain records stay assignable) and cast where read.
+type Ref = { id: string; reference?: string; title?: string; name?: string };
+type RcsaRiskExt = RcsaRisk & { risk?: Ref | null; control?: Ref | null };
+type KriExt = KeyRiskIndicator & { risks?: Ref[] };
+type LossEventExt = LossEvent & { incident?: Ref | null; risks?: Ref[] };
+
+const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
+
+// Server typeahead source for the link pickers (searches any record, server-limited).
+type Named = { id: string; name?: string; reference?: string; title?: string };
+const linkSearch = (path: string) => (q: string) =>
+  apiCall<PagedList<Named>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+    r.items.map((x): AsyncOption => ({ value: x.id, label: x.name || x.title || x.reference || x.id, sub: x.reference })),
+  );
 
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
@@ -143,6 +163,10 @@ type RiskDraft = {
   action: string;
   action_owner: string;
   due_date: string;
+  risk_id: string;
+  risk_label: string;
+  control_id: string;
+  control_label: string;
 };
 const BLANK_RISK: RiskDraft = {
   title: "",
@@ -156,6 +180,10 @@ const BLANK_RISK: RiskDraft = {
   action: "",
   action_owner: "",
   due_date: "",
+  risk_id: "",
+  risk_label: "",
+  control_id: "",
+  control_label: "",
 };
 
 type KriForm = {
@@ -170,6 +198,7 @@ type KriForm = {
   limit_threshold: string;
   description: string;
   workflow_status: string;
+  risk_ids: AsyncOption[];
 };
 const BLANK_KRI: KriForm = {
   name: "",
@@ -183,6 +212,7 @@ const BLANK_KRI: KriForm = {
   limit_threshold: "",
   description: "",
   workflow_status: "draft",
+  risk_ids: [],
 };
 function fromKri(k: KeyRiskIndicator): KriForm {
   return {
@@ -197,6 +227,7 @@ function fromKri(k: KeyRiskIndicator): KriForm {
     limit_threshold: k.limit_threshold != null ? String(k.limit_threshold) : "",
     description: k.description || "",
     workflow_status: k.workflow_status || "draft",
+    risk_ids: ((k as KriExt).risks || []).map(refToOpt),
   };
 }
 function kriPayload(f: KriForm): Record<string, unknown> {
@@ -212,6 +243,7 @@ function kriPayload(f: KriForm): Record<string, unknown> {
     limit_threshold: f.limit_threshold === "" ? null : Number(f.limit_threshold),
     description: f.description,
     workflow_status: f.workflow_status,
+    risk_ids: f.risk_ids.map((o) => o.value),
   };
 }
 
@@ -236,6 +268,9 @@ type LossForm = {
   root_cause: string;
   action_owner: string;
   workflow_status: string;
+  incident_id: string;
+  incident_label: string;
+  risk_ids: AsyncOption[];
 };
 const BLANK_LOSS: LossForm = {
   title: "",
@@ -251,8 +286,12 @@ const BLANK_LOSS: LossForm = {
   root_cause: "",
   action_owner: "",
   workflow_status: "draft",
+  incident_id: "",
+  incident_label: "",
+  risk_ids: [],
 };
 function fromLoss(l: LossEvent): LossForm {
+  const lx = l as LossEventExt;
   return {
     title: l.title,
     basel_event_type: l.basel_event_type || "internal_fraud",
@@ -267,6 +306,9 @@ function fromLoss(l: LossEvent): LossForm {
     root_cause: l.root_cause || "",
     action_owner: l.action_owner || "",
     workflow_status: l.workflow_status || "draft",
+    incident_id: lx.incident?.id || "",
+    incident_label: lx.incident ? refToOpt(lx.incident).label : "",
+    risk_ids: (lx.risks || []).map(refToOpt),
   };
 }
 function lossPayload(f: LossForm): Record<string, unknown> {
@@ -284,6 +326,8 @@ function lossPayload(f: LossForm): Record<string, unknown> {
     root_cause: f.root_cause,
     action_owner: f.action_owner,
     workflow_status: f.workflow_status,
+    incident_id: f.incident_id || null,
+    risk_ids: f.risk_ids.map((o) => o.value),
   };
 }
 
@@ -433,6 +477,8 @@ function OperationalRiskInner() {
         action: rd.action,
         action_owner: rd.action_owner,
         due_date: rd.due_date || null,
+        risk_id: rd.risk_id || null,
+        control_id: rd.control_id || null,
       });
       setRd(BLANK_RISK);
       setRcsaDetail(updated);
@@ -686,6 +732,9 @@ function OperationalRiskInner() {
       <Field label="Description">
         <TextArea value={kf.description} onChange={(v) => setK("description", v)} rows={3} placeholder="What this indicator measures." />
       </Field>
+      <Field label="Indicates risks" help="Register risks this indicator monitors.">
+        <AsyncMultiSelect search={linkSearch("risks")} value={kf.risk_ids} onChange={(v) => setK("risk_ids", v)} />
+      </Field>
       <Field label="Workflow" help="Approval lifecycle for this KRI record.">
         <Select value={kf.workflow_status} onChange={(v) => setK("workflow_status", v)} options={WORKFLOW} />
       </Field>
@@ -742,6 +791,18 @@ function OperationalRiskInner() {
       </Field>
       <Field label="Action owner">
         <TextInput value={lf.action_owner} onChange={(v) => setL("action_owner", v)} placeholder="Owner" />
+      </Field>
+      <Field label="Related incident" help="The incident this loss event stemmed from.">
+        <AsyncSelect
+          search={linkSearch("incidents")}
+          value={lf.incident_id || null}
+          selectedLabel={lf.incident_label}
+          placeholder="Link an incident…"
+          onChange={(v, o) => setLf((p) => ({ ...p, incident_id: v || "", incident_label: o?.label || "" }))}
+        />
+      </Field>
+      <Field label="Affected risks" help="Register risks this loss materialised against.">
+        <AsyncMultiSelect search={linkSearch("risks")} value={lf.risk_ids} onChange={(v) => setL("risk_ids", v)} />
       </Field>
       <Field label="Workflow" help="Approval lifecycle for this loss record.">
         <Select value={lf.workflow_status} onChange={(v) => setL("workflow_status", v)} options={WORKFLOW} />
@@ -904,6 +965,26 @@ function OperationalRiskInner() {
                     <label className="label">Control description</label>
                     <input className="input" value={rd.control_description} onChange={(ev) => setRD("control_description", ev.target.value)} placeholder="Mitigating control" />
                   </div>
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Enterprise risk</label>
+                    <AsyncSelect
+                      search={linkSearch("risks")}
+                      value={rd.risk_id || null}
+                      selectedLabel={rd.risk_label}
+                      placeholder="Link a register risk…"
+                      onChange={(v, o) => setRd((p) => ({ ...p, risk_id: v || "", risk_label: o?.label || "" }))}
+                    />
+                  </div>
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Mitigating control</label>
+                    <AsyncSelect
+                      search={linkSearch("controls")}
+                      value={rd.control_id || null}
+                      selectedLabel={rd.control_label}
+                      placeholder="Link a control…"
+                      onChange={(v, o) => setRd((p) => ({ ...p, control_id: v || "", control_label: o?.label || "" }))}
+                    />
+                  </div>
                   <div style={{ width: 170 }}>
                     <label className="label">Control effectiveness</label>
                     <select className="select" value={rd.control_effectiveness} onChange={(ev) => setRD("control_effectiveness", ev.target.value)}>
@@ -942,19 +1023,23 @@ function OperationalRiskInner() {
                         <th>Inherent LxI</th>
                         <th>Control</th>
                         <th>Residual LxI</th>
+                        <th>Enterprise risk</th>
+                        <th>Mitigating control</th>
                         <th>Action owner</th>
                         <th>Due</th>
                         <th></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {rcsaDetail.risks.map((ri: RcsaRisk) => (
+                      {rcsaDetail.risks.map((ri: RcsaRiskExt) => (
                         <tr key={ri.id}>
                           <td className="cell-title">{ri.title}</td>
                           <td className="muted">{ri.category || "—"}</td>
                           <td className="muted">{ri.inherent_likelihood}×{ri.inherent_impact} ({ri.inherent_score})</td>
                           <td><EffBadge value={ri.control_effectiveness} /></td>
                           <td className="muted">{ri.residual_likelihood}×{ri.residual_impact} ({ri.residual_score})</td>
+                          <td><RelatedChips label="" items={ri.risk ? [ri.risk] : []} href="/risks" /></td>
+                          <td><RelatedChips label="" items={ri.control ? [ri.control] : []} href="/controls" /></td>
                           <td className="muted">{ri.action_owner || "—"}</td>
                           <td className="muted">{ri.due_date || "—"}</td>
                           <td>
@@ -963,7 +1048,7 @@ function OperationalRiskInner() {
                         </tr>
                       ))}
                       {rcsaDetail.risks.length === 0 && (
-                        <tr><td colSpan={8}><span className="muted">No risk lines recorded yet.</span></td></tr>
+                        <tr><td colSpan={10}><span className="muted">No risk lines recorded yet.</span></td></tr>
                       )}
                     </tbody>
                   </table>
@@ -998,6 +1083,10 @@ function OperationalRiskInner() {
               <span className="muted" style={{ fontSize: 13 }}>
                 Current value: <strong>{kriDetail.current_value != null ? `${num(kriDetail.current_value)}${kriDetail.unit ? " " + kriDetail.unit : ""}` : "—"}</strong>
               </span>
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <RelatedChips label="Risks" items={(kriDetail as KriExt).risks} href="/risks" />
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
