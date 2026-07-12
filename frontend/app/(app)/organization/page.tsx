@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Toggle, MultiSelect, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -49,7 +51,7 @@ const BLANK_USER: UserForm = { full_name: "", email: "", is_active: true, role_n
 type RoleForm = { name: string; description: string; permission_codes: string[] };
 const BLANK_ROLE: RoleForm = { name: "", description: "", permission_codes: [] };
 
-export default function OrganizationPage() {
+function OrganizationInner() {
   const [view, setView] = useState<"users" | "roles">("users");
 
   const [roles, setRoles] = useState<RoleRecord[]>([]);
@@ -63,6 +65,17 @@ export default function OrganizationPage() {
   const [showUser, setShowUser] = useState(false);
   const [uf, setUf] = useState<UserForm>(BLANK_USER);
   const [savingUser, setSavingUser] = useState(false);
+
+  // read-only view drawer for the Users register (?id=)
+  const [recordId, setRecordId] = useRecordParam("id");
+  const [detail, setDetail] = useState<UserRecord | null>(null);
+  const loadDetail = useCallback((id: string) => {
+    apiCall<UserRecord>("GET", `/users/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (recordId) loadDetail(recordId);
+    else setDetail(null);
+  }, [recordId, loadDetail]);
 
   // role dialog state
   const [editingRole, setEditingRole] = useState<RoleRecord | null>(null);
@@ -166,6 +179,7 @@ export default function OrganizationPage() {
       const wasEditing = !!editingUser;
       setShowUser(false);
       reload();
+      if (recordId) loadDetail(recordId); // refresh the open view drawer
       toast(wasEditing ? "Changes saved" : "User created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save user");
@@ -179,6 +193,7 @@ export default function OrganizationPage() {
       await apiCall<UserRecord>("POST", `/users/${u.id}/${u.is_active ? "deactivate" : "activate"}`);
       toast(`${u.is_active ? "Deactivated" : "Activated"} ${u.email}`);
       reload();
+      if (recordId) loadDetail(recordId); // refresh the open view drawer
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update status");
     }
@@ -380,7 +395,8 @@ export default function OrganizationPage() {
           columns={userColumns}
           fetcher={fetchUsers}
           rowKey={(u) => u.id}
-          onRowClick={openEditUser}
+          onRowClick={(u) => setRecordId(u.id)}
+          activeKey={recordId ?? undefined}
           searchPlaceholder="Search users by name or email…"
           defaultSort={{ by: "email", dir: "asc" }}
           emptyMessage="No users yet. Invite your first teammate to get started."
@@ -450,6 +466,74 @@ export default function OrganizationPage() {
         </div>
       )}
 
+      {/* ===================== USER — read-only detail view (?id=) */}
+      <RecordDrawer
+        open={!!recordId && !!detail}
+        onClose={() => setRecordId(null)}
+        title={detail ? detail.full_name || detail.email.split("@")[0] : "…"}
+        subtitle={detail ? detail.email : ""}
+        width={620}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditUser(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => toggleActive(detail)}>
+              {detail.is_active ? "Deactivate" : "Activate"}
+            </button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 18 }}>
+              <div style={{ minWidth: 140 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Email</div>
+                <div style={{ marginTop: 3 }}>{detail.email}</div>
+              </div>
+              <div style={{ minWidth: 140 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Full name</div>
+                <div style={{ marginTop: 3 }}>{detail.full_name || <span className="muted">—</span>}</div>
+              </div>
+              <div style={{ minWidth: 140 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Status</div>
+                <div style={{ marginTop: 3 }}>
+                  <Badge tone={detail.is_active ? "low" : "neutral"}>{detail.is_active ? "active" : "inactive"}</Badge>
+                </div>
+              </div>
+              <div style={{ minWidth: 140 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Created</div>
+                <div style={{ marginTop: 3 }}>{fmtDate(detail.created_at)}</div>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 18 }}>
+              <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Roles</div>
+              {detail.roles.length === 0 ? (
+                <span className="muted">No roles assigned.</span>
+              ) : (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {detail.roles.map((r) => <Badge key={r.id} tone="info" plain>{r.name}</Badge>)}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+                Effective permissions ({detail.permission_codes.length})
+              </div>
+              {detail.permission_codes.length === 0 ? (
+                <span className="muted">No permissions.</span>
+              ) : (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {[...detail.permission_codes].sort().map((c) => (
+                    <Badge key={c} tone="neutral" plain>{permLabel.get(c) || cap(c)}</Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </RecordDrawer>
+
       {showUser && (
         <FormModal
           title={editingUser ? `Edit user — ${editingUser.email}` : "Add user"}
@@ -502,5 +586,13 @@ export default function OrganizationPage() {
         />
       )}
     </>
+  );
+}
+
+export default function OrganizationPage() {
+  return (
+    <Suspense fallback={null}>
+      <OrganizationInner />
+    </Suspense>
   );
 }

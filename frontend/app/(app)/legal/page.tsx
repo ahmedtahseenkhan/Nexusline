@@ -6,6 +6,8 @@ import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import RecordPanels from "@/components/RecordPanels";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
@@ -88,6 +90,8 @@ function LegalInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [recordId, setRecordId] = useRecordParam("id");
+  // Read-only detail loaded for the view drawer (?id=). Edit is a separate action.
+  const [detail, setDetail] = useState<Legal | null>(null);
 
   const [editing, setEditing] = useState<Legal | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -104,6 +108,12 @@ function LegalInner() {
   const searchAssets = (q: string) =>
     apiCall<PagedList<Ref>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map(refToOpt));
 
+  // Read-only view: ?id= (row click, global search, ⌘K) loads the record's full
+  // detail into the drawer. Editing is a separate action from there.
+  const loadDetail = useCallback((id: string) => {
+    apiCall<Legal>("GET", `/legals/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+
   function openNew() {
     setEditing(null);
     setF(BLANK);
@@ -117,12 +127,10 @@ function LegalInner() {
     setShowForm(true);
   }
 
-  // Deep-link: open the record named by ?id= (e.g. from global search / ⌘K).
   useEffect(() => {
-    if (!recordId || editing?.id === recordId) return;
-    apiCall<Legal>("GET", `/legals/${recordId}`).then(openEdit).catch(() => setRecordId(null));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recordId]);
+    if (recordId) loadDetail(recordId);
+    else setDetail(null);
+  }, [recordId, loadDetail]);
 
   async function save() {
     if (!f.name.trim()) {
@@ -149,6 +157,7 @@ function LegalInner() {
       else await apiCall<Legal>("POST", "/legals", payload);
       setShowForm(false);
       reload();
+      if (recordId) loadDetail(recordId);  // refresh the open view drawer
       toast(editing ? "Changes saved" : "Obligation created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save obligation");
@@ -162,6 +171,7 @@ function LegalInner() {
     setError(null);
     try {
       await apiCall<void>("DELETE", `/legals/${l.id}`);
+      if (recordId === l.id) setRecordId(null);
       reload();
       toast("Deleted");
     } catch (e) {
@@ -231,6 +241,24 @@ function LegalInner() {
     </>
   );
 
+  // read-only helpers for the view drawer
+  const chips = (items: Ref[]) =>
+    items.length ? (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {items.map((x) => (
+          <span key={x.id} className="chip">{x.name}</span>
+        ))}
+      </div>
+    ) : (
+      <span className="muted">—</span>
+    );
+  const field = (label: string, value: React.ReactNode) => (
+    <div style={{ minWidth: 140 }}>
+      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+      <div style={{ marginTop: 3 }}>{value ?? <span className="muted">—</span>}</div>
+    </div>
+  );
+
   return (
     <>
       <div className="page-head row-between">
@@ -252,13 +280,62 @@ function LegalInner() {
         columns={columns}
         fetcher={fetchLegals}
         rowKey={(l) => l.id}
-        onRowClick={(l) => { setRecordId(l.id); openEdit(l); }}
+        onRowClick={(l) => setRecordId(l.id)}
         activeKey={recordId ?? undefined}
         searchPlaceholder="Search obligations by name, reference or jurisdiction…"
         defaultSort={{ by: "name", dir: "asc" }}
         emptyMessage="No obligations. Register your first legal or regulatory obligation."
         refreshKey={refreshKey}
       />
+
+      {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}
+      <RecordDrawer
+        open={!!recordId && !!detail}
+        onClose={() => setRecordId(null)}
+        title={detail ? detail.name : "…"}
+        subtitle={detail ? (detail.reference ? `${detail.reference} · ` : "") + cap(detail.workflow_status) : ""}
+        width={640}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Reference", detail.reference || "—")}
+              {field("Category", detail.category ? <Badge tone="neutral" plain>{cap(detail.category)}</Badge> : "—")}
+              {field("Jurisdiction", detail.jurisdiction || "—")}
+              {field("Applicable countries", detail.countries || "—")}
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Risk magnifier", <Badge tone={detail.risk_magnifier > 1 ? "medium" : "neutral"} plain>×{detail.risk_magnifier}</Badge>)}
+              {field("Workflow", <Badge tone={WORKFLOW_TONE[detail.workflow_status] || "neutral"}>{cap(detail.workflow_status)}</Badge>)}
+              {field("Workflow owner", detail.workflow_owner || "—")}
+            </div>
+
+            {detail.description && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
+                <div style={{ fontSize: 14, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: detail.description }} />
+              </div>
+            )}
+
+            <strong style={{ fontSize: 13 }}>Related records</strong>
+            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
+              {field("Business units", chips(detail.business_units))}
+              {field("Assets", chips(detail.assets))}
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+              <RecordPanels model="legal" entityId={detail.id} />
+            </div>
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal

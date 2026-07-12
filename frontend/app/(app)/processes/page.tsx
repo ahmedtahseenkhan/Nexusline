@@ -6,6 +6,8 @@ import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import RecordPanels from "@/components/RecordPanels";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
@@ -108,6 +110,8 @@ function ProcessesInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [recordId, setRecordId] = useRecordParam("id");
+  // Read-only detail loaded for the view drawer (?id=). Edit is a separate action.
+  const [detail, setDetail] = useState<Process | null>(null);
 
   const [editing, setEditing] = useState<Process | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -126,6 +130,12 @@ function ProcessesInner() {
   const searchAssets = (q: string) =>
     apiCall<PagedList<Ref>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map(refToOpt));
 
+  // Read-only view: ?id= (row click, global search, ⌘K) loads the record's full
+  // detail into the drawer. Editing is a separate action from there.
+  const loadDetail = useCallback((id: string) => {
+    apiCall<Process>("GET", `/processes/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+
   function openNew() {
     setEditing(null);
     setF(BLANK);
@@ -139,12 +149,10 @@ function ProcessesInner() {
     setShowForm(true);
   }
 
-  // Deep-link: open the record named by ?id= (e.g. from global search / ⌘K).
   useEffect(() => {
-    if (!recordId || editing?.id === recordId) return;
-    apiCall<Process>("GET", `/processes/${recordId}`).then(openEdit).catch(() => setRecordId(null));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recordId]);
+    if (recordId) loadDetail(recordId);
+    else setDetail(null);
+  }, [recordId, loadDetail]);
 
   async function save() {
     setError(null);
@@ -155,6 +163,7 @@ function ProcessesInner() {
       else await apiCall<Process>("POST", "/processes", payload);
       setShowForm(false);
       reload();
+      if (recordId) loadDetail(recordId);  // refresh the open view drawer
       toast(editing ? "Changes saved" : "Process created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save process");
@@ -168,6 +177,7 @@ function ProcessesInner() {
     setError(null);
     try {
       await apiCall<void>("DELETE", `/processes/${p.id}`);
+      if (recordId === p.id) setRecordId(null);
       reload();
       toast("Deleted");
     } catch (e) {
@@ -248,6 +258,24 @@ function ProcessesInner() {
     </Field>
   );
 
+  // read-only helpers for the view drawer
+  const chips = (items: Ref[]) =>
+    items.length ? (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {items.map((x) => (
+          <span key={x.id} className="chip">{x.name}</span>
+        ))}
+      </div>
+    ) : (
+      <span className="muted">—</span>
+    );
+  const field = (label: string, value: React.ReactNode) => (
+    <div style={{ minWidth: 140 }}>
+      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+      <div style={{ marginTop: 3 }}>{value ?? <span className="muted">—</span>}</div>
+    </div>
+  );
+
   return (
     <>
       <div className="page-head row-between">
@@ -269,13 +297,65 @@ function ProcessesInner() {
         columns={columns}
         fetcher={fetchProcesses}
         rowKey={(p) => p.id}
-        onRowClick={(p) => { setRecordId(p.id); openEdit(p); }}
+        onRowClick={(p) => setRecordId(p.id)}
         activeKey={recordId ?? undefined}
         searchPlaceholder="Search processes by name or owner…"
         defaultSort={{ by: "name", dir: "asc" }}
         emptyMessage="No processes. Add your first business process to start impact analysis."
         refreshKey={refreshKey}
       />
+
+      {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}
+      <RecordDrawer
+        open={!!recordId && !!detail}
+        onClose={() => setRecordId(null)}
+        title={detail ? detail.name : "…"}
+        subtitle={detail ? cap(detail.workflow_status) + (detail.business_unit ? ` · ${detail.business_unit.name}` : "") : ""}
+        width={620}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Business unit", detail.business_unit ? detail.business_unit.name : "—")}
+              {field("Owner", detail.owner || "—")}
+              {field("Criticality", <Severity value={detail.criticality} />)}
+              {field("Workflow", <Badge tone={WORKFLOW_TONE[detail.workflow_status] || "neutral"}>{cap(detail.workflow_status)}</Badge>)}
+              {field("Workflow owner", detail.workflow_owner || "—")}
+            </div>
+
+            {detail.description && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
+                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.description}</div>
+              </div>
+            )}
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13 }}>Continuity objectives</strong>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 10 }}>
+                {field("RTO — Recovery Time Objective", hrs(detail.rto_hours))}
+                {field("RPO — Recovery Point Objective", hrs(detail.rpo_hours))}
+                {field("MTD — Max Tolerable Downtime", hrs(detail.rpd_hours))}
+              </div>
+            </div>
+
+            <strong style={{ fontSize: 13 }}>Related records</strong>
+            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
+              {field("Assets", chips(detail.assets))}
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+              <RecordPanels model="process" entityId={detail.id} />
+            </div>
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal

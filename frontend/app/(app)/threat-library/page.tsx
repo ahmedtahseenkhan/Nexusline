@@ -1,10 +1,12 @@
 "use client";
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea } from "@/components/fields";
@@ -71,17 +73,21 @@ const META: Record<Kind, KindMeta> = {
 function CatalogSection({
   kind,
   refreshKey,
+  onView,
   onEdit,
   onAdd,
   onDelete,
   onImported,
+  activeKey,
 }: {
   kind: Kind;
   refreshKey: number;
+  onView: (r: CatalogRow) => void;
   onEdit: (r: CatalogRow) => void;
   onAdd: () => void;
   onDelete: (r: CatalogRow) => void;
   onImported: () => void;
+  activeKey?: string;
 }) {
   const m = META[kind];
 
@@ -151,7 +157,8 @@ function CatalogSection({
         columns={columns}
         fetcher={fetcher}
         rowKey={(r) => r.id}
-        onRowClick={onEdit}
+        onRowClick={onView}
+        activeKey={activeKey}
         searchPlaceholder={`Search ${m.plural.toLowerCase()} by name…`}
         defaultSort={{ by: "name", dir: "asc" }}
         emptyMessage={`No ${m.plural.toLowerCase()} yet. Add your first ${m.label.toLowerCase()} to seed the risk register.`}
@@ -165,6 +172,12 @@ function ThreatLibraryInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  // Read-only detail loaded for the view drawer (?id=). The ?id can point to a
+  // threat or a vulnerability — viewKind records which catalog it resolved to.
+  const [recordId, setRecordId] = useRecordParam("id");
+  const [detail, setDetail] = useState<CatalogRow | null>(null);
+  const [viewKind, setViewKind] = useState<Kind>("threat");
 
   // single shared dialog, parameterised by kind + editing target
   const [kind, setKind] = useState<Kind>("threat");
@@ -191,6 +204,23 @@ function ThreatLibraryInner() {
     setShowForm(true);
   }
 
+  // Deep-link view: ?id= (row click, global search, ⌘K) loads the record's full
+  // detail into the read-only drawer. The id may belong to either catalog, so try
+  // the threat endpoint first and fall back to the vulnerability endpoint.
+  const loadDetail = useCallback((id: string) => {
+    apiCall<CatalogRow>("GET", `/threats/${id}`)
+      .then((r) => { setViewKind("threat"); setDetail(r); })
+      .catch(() =>
+        apiCall<CatalogRow>("GET", `/vulnerabilities/${id}`)
+          .then((r) => { setViewKind("vulnerability"); setDetail(r); })
+          .catch(() => setDetail(null)),
+      );
+  }, []);
+  useEffect(() => {
+    if (recordId) loadDetail(recordId);
+    else setDetail(null);
+  }, [recordId, loadDetail]);
+
   async function save() {
     setError(null);
     setSaving(true);
@@ -201,6 +231,7 @@ function ThreatLibraryInner() {
       else await apiCall("POST", `/${m.base}`, payload);
       setShowForm(false);
       reload();
+      if (recordId) loadDetail(recordId); // refresh the open view drawer
       toast(editing ? "Changes saved" : `${m.label} created`);
     } catch (e) {
       setError(e instanceof Error ? e.message : `Failed to save ${m.label.toLowerCase()}`);
@@ -221,6 +252,7 @@ function ThreatLibraryInner() {
     try {
       await apiCall("DELETE", `/${m.base}/${r.id}`);
       if (editing?.id === r.id) setShowForm(false);
+      if (recordId === r.id) setRecordId(null);
       reload();
       toast("Deleted");
     } catch (e) {
@@ -323,6 +355,8 @@ function ThreatLibraryInner() {
         <CatalogSection
           kind="threat"
           refreshKey={refreshKey}
+          onView={(r) => setRecordId(r.id)}
+          activeKey={recordId ?? undefined}
           onEdit={(r) => openEdit("threat", r)}
           onAdd={() => openNew("threat")}
           onDelete={(r) => remove("threat", r)}
@@ -331,6 +365,8 @@ function ThreatLibraryInner() {
         <CatalogSection
           kind="vulnerability"
           refreshKey={refreshKey}
+          onView={(r) => setRecordId(r.id)}
+          activeKey={recordId ?? undefined}
           onEdit={(r) => openEdit("vulnerability", r)}
           onAdd={() => openNew("vulnerability")}
           onDelete={(r) => remove("vulnerability", r)}
@@ -338,11 +374,62 @@ function ThreatLibraryInner() {
         />
       </div>
 
+      {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}
+      <RecordDrawer
+        open={!!recordId && !!detail}
+        onClose={() => setRecordId(null)}
+        title={detail ? detail.name : "…"}
+        subtitle={detail ? META[viewKind].label + (detail.category ? ` · ${detail.category}` : "") : ""}
+        width={560}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(viewKind, detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(viewKind, detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              <div style={{ minWidth: 140 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Type</div>
+                <div style={{ marginTop: 3 }}><Badge tone="info" plain>{META[viewKind].label}</Badge></div>
+              </div>
+              <div style={{ minWidth: 140 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Category</div>
+                <div style={{ marginTop: 3 }}>
+                  {detail.category ? <Badge tone="info" plain>{detail.category}</Badge> : <span className="muted">—</span>}
+                </div>
+              </div>
+              <div style={{ minWidth: 140 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Used by risks</div>
+                <div style={{ marginTop: 3 }}>
+                  {detail.used_by_risks_count > 0 ? (
+                    <Badge tone="medium" plain>{detail.used_by_risks_count} risk{detail.used_by_risks_count === 1 ? "" : "s"}</Badge>
+                  ) : (
+                    <span className="muted">Not yet linked</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {detail.description ? (
+              <div>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
+                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.description}</div>
+              </div>
+            ) : (
+              <p className="muted" style={{ fontSize: 13 }}>No description.</p>
+            )}
+          </>
+        )}
+      </RecordDrawer>
+
       {showForm && (
         <FormModal
           title={editing ? `Edit ${m.label.toLowerCase()} — ${editing.name}` : `Add ${m.label.toLowerCase()}`}
           tabs={[{ id: "general", label: "General", content: formBody, required: true }]}
-          onClose={() => setShowForm(false)}
+          onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}
           saving={saving || deleting}
           error={error}

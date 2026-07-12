@@ -1,10 +1,13 @@
 "use client";
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import RecordPanels from "@/components/RecordPanels";
 import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
@@ -100,6 +103,9 @@ function toPayload(f: FormState) {
 function EvidenceInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [recordId, setRecordId] = useRecordParam("id");
+  // Read-only detail loaded for the view drawer (?id=). Edit is a separate action.
+  const [detail, setDetail] = useState<Evidence | null>(null);
 
   const [editing, setEditing] = useState<Evidence | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -134,6 +140,16 @@ function EvidenceInner() {
     setShowForm(true);
   }
 
+  // Deep-link view: ?id= (row click, global search, ⌘K) loads the record's full
+  // detail into the read-only drawer. Editing is a separate action from there.
+  const loadDetail = useCallback((id: string) => {
+    apiCall<Evidence>("GET", `/evidence/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (recordId) loadDetail(recordId);
+    else setDetail(null);
+  }, [recordId, loadDetail]);
+
   async function save() {
     setError(null);
     if (!f.control_id) {
@@ -155,6 +171,7 @@ function EvidenceInner() {
         toast("Evidence collected");
       }
       reload();
+      if (recordId) loadDetail(recordId); // refresh the open view drawer
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save evidence");
     } finally {
@@ -168,6 +185,7 @@ function EvidenceInner() {
     try {
       await apiCall<void>("DELETE", `/evidence/${ev.id}`);
       if (editing?.id === ev.id) setShowForm(false);
+      if (recordId === ev.id) setRecordId(null);
       reload();
       toast("Deleted");
     } catch (e) {
@@ -176,6 +194,14 @@ function EvidenceInner() {
   }
 
   const controlLabel = (e: Evidence) => (e.control ? e.control.reference || e.control.name : "—");
+
+  // read-only helper for the view drawer
+  const field = (label: string, value: React.ReactNode) => (
+    <div style={{ minWidth: 140 }}>
+      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+      <div style={{ marginTop: 3 }}>{value ?? <span className="muted">—</span>}</div>
+    </div>
+  );
 
   const columns: Column<Evidence>[] = [
     {
@@ -300,13 +326,70 @@ function EvidenceInner() {
         columns={columns}
         fetcher={fetchEvidence}
         rowKey={(e) => e.id}
-        onRowClick={(e) => openEdit(e)}
+        onRowClick={(e) => setRecordId(e.id)}
+        activeKey={recordId ?? undefined}
         searchPlaceholder="Search evidence by title or reference…"
         defaultSort={{ by: "created_at", dir: "desc" }}
         emptyMessage="No evidence yet. Attach evidence to a control to demonstrate compliance."
         refreshKey={refreshKey}
         toolbarRight={<span className="muted" style={{ fontSize: 13, display: "inline-flex", gap: 6, alignItems: "center" }}><IconEvidence width={16} height={16} /> collect once, satisfy many</span>}
       />
+
+      {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}
+      <RecordDrawer
+        open={!!recordId && !!detail}
+        onClose={() => setRecordId(null)}
+        title={detail ? detail.title : "…"}
+        subtitle={detail ? cap(detail.evidence_type) + " · " + (detail.is_expired ? "Expired" : cap(detail.status)) : ""}
+        width={640}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Control", <span className="chip">{controlLabel(detail)}</span>)}
+              {field("Type", <Badge tone="info" plain>{cap(detail.evidence_type)}</Badge>)}
+              {field("Status", (
+                <Badge tone={detail.is_expired ? "critical" : STATUS_TONE[detail.status] || "neutral"}>
+                  {detail.is_expired && detail.status !== "expired" ? "Expired" : cap(detail.status)}
+                </Badge>
+              ))}
+            </div>
+
+            {detail.description && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
+                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.description}</div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 18 }}>
+              {field("Reference", detail.reference ? (
+                <a href={detail.reference} target="_blank" rel="noreferrer">{detail.reference}</a>
+              ) : "—")}
+              {field("Collected at", detail.collected_at || "—")}
+              {field("Valid until", detail.valid_until ? (
+                detail.is_expired ? <Badge tone="high">{detail.valid_until}</Badge> : detail.valid_until
+              ) : "—")}
+              {field("Created", detail.created_at ? detail.created_at.slice(0, 10) : "—")}
+            </div>
+
+            <div style={{ marginBottom: 8 }}>
+              <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Files</div>
+              <FileAttachments entityType="evidence" entityId={detail.id} />
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+              <RecordPanels model="evidence" entityId={detail.id} />
+            </div>
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -316,7 +399,7 @@ function EvidenceInner() {
             { id: "source", label: "Source & Validity", content: sourceTab },
             { id: "files", label: "Files", content: filesTab },
           ]}
-          onClose={() => setShowForm(false)}
+          onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}
           saving={saving}
           error={error}

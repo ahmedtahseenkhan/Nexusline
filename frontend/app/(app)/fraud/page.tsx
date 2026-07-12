@@ -3,8 +3,10 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -431,6 +433,17 @@ function FraudInner() {
   const [cf, setCf] = useState<CaseForm>(BLANK_CASE);
   const setC = <K extends keyof CaseForm>(k: K, v: CaseForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
+  // ---- read-only view drawer for the Fraud Cases register (?id=) ----
+  const [recordId, setRecordId] = useRecordParam("id");
+  const [detail, setDetail] = useState<FraudCase | null>(null);
+  const loadDetail = useCallback((id: string) => {
+    apiCall<FraudCase>("GET", `/fraud-cases/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (recordId) loadDetail(recordId);
+    else setDetail(null);
+  }, [recordId, loadDetail]);
+
   // ---- checklist dialog ----
   const [editingCheck, setEditingCheck] = useState<FraudControlCheck | null>(null);
   const [showCheckForm, setShowCheckForm] = useState(false);
@@ -501,6 +514,7 @@ function FraudInner() {
       setShowCaseForm(false);
       reloadCases();
       loadSummary();
+      if (recordId) loadDetail(recordId); // refresh the open view drawer
       toast(editingCase ? "Changes saved" : "Fraud case created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save fraud case");
@@ -514,6 +528,7 @@ function FraudInner() {
     try {
       await apiCall<void>("DELETE", `/fraud-cases/${c.id}`);
       setShowCaseForm(false);
+      if (recordId === c.id) setRecordId(null);
       reloadCases();
       loadSummary();
       toast("Deleted");
@@ -799,6 +814,14 @@ function FraudInner() {
     </>
   );
 
+  // read-only helper for the view drawer
+  const field = (label: string, value: React.ReactNode) => (
+    <div style={{ minWidth: 140 }}>
+      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+      <div style={{ marginTop: 3 }}>{value ?? <span className="muted">—</span>}</div>
+    </div>
+  );
+
   // ------------------------------------------------------------- render
   return (
     <>
@@ -880,7 +903,8 @@ function FraudInner() {
           columns={caseColumns}
           fetcher={fetchCases}
           rowKey={(c) => c.id}
-          onRowClick={(c) => openEditCase(c)}
+          onRowClick={(c) => setRecordId(c.id)}
+          activeKey={recordId ?? undefined}
           searchPlaceholder="Search fraud cases by title or reference…"
           defaultSort={{ by: "created_at", dir: "desc" }}
           emptyMessage="No fraud cases. Log incidents with gross / net loss, recovery, perpetrator type and SBP reporting."
@@ -911,6 +935,82 @@ function FraudInner() {
           }
         />
       )}
+
+      {/* ===================== FRAUD CASE — read-only detail view (?id=) */}
+      <RecordDrawer
+        open={!!recordId && !!detail}
+        onClose={() => setRecordId(null)}
+        title={detail ? `${detail.reference || "—"} — ${detail.title}` : "…"}
+        subtitle={detail ? cap(detail.status) + ` · ${cap(detail.scheme)}` : ""}
+        width={680}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditCase(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeCase(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-end", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Amount involved</div><div style={{ marginTop: 4 }}>{num(detail.amount_involved)} {detail.currency}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Recovered</div><div style={{ marginTop: 4 }}>{num(detail.amount_recovered)} {detail.currency}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Net loss</div><div style={{ marginTop: 4 }}>{num(detail.net_loss)} {detail.currency}</div></div>
+              <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Status</div><div style={{ marginTop: 4 }}><Badge tone={CASE_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge></div></div>
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Scheme", <Badge tone="info">{cap(detail.scheme)}</Badge>)}
+              {field("Channel", cap(detail.channel))}
+              {field("Perpetrator", cap(detail.perpetrator_type))}
+              {field("Workflow", cap(detail.workflow_status))}
+            </div>
+
+            {detail.description && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
+                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.description}</div>
+              </div>
+            )}
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13 }}>Loss &amp; impact</strong>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
+                {field("Customer impacted", detail.customer_impacted ? "Yes" : "No")}
+                {field("Customers affected", num(detail.customers_affected))}
+                {field("Currency", detail.currency || "—")}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Incident date", detail.incident_date || "—")}
+              {field("Discovery date", detail.discovery_date || "—")}
+              {field("Reported date", detail.reported_date || "—")}
+            </div>
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13 }}>Investigation</strong>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
+                {field("Investigator", detail.investigator || "—")}
+                {field("Reported to SBP", detail.reported_to_regulator ? <Badge tone="high">Reported</Badge> : <span className="muted">Not reported</span>)}
+                {field("Regulator ref", detail.regulator_ref || "—")}
+              </div>
+              {detail.root_cause && (
+                <div style={{ marginTop: 8 }}>
+                  <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Root cause</div>
+                  <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>{detail.root_cause}</div>
+                </div>
+              )}
+              {detail.resolution && (
+                <div style={{ marginTop: 8 }}>
+                  <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Resolution</div>
+                  <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>{detail.resolution}</div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showRiskForm && (

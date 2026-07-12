@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall, type Page } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
@@ -263,9 +265,12 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "ccm", label: "Continuous Controls Monitoring" },
 ];
 
-export default function IntegrationsPage() {
+function IntegrationsInner() {
   const [section, setSection] = useState<SectionId>("connectors");
   const [error, setError] = useState<string | null>(null);
+  // Read-only detail loaded for the connector view drawer (?id=).
+  const [recordId, setRecordId] = useRecordParam("id");
+  const [detail, setDetail] = useState<Connector | null>(null);
   const [connectorsKey, setConnectorsKey] = useState(0);
   const [testsKey, setTestsKey] = useState(0);
   const [connectorStatus, setConnectorStatus] = useState("");
@@ -307,6 +312,14 @@ export default function IntegrationsPage() {
   };
   const CONNECTOR_OPTS: Option[] = connectors.map((c) => ({ value: c.id, label: `${c.reference || "?"} — ${c.name}` }));
 
+  // read-only helper for the view drawer
+  const field = (label: string, value: React.ReactNode) => (
+    <div style={{ minWidth: 140 }}>
+      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+      <div style={{ marginTop: 3 }}>{value ?? <span className="muted">—</span>}</div>
+    </div>
+  );
+
   // ------------------------------------------------------------- loaders
   async function loadConnectors() {
     try {
@@ -328,10 +341,21 @@ export default function IntegrationsPage() {
     setOpenTest(t);
   }
 
+  // Deep-link view: ?id= (row click, global search, ⌘K) loads the connector's full
+  // detail into the read-only drawer. Editing is a separate action from there.
+  const loadConnectorDetail = useCallback((id: string) => {
+    apiCall<Connector>("GET", `/connectors/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+
   useEffect(() => {
     loadConnectors();
     loadSummary();
   }, []);
+
+  useEffect(() => {
+    if (recordId) loadConnectorDetail(recordId);
+    else setDetail(null);
+  }, [recordId, loadConnectorDetail]);
 
   // ------------------------------------------------------------- connector CRUD
   function openNewConnector() {
@@ -355,6 +379,7 @@ export default function IntegrationsPage() {
       await loadConnectors();
       reloadConnectors();
       await loadSummary();
+      if (recordId) loadConnectorDetail(recordId); // refresh the open view drawer
       toast(editingConnector ? "Changes saved" : "Connector created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save connector");
@@ -368,6 +393,7 @@ export default function IntegrationsPage() {
     try {
       await apiCall<void>("DELETE", `/connectors/${c.id}`);
       setShowConnectorForm(false);
+      if (recordId === c.id) setRecordId(null);
       await loadConnectors();
       reloadConnectors();
       await loadSummary();
@@ -651,7 +677,8 @@ export default function IntegrationsPage() {
           columns={connectorColumns}
           fetcher={fetchConnectors}
           rowKey={(c) => c.id}
-          onRowClick={openEditConnector}
+          onRowClick={(c) => setRecordId(c.id)}
+          activeKey={recordId ?? undefined}
           searchPlaceholder="Search connectors by name or reference…"
           defaultSort={{ by: "name", dir: "asc" }}
           filters={{ status: connectorStatus || undefined }}
@@ -665,6 +692,70 @@ export default function IntegrationsPage() {
           refreshKey={connectorsKey}
         />
       )}
+
+      {/* Read-only connector detail view (?id=) — click a row to see everything; Edit is separate. */}
+      <RecordDrawer
+        open={!!recordId && !!detail}
+        onClose={() => setRecordId(null)}
+        title={detail ? `${detail.reference || ""} ${detail.name}`.trim() : "…"}
+        subtitle={detail ? cap(detail.connector_type) + " · " + cap(detail.status) : ""}
+        width={640}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditConnector(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeConnector(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Type", <Badge tone="info">{cap(detail.connector_type)}</Badge>)}
+              {field("Status", (
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <Badge tone={CONNECTOR_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+                  {detail.is_stale && <Badge tone="high">Stale</Badge>}
+                </div>
+              ))}
+              {field("Owner", detail.owner || "—")}
+              {field("Workflow", cap(detail.workflow_status))}
+            </div>
+
+            {detail.description && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
+                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.description}</div>
+              </div>
+            )}
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13 }}>Connection</strong>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
+                {field("Endpoint URL", detail.endpoint_url ? (
+                  <a href={detail.endpoint_url} target="_blank" rel="noreferrer">{detail.endpoint_url}</a>
+                ) : "—")}
+                {field("Auth method", detail.auth_method || "—")}
+                {field("Sync frequency", cap(detail.sync_frequency))}
+                {field("Last sync", detail.last_sync || "never")}
+              </div>
+              {detail.config_note && (
+                <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>
+                  <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Config note</div>
+                  {detail.config_note}
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 8 }}>
+              {field("Created", detail.created_at ? detail.created_at.slice(0, 10) : "—")}
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+              <RecordPanels model="connector" entityId={detail.id} />
+            </div>
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= CCM */}
       {section === "ccm" && (
@@ -855,5 +946,13 @@ export default function IntegrationsPage() {
         />
       )}
     </>
+  );
+}
+
+export default function IntegrationsPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <IntegrationsInner />
+    </Suspense>
   );
 }

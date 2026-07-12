@@ -102,6 +102,11 @@ async def create_screening(body: ScreeningCreate, db: DbSession, user: CurrentUs
     return ScreeningRead.model_validate(obj)
 
 
+@router.get("/aml/screening/{cid}", response_model=ScreeningRead, dependencies=[_READ])
+async def get_screening(cid: uuid.UUID, db: DbSession) -> ScreeningRead:
+    return ScreeningRead.model_validate(await _get(db, ScreeningCase, cid, "Screening case"))
+
+
 @router.patch("/aml/screening/{cid}", response_model=ScreeningRead, dependencies=[_WRITE])
 async def update_screening(cid: uuid.UUID, body: ScreeningUpdate, db: DbSession) -> ScreeningRead:
     obj = await _get(db, ScreeningCase, cid, "Screening case")
@@ -187,6 +192,11 @@ async def create_sar(body: SarCreate, db: DbSession, user: CurrentUser) -> SarRe
     await audit_log.record(db, actor=user, action="create", entity_type="sar",
                            entity_id=obj.id, summary=f"STR/SAR {obj.reference}: {obj.subject}")
     return SarRead.model_validate(obj)
+
+
+@router.get("/aml/sars/{sid}", response_model=SarRead, dependencies=[_READ])
+async def get_sar(sid: uuid.UUID, db: DbSession) -> SarRead:
+    return SarRead.model_validate(await _get(db, SuspiciousActivityReport, sid, "SAR"))
 
 
 @router.patch("/aml/sars/{sid}", response_model=SarRead, dependencies=[_WRITE])

@@ -10,8 +10,10 @@ import {
   type AmlRisk,
 } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -263,6 +265,13 @@ function AmlInner() {
 
   const [summary, setSummary] = useState<ScreeningSummary | null>(null);
 
+  // View-first: two URL params so the two registers on this page don't collide.
+  const [caseId, setCaseId] = useRecordParam("case");
+  const [sarId, setSarId] = useRecordParam("sar");
+  // Read-only detail loaded for the view drawers. Edit is a separate action.
+  const [caseDetail, setCaseDetail] = useState<ScreeningCase | null>(null);
+  const [sarDetail, setSarDetail] = useState<Sar | null>(null);
+
   // one refresh counter per register table
   const [caseKey, setCaseKey] = useState(0);
   const [sarKey, setSarKey] = useState(0);
@@ -279,6 +288,23 @@ function AmlInner() {
     api.screeningSummary().then(setSummary).catch((e) => setError(e instanceof Error ? e.message : "Failed to load screening summary"));
   }, []);
   useEffect(() => { loadSummary(); }, [loadSummary]);
+
+  // ---- view drawers: load read-only detail from the by-id endpoints ----
+  const loadCase = useCallback((id: string) => {
+    apiCall<ScreeningCase>("GET", `/aml/screening/${id}`).then(setCaseDetail).catch(() => setCaseDetail(null));
+  }, []);
+  useEffect(() => {
+    if (caseId) loadCase(caseId);
+    else setCaseDetail(null);
+  }, [caseId, loadCase]);
+
+  const loadSar = useCallback((id: string) => {
+    apiCall<Sar>("GET", `/aml/sars/${id}`).then(setSarDetail).catch(() => setSarDetail(null));
+  }, []);
+  useEffect(() => {
+    if (sarId) loadSar(sarId);
+    else setSarDetail(null);
+  }, [sarId, loadSar]);
 
   // ---- screening dialog ----
   const [editingCase, setEditingCase] = useState<ScreeningCase | null>(null);
@@ -322,6 +348,7 @@ function AmlInner() {
       setShowCaseForm(false);
       reloadCases();
       loadSummary();
+      if (caseId) loadCase(caseId);  // refresh the open view drawer
       toast(editingCase ? "Changes saved" : "Screening case created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save screening case");
@@ -335,6 +362,7 @@ function AmlInner() {
     try {
       await api.deleteScreening(c.id);
       setShowCaseForm(false);
+      if (caseId === c.id) setCaseId(null);
       reloadCases();
       loadSummary();
       toast("Deleted");
@@ -363,6 +391,7 @@ function AmlInner() {
       else await api.createSar(payload);
       setShowSarForm(false);
       reloadSars();
+      if (sarId) loadSar(sarId);  // refresh the open view drawer
       toast(editingSar ? "Changes saved" : "STR/SAR created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save STR/SAR");
@@ -376,6 +405,7 @@ function AmlInner() {
     try {
       await api.deleteSar(s.id);
       setShowSarForm(false);
+      if (sarId === s.id) setSarId(null);
       reloadSars();
       toast("Deleted");
     } catch (e) {
@@ -426,6 +456,21 @@ function AmlInner() {
   const matchCount = summary
     ? (summary.by_match_status["potential_match"] || 0) + (summary.by_match_status["confirmed_match"] || 0)
     : 0;
+
+  // read-only helpers for the view drawers
+  const field = (label: string, value: React.ReactNode) => (
+    <div style={{ minWidth: 140 }}>
+      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+      <div style={{ marginTop: 3 }}>{value ?? <span className="muted">—</span>}</div>
+    </div>
+  );
+  const longText = (label: string, value: string) =>
+    value ? (
+      <div style={{ marginBottom: 16 }}>
+        <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>{label}</div>
+        <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{value}</div>
+      </div>
+    ) : null;
 
   // ------------------------------------------------------------- columns
   const caseColumns: Column<ScreeningCase>[] = [
@@ -688,7 +733,8 @@ function AmlInner() {
             columns={caseColumns}
             fetcher={fetchCases}
             rowKey={(c) => c.id}
-            onRowClick={(c) => openEditCase(c)}
+            onRowClick={(c) => setCaseId(c.id)}
+            activeKey={caseId ?? undefined}
             searchPlaceholder="Search screening by subject or reference…"
             defaultSort={{ by: "created_at", dir: "desc" }}
             emptyMessage="No screening cases. Record sanctions and PEP screening results against watchlists."
@@ -707,7 +753,8 @@ function AmlInner() {
             columns={sarColumns}
             fetcher={fetchSars}
             rowKey={(s) => s.id}
-            onRowClick={(s) => openEditSar(s)}
+            onRowClick={(s) => setSarId(s.id)}
+            activeKey={sarId ?? undefined}
             searchPlaceholder="Search filings by subject or reference…"
             defaultSort={{ by: "created_at", dir: "desc" }}
             emptyMessage="No STR/SAR filings. Draft suspicious transaction / activity reports and track their FMU filing deadlines."
@@ -729,6 +776,100 @@ function AmlInner() {
           refreshKey={riskKey}
         />
       )}
+
+      {/* ============================================= SCREENING VIEW DRAWER */}
+      <RecordDrawer
+        open={!!caseId && !!caseDetail}
+        onClose={() => setCaseId(null)}
+        title={caseDetail ? `${caseDetail.reference || "Case"} — ${caseDetail.subject_name}` : "…"}
+        subtitle={caseDetail ? cap(caseDetail.status) + ` · ${cap(caseDetail.screening_type)}` : ""}
+        width={680}
+        actions={caseDetail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditCase(caseDetail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeCase(caseDetail)}>Delete</button>
+          </>
+        )}
+      >
+        {caseDetail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-end", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              {field("Match", <Badge tone={MATCH_STATUS_TONE[caseDetail.match_status] || "neutral"}>{cap(caseDetail.match_status)}</Badge>)}
+              {field("Risk rating", <SeverityBadge value={caseDetail.risk_rating} />)}
+              {field("Status", <Badge tone={SCREENING_STATUS_TONE[caseDetail.status] || "neutral"}>{cap(caseDetail.status)}</Badge>)}
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Reference", caseDetail.reference || "—")}
+              {field("Subject", caseDetail.subject_name)}
+              {field("Subject type", cap(caseDetail.subject_type))}
+              {field("Screening type", <Badge tone="info">{cap(caseDetail.screening_type)}</Badge>)}
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Lists checked", caseDetail.lists_checked || "—")}
+              {field("Reviewer", caseDetail.reviewer || "—")}
+              {field("Screened date", caseDetail.screened_date || "—")}
+            </div>
+
+            {longText("Disposition", caseDetail.disposition)}
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 6, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+              {field("Workflow", cap(caseDetail.workflow_status))}
+              {field("Created", caseDetail.created_at ? caseDetail.created_at.slice(0, 10) : "—")}
+            </div>
+          </>
+        )}
+      </RecordDrawer>
+
+      {/* ============================================= STR / SAR VIEW DRAWER */}
+      <RecordDrawer
+        open={!!sarId && !!sarDetail}
+        onClose={() => setSarId(null)}
+        title={sarDetail ? `${sarDetail.reference || "STR/SAR"} — ${sarDetail.subject}` : "…"}
+        subtitle={sarDetail ? cap(sarDetail.status) : ""}
+        width={680}
+        actions={sarDetail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditSar(sarDetail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeSar(sarDetail)}>Delete</button>
+          </>
+        )}
+      >
+        {sarDetail && (
+          <>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-end", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              {field("Priority", <SeverityBadge value={sarDetail.priority} />)}
+              {field("Status", <Badge tone={SAR_STATUS_TONE[sarDetail.status] || "neutral"}>{cap(sarDetail.status)}</Badge>)}
+              <div style={{ marginLeft: "auto", textAlign: "right" }}>
+                <div className="muted" style={{ fontSize: 12 }}>Amount</div>
+                <div style={{ marginTop: 4 }}>{num(sarDetail.amount)} {sarDetail.currency}</div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Reference", sarDetail.reference || "—")}
+              {field("Subject", sarDetail.subject)}
+              {field("Analyst", sarDetail.analyst || "—")}
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
+              {field("Detected date", sarDetail.detected_date || "—")}
+              {field("Deadline", sarDetail.is_overdue ? <Badge tone="critical">Overdue · {sarDetail.deadline || "—"}</Badge> : (sarDetail.deadline || "—"))}
+              {field("Filed date", sarDetail.filed_date || "—")}
+              {field("FMU reference", sarDetail.fmu_reference || "—")}
+            </div>
+
+            {longText("Activity description", sarDetail.activity_description)}
+            {longText("Suspicion reason", sarDetail.suspicion_reason)}
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 6, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+              {field("Workflow", cap(sarDetail.workflow_status))}
+              {field("Created", sarDetail.created_at ? sarDetail.created_at.slice(0, 10) : "—")}
+            </div>
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showCaseForm && (
