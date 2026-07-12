@@ -23,39 +23,50 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 @router.get("", response_model=DashboardStats, dependencies=[Depends(require("risk:read"))])
 async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
     settings = await get_or_create_settings(db, user.tenant_id)
-    rows = (
-        await db.scalars(
-            select(Risk).where(Risk.deleted.is_(False)).execution_options(populate_existing=True)
-        )
-    ).all()
+    today = date.today()
+    live = Risk.deleted.is_(False)
 
+    # Pure-column tallies aggregate in SQL — no ORM hydration of the whole register.
+    total_risks = await db.scalar(select(func.count()).select_from(Risk).where(live)) or 0
+    total_exposure = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(Risk.annual_loss_expectancy), 0)).where(live)
+        )
+        or 0
+    )
+    overdue = (
+        await db.scalar(
+            select(func.count()).select_from(Risk).where(live, Risk.next_review_date < today)
+        )
+        or 0
+    )
     by_status: Counter[str] = Counter()
+    for status_val, cnt in (
+        await db.execute(select(Risk.status, func.count()).where(live).group_by(Risk.status))
+    ).all():
+        by_status[status_val.value] = cnt
+
+    # Severity/appetite bands keep the scoring functions as the single source of truth,
+    # so fetch just the two score columns (lightweight tuples, not full ORM objects).
     by_inherent: Counter[str] = Counter()
     by_residual: Counter[str] = Counter()
-    overdue = 0
     appetite_counts: Counter[str] = Counter()
-    total_exposure = 0.0
-    today = date.today()
-
-    for r in rows:
-        by_status[r.status.value] += 1
-        inh = severity_for_score(r.inherent_score)
+    for inherent, residual in (
+        await db.execute(select(Risk.inherent_score, Risk.residual_score).where(live))
+    ).all():
+        inh = severity_for_score(inherent)
         if inh:
             by_inherent[inh.value] += 1
-        res = severity_for_score(r.residual_score)
+        res = severity_for_score(residual)
         if res:
             by_residual[res.value] += 1
-        if r.next_review_date and r.next_review_date < today:
-            overdue += 1
         status = appetite_status(
-            effective_score(r.inherent_score, r.residual_score),
+            effective_score(inherent, residual),
             settings.appetite_score,
             settings.tolerance_score,
         )
         if status:
             appetite_counts[status] += 1
-        if r.annual_loss_expectancy:
-            total_exposure += r.annual_loss_expectancy
 
     total_controls = await db.scalar(
         select(func.count()).select_from(Control).where(Control.deleted.is_(False))
@@ -74,7 +85,7 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
     )
 
     return DashboardStats(
-        total_risks=len(rows),
+        total_risks=total_risks,
         total_controls=total_controls,
         total_assets=total_assets,
         risks_by_status=dict(by_status),
