@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, insert, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_search, apply_sort
 from app.models.asset import Asset, assets_legals, assets_processes
 from app.models.organization import BusinessUnit, Legal, Process
 from app.schemas.common import Page
@@ -70,15 +71,30 @@ def _bu_read(obj: BusinessUnit, names: dict) -> BusinessUnitRead:
     return rd
 
 
+_BU_SORTABLE = {
+    "name": BusinessUnit.name,
+    "manager": BusinessUnit.manager,
+    "location": BusinessUnit.location,
+    "workflow_status": BusinessUnit.workflow_status,
+    "created_at": BusinessUnit.created_at,
+}
+
+
 @router.get("/business-units", response_model=Page[BusinessUnitRead], dependencies=[Depends(require("org:read"))])
 async def list_business_units(
     db: DbSession,
+    search: Annotated[str | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[BusinessUnitRead]:
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(BusinessUnit).where(BusinessUnit.deleted.is_(False))
+    stmt = apply_search(stmt, params, [BusinessUnit.name, BusinessUnit.manager, BusinessUnit.location])
+    stmt = apply_sort(stmt, params, _BU_SORTABLE, default=BusinessUnit.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(BusinessUnit.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     names = await _bu_name_map(db)
     return Page(items=[_bu_read(r, names) for r in rows], total=total, limit=limit, offset=offset)
 
@@ -190,15 +206,30 @@ async def _set_process_assets(db, process_id, asset_ids) -> None:
         )
 
 
+_PROCESS_SORTABLE = {
+    "name": Process.name,
+    "owner": Process.owner,
+    "criticality": Process.criticality,
+    "workflow_status": Process.workflow_status,
+    "created_at": Process.created_at,
+}
+
+
 @router.get("/processes", response_model=Page[ProcessRead], dependencies=[Depends(require("org:read"))])
 async def list_processes(
     db: DbSession,
+    search: Annotated[str | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ProcessRead]:
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(Process).where(Process.deleted.is_(False))
+    stmt = apply_search(stmt, params, [Process.name, Process.owner])
+    stmt = apply_sort(stmt, params, _PROCESS_SORTABLE, default=Process.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(Process.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     assets_map = await _process_assets_map(db, [r.id for r in rows])
     return Page(items=[_process_read(r, assets_map) for r in rows], total=total, limit=limit, offset=offset)
 
@@ -283,15 +314,32 @@ async def _set_legal_assets(db, legal_id, asset_ids) -> None:
         )
 
 
+_LEGAL_SORTABLE = {
+    "name": Legal.name,
+    "reference": Legal.reference,
+    "category": Legal.category,
+    "jurisdiction": Legal.jurisdiction,
+    "risk_magnifier": Legal.risk_magnifier,
+    "workflow_status": Legal.workflow_status,
+    "created_at": Legal.created_at,
+}
+
+
 @router.get("/legals", response_model=Page[LegalRead], dependencies=[Depends(require("org:read"))])
 async def list_legals(
     db: DbSession,
+    search: Annotated[str | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[LegalRead]:
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(Legal).where(Legal.deleted.is_(False))
+    stmt = apply_search(stmt, params, [Legal.name, Legal.reference, Legal.jurisdiction])
+    stmt = apply_sort(stmt, params, _LEGAL_SORTABLE, default=Legal.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(Legal.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     assets_map = await _legal_assets_map(db, [r.id for r in rows])
     return Page(items=[_legal_read(r, assets_map) for r in rows], total=total, limit=limit, offset=offset)
 

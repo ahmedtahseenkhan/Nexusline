@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Toggle, MultiSelect, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -50,11 +52,11 @@ const BLANK_ROLE: RoleForm = { name: "", description: "", permission_codes: [] }
 export default function OrganizationPage() {
   const [view, setView] = useState<"users" | "roles">("users");
 
-  const [users, setUsers] = useState<UserRecord[]>([]);
   const [roles, setRoles] = useState<RoleRecord[]>([]);
   const [perms, setPerms] = useState<Permission[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [userTotal, setUserTotal] = useState<number | null>(null);
 
   // user dialog state
   const [editingUser, setEditingUser] = useState<UserRecord | null>(null);
@@ -71,13 +73,12 @@ export default function OrganizationPage() {
   const setU = <K extends keyof UserForm>(k: K, v: UserForm[K]) => setUf((p) => ({ ...p, [k]: v }));
   const setR = <K extends keyof RoleForm>(k: K, v: RoleForm[K]) => setRf((p) => ({ ...p, [k]: v }));
 
-  async function loadUsers() {
-    try {
-      setUsers((await apiCall<Page<UserRecord>>("GET", "/users?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load users");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchUsers = useCallback(
+    (qs: string) => apiCall<Page<UserRecord>>("GET", `/users?${qs}`),
+    [],
+  );
+
   async function loadRoles() {
     try {
       setRoles(await apiCall<RoleRecord[]>("GET", "/users/roles"));
@@ -86,10 +87,15 @@ export default function OrganizationPage() {
     }
   }
   useEffect(() => {
-    loadUsers();
     loadRoles();
     apiCall<Permission[]>("GET", "/users/permissions").then(setPerms).catch(() => {});
   }, []);
+  // Keep the Users tab badge count in sync with the server-driven table.
+  useEffect(() => {
+    apiCall<Page<UserRecord>>("GET", "/users?limit=1")
+      .then((r) => setUserTotal(r.total))
+      .catch(() => {});
+  }, [refreshKey]);
 
   // -------------------------------------------------------------------- option lists
   const roleOpts: Option[] = useMemo(
@@ -157,8 +163,10 @@ export default function OrganizationPage() {
           role_names: uf.role_names,
         });
       }
+      const wasEditing = !!editingUser;
       setShowUser(false);
-      await loadUsers();
+      reload();
+      toast(wasEditing ? "Changes saved" : "User created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save user");
     } finally {
@@ -169,8 +177,8 @@ export default function OrganizationPage() {
     setError(null);
     try {
       await apiCall<UserRecord>("POST", `/users/${u.id}/${u.is_active ? "deactivate" : "activate"}`);
-      setNote(`${u.is_active ? "Deactivated" : "Activated"} ${u.email}.`);
-      await loadUsers();
+      toast(`${u.is_active ? "Deactivated" : "Activated"} ${u.email}`);
+      reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update status");
     }
@@ -220,7 +228,7 @@ export default function OrganizationPage() {
     setError(null);
     try {
       await apiCall<void>("DELETE", `/users/roles/${r.id}`);
-      setNote(`Deleted role ${r.name}.`);
+      toast(`Deleted role ${r.name}`);
       await loadRoles();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete role");
@@ -333,6 +341,16 @@ export default function OrganizationPage() {
     </>
   );
 
+  const userColumns: Column<UserRecord>[] = [
+    { key: "full_name", header: "User", sortable: true, render: (u) => <span className="cell-title">{u.full_name || u.email.split("@")[0]}</span> },
+    { key: "email", header: "Email", sortable: true, render: (u) => <span className="muted">{u.email}</span> },
+    { key: "roles", header: "Roles", render: (u) => <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{u.roles.length === 0 && <span className="muted">—</span>}{u.roles.map((r) => <Badge key={r.id} tone="info" plain>{r.name}</Badge>)}</div> },
+    { key: "permissions", header: "Permissions", align: "center", render: (u) => <span className="muted">{u.permission_codes.length}</span> },
+    { key: "is_active", header: "Status", sortable: true, render: (u) => <Badge tone={u.is_active ? "low" : "neutral"}>{u.is_active ? "active" : "inactive"}</Badge> },
+    { key: "created_at", header: "Created", sortable: true, render: (u) => <span className="muted">{fmtDate(u.created_at)}</span> },
+    { key: "actions", header: "", render: (u) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditUser(u)}>Edit</button> <button className="btn secondary sm" onClick={() => toggleActive(u)}>{u.is_active ? "Deactivate" : "Activate"}</button></div> },
+  ];
+
   // ------------------------------------------------------------------------- render
   return (
     <>
@@ -348,7 +366,7 @@ export default function OrganizationPage() {
 
       <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
         <button className={`btn ${view === "users" ? "" : "secondary"}`} onClick={() => setView("users")}>
-          <IconUsers width={15} height={15} /> Users <Badge tone="neutral" plain>{users.length}</Badge>
+          <IconUsers width={15} height={15} /> Users <Badge tone="neutral" plain>{userTotal ?? 0}</Badge>
         </button>
         <button className={`btn ${view === "roles" ? "" : "secondary"}`} onClick={() => setView("roles")}>
           <IconShield width={15} height={15} /> Roles <Badge tone="neutral" plain>{roles.length}</Badge>
@@ -356,74 +374,18 @@ export default function OrganizationPage() {
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
-      {note && (
-        <div className="card card-pad" style={{ marginBottom: 16, borderColor: "var(--primary)" }} onClick={() => setNote(null)}>
-          {note}
-        </div>
-      )}
 
       {view === "users" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Members</h3>
-            <span className="sub">{users.length} users</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>User</th>
-                  <th>Email</th>
-                  <th>Roles</th>
-                  <th>Permissions</th>
-                  <th>Status</th>
-                  <th>Created</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((u) => (
-                  <tr key={u.id} style={{ cursor: "pointer" }} onClick={() => openEditUser(u)}>
-                    <td className="cell-title">{u.full_name || u.email.split("@")[0]}</td>
-                    <td className="muted">{u.email}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {u.roles.length === 0 && <span className="muted">—</span>}
-                        {u.roles.map((r) => (
-                          <Badge key={r.id} tone="info" plain>{r.name}</Badge>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="muted">{u.permission_codes.length}</td>
-                    <td>
-                      <Badge tone={u.is_active ? "low" : "neutral"}>{u.is_active ? "active" : "inactive"}</Badge>
-                    </td>
-                    <td className="muted">{fmtDate(u.created_at)}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => openEditUser(u)}>Edit</button>
-                        <button className="btn secondary sm" onClick={() => toggleActive(u)}>
-                          {u.is_active ? "Deactivate" : "Activate"}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {users.length === 0 && (
-                  <tr>
-                    <td colSpan={7}>
-                      <div className="empty">
-                        <span className="ico"><IconUsers width={24} height={24} /></span>
-                        <h3>No users</h3>
-                        <p>Invite your first teammate to get started.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<UserRecord>
+          columns={userColumns}
+          fetcher={fetchUsers}
+          rowKey={(u) => u.id}
+          onRowClick={openEditUser}
+          searchPlaceholder="Search users by name or email…"
+          defaultSort={{ by: "email", dir: "asc" }}
+          emptyMessage="No users yet. Invite your first teammate to get started."
+          refreshKey={refreshKey}
+        />
       )}
 
       {view === "roles" && (

@@ -1,16 +1,20 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import AsyncSelect from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus, IconCompliance } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 /* ------------------------------------------------------------------ types */
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 type IcfrTest = {
   id: string;
   control_id: string;
@@ -72,6 +76,8 @@ type IcfrDeficiency = {
   description: string;
   control_id: string | null;
   process_id: string | null;
+  process_label: string | null;
+  control_label: string | null;
   severity: string;
   status: string;
   owner: string;
@@ -99,7 +105,6 @@ type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 
 /* ------------------------------------------------------------------ enum lists */
 const PROCESS_STATUS = opts(["active", "retired"]);
@@ -262,7 +267,9 @@ type DefForm = {
   title: string;
   description: string;
   process_id: string;
+  process_label: string;
   control_id: string;
+  control_label: string;
   severity: string;
   status: string;
   owner: string;
@@ -275,7 +282,9 @@ const BLANK_DEF: DefForm = {
   title: "",
   description: "",
   process_id: "",
+  process_label: "",
   control_id: "",
+  control_label: "",
   severity: "deficiency",
   status: "open",
   owner: "",
@@ -289,7 +298,9 @@ function fromDef(d: IcfrDeficiency): DefForm {
     title: d.title,
     description: d.description || "",
     process_id: d.process_id || "",
+    process_label: d.process_label || "",
     control_id: d.control_id || "",
+    control_label: d.control_label || "",
     severity: d.severity || "deficiency",
     status: d.status || "open",
     owner: d.owner || "",
@@ -321,22 +332,24 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "deficiencies", label: "Deficiencies" },
 ];
 
-export default function IcfrPage() {
+function IcfrInner() {
   const [section, setSection] = useState<SectionId>("processes");
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  const [processes, setProcesses] = useState<IcfrProcess[]>([]);
-  const [deficiencies, setDeficiencies] = useState<IcfrDeficiency[]>([]);
   const [summary, setSummary] = useState<IcfrSummary | null>(null);
 
-  // ---- process dialog + expanded detail ----
+  // ---- process form dialog ----
   const [editingProcess, setEditingProcess] = useState<IcfrProcess | null>(null);
   const [showProcessForm, setShowProcessForm] = useState(false);
   const [savingProcess, setSavingProcess] = useState(false);
   const [pf, setPf] = useState<ProcessForm>(BLANK_PROCESS);
   const setP = <K extends keyof ProcessForm>(k: K, v: ProcessForm[K]) => setPf((p) => ({ ...p, [k]: v }));
 
-  const [openProcess, setOpenProcess] = useState<IcfrProcess | null>(null);
+  // ---- process drawer (RCM) ----
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<IcfrProcess | null>(null);
   const [cd, setCd] = useState<ControlDraft>(BLANK_CONTROL);
   const setCD = <K extends keyof ControlDraft>(k: K, v: ControlDraft[K]) => setCd((p) => ({ ...p, [k]: v }));
 
@@ -353,51 +366,53 @@ export default function IcfrPage() {
   const setD = <K extends keyof DefForm>(k: K, v: DefForm[K]) => setDf((p) => ({ ...p, [k]: v }));
 
   // ------------------------------------------------------------- loaders
-  async function loadProcesses(keepOpen?: string) {
-    try {
-      const res = await apiCall<Page<IcfrProcess>>("GET", "/icfr");
-      setProcesses(res.items);
-      if (keepOpen) setOpenProcess(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load ICFR processes");
-    }
-  }
-  async function loadDeficiencies() {
-    try {
-      const res = await apiCall<Page<IcfrDeficiency>>("GET", "/icfr-deficiencies");
-      setDeficiencies(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load deficiencies");
-    }
-  }
-  async function loadSummary() {
+  const loadSummary = useCallback(async () => {
     try {
       setSummary(await apiCall<IcfrSummary>("GET", "/icfr-summary"));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load ICFR summary");
     }
-  }
+  }, []);
+  useEffect(() => {
+    loadSummary();
+  }, [loadSummary, refreshKey]);
+
+  const fetchProcesses = useCallback((qs: string) => apiCall<PagedList<IcfrProcess>>("GET", `/icfr?${qs}`), []);
+  const fetchDeficiencies = useCallback(
+    (qs: string) => apiCall<PagedList<IcfrDeficiency>>("GET", `/icfr-deficiencies?${qs}`),
+    [],
+  );
+
+  const loadDetail = useCallback((id: string) => {
+    return apiCall<IcfrProcess>("GET", `/icfr/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (openId) {
+      loadDetail(openId);
+    } else {
+      setDetail(null);
+      setOpenControlId(null);
+      setCd(BLANK_CONTROL);
+    }
+  }, [openId, loadDetail]);
+
   async function refreshProcess(id: string) {
     const p = await apiCall<IcfrProcess>("GET", `/icfr/${id}`);
-    setOpenProcess(p);
-    setProcesses((prev) => prev.map((x) => (x.id === id ? p : x)));
+    setDetail(p);
+    reload();
   }
-
-  useEffect(() => {
-    loadProcesses();
-    loadDeficiencies();
-    loadSummary();
-  }, []);
 
   // ------------------------------------------------------------- process CRUD
   function openNewProcess() {
     setEditingProcess(null);
     setPf(BLANK_PROCESS);
+    setError(null);
     setShowProcessForm(true);
   }
   function openEditProcess(p: IcfrProcess) {
     setEditingProcess(p);
     setPf(fromProcess(p));
+    setError(null);
     setShowProcessForm(true);
   }
   async function saveProcess() {
@@ -408,8 +423,10 @@ export default function IcfrPage() {
       if (editingProcess) await apiCall("PATCH", `/icfr/${editingProcess.id}`, payload);
       else await apiCall("POST", "/icfr", payload);
       setShowProcessForm(false);
-      await loadProcesses(openProcess?.id);
+      reload();
+      if (openId) loadDetail(openId);
       await loadSummary();
+      toast(editingProcess ? "Changes saved" : "Process created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save process");
     } finally {
@@ -417,30 +434,26 @@ export default function IcfrPage() {
     }
   }
   async function removeProcess(p: IcfrProcess) {
-    if (!window.confirm(`Delete process ${p.reference || p.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete process ${p.reference || p.name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/icfr/${p.id}`);
       setShowProcessForm(false);
-      if (openProcess?.id === p.id) setOpenProcess(null);
-      await loadProcesses();
+      if (openId === p.id) setOpenId(null);
+      reload();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleProcess(p: IcfrProcess) {
-    setCd(BLANK_CONTROL);
-    setOpenControlId(null);
-    setOpenProcess(openProcess?.id === p.id ? null : p);
-  }
 
-  // ------------------------------------------------------------- RCM controls (inline)
+  // ------------------------------------------------------------- RCM controls (drawer)
   async function addControl() {
-    if (!openProcess) return;
+    if (!detail) return;
     setError(null);
     try {
-      await apiCall("POST", `/icfr/${openProcess.id}/controls`, {
+      await apiCall("POST", `/icfr/${detail.id}/controls`, {
         title: cd.title,
         control_objective: cd.control_objective,
         risk_description: cd.risk_description,
@@ -454,21 +467,23 @@ export default function IcfrPage() {
         operating_effectiveness: cd.operating_effectiveness,
       });
       setCd(BLANK_CONTROL);
-      await refreshProcess(openProcess.id);
+      await refreshProcess(detail.id);
       await loadSummary();
+      toast("Control added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add control");
     }
   }
   async function removeControl(controlId: string) {
-    if (!openProcess) return;
-    if (!window.confirm("Remove this control from the RCM?")) return;
+    if (!detail) return;
+    if (!(await confirmDialog({ title: "Remove this control from the RCM?", danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/icfr-controls/${controlId}`);
       if (openControlId === controlId) setOpenControlId(null);
-      await refreshProcess(openProcess.id);
+      await refreshProcess(detail.id);
       await loadSummary();
+      toast("Control removed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to remove control");
     }
@@ -478,9 +493,9 @@ export default function IcfrPage() {
     setOpenControlId(openControlId === controlId ? null : controlId);
   }
 
-  // ------------------------------------------------------------- control tests (inline)
+  // ------------------------------------------------------------- control tests (drawer)
   async function addTest(controlId: string) {
-    if (!openProcess) return;
+    if (!detail) return;
     setError(null);
     try {
       await apiCall("POST", `/icfr-controls/${controlId}/tests`, {
@@ -495,8 +510,9 @@ export default function IcfrPage() {
         conclusion: td.conclusion,
       });
       setTd(BLANK_TEST);
-      await refreshProcess(openProcess.id);
+      await refreshProcess(detail.id);
       await loadSummary();
+      toast("Test recorded");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add test");
     }
@@ -506,11 +522,13 @@ export default function IcfrPage() {
   function openNewDef() {
     setEditingDef(null);
     setDf(BLANK_DEF);
+    setError(null);
     setShowDefForm(true);
   }
   function openEditDef(d: IcfrDeficiency) {
     setEditingDef(d);
     setDf(fromDef(d));
+    setError(null);
     setShowDefForm(true);
   }
   async function saveDef() {
@@ -521,8 +539,9 @@ export default function IcfrPage() {
       if (editingDef) await apiCall("PATCH", `/icfr-deficiencies/${editingDef.id}`, payload);
       else await apiCall("POST", "/icfr-deficiencies", payload);
       setShowDefForm(false);
-      await loadDeficiencies();
+      reload();
       await loadSummary();
+      toast(editingDef ? "Changes saved" : "Deficiency created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save deficiency");
     } finally {
@@ -530,30 +549,78 @@ export default function IcfrPage() {
     }
   }
   async function removeDef(d: IcfrDeficiency) {
-    if (!window.confirm(`Delete deficiency ${d.reference || d.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete deficiency ${d.reference || d.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/icfr-deficiencies/${d.id}`);
       setShowDefForm(false);
-      await loadDeficiencies();
+      reload();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
 
-  // ------------------------------------------------------------- deficiency link options
-  const processOptions = useMemo<Option[]>(
-    () => processes.map((p) => ({ value: p.id, label: `${p.reference || "PRC"} — ${p.name}` })),
-    [processes],
-  );
-  const controlOptions = useMemo<Option[]>(
-    () =>
-      processes.flatMap((p) =>
-        p.controls.map((c) => ({ value: c.id, label: `${c.reference || "CTL"} — ${c.title}`, sub: p.name })),
+  // ------------------------------------------------------------- deficiency link pickers (server typeahead)
+  const searchProcesses = (q: string) =>
+    apiCall<PagedList<IcfrProcess>>("GET", `/icfr?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((p) => ({ value: p.id, label: `${p.reference || "PRC"} — ${p.name}` })),
+    );
+  const searchControls = (q: string) =>
+    apiCall<PagedList<IcfrControl>>("GET", `/icfr-controls?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((c) => ({ value: c.id, label: `${c.reference || "CTL"} — ${c.title}` })),
+    );
+
+  // ------------------------------------------------------------- table columns
+  const processColumns: Column<IcfrProcess>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (p) => <span className="ref">{p.reference || "—"}</span> },
+    { key: "name", header: "Process", sortable: true, render: (p) => <span className="cell-title">{p.name}</span> },
+    { key: "cycle", header: "Cycle", sortable: true, render: (p) => <span className="muted">{p.cycle || "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (p) => <span className="muted">{p.owner || "—"}</span> },
+    { key: "key", header: "Key", render: (p) => (p.key_process ? <Badge tone="info">Key</Badge> : <span className="muted">—</span>) },
+    { key: "controls", header: "Controls", render: (p) => <span className="muted">{p.control_count} ({p.key_control_count} key)</span> },
+    { key: "status", header: "Status", sortable: true, render: (p) => <Badge tone={PROCESS_STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge> },
+    {
+      key: "actions",
+      header: "",
+      render: (p) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => openEditProcess(p)}>Edit</button>{" "}
+          <button className="btn secondary sm" onClick={() => removeProcess(p)}>Delete</button>
+        </div>
       ),
-    [processes],
-  );
+    },
+  ];
+
+  const defColumns: Column<IcfrDeficiency>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (d) => <span className="ref">{d.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (d) => <span className="cell-title">{d.title}</span> },
+    {
+      key: "severity",
+      header: "Severity",
+      sortable: true,
+      render: (d) => (
+        <>
+          <Badge tone={SEVERITY_TONE[d.severity] || "neutral"}>{cap(d.severity)}</Badge>
+          {d.severity === "material_weakness" && <> <Badge tone="critical">Material</Badge></>}
+        </>
+      ),
+    },
+    { key: "status", header: "Status", sortable: true, render: (d) => <Badge tone={DEF_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge> },
+    { key: "owner", header: "Owner", sortable: true, render: (d) => <span className="muted">{d.owner || "—"}</span> },
+    { key: "identified_date", header: "Identified", sortable: true, render: (d) => <span className="muted">{d.identified_date || "—"}</span> },
+    { key: "target_date", header: "Target", sortable: true, render: (d) => <span className="muted">{d.target_date || "—"}</span> },
+    {
+      key: "actions",
+      header: "",
+      render: (d) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => removeDef(d)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
 
   // ------------------------------------------------------------- process form tabs
   const processGeneral = (
@@ -609,10 +676,22 @@ export default function IcfrPage() {
       </div>
       <div className="field-row">
         <Field label="Process" help="The process this deficiency relates to.">
-          <Select value={df.process_id} onChange={(v) => setD("process_id", v)} options={processOptions} placeholder="Unlinked" />
+          <AsyncSelect
+            search={searchProcesses}
+            value={df.process_id || null}
+            selectedLabel={df.process_label || undefined}
+            onChange={(v, opt) => setDf((p) => ({ ...p, process_id: v ?? "", process_label: opt?.label ?? "" }))}
+            placeholder="Unlinked"
+          />
         </Field>
         <Field label="Control" help="The RCM control this deficiency relates to.">
-          <Select value={df.control_id} onChange={(v) => setD("control_id", v)} options={controlOptions} placeholder="Unlinked" />
+          <AsyncSelect
+            search={searchControls}
+            value={df.control_id || null}
+            selectedLabel={df.control_label || undefined}
+            onChange={(v, opt) => setDf((p) => ({ ...p, control_id: v ?? "", control_label: opt?.label ?? "" }))}
+            placeholder="Unlinked"
+          />
         </Field>
       </div>
       <Field label="Description">
@@ -690,7 +769,10 @@ export default function IcfrPage() {
           <button
             key={s.id}
             className={`btn${section === s.id ? "" : " secondary"}`}
-            onClick={() => setSection(s.id)}
+            onClick={() => {
+              if (s.id !== "processes") setOpenId(null);
+              setSection(s.id);
+            }}
             type="button"
           >
             {s.label}
@@ -702,365 +784,277 @@ export default function IcfrPage() {
 
       {/* ============================================= PROCESS & RCM */}
       {section === "processes" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <h3>Process universe</h3>
-              <span className="sub">{processes.length} total · click a row to manage its Risk-Control Matrix</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Process</th>
-                    <th>Cycle</th>
-                    <th>Owner</th>
-                    <th>Key</th>
-                    <th>Controls</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {processes.map((p) => (
-                    <tr key={p.id} style={{ cursor: "pointer" }} onClick={() => toggleProcess(p)}>
-                      <td className="ref">{p.reference || "—"}</td>
-                      <td className="cell-title">{p.name}</td>
-                      <td className="muted">{p.cycle || "—"}</td>
-                      <td className="muted">{p.owner || "—"}</td>
-                      <td>{p.key_process ? <Badge tone="info">Key</Badge> : <span className="muted">—</span>}</td>
-                      <td className="muted">{p.control_count} ({p.key_control_count} key)</td>
-                      <td><Badge tone={PROCESS_STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge></td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleProcess(p)}>
-                            {openProcess?.id === p.id ? "Hide" : "Manage RCM"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => removeProcess(p)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {processes.length === 0 && (
-                    <tr>
-                      <td colSpan={8}>
-                        <div className="empty">
-                          <span className="ico"><IconCompliance width={24} height={24} /></span>
-                          <h3>No ICFR processes</h3>
-                          <p>Map the financial-reporting process universe, then build a Risk-Control Matrix for each.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openProcess && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openProcess.reference} — {openProcess.name}</h3>
-                    <span className="sub">
-                      {cap(openProcess.status)} · {openProcess.cycle || "no cycle"}
-                      {openProcess.owner ? " · owner " + openProcess.owner : ""}
-                      {openProcess.key_process ? " · key process" : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button className="btn secondary sm" onClick={() => openEditProcess(openProcess)}>Edit</button>
-                    <button className="btn secondary sm" onClick={() => removeProcess(openProcess)}>Delete</button>
-                  </div>
-                </div>
-
-                <div className="card-pad">
-                  <strong>Risk-Control Matrix</strong>
-                  <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                    Each control maps a risk to a financial-statement assertion, with design and operating effectiveness. Click a control to record tests.
-                  </p>
-                  <form
-                    style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                    onSubmit={(ev) => { ev.preventDefault(); addControl(); }}
-                  >
-                    <div style={{ flex: "1 1 200px" }}>
-                      <label className="label">Control title</label>
-                      <input className="input" value={cd.title} onChange={(ev) => setCD("title", ev.target.value)} placeholder="Control title" required />
-                    </div>
-                    <div style={{ width: 190 }}>
-                      <label className="label">Assertion</label>
-                      <select className="select" value={cd.assertion} onChange={(ev) => setCD("assertion", ev.target.value)}>
-                        {ASSERTIONS.map((a) => (<option key={a} value={a}>{cap(a)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 130 }}>
-                      <label className="label">Type</label>
-                      <select className="select" value={cd.control_type} onChange={(ev) => setCD("control_type", ev.target.value)}>
-                        {CONTROL_TYPE.map((t) => (<option key={t} value={t}>{cap(t)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 160 }}>
-                      <label className="label">Nature</label>
-                      <select className="select" value={cd.nature} onChange={(ev) => setCD("nature", ev.target.value)}>
-                        {NATURE.map((n) => (<option key={n} value={n}>{cap(n)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 130 }}>
-                      <label className="label">Frequency</label>
-                      <select className="select" value={cd.frequency} onChange={(ev) => setCD("frequency", ev.target.value)}>
-                        {FREQUENCY.map((fr) => (<option key={fr} value={fr}>{cap(fr)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 140 }}>
-                      <label className="label">Owner</label>
-                      <input className="input" value={cd.owner} onChange={(ev) => setCD("owner", ev.target.value)} placeholder="Owner" />
-                    </div>
-                    <div style={{ width: 170 }}>
-                      <label className="label">Design eff.</label>
-                      <select className="select" value={cd.design_effectiveness} onChange={(ev) => setCD("design_effectiveness", ev.target.value)}>
-                        {CONTROL_EFF.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 170 }}>
-                      <label className="label">Operating eff.</label>
-                      <select className="select" value={cd.operating_effectiveness} onChange={(ev) => setCD("operating_effectiveness", ev.target.value)}>
-                        {CONTROL_EFF.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ flex: "1 1 200px" }}>
-                      <label className="label">Control objective</label>
-                      <input className="input" value={cd.control_objective} onChange={(ev) => setCD("control_objective", ev.target.value)} placeholder="What the control achieves" />
-                    </div>
-                    <div style={{ flex: "1 1 200px" }}>
-                      <label className="label">Risk description</label>
-                      <input className="input" value={cd.risk_description} onChange={(ev) => setCD("risk_description", ev.target.value)} placeholder="Risk being mitigated" />
-                    </div>
-                    <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 8 }}>
-                      <input type="checkbox" checked={cd.is_key} onChange={(ev) => setCD("is_key", ev.target.checked)} /> Key
-                    </label>
-                    <button className="btn">Add control</button>
-                  </form>
-
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Ref</th>
-                          <th>Control</th>
-                          <th>Assertion</th>
-                          <th>Type</th>
-                          <th>Key</th>
-                          <th>Design eff.</th>
-                          <th>Operating eff.</th>
-                          <th>Tests</th>
-                          <th></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {openProcess.controls.map((c) => (
-                          <Fragment key={c.id}>
-                            <tr style={{ cursor: "pointer" }} onClick={() => toggleControl(c.id)}>
-                              <td className="ref">{c.reference || "—"}</td>
-                              <td className="cell-title">{c.title}</td>
-                              <td><Badge tone="info">{cap(c.assertion)}</Badge></td>
-                              <td className="muted">{cap(c.control_type)}</td>
-                              <td>{c.is_key ? <Badge tone="info">Key</Badge> : <span className="muted">—</span>}</td>
-                              <td><EffBadge value={c.design_effectiveness} /></td>
-                              <td><EffBadge value={c.operating_effectiveness} /></td>
-                              <td className="muted">
-                                {c.test_count}
-                                {c.latest_result ? (
-                                  <> · <Badge tone={TEST_RESULT_TONE[c.latest_result] || "neutral"}>{cap(c.latest_result)}</Badge></>
-                                ) : null}
-                              </td>
-                              <td>
-                                <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                                  <button className="btn secondary sm" onClick={() => toggleControl(c.id)}>
-                                    {openControlId === c.id ? "Hide" : "Tests"}
-                                  </button>
-                                  <button className="btn secondary sm" onClick={() => removeControl(c.id)}>Remove</button>
-                                </div>
-                              </td>
-                            </tr>
-                            {openControlId === c.id && (
-                              <tr>
-                                <td colSpan={9} style={{ background: "var(--panel-2, rgba(0,0,0,0.02))" }}>
-                                  <div style={{ padding: "4px 0 8px" }}>
-                                    <strong style={{ fontSize: 13 }}>Control testing — {c.reference}</strong>
-                                    <p className="muted" style={{ margin: "4px 0 10px", fontSize: 12 }}>
-                                      Record design and operating-effectiveness tests, sample sizes and exceptions.
-                                    </p>
-                                    <form
-                                      style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}
-                                      onSubmit={(ev) => { ev.preventDefault(); addTest(c.id); }}
-                                    >
-                                      <div style={{ width: 130 }}>
-                                        <label className="label">Test type</label>
-                                        <select className="select" value={td.test_type} onChange={(ev) => setTD("test_type", ev.target.value)}>
-                                          {TEST_TYPE.map((t) => (<option key={t} value={t}>{cap(t)}</option>))}
-                                        </select>
-                                      </div>
-                                      <div style={{ width: 120 }}>
-                                        <label className="label">Period</label>
-                                        <input className="input" value={td.period} onChange={(ev) => setTD("period", ev.target.value)} placeholder="FY26 Q1" />
-                                      </div>
-                                      <div style={{ width: 140 }}>
-                                        <label className="label">Tester</label>
-                                        <input className="input" value={td.tester} onChange={(ev) => setTD("tester", ev.target.value)} placeholder="Tester" />
-                                      </div>
-                                      <div style={{ width: 90 }}>
-                                        <label className="label">Sample</label>
-                                        <input className="input" type="number" min={0} value={td.sample_size} onChange={(ev) => setTD("sample_size", ev.target.value)} />
-                                      </div>
-                                      <div style={{ width: 100 }}>
-                                        <label className="label">Exceptions</label>
-                                        <input className="input" type="number" min={0} value={td.exceptions_found} onChange={(ev) => setTD("exceptions_found", ev.target.value)} />
-                                      </div>
-                                      <div style={{ width: 150 }}>
-                                        <label className="label">Test date</label>
-                                        <input className="input" type="date" value={td.test_date} onChange={(ev) => setTD("test_date", ev.target.value)} />
-                                      </div>
-                                      <div style={{ width: 190 }}>
-                                        <label className="label">Result</label>
-                                        <select className="select" value={td.result} onChange={(ev) => setTD("result", ev.target.value)}>
-                                          {TEST_RESULT.map((r) => (<option key={r} value={r}>{cap(r)}</option>))}
-                                        </select>
-                                      </div>
-                                      <div style={{ width: 140 }}>
-                                        <label className="label">Status</label>
-                                        <select className="select" value={td.status} onChange={(ev) => setTD("status", ev.target.value)}>
-                                          {TEST_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-                                        </select>
-                                      </div>
-                                      <div style={{ flex: "1 1 200px" }}>
-                                        <label className="label">Conclusion</label>
-                                        <input className="input" value={td.conclusion} onChange={(ev) => setTD("conclusion", ev.target.value)} placeholder="Test conclusion" />
-                                      </div>
-                                      <button className="btn">Add test</button>
-                                    </form>
-
-                                    <div className="table-wrap">
-                                      <table>
-                                        <thead>
-                                          <tr>
-                                            <th>Ref</th>
-                                            <th>Type</th>
-                                            <th>Period</th>
-                                            <th>Tester</th>
-                                            <th>Sample</th>
-                                            <th>Exceptions</th>
-                                            <th>Result</th>
-                                            <th>Status</th>
-                                            <th>Date</th>
-                                          </tr>
-                                        </thead>
-                                        <tbody>
-                                          {c.tests.map((t) => (
-                                            <tr key={t.id}>
-                                              <td className="ref">{t.reference || "—"}</td>
-                                              <td className="muted">{cap(t.test_type)}</td>
-                                              <td className="muted">{t.period || "—"}</td>
-                                              <td className="muted">{t.tester || "—"}</td>
-                                              <td className="muted">{t.sample_size}</td>
-                                              <td className="muted">{t.exceptions_found}</td>
-                                              <td><Badge tone={TEST_RESULT_TONE[t.result] || "neutral"}>{cap(t.result)}</Badge></td>
-                                              <td><Badge tone={TEST_STATUS_TONE[t.status] || "neutral"}>{cap(t.status)}</Badge></td>
-                                              <td className="muted">{t.test_date || "—"}</td>
-                                            </tr>
-                                          ))}
-                                          {c.tests.length === 0 && (
-                                            <tr><td colSpan={9}><span className="muted">No tests recorded yet.</span></td></tr>
-                                          )}
-                                        </tbody>
-                                      </table>
-                                    </div>
-                                  </div>
-                                </td>
-                              </tr>
-                            )}
-                          </Fragment>
-                        ))}
-                        {openProcess.controls.length === 0 && (
-                          <tr><td colSpan={9}><span className="muted">No controls in the RCM yet.</span></td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <RecordPanels model="icfr_process" entityId={openProcess.id} />
-            </>
-          )}
-        </>
+        <DataTable<IcfrProcess>
+          columns={processColumns}
+          fetcher={fetchProcesses}
+          rowKey={(p) => p.id}
+          onRowClick={(p) => setOpenId(p.id)}
+          activeKey={openId}
+          searchPlaceholder="Search processes by name or reference…"
+          emptyMessage="No ICFR processes yet. Map the financial-reporting process universe, then build a Risk-Control Matrix for each."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= DEFICIENCIES */}
       {section === "deficiencies" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Deficiency register</h3>
-            <span className="sub">{deficiencies.length} total · material weaknesses highlighted · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Title</th>
-                  <th>Severity</th>
-                  <th>Status</th>
-                  <th>Owner</th>
-                  <th>Identified</th>
-                  <th>Target</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {deficiencies.map((d) => {
-                  const mw = d.severity === "material_weakness";
-                  return (
-                    <tr
-                      key={d.id}
-                      style={{ cursor: "pointer", background: mw ? "rgba(192,57,43,0.06)" : undefined }}
-                      onClick={() => openEditDef(d)}
-                    >
-                      <td className="ref">{d.reference || "—"}</td>
-                      <td className="cell-title">{d.title}</td>
-                      <td>
-                        <Badge tone={SEVERITY_TONE[d.severity] || "neutral"}>{cap(d.severity)}</Badge>
-                        {mw && <Badge tone="critical">Material</Badge>}
-                      </td>
-                      <td><Badge tone={DEF_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge></td>
-                      <td className="muted">{d.owner || "—"}</td>
-                      <td className="muted">{d.identified_date || "—"}</td>
-                      <td className="muted">{d.target_date || "—"}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => removeDef(d)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-                {deficiencies.length === 0 && (
-                  <tr>
-                    <td colSpan={8}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No deficiencies logged</h3>
-                        <p>Record control deficiencies from testing and evaluate each as a deficiency, significant deficiency, or material weakness.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<IcfrDeficiency>
+          columns={defColumns}
+          fetcher={fetchDeficiencies}
+          rowKey={(d) => d.id}
+          onRowClick={(d) => openEditDef(d)}
+          searchPlaceholder="Search deficiencies by title or reference…"
+          emptyMessage="No deficiencies logged. Record control deficiencies from testing and evaluate each severity."
+          refreshKey={refreshKey}
+        />
       )}
+
+      {/* ============================================= PROCESS / RCM DRAWER */}
+      <RecordDrawer
+        open={section === "processes" && !!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference || "PRC"} — ${detail.name}` : "…"}
+        subtitle={
+          detail
+            ? `${cap(detail.status)} · ${detail.cycle || "no cycle"}${detail.owner ? " · owner " + detail.owner : ""}${detail.key_process ? " · key process" : ""}`
+            : ""
+        }
+        width={900}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditProcess(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeProcess(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              <Badge tone={PROCESS_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              {detail.key_process && <Badge tone="info">Key process</Badge>}
+              <Badge tone="neutral" plain>{detail.control_count} controls · {detail.key_control_count} key</Badge>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Risk-Control Matrix</h3></div>
+              <div className="card-pad">
+                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+                  Each control maps a risk to a financial-statement assertion, with design and operating effectiveness. Click a control to record tests.
+                </p>
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(ev) => { ev.preventDefault(); addControl(); }}
+                >
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Control title</label>
+                    <input className="input" value={cd.title} onChange={(ev) => setCD("title", ev.target.value)} placeholder="Control title" required />
+                  </div>
+                  <div style={{ width: 190 }}>
+                    <label className="label">Assertion</label>
+                    <select className="select" value={cd.assertion} onChange={(ev) => setCD("assertion", ev.target.value)}>
+                      {ASSERTIONS.map((a) => (<option key={a} value={a}>{cap(a)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Type</label>
+                    <select className="select" value={cd.control_type} onChange={(ev) => setCD("control_type", ev.target.value)}>
+                      {CONTROL_TYPE.map((t) => (<option key={t} value={t}>{cap(t)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 160 }}>
+                    <label className="label">Nature</label>
+                    <select className="select" value={cd.nature} onChange={(ev) => setCD("nature", ev.target.value)}>
+                      {NATURE.map((n) => (<option key={n} value={n}>{cap(n)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Frequency</label>
+                    <select className="select" value={cd.frequency} onChange={(ev) => setCD("frequency", ev.target.value)}>
+                      {FREQUENCY.map((fr) => (<option key={fr} value={fr}>{cap(fr)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Owner</label>
+                    <input className="input" value={cd.owner} onChange={(ev) => setCD("owner", ev.target.value)} placeholder="Owner" />
+                  </div>
+                  <div style={{ width: 170 }}>
+                    <label className="label">Design eff.</label>
+                    <select className="select" value={cd.design_effectiveness} onChange={(ev) => setCD("design_effectiveness", ev.target.value)}>
+                      {CONTROL_EFF.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 170 }}>
+                    <label className="label">Operating eff.</label>
+                    <select className="select" value={cd.operating_effectiveness} onChange={(ev) => setCD("operating_effectiveness", ev.target.value)}>
+                      {CONTROL_EFF.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Control objective</label>
+                    <input className="input" value={cd.control_objective} onChange={(ev) => setCD("control_objective", ev.target.value)} placeholder="What the control achieves" />
+                  </div>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Risk description</label>
+                    <input className="input" value={cd.risk_description} onChange={(ev) => setCD("risk_description", ev.target.value)} placeholder="Risk being mitigated" />
+                  </div>
+                  <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 8 }}>
+                    <input type="checkbox" checked={cd.is_key} onChange={(ev) => setCD("is_key", ev.target.checked)} /> Key
+                  </label>
+                  <button className="btn">Add control</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Ref</th>
+                        <th>Control</th>
+                        <th>Assertion</th>
+                        <th>Type</th>
+                        <th>Key</th>
+                        <th>Design eff.</th>
+                        <th>Operating eff.</th>
+                        <th>Tests</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.controls.map((c) => (
+                        <Fragment key={c.id}>
+                          <tr style={{ cursor: "pointer" }} onClick={() => toggleControl(c.id)}>
+                            <td className="ref">{c.reference || "—"}</td>
+                            <td className="cell-title">{c.title}</td>
+                            <td><Badge tone="info">{cap(c.assertion)}</Badge></td>
+                            <td className="muted">{cap(c.control_type)}</td>
+                            <td>{c.is_key ? <Badge tone="info">Key</Badge> : <span className="muted">—</span>}</td>
+                            <td><EffBadge value={c.design_effectiveness} /></td>
+                            <td><EffBadge value={c.operating_effectiveness} /></td>
+                            <td className="muted">
+                              {c.test_count}
+                              {c.latest_result ? (
+                                <> · <Badge tone={TEST_RESULT_TONE[c.latest_result] || "neutral"}>{cap(c.latest_result)}</Badge></>
+                              ) : null}
+                            </td>
+                            <td>
+                              <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
+                                <button className="btn secondary sm" onClick={() => toggleControl(c.id)}>
+                                  {openControlId === c.id ? "Hide" : "Tests"}
+                                </button>
+                                <button className="btn secondary sm" onClick={() => removeControl(c.id)}>Remove</button>
+                              </div>
+                            </td>
+                          </tr>
+                          {openControlId === c.id && (
+                            <tr>
+                              <td colSpan={9} style={{ background: "var(--panel-2, rgba(0,0,0,0.02))" }}>
+                                <div style={{ padding: "4px 0 8px" }}>
+                                  <strong style={{ fontSize: 13 }}>Control testing — {c.reference}</strong>
+                                  <p className="muted" style={{ margin: "4px 0 10px", fontSize: 12 }}>
+                                    Record design and operating-effectiveness tests, sample sizes and exceptions.
+                                  </p>
+                                  <form
+                                    style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}
+                                    onSubmit={(ev) => { ev.preventDefault(); addTest(c.id); }}
+                                  >
+                                    <div style={{ width: 130 }}>
+                                      <label className="label">Test type</label>
+                                      <select className="select" value={td.test_type} onChange={(ev) => setTD("test_type", ev.target.value)}>
+                                        {TEST_TYPE.map((t) => (<option key={t} value={t}>{cap(t)}</option>))}
+                                      </select>
+                                    </div>
+                                    <div style={{ width: 120 }}>
+                                      <label className="label">Period</label>
+                                      <input className="input" value={td.period} onChange={(ev) => setTD("period", ev.target.value)} placeholder="FY26 Q1" />
+                                    </div>
+                                    <div style={{ width: 140 }}>
+                                      <label className="label">Tester</label>
+                                      <input className="input" value={td.tester} onChange={(ev) => setTD("tester", ev.target.value)} placeholder="Tester" />
+                                    </div>
+                                    <div style={{ width: 90 }}>
+                                      <label className="label">Sample</label>
+                                      <input className="input" type="number" min={0} value={td.sample_size} onChange={(ev) => setTD("sample_size", ev.target.value)} />
+                                    </div>
+                                    <div style={{ width: 100 }}>
+                                      <label className="label">Exceptions</label>
+                                      <input className="input" type="number" min={0} value={td.exceptions_found} onChange={(ev) => setTD("exceptions_found", ev.target.value)} />
+                                    </div>
+                                    <div style={{ width: 150 }}>
+                                      <label className="label">Test date</label>
+                                      <input className="input" type="date" value={td.test_date} onChange={(ev) => setTD("test_date", ev.target.value)} />
+                                    </div>
+                                    <div style={{ width: 190 }}>
+                                      <label className="label">Result</label>
+                                      <select className="select" value={td.result} onChange={(ev) => setTD("result", ev.target.value)}>
+                                        {TEST_RESULT.map((r) => (<option key={r} value={r}>{cap(r)}</option>))}
+                                      </select>
+                                    </div>
+                                    <div style={{ width: 140 }}>
+                                      <label className="label">Status</label>
+                                      <select className="select" value={td.status} onChange={(ev) => setTD("status", ev.target.value)}>
+                                        {TEST_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+                                      </select>
+                                    </div>
+                                    <div style={{ flex: "1 1 200px" }}>
+                                      <label className="label">Conclusion</label>
+                                      <input className="input" value={td.conclusion} onChange={(ev) => setTD("conclusion", ev.target.value)} placeholder="Test conclusion" />
+                                    </div>
+                                    <button className="btn">Add test</button>
+                                  </form>
+
+                                  <div className="table-wrap">
+                                    <table>
+                                      <thead>
+                                        <tr>
+                                          <th>Ref</th>
+                                          <th>Type</th>
+                                          <th>Period</th>
+                                          <th>Tester</th>
+                                          <th>Sample</th>
+                                          <th>Exceptions</th>
+                                          <th>Result</th>
+                                          <th>Status</th>
+                                          <th>Date</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {c.tests.map((t) => (
+                                          <tr key={t.id}>
+                                            <td className="ref">{t.reference || "—"}</td>
+                                            <td className="muted">{cap(t.test_type)}</td>
+                                            <td className="muted">{t.period || "—"}</td>
+                                            <td className="muted">{t.tester || "—"}</td>
+                                            <td className="muted">{t.sample_size}</td>
+                                            <td className="muted">{t.exceptions_found}</td>
+                                            <td><Badge tone={TEST_RESULT_TONE[t.result] || "neutral"}>{cap(t.result)}</Badge></td>
+                                            <td><Badge tone={TEST_STATUS_TONE[t.status] || "neutral"}>{cap(t.status)}</Badge></td>
+                                            <td className="muted">{t.test_date || "—"}</td>
+                                          </tr>
+                                        ))}
+                                        {c.tests.length === 0 && (
+                                          <tr><td colSpan={9}><span className="muted">No tests recorded yet.</span></td></tr>
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      ))}
+                      {detail.controls.length === 0 && (
+                        <tr><td colSpan={9}><span className="muted">No controls in the RCM yet.</span></td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="icfr_process" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showProcessForm && (
@@ -1121,5 +1115,13 @@ export default function IcfrPage() {
         />
       )}
     </>
+  );
+}
+
+export default function IcfrPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <IcfrInner />
+    </Suspense>
   );
 }

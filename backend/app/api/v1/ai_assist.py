@@ -26,6 +26,7 @@ from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.ai_assist import AiExtraction, AiExtractionType, AiJobStatus
 from app.schemas.ai_assist import AiExtractionCreate, AiExtractionRead
 from app.schemas.common import Page
@@ -297,20 +298,40 @@ async def run_extraction(body: AiExtractionCreate, db: DbSession, user: CurrentU
     return AiExtractionRead.model_validate(obj)
 
 
+_AI_SORTABLE = {
+    "reference": AiExtraction.reference,
+    "title": AiExtraction.title,
+    "source_type": AiExtraction.source_type,
+    "extraction_type": AiExtraction.extraction_type,
+    "status": AiExtraction.status,
+    "created_at": AiExtraction.created_at,
+}
+
+
 @router.get("/ai-assist", response_model=Page[AiExtractionRead], dependencies=[_READ])
 async def list_extractions(
     db: DbSession,
+    search: str | None = None,
     extraction_type: Annotated[AiExtractionType | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "desc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[AiExtractionRead]:
     stmt = select(AiExtraction).where(AiExtraction.deleted.is_(False))
     if extraction_type is not None:
         stmt = stmt.where(AiExtraction.extraction_type == extraction_type)
+    if search:
+        stmt = stmt.where(
+            AiExtraction.title.ilike(f"%{search}%") | AiExtraction.reference.ilike(f"%{search}%")
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _AI_SORTABLE, default=AiExtraction.created_at)
+    else:
+        stmt = stmt.order_by(AiExtraction.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(
-        stmt.order_by(AiExtraction.created_at.desc()).limit(limit).offset(offset)
-    )).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[AiExtractionRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

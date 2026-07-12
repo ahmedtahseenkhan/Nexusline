@@ -6,15 +6,16 @@ frameworks ("map once, comply many").
 from __future__ import annotations
 
 import uuid
-from typing import Sequence
+from typing import Annotated, Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from sqlalchemy import delete, func
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.compliance import (
     ComplianceFinding,
     Framework,
@@ -158,18 +159,42 @@ async def _attach_counts(db, reqs: list[Requirement]) -> None:
 
 
 # ------------------------------------------------------------------ frameworks
+_FRAMEWORK_SORTABLE = {
+    "name": Framework.name,
+    "authority": Framework.authority,
+    "regulator": Framework.regulator,
+    "workflow_status": Framework.workflow_status,
+    "created_at": Framework.created_at,
+}
+
+
 @router.get(
     "/frameworks", response_model=Page[FrameworkRead], dependencies=[Depends(require("compliance:read"))]
 )
-async def list_frameworks(db: DbSession) -> Page[FrameworkRead]:
-    rows = (await db.scalars(
-        select(Framework).where(Framework.deleted.is_(False)).order_by(Framework.name)
-    )).all()
+async def list_frameworks(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[FrameworkRead]:
+    stmt = select(Framework).where(Framework.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(Framework.name.ilike(like) | Framework.authority.ilike(like))
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _FRAMEWORK_SORTABLE, default=Framework.name)
+    else:
+        stmt = stmt.order_by(Framework.name)
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(
         items=[FrameworkRead.model_validate(f) for f in rows],
-        total=len(rows),
-        limit=len(rows),
-        offset=0,
+        total=total,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -303,24 +328,51 @@ async def load_framework_template(key: str, db: DbSession, user: CurrentUser) ->
 
 
 # ----------------------------------------------------------------- requirements
+_REQUIREMENT_SORTABLE = {
+    "reference": Requirement.reference,
+    "title": Requirement.title,
+    "status": Requirement.status,
+    "domain": Requirement.domain,
+    "workflow_status": Requirement.workflow_status,
+    "created_at": Requirement.created_at,
+}
+
+
 @router.get(
     "/frameworks/{framework_id}/requirements",
-    response_model=list[RequirementRead],
+    response_model=Page[RequirementRead],
     dependencies=[Depends(require("compliance:read"))],
 )
-async def list_requirements(framework_id: uuid.UUID, db: DbSession) -> list[RequirementRead]:
+async def list_requirements(
+    framework_id: uuid.UUID,
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[RequirementRead]:
     await _load_framework(db, framework_id)
-    rows = list(
-        (
-            await db.scalars(
-                select(Requirement)
-                .where(Requirement.framework_id == framework_id, Requirement.deleted.is_(False))
-                .order_by(Requirement.reference)
-            )
-        ).all()
+    stmt = select(Requirement).where(
+        Requirement.framework_id == framework_id, Requirement.deleted.is_(False)
     )
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(Requirement.title.ilike(like) | Requirement.reference.ilike(like))
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _REQUIREMENT_SORTABLE, default=Requirement.reference)
+    else:
+        stmt = stmt.order_by(Requirement.reference)
+    rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
     await _attach_counts(db, rows)
-    return [RequirementRead.model_validate(r) for r in rows]
+    return Page(
+        items=[RequirementRead.model_validate(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(

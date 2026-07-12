@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
-import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconUsers } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
@@ -25,8 +30,6 @@ type BusinessUnit = {
   legals: Ref[];
 };
 
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 const WORKFLOW_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
   approved: "low",
   in_review: "medium",
@@ -38,6 +41,7 @@ const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUppe
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+const refToOpt = (l: Ref): AsyncOption => ({ value: l.id, label: l.name });
 
 type FormState = {
   name: string;
@@ -48,7 +52,7 @@ type FormState = {
   parent_id: string;
   workflow_status: string;
   workflow_owner: string;
-  legal_ids: string[];
+  legal_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
@@ -66,14 +70,16 @@ function fromUnit(u: BusinessUnit): FormState {
     parent_id: u.parent_id || "",
     workflow_status: u.workflow_status,
     workflow_owner: u.workflow_owner || "",
-    legal_ids: u.legals.map((l) => l.id),
+    legal_ids: u.legals.map(refToOpt),
   };
 }
 
-export default function BusinessUnitsPage() {
-  const [items, setItems] = useState<BusinessUnit[]>([]);
-  const [legals, setLegals] = useState<Ref[]>([]);
+function BusinessUnitsInner() {
+  // A full flat index of units backs the hierarchy (parent picker + sub-unit counts),
+  // independent of the paginated table below.
+  const [allUnits, setAllUnits] = useState<BusinessUnit[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const [editing, setEditing] = useState<BusinessUnit | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -82,19 +88,18 @@ export default function BusinessUnitsPage() {
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  async function load() {
-    try {
-      setItems((await apiCall<Page<BusinessUnit>>("GET", "/business-units")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-    apiCall<Page<Ref>>("GET", "/legals")
-      .then((r) => setLegals(r.items))
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchUnits = useCallback((qs: string) => apiCall<PagedList<BusinessUnit>>("GET", `/business-units?${qs}`), []);
+
+  const loadIndex = useCallback(() => {
+    apiCall<PagedList<BusinessUnit>>("GET", "/business-units?limit=200")
+      .then((r) => setAllUnits(r.items))
       .catch(() => {});
   }, []);
+  useEffect(() => { loadIndex(); }, [loadIndex]);
+
+  const searchLegals = (q: string) =>
+    apiCall<PagedList<Ref>>("GET", `/legals?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map(refToOpt));
 
   function openNew() {
     setEditing(null);
@@ -125,13 +130,15 @@ export default function BusinessUnitsPage() {
       parent_id: f.parent_id || null,
       workflow_status: f.workflow_status,
       workflow_owner: f.workflow_owner,
-      legal_ids: f.legal_ids,
+      legal_ids: f.legal_ids.map((o) => o.value),
     };
     try {
       if (editing) await apiCall<BusinessUnit>("PATCH", `/business-units/${editing.id}`, payload);
       else await apiCall<BusinessUnit>("POST", "/business-units", payload);
       setShowForm(false);
-      await load();
+      reload();
+      loadIndex();
+      toast(editing ? "Changes saved" : "Business unit created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save business unit");
     } finally {
@@ -140,11 +147,13 @@ export default function BusinessUnitsPage() {
   }
 
   async function remove(u: BusinessUnit) {
-    if (!confirm(`Delete business unit "${u.name}"? Child units will be detached.`)) return;
+    if (!(await confirmDialog({ title: `Delete business unit "${u.name}"?`, message: "Child units will be detached.", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/business-units/${u.id}`);
-      await load();
+      reload();
+      loadIndex();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -153,24 +162,30 @@ export default function BusinessUnitsPage() {
   // Parent options exclude self (prevent a unit being its own parent).
   const parentOpts: Option[] = useMemo(
     () =>
-      items
+      allUnits
         .filter((u) => u.id !== editing?.id)
         .map((u) => ({ value: u.id, label: u.name, sub: u.manager || undefined })),
-    [items, editing],
-  );
-  const legalOpts: Option[] = useMemo(
-    () => legals.map((l) => ({ value: l.id, label: l.name })),
-    [legals],
+    [allUnits, editing],
   );
 
-  // children count is derived client-side: units whose parent is this one.
+  // children count is derived from the full index: units whose parent is this one.
   const childCount = useMemo(() => {
     const m = new Map<string, number>();
-    for (const u of items) {
+    for (const u of allUnits) {
       if (u.parent_id) m.set(u.parent_id, (m.get(u.parent_id) || 0) + 1);
     }
     return m;
-  }, [items]);
+  }, [allUnits]);
+
+  const columns: Column<BusinessUnit>[] = [
+    { key: "name", header: "Name", sortable: true, render: (u) => <span className="cell-title">{u.name}</span> },
+    { key: "manager", header: "Manager", sortable: true, render: (u) => <span className="muted">{u.manager || "—"}</span> },
+    { key: "parent", header: "Parent", render: (u) => <span className="muted">{u.parent_name || "—"}</span> },
+    { key: "obligations", header: "Obligations", align: "center", render: (u) => <span className="muted">{u.legals.length || "—"}</span> },
+    { key: "subunits", header: "Sub-units", align: "center", render: (u) => <span className="muted">{childCount.get(u.id) || "—"}</span> },
+    { key: "workflow_status", header: "Workflow", sortable: true, render: (u) => <Badge tone={WORKFLOW_TONE[u.workflow_status] || "neutral"}>{cap(u.workflow_status)}</Badge> },
+    { key: "actions", header: "", render: (u) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(u)}>Delete</button></div> },
+  ];
 
   const generalTab = (
     <>
@@ -212,7 +227,7 @@ export default function BusinessUnitsPage() {
 
   const linksTab = (
     <Field label="Legal & Regulatory Obligations" help="Legal obligations that apply to this business unit.">
-      <MultiSelect value={f.legal_ids} onChange={(v) => set("legal_ids", v)} options={legalOpts} />
+      <AsyncMultiSelect search={searchLegals} value={f.legal_ids} onChange={(v) => set("legal_ids", v)} />
     </Field>
   );
 
@@ -224,7 +239,7 @@ export default function BusinessUnitsPage() {
           <p>Organizational hierarchy that owns assets, runs processes and holds legal obligations.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <ImportExport resource="business-units" label="Business Units" onDone={load} />
+          <ImportExport resource="business-units" label="Business Units" onDone={() => { reload(); loadIndex(); }} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add business unit
           </button>
@@ -233,55 +248,16 @@ export default function BusinessUnitsPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card">
-        <div className="card-head">
-          <h3>Units</h3>
-          <span className="sub">{items.length} total</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Manager</th>
-                <th>Parent</th>
-                <th>Obligations</th>
-                <th>Sub-units</th>
-                <th>Workflow</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((u) => (
-                <tr key={u.id} style={{ cursor: "pointer" }} onClick={() => openEdit(u)}>
-                  <td className="cell-title">{u.name}</td>
-                  <td className="muted">{u.manager || "—"}</td>
-                  <td className="muted">{u.parent_name || "—"}</td>
-                  <td className="muted">{u.legals.length || "—"}</td>
-                  <td className="muted">{childCount.get(u.id) || "—"}</td>
-                  <td><Badge tone={WORKFLOW_TONE[u.workflow_status] || "neutral"}>{cap(u.workflow_status)}</Badge></td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => remove(u)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={7}>
-                    <div className="empty">
-                      <span className="ico"><IconUsers width={24} height={24} /></span>
-                      <h3>No business units</h3>
-                      <p>Create your first unit to build the organizational hierarchy.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<BusinessUnit>
+        columns={columns}
+        fetcher={fetchUnits}
+        rowKey={(u) => u.id}
+        onRowClick={(u) => openEdit(u)}
+        searchPlaceholder="Search units by name, manager or location…"
+        defaultSort={{ by: "name", dir: "asc" }}
+        emptyMessage="No business units. Create your first unit to build the organizational hierarchy."
+        refreshKey={refreshKey}
+      />
 
       {showForm && (
         <FormModal
@@ -298,5 +274,13 @@ export default function BusinessUnitsPage() {
         />
       )}
     </>
+  );
+}
+
+export default function BusinessUnitsPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <BusinessUnitsInner />
+    </Suspense>
   );
 }

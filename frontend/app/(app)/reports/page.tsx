@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type MetricInfo, type WidgetData } from "@/lib/api";
+import { confirmDialog, toast } from "@/lib/feedback";
 import { IconPlus } from "@/components/icons";
 
 const PALETTE = ["#2563eb", "#0891b2", "#7c3aed", "#db2777", "#ea580c", "#16a34a", "#ca8a04", "#64748b"];
@@ -87,14 +88,21 @@ export default function ReportsPage() {
       setShowForm(false);
       setMetricKey("");
       await load();
+      toast("Widget added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Add failed");
     }
   }
 
   async function remove(id: string) {
-    await api.deleteWidget(id).catch(() => {});
-    await load();
+    if (!(await confirmDialog({ title: "Remove this widget?", danger: true, confirmLabel: "Remove" }))) return;
+    try {
+      await api.deleteWidget(id);
+      await load();
+      toast("Widget removed");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to remove widget");
+    }
   }
 
   const scalars = data.filter((d) => d.kind === "scalar");

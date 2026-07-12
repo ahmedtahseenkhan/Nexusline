@@ -1,12 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconCompliance, IconPolicy, IconAlert } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -153,8 +159,6 @@ type Summary = {
   returns_overdue: number;
 };
 
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 // ------------------------------------------------------------------ form state
 type ChangeForm = {
   title: string;
@@ -278,7 +282,7 @@ function oblPayload(f: OblForm): Record<string, unknown> {
   };
 }
 
-// inline nested obligation draft (expanded change row)
+// inline nested obligation draft (change drawer)
 type OblDraft = { title: string; obligation_type: string; owner: string; status: string; due_date: string };
 const BLANK_OBL_DRAFT: OblDraft = { title: "", obligation_type: "mandatory", owner: "", status: "open", due_date: "" };
 
@@ -351,28 +355,29 @@ function StatusBadge({ value, tone }: { value: string | null; tone: Record<strin
   return <Badge tone={tone[value] || "neutral"}>{cap(value)}</Badge>;
 }
 
-export default function RegulatoryChangePage() {
+// ================================================================ page ===
+function RegulatoryChangeInner() {
   const [section, setSection] = useState<SectionId>("changes");
   const [error, setError] = useState<string | null>(null);
-
-  const [changes, setChanges] = useState<RegChange[]>([]);
-  const [obligations, setObligations] = useState<Obligation[]>([]);
-  const [returns, setReturns] = useState<RegReturn[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  // ---- change filters ----
-  const [search, setSearch] = useState("");
+  // ---- change filters (server-side) ----
   const [statusF, setStatusF] = useState("");
   const [applicF, setApplicF] = useState("");
 
-  // ---- change dialog + expanded detail ----
+  // ---- change drawer (URL-driven) ----
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<RegChange | null>(null);
+
+  // ---- change dialog ----
   const [editingChange, setEditingChange] = useState<RegChange | null>(null);
   const [showChangeForm, setShowChangeForm] = useState(false);
   const [savingChange, setSavingChange] = useState(false);
   const [cf, setCf] = useState<ChangeForm>(BLANK_CHANGE);
   const setC = <K extends keyof ChangeForm>(k: K, v: ChangeForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
-  const [openChange, setOpenChange] = useState<RegChange | null>(null);
+  // ---- nested obligation draft (drawer) ----
   const [od, setOd] = useState<OblDraft>(BLANK_OBL_DRAFT);
   const setOD = <K extends keyof OblDraft>(k: K, v: OblDraft[K]) => setOd((p) => ({ ...p, [k]: v }));
 
@@ -382,7 +387,7 @@ export default function RegulatoryChangePage() {
   const [savingObl, setSavingObl] = useState(false);
   const [of, setOf] = useState<OblForm>(BLANK_OBL);
   const setO = <K extends keyof OblForm>(k: K, v: OblForm[K]) => setOf((p) => ({ ...p, [k]: v }));
-  const [oblSearch, setOblSearch] = useState("");
+  const [oblChange, setOblChange] = useState<AsyncOption | null>(null);
 
   // ---- return dialog ----
   const [editingReturn, setEditingReturn] = useState<RegReturn | null>(null);
@@ -392,58 +397,37 @@ export default function RegulatoryChangePage() {
   const setR = <K extends keyof ReturnForm>(k: K, v: ReturnForm[K]) => setRf((p) => ({ ...p, [k]: v }));
 
   // ------------------------------------------------------------- loaders
-  async function loadChanges(keepOpen?: string) {
-    try {
-      const qs = new URLSearchParams({ limit: "200" });
-      if (search) qs.set("search", search);
-      if (statusF) qs.set("status", statusF);
-      if (applicF) qs.set("applicability", applicF);
-      const res = await apiCall<Page<RegChange>>("GET", `/regulatory-change?${qs.toString()}`);
-      setChanges(res.items);
-      if (keepOpen) setOpenChange(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load regulatory changes");
-    }
-  }
-  async function loadObligations() {
-    try {
-      const res = await apiCall<Page<Obligation>>("GET", "/obligations?limit=200");
-      setObligations(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load obligations");
-    }
-  }
-  async function loadReturns() {
-    try {
-      const res = await apiCall<Page<RegReturn>>("GET", "/regulatory-returns?limit=200");
-      setReturns(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load regulatory returns");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<Summary>("GET", "/regulatory-change-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load summary");
-    }
-  }
-  async function refreshChange(id: string) {
-    const c = await apiCall<RegChange>("GET", `/regulatory-change/${id}`);
-    setOpenChange(c);
-    setChanges((prev) => prev.map((x) => (x.id === id ? c : x)));
-  }
+  const loadSummary = useCallback(() => {
+    apiCall<Summary>("GET", "/regulatory-change-summary").then(setSummary).catch(() => {});
+  }, []);
+  // Bump tables + refresh the summary stat cards after any mutation.
+  const reload = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+    loadSummary();
+  }, [loadSummary]);
+
+  const loadDetail = useCallback((id: string) => {
+    apiCall<RegChange>("GET", `/regulatory-change/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setDetail(null);
+  }, [openId, loadDetail]);
 
   useEffect(() => {
-    loadObligations();
-    loadReturns();
     loadSummary();
-  }, []);
-  // Re-fetch changes when server-side filters change (also runs on mount).
-  useEffect(() => {
-    loadChanges(openChange?.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusF, applicF]);
+  }, [loadSummary]);
+
+  // ------------------------------------------------------------- fetchers (server-driven tables)
+  const fetchChanges = useCallback((qs: string) => apiCall<PagedList<RegChange>>("GET", `/regulatory-change?${qs}`), []);
+  const fetchObligations = useCallback((qs: string) => apiCall<PagedList<Obligation>>("GET", `/obligations?${qs}`), []);
+  const fetchReturns = useCallback((qs: string) => apiCall<PagedList<RegReturn>>("GET", `/regulatory-returns?${qs}`), []);
+
+  // server typeahead for the "linked regulatory change" picker (any record, not a capped array)
+  const searchChanges = (q: string) =>
+    apiCall<PagedList<RegChange>>("GET", `/regulatory-change?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((c) => ({ value: c.id, label: c.title, sub: c.reference || undefined })),
+    );
 
   // ------------------------------------------------------------- change CRUD
   function openNewChange() {
@@ -466,8 +450,9 @@ export default function RegulatoryChangePage() {
       if (editingChange) await apiCall<RegChange>("PATCH", `/regulatory-change/${editingChange.id}`, payload);
       else await apiCall<RegChange>("POST", "/regulatory-change", payload);
       setShowChangeForm(false);
-      await loadChanges(openChange?.id);
-      await loadSummary();
+      reload();
+      if (openId) loadDetail(openId);
+      toast(editingChange ? "Changes saved" : "Regulatory change created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save regulatory change");
     } finally {
@@ -475,29 +460,25 @@ export default function RegulatoryChangePage() {
     }
   }
   async function removeChange(c: RegChange) {
-    if (!window.confirm(`Delete regulatory change ${c.reference || c.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete regulatory change ${c.reference || c.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/regulatory-change/${c.id}`);
       setShowChangeForm(false);
-      if (openChange?.id === c.id) setOpenChange(null);
-      await loadChanges();
-      await loadSummary();
+      if (openId === c.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleChange(c: RegChange) {
-    setOd(BLANK_OBL_DRAFT);
-    setOpenChange(openChange?.id === c.id ? null : c);
-  }
 
-  // ------------------------------------------------------------- nested obligations (inline)
+  // ------------------------------------------------------------- nested obligations (drawer)
   async function addNestedObligation() {
-    if (!openChange) return;
+    if (!detail) return;
     setError(null);
     try {
-      await apiCall<RegChange>("POST", `/regulatory-change/${openChange.id}/obligations`, {
+      await apiCall<RegChange>("POST", `/regulatory-change/${detail.id}/obligations`, {
         title: od.title,
         obligation_type: od.obligation_type,
         owner: od.owner,
@@ -505,22 +486,22 @@ export default function RegulatoryChangePage() {
         due_date: od.due_date || null,
       });
       setOd(BLANK_OBL_DRAFT);
-      await refreshChange(openChange.id);
-      await loadObligations();
-      await loadSummary();
+      loadDetail(detail.id);
+      reload();
+      toast("Obligation added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add obligation");
     }
   }
   async function removeNestedObligation(oid: string) {
-    if (!openChange) return;
-    if (!window.confirm("Remove this obligation?")) return;
+    if (!detail) return;
+    if (!(await confirmDialog({ title: "Remove this obligation?", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/obligations/${oid}`);
-      await refreshChange(openChange.id);
-      await loadObligations();
-      await loadSummary();
+      loadDetail(detail.id);
+      reload();
+      toast("Removed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to remove obligation");
     }
@@ -530,6 +511,7 @@ export default function RegulatoryChangePage() {
   function openNewObl() {
     setEditingObl(null);
     setOf(BLANK_OBL);
+    setOblChange(null);
     setError(null);
     setShowOblForm(true);
   }
@@ -537,6 +519,18 @@ export default function RegulatoryChangePage() {
     setEditingObl(o);
     setOf(fromObl(o));
     setError(null);
+    if (o.regulatory_change_id) {
+      if (detail && detail.id === o.regulatory_change_id) {
+        setOblChange({ value: detail.id, label: detail.title, sub: detail.reference || undefined });
+      } else {
+        setOblChange(null);
+        apiCall<RegChange>("GET", `/regulatory-change/${o.regulatory_change_id}`)
+          .then((c) => setOblChange({ value: c.id, label: c.title, sub: c.reference || undefined }))
+          .catch(() => setOblChange(null));
+      }
+    } else {
+      setOblChange(null);
+    }
     setShowOblForm(true);
   }
   async function saveObl() {
@@ -547,9 +541,9 @@ export default function RegulatoryChangePage() {
       if (editingObl) await apiCall<Obligation>("PATCH", `/obligations/${editingObl.id}`, payload);
       else await apiCall<Obligation>("POST", "/obligations", payload);
       setShowOblForm(false);
-      await loadObligations();
-      if (openChange) await refreshChange(openChange.id);
-      await loadSummary();
+      reload();
+      if (openId) loadDetail(openId);
+      toast(editingObl ? "Changes saved" : "Obligation created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save obligation");
     } finally {
@@ -557,14 +551,14 @@ export default function RegulatoryChangePage() {
     }
   }
   async function removeObl(o: Obligation) {
-    if (!window.confirm(`Delete obligation ${o.reference || o.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete obligation ${o.reference || o.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/obligations/${o.id}`);
       setShowOblForm(false);
-      await loadObligations();
-      if (openChange) await refreshChange(openChange.id);
-      await loadSummary();
+      reload();
+      if (openId) loadDetail(openId);
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -591,8 +585,8 @@ export default function RegulatoryChangePage() {
       if (editingReturn) await apiCall<RegReturn>("PATCH", `/regulatory-returns/${editingReturn.id}`, payload);
       else await apiCall<RegReturn>("POST", "/regulatory-returns", payload);
       setShowReturnForm(false);
-      await loadReturns();
-      await loadSummary();
+      reload();
+      toast(editingReturn ? "Changes saved" : "Regulatory return created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save regulatory return");
     } finally {
@@ -600,29 +594,110 @@ export default function RegulatoryChangePage() {
     }
   }
   async function removeReturn(r: RegReturn) {
-    if (!window.confirm(`Delete regulatory return ${r.reference || r.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete regulatory return ${r.reference || r.name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/regulatory-returns/${r.id}`);
       setShowReturnForm(false);
-      await loadReturns();
-      await loadSummary();
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
 
-  const changeOpts: Option[] = useMemo(
-    () => changes.map((c) => ({ value: c.id, label: `${c.reference || "—"} · ${c.title}` })),
-    [changes],
-  );
-  const filteredObligations = useMemo(() => {
-    const q = oblSearch.trim().toLowerCase();
-    if (!q) return obligations;
-    return obligations.filter(
-      (o) => o.title.toLowerCase().includes(q) || (o.reference || "").toLowerCase().includes(q),
-    );
-  }, [obligations, oblSearch]);
+  // ------------------------------------------------------------- columns
+  const changeColumns: Column<RegChange>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (c) => <span className="cell-title">{c.title}</span> },
+    { key: "circular_ref", header: "Circular", sortable: true, render: (c) => <span className="muted">{c.circular_ref || "—"}</span> },
+    { key: "applicability", header: "Applicability", sortable: true, render: (c) => <StatusBadge value={c.applicability} tone={APPLICABILITY_TONE} /> },
+    { key: "status", header: "Status", sortable: true, render: (c) => <StatusBadge value={c.status} tone={REG_STATUS_TONE} /> },
+    { key: "priority", header: "Priority", sortable: true, render: (c) => <StatusBadge value={c.priority} tone={PRIORITY_TONE} /> },
+    { key: "obligations", header: "Obligations", align: "center", render: (c) => <span className="muted">{c.obligation_count || "—"}</span> },
+    {
+      key: "effective_date",
+      header: "Effective",
+      sortable: true,
+      render: (c) =>
+        c.is_overdue ? (
+          <Badge tone="critical">Overdue</Badge>
+        ) : c.effective_date ? (
+          <span className="muted">
+            {c.effective_date}
+            {c.days_to_effective != null && c.days_to_effective >= 0 ? ` · ${c.days_to_effective}d` : ""}
+          </span>
+        ) : (
+          <span className="muted">—</span>
+        ),
+    },
+    {
+      key: "actions",
+      header: "",
+      render: (c) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => openEditChange(c)}>Edit</button>{" "}
+          <button className="btn secondary sm" onClick={() => removeChange(c)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
+
+  const obligationColumns: Column<Obligation>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (o) => <span className="ref">{o.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (o) => <span className="cell-title">{o.title}</span> },
+    { key: "obligation_type", header: "Type", sortable: true, render: (o) => <StatusBadge value={o.obligation_type} tone={OBL_TYPE_TONE} /> },
+    { key: "owner", header: "Owner", sortable: true, render: (o) => <span className="muted">{o.owner || "—"}</span> },
+    { key: "business_unit", header: "Business unit", sortable: true, render: (o) => <span className="muted">{o.business_unit || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (o) => <StatusBadge value={o.status} tone={OBL_STATUS_TONE} /> },
+    { key: "due_date", header: "Due", sortable: true, render: (o) => <span className="muted">{o.due_date || "—"}</span> },
+    {
+      key: "actions",
+      header: "",
+      render: (o) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => removeObl(o)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
+
+  const returnColumns: Column<RegReturn>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, render: (r) => <span className="cell-title">{r.name}</span> },
+    { key: "regulator", header: "Regulator", sortable: true, render: (r) => <span className="muted">{r.regulator || "—"}</span> },
+    { key: "frequency", header: "Frequency", sortable: true, render: (r) => <span className="muted">{cap(r.frequency)}</span> },
+    { key: "submission_channel", header: "Channel", render: (r) => <span className="muted">{r.submission_channel || "—"}</span> },
+    { key: "owner", header: "Owner", render: (r) => <span className="muted">{r.owner || "—"}</span> },
+    {
+      key: "next_due_date",
+      header: "Next due",
+      sortable: true,
+      render: (r) => {
+        const dueSoon = !r.is_overdue && r.days_to_due != null && r.days_to_due >= 0 && r.days_to_due <= 30 && r.status !== "submitted";
+        return r.is_overdue ? (
+          <Badge tone="critical">Overdue{r.next_due_date ? ` · ${r.next_due_date}` : ""}</Badge>
+        ) : r.next_due_date ? (
+          <span className={dueSoon ? "" : "muted"}>
+            {r.next_due_date}
+            {r.days_to_due != null && r.days_to_due >= 0 ? ` · ${r.days_to_due}d` : ""}
+          </span>
+        ) : (
+          <span className="muted">—</span>
+        );
+      },
+    },
+    { key: "status", header: "Status", sortable: true, render: (r) => <StatusBadge value={r.status} tone={RETURN_STATUS_TONE} /> },
+    {
+      key: "actions",
+      header: "",
+      render: (r) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => removeReturn(r)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
 
   // ------------------------------------------------------------- change form tabs
   const changeGeneral = (
@@ -715,7 +790,16 @@ export default function RegulatoryChangePage() {
           <TextInput type="date" value={of.due_date} onChange={(v) => setO("due_date", v)} />
         </Field>
         <Field label="Linked regulatory change" help="Optional — leave blank for a standalone obligation.">
-          <Select value={of.regulatory_change_id} onChange={(v) => setO("regulatory_change_id", v)} options={changeOpts} placeholder="— None —" />
+          <AsyncSelect
+            search={searchChanges}
+            value={of.regulatory_change_id || null}
+            selectedLabel={oblChange?.label}
+            onChange={(val, opt) => {
+              setO("regulatory_change_id", val || "");
+              setOblChange(opt);
+            }}
+            placeholder="— None —"
+          />
         </Field>
       </div>
       <Field label="Description">
@@ -845,23 +929,17 @@ export default function RegulatoryChangePage() {
             </div>
           </div>
 
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head row-between">
-              <div>
-                <h3>Regulatory Changes</h3>
-                <span className="sub">{changes.length} shown · click a row to manage obligations</span>
-              </div>
-              <form
-                style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
-                onSubmit={(ev) => { ev.preventDefault(); loadChanges(openChange?.id); }}
-              >
-                <input
-                  className="input"
-                  style={{ width: 220 }}
-                  value={search}
-                  onChange={(ev) => setSearch(ev.target.value)}
-                  placeholder="Search title / circular ref…"
-                />
+          <DataTable<RegChange>
+            columns={changeColumns}
+            fetcher={fetchChanges}
+            rowKey={(c) => c.id}
+            onRowClick={(c) => setOpenId(c.id)}
+            activeKey={openId}
+            searchPlaceholder="Search title / circular ref / reference…"
+            defaultSort={{ by: "created_at", dir: "desc" }}
+            filters={{ status: statusF || undefined, applicability: applicF || undefined }}
+            toolbarRight={
+              <>
                 <select className="select" style={{ width: 170 }} value={statusF} onChange={(ev) => setStatusF(ev.target.value)}>
                   <option value="">All statuses</option>
                   {REG_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
@@ -870,234 +948,26 @@ export default function RegulatoryChangePage() {
                   <option value="">All applicability</option>
                   {APPLICABILITY.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
                 </select>
-                <button className="btn secondary sm" type="submit">Search</button>
-              </form>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Title</th>
-                    <th>Circular</th>
-                    <th>Applicability</th>
-                    <th>Status</th>
-                    <th>Priority</th>
-                    <th>Obligations</th>
-                    <th>Effective</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {changes.map((c) => (
-                    <tr key={c.id} style={{ cursor: "pointer" }} onClick={() => toggleChange(c)}>
-                      <td className="ref">{c.reference || "—"}</td>
-                      <td className="cell-title">{c.title}</td>
-                      <td className="muted">{c.circular_ref || "—"}</td>
-                      <td><StatusBadge value={c.applicability} tone={APPLICABILITY_TONE} /></td>
-                      <td><StatusBadge value={c.status} tone={REG_STATUS_TONE} /></td>
-                      <td><StatusBadge value={c.priority} tone={PRIORITY_TONE} /></td>
-                      <td className="muted">{c.obligation_count}</td>
-                      <td>
-                        {c.is_overdue ? (
-                          <Badge tone="critical">Overdue</Badge>
-                        ) : c.effective_date ? (
-                          <span className="muted">
-                            {c.effective_date}
-                            {c.days_to_effective != null && c.days_to_effective >= 0 ? ` · ${c.days_to_effective}d` : ""}
-                          </span>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleChange(c)}>
-                            {openChange?.id === c.id ? "Hide" : "Manage"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => openEditChange(c)}>Edit</button>
-                          <button className="btn secondary sm" onClick={() => removeChange(c)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {changes.length === 0 && (
-                    <tr>
-                      <td colSpan={9}>
-                        <div className="empty">
-                          <span className="ico"><IconCompliance width={24} height={24} /></span>
-                          <h3>No regulatory changes</h3>
-                          <p>Log an SBP circular or law to track applicability, obligations and implementation.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openChange && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openChange.reference} — {openChange.title}</h3>
-                    <span className="sub">
-                      {openChange.regulator}
-                      {openChange.circular_ref ? " · " + openChange.circular_ref : ""} · {cap(openChange.status)}
-                      {openChange.owner ? " · owner " + openChange.owner : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button className="btn secondary sm" onClick={() => openEditChange(openChange)}>Edit</button>
-                    <button className="btn secondary sm" onClick={() => removeChange(openChange)}>Delete</button>
-                  </div>
-                </div>
-
-                <div className="card-pad">
-                  <strong>Obligations</strong>
-                  <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                    Discrete requirements distilled from this change, tracked to closure.
-                  </p>
-                  <form
-                    style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                    onSubmit={(ev) => { ev.preventDefault(); addNestedObligation(); }}
-                  >
-                    <div style={{ flex: "1 1 220px" }}>
-                      <label className="label">Title</label>
-                      <input className="input" value={od.title} onChange={(ev) => setOD("title", ev.target.value)} placeholder="Obligation title" required />
-                    </div>
-                    <div style={{ width: 150 }}>
-                      <label className="label">Type</label>
-                      <select className="select" value={od.obligation_type} onChange={(ev) => setOD("obligation_type", ev.target.value)}>
-                        {OBL_TYPE.map((t) => (<option key={t} value={t}>{cap(t)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 150 }}>
-                      <label className="label">Owner</label>
-                      <input className="input" value={od.owner} onChange={(ev) => setOD("owner", ev.target.value)} placeholder="Owner" />
-                    </div>
-                    <div style={{ width: 150 }}>
-                      <label className="label">Status</label>
-                      <select className="select" value={od.status} onChange={(ev) => setOD("status", ev.target.value)}>
-                        {OBL_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 150 }}>
-                      <label className="label">Due date</label>
-                      <input className="input" type="date" value={od.due_date} onChange={(ev) => setOD("due_date", ev.target.value)} />
-                    </div>
-                    <button className="btn">Add</button>
-                  </form>
-
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Ref</th>
-                          <th>Title</th>
-                          <th>Type</th>
-                          <th>Owner</th>
-                          <th>Status</th>
-                          <th>Due</th>
-                          <th></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {openChange.obligations.map((o) => (
-                          <tr key={o.id}>
-                            <td className="ref">{o.reference || "—"}</td>
-                            <td className="cell-title">{o.title}</td>
-                            <td><StatusBadge value={o.obligation_type} tone={OBL_TYPE_TONE} /></td>
-                            <td className="muted">{o.owner || "—"}</td>
-                            <td><StatusBadge value={o.status} tone={OBL_STATUS_TONE} /></td>
-                            <td className="muted">{o.due_date || "—"}</td>
-                            <td>
-                              <div style={{ display: "flex", gap: 6 }}>
-                                <button className="btn secondary sm" onClick={() => openEditObl(o)}>Edit</button>
-                                <button className="btn secondary sm" onClick={() => removeNestedObligation(o.id)}>Remove</button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                        {openChange.obligations.length === 0 && (
-                          <tr><td colSpan={7}><span className="muted">No obligations recorded yet.</span></td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <RecordPanels model="regulatory_change" entityId={openChange.id} />
-            </>
-          )}
+              </>
+            }
+            emptyMessage="No regulatory changes. Log an SBP circular or law to track applicability, obligations and implementation."
+            refreshKey={refreshKey}
+          />
         </>
       )}
 
       {/* ============================================= OBLIGATIONS */}
       {section === "obligations" && (
-        <div className="card">
-          <div className="card-head row-between">
-            <div>
-              <h3>Obligation Register</h3>
-              <span className="sub">{filteredObligations.length} shown · standalone and change-linked obligations</span>
-            </div>
-            <input
-              className="input"
-              style={{ width: 240 }}
-              value={oblSearch}
-              onChange={(ev) => setOblSearch(ev.target.value)}
-              placeholder="Search title / reference…"
-            />
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Title</th>
-                  <th>Type</th>
-                  <th>Owner</th>
-                  <th>Business unit</th>
-                  <th>Status</th>
-                  <th>Due</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredObligations.map((o) => (
-                  <tr key={o.id} style={{ cursor: "pointer" }} onClick={() => openEditObl(o)}>
-                    <td className="ref">{o.reference || "—"}</td>
-                    <td className="cell-title">{o.title}</td>
-                    <td><StatusBadge value={o.obligation_type} tone={OBL_TYPE_TONE} /></td>
-                    <td className="muted">{o.owner || "—"}</td>
-                    <td className="muted">{o.business_unit || "—"}</td>
-                    <td><StatusBadge value={o.status} tone={OBL_STATUS_TONE} /></td>
-                    <td className="muted">{o.due_date || "—"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeObl(o)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {filteredObligations.length === 0 && (
-                  <tr>
-                    <td colSpan={8}>
-                      <div className="empty">
-                        <span className="ico"><IconPolicy width={24} height={24} /></span>
-                        <h3>No obligations</h3>
-                        <p>Register compliance obligations, standalone or linked to a regulatory change.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<Obligation>
+          columns={obligationColumns}
+          fetcher={fetchObligations}
+          rowKey={(o) => o.id}
+          onRowClick={(o) => openEditObl(o)}
+          searchPlaceholder="Search obligations by title or reference…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No obligations. Register compliance obligations, standalone or linked to a regulatory change."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= RETURNS CALENDAR */}
@@ -1122,79 +992,125 @@ export default function RegulatoryChangePage() {
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head">
-              <h3>Regulatory Returns Calendar</h3>
-              <span className="sub">{returns.length} total · rows due within 30 days are highlighted</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Name</th>
-                    <th>Regulator</th>
-                    <th>Frequency</th>
-                    <th>Channel</th>
-                    <th>Owner</th>
-                    <th>Next due</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {returns.map((r) => {
-                    const dueSoon = !r.is_overdue && r.days_to_due != null && r.days_to_due >= 0 && r.days_to_due <= 30 && r.status !== "submitted";
-                    return (
-                      <tr
-                        key={r.id}
-                        style={{ cursor: "pointer", background: r.is_overdue ? "var(--danger-bg, rgba(192,57,43,0.06))" : dueSoon ? "var(--warn-bg, rgba(217,164,6,0.08))" : undefined }}
-                        onClick={() => openEditReturn(r)}
-                      >
-                        <td className="ref">{r.reference || "—"}</td>
-                        <td className="cell-title">{r.name}</td>
-                        <td className="muted">{r.regulator || "—"}</td>
-                        <td className="muted">{cap(r.frequency)}</td>
-                        <td className="muted">{r.submission_channel || "—"}</td>
-                        <td className="muted">{r.owner || "—"}</td>
-                        <td>
-                          {r.is_overdue ? (
-                            <Badge tone="critical">Overdue{r.next_due_date ? ` · ${r.next_due_date}` : ""}</Badge>
-                          ) : r.next_due_date ? (
-                            <span className={dueSoon ? "" : "muted"}>
-                              {r.next_due_date}
-                              {r.days_to_due != null && r.days_to_due >= 0 ? ` · ${r.days_to_due}d` : ""}
-                            </span>
-                          ) : (
-                            <span className="muted">—</span>
-                          )}
-                        </td>
-                        <td><StatusBadge value={r.status} tone={RETURN_STATUS_TONE} /></td>
-                        <td>
-                          <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                            <button className="btn secondary sm" onClick={() => removeReturn(r)}>Delete</button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {returns.length === 0 && (
-                    <tr>
-                      <td colSpan={9}>
-                        <div className="empty">
-                          <span className="ico"><IconAlert width={24} height={24} /></span>
-                          <h3>No regulatory returns</h3>
-                          <p>Register recurring SBP submissions to track upcoming and overdue filings.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <DataTable<RegReturn>
+            columns={returnColumns}
+            fetcher={fetchReturns}
+            rowKey={(r) => r.id}
+            onRowClick={(r) => openEditReturn(r)}
+            searchPlaceholder="Search returns by name, reference or regulator…"
+            defaultSort={{ by: "next_due_date", dir: "asc" }}
+            emptyMessage="No regulatory returns. Register recurring SBP submissions to track upcoming and overdue filings."
+            refreshKey={refreshKey}
+          />
         </>
       )}
+
+      {/* ============================================= CHANGE DRAWER (obligations) */}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
+        subtitle={
+          detail
+            ? `${detail.regulator}${detail.circular_ref ? " · " + detail.circular_ref : ""} · ${cap(detail.status)}${detail.owner ? " · owner " + detail.owner : ""}`
+            : ""
+        }
+        width={760}
+        actions={
+          detail && (
+            <>
+              <button className="btn secondary sm" onClick={() => openEditChange(detail)}>Edit</button>
+              <button className="btn secondary sm" onClick={() => removeChange(detail)}>Delete</button>
+            </>
+          )
+        }
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              <StatusBadge value={detail.applicability} tone={APPLICABILITY_TONE} />
+              <StatusBadge value={detail.status} tone={REG_STATUS_TONE} />
+              <StatusBadge value={detail.priority} tone={PRIORITY_TONE} />
+              {detail.is_overdue && <Badge tone="critical">Overdue</Badge>}
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Obligations</h3><span className="sub">{detail.obligation_count} tracked to closure</span></div>
+              <div className="card-pad">
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(ev) => { ev.preventDefault(); addNestedObligation(); }}
+                >
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Title</label>
+                    <input className="input" value={od.title} onChange={(ev) => setOD("title", ev.target.value)} placeholder="Obligation title" required />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Type</label>
+                    <select className="select" value={od.obligation_type} onChange={(ev) => setOD("obligation_type", ev.target.value)}>
+                      {OBL_TYPE.map((t) => (<option key={t} value={t}>{cap(t)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Owner</label>
+                    <input className="input" value={od.owner} onChange={(ev) => setOD("owner", ev.target.value)} placeholder="Owner" />
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Status</label>
+                    <select className="select" value={od.status} onChange={(ev) => setOD("status", ev.target.value)}>
+                      {OBL_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Due date</label>
+                    <input className="input" type="date" value={od.due_date} onChange={(ev) => setOD("due_date", ev.target.value)} />
+                  </div>
+                  <button className="btn">Add</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Ref</th>
+                        <th>Title</th>
+                        <th>Type</th>
+                        <th>Owner</th>
+                        <th>Status</th>
+                        <th>Due</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.obligations.map((o) => (
+                        <tr key={o.id}>
+                          <td className="ref">{o.reference || "—"}</td>
+                          <td className="cell-title">{o.title}</td>
+                          <td><StatusBadge value={o.obligation_type} tone={OBL_TYPE_TONE} /></td>
+                          <td className="muted">{o.owner || "—"}</td>
+                          <td><StatusBadge value={o.status} tone={OBL_STATUS_TONE} /></td>
+                          <td className="muted">{o.due_date || "—"}</td>
+                          <td>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <button className="btn secondary sm" onClick={() => openEditObl(o)}>Edit</button>
+                              <button className="btn secondary sm" onClick={() => removeNestedObligation(o.id)}>Remove</button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                      {detail.obligations.length === 0 && (
+                        <tr><td colSpan={7}><span className="muted">No obligations recorded yet.</span></td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="regulatory_change" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showChangeForm && (
@@ -1267,5 +1183,13 @@ export default function RegulatoryChangePage() {
         />
       )}
     </>
+  );
+}
+
+export default function RegulatoryChangePage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <RegulatoryChangeInner />
+    </Suspense>
   );
 }

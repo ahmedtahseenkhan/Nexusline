@@ -1,16 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconShield } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 type Dpia = {
   id: string;
   reference: string;
@@ -397,270 +400,73 @@ function consentPayload(f: ConsentForm): Record<string, unknown> {
   };
 }
 
-// ------------------------------------------------------------------ sections
-type SectionId = "dpia" | "dsar" | "breach" | "consent";
-const SECTIONS: { id: SectionId; label: string }[] = [
-  { id: "dpia", label: "DPIA" },
-  { id: "dsar", label: "DSAR" },
-  { id: "breach", label: "Breach Register" },
-  { id: "consent", label: "Consent" },
-];
-
-export default function DataProtectionPage() {
-  const [section, setSection] = useState<SectionId>("dpia");
+// ================================================================ DPIA section
+function DpiaSection({ onChanged }: { onChanged: () => void }) {
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const [editing, setEditing] = useState<Dpia | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const [dpias, setDpias] = useState<Dpia[]>([]);
-  const [dsars, setDsars] = useState<Dsar[]>([]);
-  const [breaches, setBreaches] = useState<DataBreach[]>([]);
-  const [consents, setConsents] = useState<ConsentRecord[]>([]);
-  const [summary, setSummary] = useState<DpSummary | null>(null);
-
-  // ---- DPIA dialog ----
-  const [editingDpia, setEditingDpia] = useState<Dpia | null>(null);
-  const [showDpiaForm, setShowDpiaForm] = useState(false);
-  const [savingDpia, setSavingDpia] = useState(false);
   const [df, setDf] = useState<DpiaForm>(BLANK_DPIA);
   const setD = <K extends keyof DpiaForm>(k: K, v: DpiaForm[K]) => setDf((p) => ({ ...p, [k]: v }));
 
-  // ---- DSAR dialog ----
-  const [editingDsar, setEditingDsar] = useState<Dsar | null>(null);
-  const [showDsarForm, setShowDsarForm] = useState(false);
-  const [savingDsar, setSavingDsar] = useState(false);
-  const [sf, setSf] = useState<DsarForm>(BLANK_DSAR);
-  const setS = <K extends keyof DsarForm>(k: K, v: DsarForm[K]) => setSf((p) => ({ ...p, [k]: v }));
+  const fetcher = useCallback((qs: string) => apiCall<PagedList<Dpia>>("GET", `/dpias?${qs}`), []);
 
-  // ---- Breach dialog + expanded detail ----
-  const [editingBreach, setEditingBreach] = useState<DataBreach | null>(null);
-  const [showBreachForm, setShowBreachForm] = useState(false);
-  const [savingBreach, setSavingBreach] = useState(false);
-  const [bf, setBf] = useState<BreachForm>(BLANK_BREACH);
-  const setB = <K extends keyof BreachForm>(k: K, v: BreachForm[K]) => setBf((p) => ({ ...p, [k]: v }));
-  const [openBreach, setOpenBreach] = useState<DataBreach | null>(null);
-
-  // ---- Consent dialog ----
-  const [editingConsent, setEditingConsent] = useState<ConsentRecord | null>(null);
-  const [showConsentForm, setShowConsentForm] = useState(false);
-  const [savingConsent, setSavingConsent] = useState(false);
-  const [cf, setCf] = useState<ConsentForm>(BLANK_CONSENT);
-  const setC = <K extends keyof ConsentForm>(k: K, v: ConsentForm[K]) => setCf((p) => ({ ...p, [k]: v }));
-
-  // ------------------------------------------------------------- loaders
-  async function loadDpias() {
-    try {
-      const res = await apiCall<Page<Dpia>>("GET", "/dpias?limit=200");
-      setDpias(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load DPIAs");
-    }
-  }
-  async function loadDsars() {
-    try {
-      const res = await apiCall<Page<Dsar>>("GET", "/dsars?limit=200");
-      setDsars(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load DSARs");
-    }
-  }
-  async function loadBreaches(keepOpen?: string) {
-    try {
-      const res = await apiCall<Page<DataBreach>>("GET", "/data-breaches?limit=200");
-      setBreaches(res.items);
-      if (keepOpen) setOpenBreach(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load breach register");
-    }
-  }
-  async function loadConsents() {
-    try {
-      const res = await apiCall<Page<ConsentRecord>>("GET", "/consent-records?limit=200");
-      setConsents(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load consent ledger");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<DpSummary>("GET", "/data-protection-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load summary");
-    }
-  }
-
-  useEffect(() => {
-    loadDpias();
-    loadDsars();
-    loadBreaches();
-    loadConsents();
-    loadSummary();
-  }, []);
-
-  // ------------------------------------------------------------- DPIA CRUD
-  function openNewDpia() {
-    setEditingDpia(null);
+  function openNew() {
+    setEditing(null);
     setDf(BLANK_DPIA);
-    setShowDpiaForm(true);
-  }
-  function openEditDpia(d: Dpia) {
-    setEditingDpia(d);
-    setDf(fromDpia(d));
-    setShowDpiaForm(true);
-  }
-  async function saveDpia() {
     setError(null);
-    setSavingDpia(true);
+    setShowForm(true);
+  }
+  function openEdit(d: Dpia) {
+    setEditing(d);
+    setDf(fromDpia(d));
+    setError(null);
+    setShowForm(true);
+  }
+  async function save() {
+    setError(null);
+    setSaving(true);
     try {
       const payload = dpiaPayload(df);
-      if (editingDpia) await apiCall("PATCH", `/dpias/${editingDpia.id}`, payload);
+      if (editing) await apiCall("PATCH", `/dpias/${editing.id}`, payload);
       else await apiCall("POST", "/dpias", payload);
-      setShowDpiaForm(false);
-      await loadDpias();
-      await loadSummary();
+      setShowForm(false);
+      reload();
+      onChanged();
+      toast(editing ? "Changes saved" : "DPIA created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save DPIA");
     } finally {
-      setSavingDpia(false);
+      setSaving(false);
     }
   }
-  async function removeDpia(d: Dpia) {
-    if (!window.confirm(`Delete DPIA ${d.reference || d.title}?`)) return;
-    setError(null);
+  async function remove(d: Dpia) {
+    if (!(await confirmDialog({ title: `Delete DPIA ${d.reference || d.title}?`, danger: true }))) return;
     try {
       await apiCall("DELETE", `/dpias/${d.id}`);
-      setShowDpiaForm(false);
-      await loadDpias();
-      await loadSummary();
+      setShowForm(false);
+      reload();
+      onChanged();
+      toast("Deleted");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      toast(e instanceof Error ? e.message : "Failed to delete", "error");
     }
   }
 
-  // ------------------------------------------------------------- DSAR CRUD
-  function openNewDsar() {
-    setEditingDsar(null);
-    setSf(BLANK_DSAR);
-    setShowDsarForm(true);
-  }
-  function openEditDsar(d: Dsar) {
-    setEditingDsar(d);
-    setSf(fromDsar(d));
-    setShowDsarForm(true);
-  }
-  async function saveDsar() {
-    setError(null);
-    setSavingDsar(true);
-    try {
-      const payload = dsarPayload(sf);
-      if (editingDsar) await apiCall("PATCH", `/dsars/${editingDsar.id}`, payload);
-      else await apiCall("POST", "/dsars", payload);
-      setShowDsarForm(false);
-      await loadDsars();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save DSAR");
-    } finally {
-      setSavingDsar(false);
-    }
-  }
-  async function removeDsar(d: Dsar) {
-    if (!window.confirm(`Delete DSAR ${d.reference || d.subject_name}?`)) return;
-    setError(null);
-    try {
-      await apiCall("DELETE", `/dsars/${d.id}`);
-      setShowDsarForm(false);
-      await loadDsars();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
-  }
+  const columns: Column<Dpia>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (d) => <span className="ref">{d.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (d) => <span className="cell-title">{d.title}</span> },
+    { key: "processing_activity", header: "Processing activity", sortable: true, render: (d) => <span className="muted">{d.processing_activity || "—"}</span> },
+    { key: "residual_risk", header: "Residual risk", sortable: true, render: (d) => <CritBadge value={d.residual_risk} /> },
+    { key: "status", header: "Status", sortable: true, render: (d) => <Badge tone={DPIA_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge> },
+    { key: "dpo_reviewer", header: "DPO reviewer", render: (d) => <span className="muted">{d.dpo_reviewer || "—"}</span> },
+    { key: "review_date", header: "Review date", sortable: true, render: (d) => <span className="muted">{d.review_date || "—"}</span> },
+    { key: "actions", header: "", render: (d) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(d)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(d)}>Delete</button></div> },
+  ];
 
-  // ------------------------------------------------------------- Breach CRUD
-  function openNewBreach() {
-    setEditingBreach(null);
-    setBf(BLANK_BREACH);
-    setShowBreachForm(true);
-  }
-  function openEditBreach(b: DataBreach) {
-    setEditingBreach(b);
-    setBf(fromBreach(b));
-    setShowBreachForm(true);
-  }
-  function toggleBreach(b: DataBreach) {
-    setOpenBreach(openBreach?.id === b.id ? null : b);
-  }
-  async function saveBreach() {
-    setError(null);
-    setSavingBreach(true);
-    try {
-      const payload = breachPayload(bf);
-      if (editingBreach) await apiCall("PATCH", `/data-breaches/${editingBreach.id}`, payload);
-      else await apiCall("POST", "/data-breaches", payload);
-      setShowBreachForm(false);
-      await loadBreaches(openBreach?.id);
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save breach");
-    } finally {
-      setSavingBreach(false);
-    }
-  }
-  async function removeBreach(b: DataBreach) {
-    if (!window.confirm(`Delete breach ${b.reference || b.title}?`)) return;
-    setError(null);
-    try {
-      await apiCall("DELETE", `/data-breaches/${b.id}`);
-      setShowBreachForm(false);
-      if (openBreach?.id === b.id) setOpenBreach(null);
-      await loadBreaches();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
-  }
-
-  // ------------------------------------------------------------- Consent CRUD
-  function openNewConsent() {
-    setEditingConsent(null);
-    setCf(BLANK_CONSENT);
-    setShowConsentForm(true);
-  }
-  function openEditConsent(c: ConsentRecord) {
-    setEditingConsent(c);
-    setCf(fromConsent(c));
-    setShowConsentForm(true);
-  }
-  async function saveConsent() {
-    setError(null);
-    setSavingConsent(true);
-    try {
-      const payload = consentPayload(cf);
-      if (editingConsent) await apiCall("PATCH", `/consent-records/${editingConsent.id}`, payload);
-      else await apiCall("POST", "/consent-records", payload);
-      setShowConsentForm(false);
-      await loadConsents();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save consent record");
-    } finally {
-      setSavingConsent(false);
-    }
-  }
-  async function removeConsent(c: ConsentRecord) {
-    if (!window.confirm(`Delete consent record ${c.reference || c.subject_name}?`)) return;
-    setError(null);
-    try {
-      await apiCall("DELETE", `/consent-records/${c.id}`);
-      setShowConsentForm(false);
-      await loadConsents();
-      await loadSummary();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
-    }
-  }
-
-  // ------------------------------------------------------------- DPIA form tabs
-  const dpiaGeneral = (
+  const general = (
     <>
       <Field label="Title" required help="For example: Retail onboarding biometric KYC processing.">
         <TextInput value={df.title} onChange={(v) => setD("title", v)} placeholder="DPIA title" required />
@@ -686,7 +492,7 @@ export default function DataProtectionPage() {
       </div>
     </>
   );
-  const dpiaAssessment = (
+  const assessment = (
     <>
       <Field label="Necessity & proportionality" help="Why the processing is necessary and proportionate.">
         <TextArea value={df.necessity_justification} onChange={(v) => setD("necessity_justification", v)} rows={3} placeholder="Necessity justification" />
@@ -699,7 +505,7 @@ export default function DataProtectionPage() {
       </Field>
     </>
   );
-  const dpiaReview = (
+  const review = (
     <>
       <div className="field-row">
         <Field label="DPO reviewer" help="Data Protection Officer who reviewed this DPIA.">
@@ -715,8 +521,110 @@ export default function DataProtectionPage() {
     </>
   );
 
-  // ------------------------------------------------------------- DSAR form tabs
-  const dsarGeneral = (
+  return (
+    <>
+      <DataTable<Dpia>
+        columns={columns}
+        fetcher={fetcher}
+        rowKey={(d) => d.id}
+        onRowClick={openEdit}
+        searchPlaceholder="Search DPIAs by title, reference, owner…"
+        emptyMessage="No DPIAs yet. Assess the data-protection impact of high-risk processing activities."
+        refreshKey={refreshKey}
+        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DPIA</button>}
+      />
+      {showForm && (
+        <FormModal
+          title={editing ? `Edit DPIA — ${editing.reference || editing.title}` : "New DPIA"}
+          wide
+          tabs={[
+            { id: "general", label: "General", content: general, required: true },
+            { id: "assessment", label: "Assessment", content: assessment },
+            { id: "review", label: "Review", content: review },
+          ]}
+          onClose={() => setShowForm(false)}
+          onSave={save}
+          saving={saving}
+          error={error}
+          saveLabel={editing ? "Save changes" : "Create DPIA"}
+          footerLeft={
+            editing ? (
+              <button className="btn secondary sm" type="button" onClick={() => remove(editing)} disabled={saving} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
+            ) : undefined
+          }
+        />
+      )}
+    </>
+  );
+}
+
+// ================================================================ DSAR section
+function DsarSection({ onChanged }: { onChanged: () => void }) {
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const [editing, setEditing] = useState<Dsar | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sf, setSf] = useState<DsarForm>(BLANK_DSAR);
+  const setS = <K extends keyof DsarForm>(k: K, v: DsarForm[K]) => setSf((p) => ({ ...p, [k]: v }));
+
+  const fetcher = useCallback((qs: string) => apiCall<PagedList<Dsar>>("GET", `/dsars?${qs}`), []);
+
+  function openNew() {
+    setEditing(null);
+    setSf(BLANK_DSAR);
+    setError(null);
+    setShowForm(true);
+  }
+  function openEdit(d: Dsar) {
+    setEditing(d);
+    setSf(fromDsar(d));
+    setError(null);
+    setShowForm(true);
+  }
+  async function save() {
+    setError(null);
+    setSaving(true);
+    try {
+      const payload = dsarPayload(sf);
+      if (editing) await apiCall("PATCH", `/dsars/${editing.id}`, payload);
+      else await apiCall("POST", "/dsars", payload);
+      setShowForm(false);
+      reload();
+      onChanged();
+      toast(editing ? "Changes saved" : "DSAR created");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save DSAR");
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function remove(d: Dsar) {
+    if (!(await confirmDialog({ title: `Delete DSAR ${d.reference || d.subject_name}?`, danger: true }))) return;
+    try {
+      await apiCall("DELETE", `/dsars/${d.id}`);
+      setShowForm(false);
+      reload();
+      onChanged();
+      toast("Deleted");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Failed to delete", "error");
+    }
+  }
+
+  const columns: Column<Dsar>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (d) => <span className="ref">{d.reference || "—"}</span> },
+    { key: "subject_name", header: "Subject", sortable: true, render: (d) => <span className="cell-title">{d.subject_name || "—"}</span> },
+    { key: "request_type", header: "Type", sortable: true, render: (d) => <Badge tone="info">{cap(d.request_type)}</Badge> },
+    { key: "received_date", header: "Received", sortable: true, render: (d) => <span className="muted">{d.received_date || "—"}</span> },
+    { key: "due_date", header: "Due / SLA", sortable: true, render: (d) => (d.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{d.due_date || "—"} · {d.sla_days}d SLA</span>) },
+    { key: "handler", header: "Handler", sortable: true, render: (d) => <span className="muted">{d.handler || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (d) => <Badge tone={DSAR_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge> },
+    { key: "actions", header: "", render: (d) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(d)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(d)}>Delete</button></div> },
+  ];
+
+  const general = (
     <>
       <div className="field-row">
         <Field label="Subject name" help="The data subject making the request.">
@@ -739,7 +647,7 @@ export default function DataProtectionPage() {
       </Field>
     </>
   );
-  const dsarTiming = (
+  const timing = (
     <>
       <div className="field-row">
         <Field label="Received date" help="When the request was received — starts the 30-day SLA clock.">
@@ -761,8 +669,133 @@ export default function DataProtectionPage() {
     </>
   );
 
-  // ------------------------------------------------------------- Breach form tabs
-  const breachGeneral = (
+  return (
+    <>
+      <DataTable<Dsar>
+        columns={columns}
+        fetcher={fetcher}
+        rowKey={(d) => d.id}
+        onRowClick={openEdit}
+        searchPlaceholder="Search DSARs by subject, reference, handler…"
+        emptyMessage="No subject requests yet. Log access, erasure and portability requests to track the SLA."
+        refreshKey={refreshKey}
+        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DSAR</button>}
+      />
+      {showForm && (
+        <FormModal
+          title={editing ? `Edit DSAR — ${editing.reference || editing.subject_name}` : "New DSAR"}
+          wide
+          tabs={[
+            { id: "general", label: "General", content: general },
+            { id: "timing", label: "Timing & notes", content: timing },
+          ]}
+          onClose={() => setShowForm(false)}
+          onSave={save}
+          saving={saving}
+          error={error}
+          saveLabel={editing ? "Save changes" : "Create DSAR"}
+          footerLeft={
+            editing ? (
+              <button className="btn secondary sm" type="button" onClick={() => remove(editing)} disabled={saving} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
+            ) : undefined
+          }
+        />
+      )}
+    </>
+  );
+}
+
+// ============================================================== Breach section
+function BreachSection({ onChanged }: { onChanged: () => void }) {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<DataBreach | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const [editing, setEditing] = useState<DataBreach | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [bf, setBf] = useState<BreachForm>(BLANK_BREACH);
+  const setB = <K extends keyof BreachForm>(k: K, v: BreachForm[K]) => setBf((p) => ({ ...p, [k]: v }));
+
+  const fetcher = useCallback((qs: string) => apiCall<PagedList<DataBreach>>("GET", `/data-breaches?${qs}`), []);
+  const loadDetail = useCallback((id: string) => {
+    apiCall<DataBreach>("GET", `/data-breaches/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setDetail(null);
+  }, [openId, loadDetail]);
+
+  function openNew() {
+    setEditing(null);
+    setBf(BLANK_BREACH);
+    setError(null);
+    setShowForm(true);
+  }
+  function openEdit(b: DataBreach) {
+    setEditing(b);
+    setBf(fromBreach(b));
+    setError(null);
+    setShowForm(true);
+  }
+  async function save() {
+    setError(null);
+    setSaving(true);
+    try {
+      const payload = breachPayload(bf);
+      if (editing) await apiCall("PATCH", `/data-breaches/${editing.id}`, payload);
+      else await apiCall("POST", "/data-breaches", payload);
+      setShowForm(false);
+      reload();
+      onChanged();
+      if (openId) loadDetail(openId);
+      toast(editing ? "Changes saved" : "Breach created");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save breach");
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function remove(b: DataBreach) {
+    if (!(await confirmDialog({ title: `Delete breach ${b.reference || b.title}?`, danger: true }))) return;
+    try {
+      await apiCall("DELETE", `/data-breaches/${b.id}`);
+      setShowForm(false);
+      if (openId === b.id) setOpenId(null);
+      reload();
+      onChanged();
+      toast("Deleted");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Failed to delete", "error");
+    }
+  }
+
+  const columns: Column<DataBreach>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (b) => <span className="ref">{b.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (b) => <span className="cell-title">{b.title}</span> },
+    { key: "breach_type", header: "Type", sortable: true, render: (b) => <Badge tone="info">{cap(b.breach_type)}</Badge> },
+    { key: "severity", header: "Severity", sortable: true, render: (b) => <CritBadge value={b.severity} /> },
+    { key: "records_affected", header: "Records", sortable: true, render: (b) => <span className="muted">{num(b.records_affected)}</span> },
+    { key: "status", header: "Status", sortable: true, render: (b) => <Badge tone={BREACH_STATUS_TONE[b.status] || "neutral"}>{cap(b.status)}</Badge> },
+    {
+      key: "notification",
+      header: "Notification",
+      render: (b) =>
+        b.notification_overdue ? (
+          <Badge tone="critical">72h overdue</Badge>
+        ) : b.reported_to_regulator ? (
+          <Badge tone="low">Reported</Badge>
+        ) : b.notification_required ? (
+          <Badge tone="medium">Required</Badge>
+        ) : (
+          <span className="muted">—</span>
+        ),
+    },
+    { key: "actions", header: "", render: (b) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(b)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(b)}>Delete</button></div> },
+  ];
+
+  const general = (
     <>
       <Field label="Title" required help="For example: Misdirected statements exposed to wrong customers.">
         <TextInput value={bf.title} onChange={(v) => setB("title", v)} placeholder="Breach title" required />
@@ -796,7 +829,7 @@ export default function DataProtectionPage() {
       </div>
     </>
   );
-  const breachTiming = (
+  const timing = (
     <>
       <div className="field-row">
         <Field label="Discovered date" help="When the breach was discovered — starts the 72-hour clock.">
@@ -822,7 +855,7 @@ export default function DataProtectionPage() {
       </Field>
     </>
   );
-  const breachResponse = (
+  const response = (
     <>
       <Field label="Root cause">
         <TextArea value={bf.root_cause} onChange={(v) => setB("root_cause", v)} rows={3} placeholder="Underlying cause of the breach." />
@@ -836,8 +869,163 @@ export default function DataProtectionPage() {
     </>
   );
 
-  // ------------------------------------------------------------- Consent form tabs
-  const consentGeneral = (
+  return (
+    <>
+      <DataTable<DataBreach>
+        columns={columns}
+        fetcher={fetcher}
+        rowKey={(b) => b.id}
+        onRowClick={(b) => setOpenId(b.id)}
+        activeKey={openId}
+        searchPlaceholder="Search breaches by title, reference, data categories…"
+        emptyMessage="No breaches recorded. Register personal-data breaches to track containment and regulator notification."
+        refreshKey={refreshKey}
+        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New breach</button>}
+      />
+
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference || ""} ${detail.title}`.trim() : "…"}
+        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.breach_type)} · ${num(detail.records_affected)} records${detail.discovered_date ? " · discovered " + detail.discovered_date : ""}` : ""}
+        width={720}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              <CritBadge value={detail.severity} />
+              <Badge tone={BREACH_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              {detail.notification_overdue && <Badge tone="critical">72h notification overdue</Badge>}
+            </div>
+            <div className="field-row" style={{ marginBottom: 12 }}>
+              <div>
+                <div className="muted" style={{ fontSize: 12 }}>Data categories</div>
+                <strong>{detail.data_categories || "—"}</strong>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 12 }}>Owner</div>
+                <strong>{detail.owner || "—"}</strong>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 12 }}>Regulator reported</div>
+                <strong>{detail.reported_to_regulator ? (detail.regulator_report_date || "Yes") : "No"}</strong>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: 12 }}>Subjects notified</div>
+                <strong>{detail.subjects_notified ? "Yes" : "No"}</strong>
+              </div>
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <div className="muted" style={{ fontSize: 12 }}>Root cause</div>
+              <p style={{ margin: "2px 0 0" }}>{detail.root_cause || "—"}</p>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <div className="muted" style={{ fontSize: 12 }}>Remediation</div>
+              <p style={{ margin: "2px 0 0" }}>{detail.remediation || "—"}</p>
+            </div>
+            <RecordPanels model="data_breach" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
+
+      {showForm && (
+        <FormModal
+          title={editing ? `Edit breach — ${editing.reference || editing.title}` : "New breach"}
+          wide
+          tabs={[
+            { id: "general", label: "General", content: general, required: true },
+            { id: "timing", label: "Timing & notification", content: timing },
+            { id: "response", label: "Response", content: response },
+          ]}
+          onClose={() => setShowForm(false)}
+          onSave={save}
+          saving={saving}
+          error={error}
+          saveLabel={editing ? "Save changes" : "Create breach"}
+          footerLeft={
+            editing ? (
+              <button className="btn secondary sm" type="button" onClick={() => remove(editing)} disabled={saving} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
+            ) : undefined
+          }
+        />
+      )}
+    </>
+  );
+}
+
+// ============================================================= Consent section
+function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary: DpSummary | null }) {
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const [editing, setEditing] = useState<ConsentRecord | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [cf, setCf] = useState<ConsentForm>(BLANK_CONSENT);
+  const setC = <K extends keyof ConsentForm>(k: K, v: ConsentForm[K]) => setCf((p) => ({ ...p, [k]: v }));
+
+  const fetcher = useCallback((qs: string) => apiCall<PagedList<ConsentRecord>>("GET", `/consent-records?${qs}`), []);
+
+  function openNew() {
+    setEditing(null);
+    setCf(BLANK_CONSENT);
+    setError(null);
+    setShowForm(true);
+  }
+  function openEdit(c: ConsentRecord) {
+    setEditing(c);
+    setCf(fromConsent(c));
+    setError(null);
+    setShowForm(true);
+  }
+  async function save() {
+    setError(null);
+    setSaving(true);
+    try {
+      const payload = consentPayload(cf);
+      if (editing) await apiCall("PATCH", `/consent-records/${editing.id}`, payload);
+      else await apiCall("POST", "/consent-records", payload);
+      setShowForm(false);
+      reload();
+      onChanged();
+      toast(editing ? "Changes saved" : "Consent record created");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save consent record");
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function remove(c: ConsentRecord) {
+    if (!(await confirmDialog({ title: `Delete consent record ${c.reference || c.subject_name}?`, danger: true }))) return;
+    try {
+      await apiCall("DELETE", `/consent-records/${c.id}`);
+      setShowForm(false);
+      reload();
+      onChanged();
+      toast("Deleted");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Failed to delete", "error");
+    }
+  }
+
+  const columns: Column<ConsentRecord>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "subject_name", header: "Subject", sortable: true, render: (c) => <span className="cell-title">{c.subject_name || "—"}</span> },
+    { key: "purpose", header: "Purpose", sortable: true, render: (c) => <span className="muted">{c.purpose || "—"}</span> },
+    { key: "lawful_basis", header: "Lawful basis", sortable: true, render: (c) => <span className="muted">{cap(c.lawful_basis)}</span> },
+    { key: "channel", header: "Channel", sortable: true, render: (c) => <span className="muted">{c.channel || "—"}</span> },
+    { key: "given", header: "Given", render: (c) => <span className="muted">{c.consent_given ? (c.consent_date || "Yes") : "No"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CONSENT_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
+    { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(c)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(c)}>Delete</button></div> },
+  ];
+
+  const general = (
     <>
       <div className="field-row">
         <Field label="Subject name" help="The data subject giving consent.">
@@ -872,28 +1060,76 @@ export default function DataProtectionPage() {
     </>
   );
 
-  // ------------------------------------------------------------- render
   return (
     <>
-      <div className="page-head row-between">
-        <div>
-          <h1>Data Protection</h1>
-          <p>Pakistan PDPA readiness — impact assessments, subject access requests on a 30-day SLA, the breach register with the 72-hour notification rule, and a consent ledger.</p>
+      <div className="grid stat-grid" style={{ marginBottom: 16 }}>
+        <div className="card stat">
+          <div className="stat-top"><span className="n">{summary ? summary.consents_active.toLocaleString() : "—"}</span></div>
+          <span className="l">Active consents</span>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {section === "dpia" && (
-            <button className="btn" onClick={openNewDpia}><IconPlus width={16} height={16} /> New DPIA</button>
-          )}
-          {section === "dsar" && (
-            <button className="btn" onClick={openNewDsar}><IconPlus width={16} height={16} /> New DSAR</button>
-          )}
-          {section === "breach" && (
-            <button className="btn" onClick={openNewBreach}><IconPlus width={16} height={16} /> New breach</button>
-          )}
-          {section === "consent" && (
-            <button className="btn" onClick={openNewConsent}><IconPlus width={16} height={16} /> New consent</button>
-          )}
+        <div className="card stat">
+          <div className="stat-top"><span className="n">{summary ? summary.consents_withdrawn.toLocaleString() : "—"}</span></div>
+          <span className="l">Withdrawn</span>
         </div>
+      </div>
+
+      <DataTable<ConsentRecord>
+        columns={columns}
+        fetcher={fetcher}
+        rowKey={(c) => c.id}
+        onRowClick={openEdit}
+        searchPlaceholder="Search consents by subject, purpose, reference…"
+        emptyMessage="No consent records yet. Record subject consents, their lawful basis, and withdrawals."
+        refreshKey={refreshKey}
+        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New consent</button>}
+      />
+
+      {showForm && (
+        <FormModal
+          title={editing ? `Edit consent — ${editing.reference || editing.subject_name}` : "New consent"}
+          wide
+          tabs={[{ id: "general", label: "General", content: general }]}
+          onClose={() => setShowForm(false)}
+          onSave={save}
+          saving={saving}
+          error={error}
+          saveLabel={editing ? "Save changes" : "Create consent"}
+          footerLeft={
+            editing ? (
+              <button className="btn secondary sm" type="button" onClick={() => remove(editing)} disabled={saving} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
+            ) : undefined
+          }
+        />
+      )}
+    </>
+  );
+}
+
+// ================================================================ page ======
+type SectionId = "dpia" | "dsar" | "breach" | "consent";
+const SECTIONS: { id: SectionId; label: string }[] = [
+  { id: "dpia", label: "DPIA" },
+  { id: "dsar", label: "DSAR" },
+  { id: "breach", label: "Breach Register" },
+  { id: "consent", label: "Consent" },
+];
+
+function DataProtectionInner() {
+  const [section, setSection] = useState<SectionId>("dpia");
+  const [summary, setSummary] = useState<DpSummary | null>(null);
+
+  const loadSummary = useCallback(() => {
+    apiCall<DpSummary>("GET", "/data-protection-summary").then(setSummary).catch(() => {});
+  }, []);
+  useEffect(() => {
+    loadSummary();
+  }, [loadSummary]);
+
+  return (
+    <>
+      <div className="page-head">
+        <h1>Data Protection</h1>
+        <p>Pakistan PDPA readiness — impact assessments, subject access requests on a 30-day SLA, the breach register with the 72-hour notification rule, and a consent ledger.</p>
       </div>
 
       <div className="grid stat-grid">
@@ -928,396 +1164,18 @@ export default function DataProtectionPage() {
         ))}
       </div>
 
-      {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
-
-      {/* ============================================= DPIA */}
-      {section === "dpia" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Data Protection Impact Assessments</h3>
-            <span className="sub">{dpias.length} total · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Title</th>
-                  <th>Processing activity</th>
-                  <th>Residual risk</th>
-                  <th>Status</th>
-                  <th>DPO reviewer</th>
-                  <th>Review date</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {dpias.map((d) => (
-                  <tr key={d.id} style={{ cursor: "pointer" }} onClick={() => openEditDpia(d)}>
-                    <td className="ref">{d.reference || "—"}</td>
-                    <td className="cell-title">{d.title}</td>
-                    <td className="muted">{d.processing_activity || "—"}</td>
-                    <td><CritBadge value={d.residual_risk} /></td>
-                    <td><Badge tone={DPIA_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge></td>
-                    <td className="muted">{d.dpo_reviewer || "—"}</td>
-                    <td className="muted">{d.review_date || "—"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeDpia(d)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {dpias.length === 0 && (
-                  <tr>
-                    <td colSpan={8}>
-                      <div className="empty">
-                        <span className="ico"><IconShield width={24} height={24} /></span>
-                        <h3>No DPIAs</h3>
-                        <p>Assess the data-protection impact of high-risk processing activities.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================= DSAR */}
-      {section === "dsar" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Data Subject Access Requests</h3>
-            <span className="sub">{dsars.length} total · 30-day statutory SLA · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Subject</th>
-                  <th>Type</th>
-                  <th>Received</th>
-                  <th>Due / SLA</th>
-                  <th>Handler</th>
-                  <th>Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {dsars.map((d) => (
-                  <tr key={d.id} style={{ cursor: "pointer" }} onClick={() => openEditDsar(d)}>
-                    <td className="ref">{d.reference || "—"}</td>
-                    <td className="cell-title">{d.subject_name || "—"}</td>
-                    <td><Badge tone="info">{cap(d.request_type)}</Badge></td>
-                    <td className="muted">{d.received_date || "—"}</td>
-                    <td>
-                      {d.is_overdue ? (
-                        <Badge tone="critical">Overdue</Badge>
-                      ) : (
-                        <span className="muted">{d.due_date || "—"} · {d.sla_days}d SLA</span>
-                      )}
-                    </td>
-                    <td className="muted">{d.handler || "—"}</td>
-                    <td><Badge tone={DSAR_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge></td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeDsar(d)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {dsars.length === 0 && (
-                  <tr>
-                    <td colSpan={8}>
-                      <div className="empty">
-                        <span className="ico"><IconShield width={24} height={24} /></span>
-                        <h3>No subject requests</h3>
-                        <p>Log data-subject access, erasure and portability requests to track the SLA.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================= BREACH REGISTER */}
-      {section === "breach" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <h3>Personal-Data Breach Register</h3>
-              <span className="sub">{breaches.length} total · 72-hour regulator notification rule · click a row to expand</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Title</th>
-                    <th>Type</th>
-                    <th>Severity</th>
-                    <th>Records</th>
-                    <th>Status</th>
-                    <th>Notification</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {breaches.map((b) => (
-                    <tr key={b.id} style={{ cursor: "pointer" }} onClick={() => toggleBreach(b)}>
-                      <td className="ref">{b.reference || "—"}</td>
-                      <td className="cell-title">{b.title}</td>
-                      <td><Badge tone="info">{cap(b.breach_type)}</Badge></td>
-                      <td><CritBadge value={b.severity} /></td>
-                      <td className="muted">{num(b.records_affected)}</td>
-                      <td><Badge tone={BREACH_STATUS_TONE[b.status] || "neutral"}>{cap(b.status)}</Badge></td>
-                      <td>
-                        {b.notification_overdue ? (
-                          <Badge tone="critical">72h overdue</Badge>
-                        ) : b.reported_to_regulator ? (
-                          <Badge tone="low">Reported</Badge>
-                        ) : b.notification_required ? (
-                          <Badge tone="medium">Required</Badge>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleBreach(b)}>
-                            {openBreach?.id === b.id ? "Hide" : "Open"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => removeBreach(b)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {breaches.length === 0 && (
-                    <tr>
-                      <td colSpan={8}>
-                        <div className="empty">
-                          <span className="ico"><IconShield width={24} height={24} /></span>
-                          <h3>No breaches recorded</h3>
-                          <p>Register personal-data breaches to track containment and regulator notification.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openBreach && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openBreach.reference} — {openBreach.title}</h3>
-                    <span className="sub">
-                      {cap(openBreach.status)} · {cap(openBreach.breach_type)} · {num(openBreach.records_affected)} records
-                      {openBreach.discovered_date ? " · discovered " + openBreach.discovered_date : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    {openBreach.notification_overdue && <Badge tone="critical">72h notification overdue</Badge>}
-                    <button className="btn secondary sm" onClick={() => openEditBreach(openBreach)}>Edit</button>
-                    <button className="btn secondary sm" onClick={() => removeBreach(openBreach)}>Delete</button>
-                  </div>
-                </div>
-                <div className="card-pad">
-                  <div className="field-row" style={{ marginBottom: 12 }}>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Data categories</div>
-                      <strong>{openBreach.data_categories || "—"}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Owner</div>
-                      <strong>{openBreach.owner || "—"}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Regulator reported</div>
-                      <strong>{openBreach.reported_to_regulator ? (openBreach.regulator_report_date || "Yes") : "No"}</strong>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Subjects notified</div>
-                      <strong>{openBreach.subjects_notified ? "Yes" : "No"}</strong>
-                    </div>
-                  </div>
-                  <div style={{ marginBottom: 10 }}>
-                    <div className="muted" style={{ fontSize: 12 }}>Root cause</div>
-                    <p style={{ margin: "2px 0 0" }}>{openBreach.root_cause || "—"}</p>
-                  </div>
-                  <div>
-                    <div className="muted" style={{ fontSize: 12 }}>Remediation</div>
-                    <p style={{ margin: "2px 0 0" }}>{openBreach.remediation || "—"}</p>
-                  </div>
-                </div>
-              </div>
-
-              <RecordPanels model="data_breach" entityId={openBreach.id} />
-            </>
-          )}
-        </>
-      )}
-
-      {/* ============================================= CONSENT */}
-      {section === "consent" && (
-        <>
-          <div className="grid stat-grid" style={{ marginBottom: 16 }}>
-            <div className="card stat">
-              <div className="stat-top"><span className="n">{summary ? summary.consents_active.toLocaleString() : "—"}</span></div>
-              <span className="l">Active consents</span>
-            </div>
-            <div className="card stat">
-              <div className="stat-top"><span className="n">{summary ? summary.consents_withdrawn.toLocaleString() : "—"}</span></div>
-              <span className="l">Withdrawn</span>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-head">
-              <h3>Consent Ledger</h3>
-              <span className="sub">{consents.length} total · click a row to edit</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Subject</th>
-                    <th>Purpose</th>
-                    <th>Lawful basis</th>
-                    <th>Channel</th>
-                    <th>Given</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {consents.map((c) => (
-                    <tr key={c.id} style={{ cursor: "pointer" }} onClick={() => openEditConsent(c)}>
-                      <td className="ref">{c.reference || "—"}</td>
-                      <td className="cell-title">{c.subject_name || "—"}</td>
-                      <td className="muted">{c.purpose || "—"}</td>
-                      <td className="muted">{cap(c.lawful_basis)}</td>
-                      <td className="muted">{c.channel || "—"}</td>
-                      <td className="muted">{c.consent_given ? (c.consent_date || "Yes") : "No"}</td>
-                      <td><Badge tone={CONSENT_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge></td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => removeConsent(c)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {consents.length === 0 && (
-                    <tr>
-                      <td colSpan={8}>
-                        <div className="empty">
-                          <span className="ico"><IconShield width={24} height={24} /></span>
-                          <h3>No consent records</h3>
-                          <p>Record subject consents, their lawful basis, and withdrawals.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* ============================================= MODALS */}
-      {showDpiaForm && (
-        <FormModal
-          title={editingDpia ? `Edit DPIA — ${editingDpia.reference || editingDpia.title}` : "New DPIA"}
-          wide
-          tabs={[
-            { id: "general", label: "General", content: dpiaGeneral, required: true },
-            { id: "assessment", label: "Assessment", content: dpiaAssessment },
-            { id: "review", label: "Review", content: dpiaReview },
-          ]}
-          onClose={() => setShowDpiaForm(false)}
-          onSave={saveDpia}
-          saving={savingDpia}
-          error={error}
-          saveLabel={editingDpia ? "Save changes" : "Create DPIA"}
-          footerLeft={
-            editingDpia ? (
-              <button className="btn secondary sm" type="button" onClick={() => removeDpia(editingDpia)} disabled={savingDpia} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
-            ) : undefined
-          }
-        />
-      )}
-
-      {showDsarForm && (
-        <FormModal
-          title={editingDsar ? `Edit DSAR — ${editingDsar.reference || editingDsar.subject_name}` : "New DSAR"}
-          wide
-          tabs={[
-            { id: "general", label: "General", content: dsarGeneral },
-            { id: "timing", label: "Timing & notes", content: dsarTiming },
-          ]}
-          onClose={() => setShowDsarForm(false)}
-          onSave={saveDsar}
-          saving={savingDsar}
-          error={error}
-          saveLabel={editingDsar ? "Save changes" : "Create DSAR"}
-          footerLeft={
-            editingDsar ? (
-              <button className="btn secondary sm" type="button" onClick={() => removeDsar(editingDsar)} disabled={savingDsar} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
-            ) : undefined
-          }
-        />
-      )}
-
-      {showBreachForm && (
-        <FormModal
-          title={editingBreach ? `Edit breach — ${editingBreach.reference || editingBreach.title}` : "New breach"}
-          wide
-          tabs={[
-            { id: "general", label: "General", content: breachGeneral, required: true },
-            { id: "timing", label: "Timing & notification", content: breachTiming },
-            { id: "response", label: "Response", content: breachResponse },
-          ]}
-          onClose={() => setShowBreachForm(false)}
-          onSave={saveBreach}
-          saving={savingBreach}
-          error={error}
-          saveLabel={editingBreach ? "Save changes" : "Create breach"}
-          footerLeft={
-            editingBreach ? (
-              <button className="btn secondary sm" type="button" onClick={() => removeBreach(editingBreach)} disabled={savingBreach} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
-            ) : undefined
-          }
-        />
-      )}
-
-      {showConsentForm && (
-        <FormModal
-          title={editingConsent ? `Edit consent — ${editingConsent.reference || editingConsent.subject_name}` : "New consent"}
-          wide
-          tabs={[{ id: "general", label: "General", content: consentGeneral }]}
-          onClose={() => setShowConsentForm(false)}
-          onSave={saveConsent}
-          saving={savingConsent}
-          error={error}
-          saveLabel={editingConsent ? "Save changes" : "Create consent"}
-          footerLeft={
-            editingConsent ? (
-              <button className="btn secondary sm" type="button" onClick={() => removeConsent(editingConsent)} disabled={savingConsent} style={{ color: "var(--danger, #c0392b)" }}>Delete</button>
-            ) : undefined
-          }
-        />
-      )}
+      {section === "dpia" && <DpiaSection onChanged={loadSummary} />}
+      {section === "dsar" && <DsarSection onChanged={loadSummary} />}
+      {section === "breach" && <BreachSection onChanged={loadSummary} />}
+      {section === "consent" && <ConsentSection onChanged={loadSummary} summary={summary} />}
     </>
+  );
+}
+
+export default function DataProtectionPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <DataProtectionInner />
+    </Suspense>
   );
 }

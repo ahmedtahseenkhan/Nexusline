@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_search, apply_sort
 from app.models.goal import Goal, GoalAudit
 from app.models.policy import Policy
 from app.models.project import Project
@@ -69,17 +70,31 @@ async def _next_ref(db) -> str:
     return await next_reference(db, Goal, "GOAL")
 
 
+_GOAL_SORTABLE = {
+    "reference": Goal.reference,
+    "name": Goal.name,
+    "owner": Goal.owner,
+    "status": Goal.status,
+    "next_audit_date": Goal.next_audit_date,
+    "created_at": Goal.created_at,
+}
+
+
 @router.get("", response_model=Page[GoalRead], dependencies=[Depends(require("goal:read"))])
 async def list_goals(
     db: DbSession,
+    search: Annotated[str | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[GoalRead]:
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(Goal).where(Goal.deleted.is_(False))
+    stmt = apply_search(stmt, params, [Goal.name, Goal.reference, Goal.owner])
+    stmt = apply_sort(stmt, params, _GOAL_SORTABLE, default=Goal.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(stmt.order_by(Goal.name).limit(limit).offset(offset))
-    ).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[GoalRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

@@ -125,6 +125,14 @@ class FindingRead(FindingBase):
     created_at: datetime
 
 
+class FindingSummary(BaseModel):
+    """Server-computed remediation follow-up counts for the findings stat cards."""
+
+    total: int
+    open: int
+    overdue: int
+
+
 # ------------------------------------------------------------------ engagements ---
 class EngagementBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)

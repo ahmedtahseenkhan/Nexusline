@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { toast } from "@/lib/feedback";
 import { Badge } from "@/components/badges";
-import { IconCompliance, IconCheck } from "@/components/icons";
+import { IconCompliance } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
 type ContentPack = {
@@ -27,7 +28,7 @@ export default function ContentLibraryPage() {
   const [loading, setLoading] = useState(true);
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   async function loadPacks() {
     try {
@@ -45,11 +46,10 @@ export default function ContentLibraryPage() {
 
   async function install(pack: ContentPack) {
     setError(null);
-    setNotice(null);
     setInstallingId(pack.id);
     try {
       const res = await apiCall<InstallResult>("POST", `/content-library/${pack.id}/install`);
-      setNotice(`Installed ${res.name} — ${res.requirement_count} requirements added. It now appears in Compliance.`);
+      toast(`Installed ${res.name} — ${res.requirement_count} requirements added. It now appears in Compliance.`);
       await loadPacks();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to install framework pack");
@@ -59,6 +59,13 @@ export default function ContentLibraryPage() {
   }
 
   const installedCount = packs.filter((p) => p.installed).length;
+  const visiblePacks = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return packs;
+    return packs.filter((p) =>
+      [p.name, p.standard, p.description, p.domain].some((v) => (v || "").toLowerCase().includes(q)),
+    );
+  }, [packs, query]);
 
   return (
     <>
@@ -77,20 +84,16 @@ export default function ContentLibraryPage() {
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
-      {notice && (
-        <div
-          className="card card-pad"
-          style={{
-            marginBottom: 16,
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            color: "var(--green)",
-            background: "var(--green-bg)",
-          }}
-        >
-          <IconCheck width={18} height={18} />
-          <span>{notice}</span>
+
+      {!loading && packs.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <input
+            className="input"
+            style={{ maxWidth: 320 }}
+            placeholder="Search framework packs…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
         </div>
       )}
 
@@ -102,12 +105,18 @@ export default function ContentLibraryPage() {
           <h3>No framework packs</h3>
           <p>There are no framework packs available to install.</p>
         </div>
+      ) : visiblePacks.length === 0 ? (
+        <div className="empty">
+          <span className="ico"><IconCompliance width={24} height={24} /></span>
+          <h3>No matching packs</h3>
+          <p>No framework packs match &ldquo;{query}&rdquo;.</p>
+        </div>
       ) : (
         <div
           className="grid"
           style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}
         >
-          {packs.map((p) => (
+          {visiblePacks.map((p) => (
             <div
               key={p.id}
               className="card card-pad"

@@ -176,3 +176,7 @@ class IcfrDeficiencyRead(IcfrDeficiencyBase):
     id: uuid.UUID
     reference: str
     created_at: datetime
+    # Human labels for the linked process/control, so the edit form's link pickers can
+    # render a name instead of a raw UUID. Populated server-side (transient attributes).
+    process_label: str | None = None
+    control_label: str | None = None

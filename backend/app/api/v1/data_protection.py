@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_search, apply_sort
 from app.models.data_protection import (
     BreachStatus,
     ConsentRecord,
@@ -62,15 +63,34 @@ async def _get(db, model, obj_id, name):
 
 
 # =================================================================== DPIA ===
+_DPIA_SORTABLE = {
+    "reference": Dpia.reference,
+    "title": Dpia.title,
+    "processing_activity": Dpia.processing_activity,
+    "residual_risk": Dpia.residual_risk,
+    "status": Dpia.status,
+    "review_date": Dpia.review_date,
+    "owner": Dpia.owner,
+    "created_at": Dpia.created_at,
+}
+_DPIA_SEARCH = [Dpia.reference, Dpia.title, Dpia.processing_activity, Dpia.owner, Dpia.dpo_reviewer]
+
+
 @router.get("/dpias", response_model=Page[DpiaRead], dependencies=[_READ])
-async def list_dpias(db: DbSession, status: str | None = None,
+async def list_dpias(db: DbSession, status: str | None = None, search: str | None = None,
+                     sort_by: Annotated[str | None, Query()] = None,
+                     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
                      limit: Annotated[int, Query(ge=1, le=200)] = 100,
                      offset: Annotated[int, Query(ge=0)] = 0) -> Page[DpiaRead]:
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(Dpia).where(Dpia.deleted.is_(False))
     if status:
         stmt = stmt.where(Dpia.status == status)
+    stmt = apply_search(stmt, params, _DPIA_SEARCH)
+    stmt = apply_sort(stmt, params, _DPIA_SORTABLE, default=Dpia.created_at) if sort_by \
+        else stmt.order_by(Dpia.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(Dpia.created_at.desc()).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[DpiaRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -101,25 +121,45 @@ async def delete_dpia(did: uuid.UUID, db: DbSession) -> None:
 
 
 # =================================================================== DSAR ===
+_DSAR_SORTABLE = {
+    "reference": Dsar.reference,
+    "subject_name": Dsar.subject_name,
+    "request_type": Dsar.request_type,
+    "received_date": Dsar.received_date,
+    "due_date": Dsar.due_date,
+    "response_date": Dsar.response_date,
+    "handler": Dsar.handler,
+    "status": Dsar.status,
+    "created_at": Dsar.created_at,
+}
+_DSAR_SEARCH = [Dsar.reference, Dsar.subject_name, Dsar.subject_contact, Dsar.handler]
+
+
 @router.get("/dsars", response_model=Page[DsarRead], dependencies=[_READ])
 async def list_dsars(db: DbSession, status: str | None = None, request_type: str | None = None,
-                     overdue: bool | None = None,
+                     overdue: bool | None = None, search: str | None = None,
+                     sort_by: Annotated[str | None, Query()] = None,
+                     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
                      limit: Annotated[int, Query(ge=1, le=200)] = 100,
                      offset: Annotated[int, Query(ge=0)] = 0) -> Page[DsarRead]:
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(Dsar).where(Dsar.deleted.is_(False))
     if status:
         stmt = stmt.where(Dsar.status == status)
     if request_type:
         stmt = stmt.where(Dsar.request_type == request_type)
+    stmt = apply_search(stmt, params, _DSAR_SEARCH)
+    stmt = apply_sort(stmt, params, _DSAR_SORTABLE, default=Dsar.created_at) if sort_by \
+        else stmt.order_by(Dsar.created_at.desc())
     if overdue:
         # is_overdue is a computed property — evaluate in Python, then paginate.
-        rows = (await db.scalars(stmt.order_by(Dsar.created_at.desc()))).all()
+        rows = (await db.scalars(stmt)).all()
         rows = [r for r in rows if r.is_overdue]
         total = len(rows)
         rows = rows[offset:offset + limit]
     else:
         total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-        rows = (await db.scalars(stmt.order_by(Dsar.created_at.desc()).limit(limit).offset(offset))).all()
+        rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[DsarRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -159,26 +199,51 @@ async def delete_dsar(did: uuid.UUID, db: DbSession) -> None:
 
 
 # ============================================================ data breach ===
+_BREACH_SORTABLE = {
+    "reference": DataBreach.reference,
+    "title": DataBreach.title,
+    "breach_type": DataBreach.breach_type,
+    "severity": DataBreach.severity,
+    "records_affected": DataBreach.records_affected,
+    "status": DataBreach.status,
+    "discovered_date": DataBreach.discovered_date,
+    "owner": DataBreach.owner,
+    "created_at": DataBreach.created_at,
+}
+_BREACH_SEARCH = [DataBreach.reference, DataBreach.title, DataBreach.data_categories, DataBreach.owner]
+
+
 @router.get("/data-breaches", response_model=Page[DataBreachRead], dependencies=[_READ])
 async def list_data_breaches(db: DbSession, status: str | None = None, breach_type: str | None = None,
-                             notification_overdue: bool | None = None,
+                             notification_overdue: bool | None = None, search: str | None = None,
+                             sort_by: Annotated[str | None, Query()] = None,
+                             sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
                              limit: Annotated[int, Query(ge=1, le=200)] = 100,
                              offset: Annotated[int, Query(ge=0)] = 0) -> Page[DataBreachRead]:
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(DataBreach).where(DataBreach.deleted.is_(False))
     if status:
         stmt = stmt.where(DataBreach.status == status)
     if breach_type:
         stmt = stmt.where(DataBreach.breach_type == breach_type)
+    stmt = apply_search(stmt, params, _BREACH_SEARCH)
+    stmt = apply_sort(stmt, params, _BREACH_SORTABLE, default=DataBreach.created_at) if sort_by \
+        else stmt.order_by(DataBreach.created_at.desc())
     if notification_overdue:
         # notification_overdue is computed — evaluate in Python, then paginate.
-        rows = (await db.scalars(stmt.order_by(DataBreach.created_at.desc()))).all()
+        rows = (await db.scalars(stmt)).all()
         rows = [r for r in rows if r.notification_overdue]
         total = len(rows)
         rows = rows[offset:offset + limit]
     else:
         total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-        rows = (await db.scalars(stmt.order_by(DataBreach.created_at.desc()).limit(limit).offset(offset))).all()
+        rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[DataBreachRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+
+
+@router.get("/data-breaches/{bid}", response_model=DataBreachRead, dependencies=[_READ])
+async def get_data_breach(bid: uuid.UUID, db: DbSession) -> DataBreachRead:
+    return DataBreachRead.model_validate(await _get(db, DataBreach, bid, "Data breach"))
 
 
 @router.post("/data-breaches", response_model=DataBreachRead, status_code=201, dependencies=[_WRITE])
@@ -211,15 +276,34 @@ async def delete_data_breach(bid: uuid.UUID, db: DbSession) -> None:
 
 
 # ========================================================= consent records ===
+_CONSENT_SORTABLE = {
+    "reference": ConsentRecord.reference,
+    "subject_name": ConsentRecord.subject_name,
+    "purpose": ConsentRecord.purpose,
+    "channel": ConsentRecord.channel,
+    "lawful_basis": ConsentRecord.lawful_basis,
+    "consent_date": ConsentRecord.consent_date,
+    "status": ConsentRecord.status,
+    "created_at": ConsentRecord.created_at,
+}
+_CONSENT_SEARCH = [ConsentRecord.reference, ConsentRecord.subject_name, ConsentRecord.purpose, ConsentRecord.channel]
+
+
 @router.get("/consent-records", response_model=Page[ConsentRecordRead], dependencies=[_READ])
-async def list_consent_records(db: DbSession, status: str | None = None,
+async def list_consent_records(db: DbSession, status: str | None = None, search: str | None = None,
+                               sort_by: Annotated[str | None, Query()] = None,
+                               sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
                                limit: Annotated[int, Query(ge=1, le=200)] = 100,
                                offset: Annotated[int, Query(ge=0)] = 0) -> Page[ConsentRecordRead]:
+    params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(ConsentRecord).where(ConsentRecord.deleted.is_(False))
     if status:
         stmt = stmt.where(ConsentRecord.status == status)
+    stmt = apply_search(stmt, params, _CONSENT_SEARCH)
+    stmt = apply_sort(stmt, params, _CONSENT_SORTABLE, default=ConsentRecord.created_at) if sort_by \
+        else stmt.order_by(ConsentRecord.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(ConsentRecord.created_at.desc()).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ConsentRecordRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.enums import AuditFindingStatus
 from app.models.internal_audit import (
     AuditableUnit,
@@ -31,6 +32,7 @@ from app.schemas.internal_audit import (
     EngagementUpdate,
     FindingCreate,
     FindingRead,
+    FindingSummary,
     FindingUpdate,
     ProcedureCreate,
     ProcedureRead,
@@ -50,15 +52,42 @@ async def _next_ref(db, model, prefix: str) -> str:
 
 
 # ============================================================ audit universe ===
+_UNIT_SORTABLE = {
+    "reference": AuditableUnit.reference,
+    "name": AuditableUnit.name,
+    "category": AuditableUnit.category,
+    "owner": AuditableUnit.owner,
+    "inherent_risk": AuditableUnit.inherent_risk,
+    "next_audit_due": AuditableUnit.next_audit_due,
+    "created_at": AuditableUnit.created_at,
+}
+
+
 @router.get("/audit-universe", response_model=Page[AuditableUnitRead], dependencies=[_READ])
 async def list_units(
     db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[AuditableUnitRead]:
     stmt = select(AuditableUnit).where(AuditableUnit.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            AuditableUnit.name.ilike(like)
+            | AuditableUnit.reference.ilike(like)
+            | AuditableUnit.category.ilike(like)
+            | AuditableUnit.owner.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _UNIT_SORTABLE, default=AuditableUnit.name)
+    else:
+        stmt = stmt.order_by(AuditableUnit.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(AuditableUnit.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[AuditableUnitRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -107,15 +136,40 @@ async def _load_engagement(db, eid: uuid.UUID) -> AuditEngagement:
     return obj
 
 
+_ENGAGEMENT_SORTABLE = {
+    "reference": AuditEngagement.reference,
+    "title": AuditEngagement.title,
+    "status": AuditEngagement.status,
+    "lead_auditor": AuditEngagement.lead_auditor,
+    "planned_end": AuditEngagement.planned_end,
+    "created_at": AuditEngagement.created_at,
+}
+
+
 @router.get("/audit-engagements", response_model=Page[EngagementRead], dependencies=[_READ])
 async def list_engagements(
     db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[EngagementRead]:
     stmt = select(AuditEngagement).where(AuditEngagement.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            AuditEngagement.title.ilike(like)
+            | AuditEngagement.reference.ilike(like)
+            | AuditEngagement.lead_auditor.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _ENGAGEMENT_SORTABLE, default=AuditEngagement.created_at)
+    else:
+        stmt = stmt.order_by(AuditEngagement.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(AuditEngagement.created_at.desc()).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[EngagementRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -228,23 +282,91 @@ async def delete_finding(fid: uuid.UUID, db: DbSession) -> None:
     await db.delete(obj)
 
 
-@router.get("/audit-findings", response_model=list[FindingRead], dependencies=[_READ],
+_FINDING_SORTABLE = {
+    "reference": AuditFinding.reference,
+    "title": AuditFinding.title,
+    "rating": AuditFinding.rating,
+    "status": AuditFinding.status,
+    "due_date": AuditFinding.due_date,
+    "action_owner": AuditFinding.action_owner,
+    "created_at": AuditFinding.created_at,
+}
+
+# "Open" in the follow-up view means not yet resolved: not closed and not risk-accepted
+# (matches AuditFinding.is_overdue and the UI's open/overdue stat cards).
+_OPEN_STATES = [AuditFindingStatus.closed, AuditFindingStatus.risk_accepted]
+
+
+def _open_pred():
+    return AuditFinding.status.not_in(_OPEN_STATES)
+
+
+def _overdue_pred():
+    # Expressed in SQL (not the Python `is_overdue` property) so it can filter, count
+    # and paginate on the server instead of pulling every row.
+    return (
+        AuditFinding.status.not_in(_OPEN_STATES)
+        & AuditFinding.due_date.is_not(None)
+        & (AuditFinding.due_date < date.today())
+    )
+
+
+def _findings_base():
+    # Exclude findings of archived engagements from the remediation follow-up view.
+    return (
+        select(AuditFinding)
+        .join(AuditEngagement, AuditEngagement.id == AuditFinding.engagement_id)
+        .where(AuditEngagement.deleted.is_(False))
+    )
+
+
+@router.get("/audit-findings/summary", response_model=FindingSummary, dependencies=[_READ],
+            summary="Remediation follow-up counts (open / overdue)")
+async def findings_summary(db: DbSession) -> FindingSummary:
+    base = _findings_base()
+    total = await db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    open_count = await db.scalar(
+        select(func.count()).select_from(base.where(_open_pred()).subquery())
+    ) or 0
+    overdue_count = await db.scalar(
+        select(func.count()).select_from(base.where(_overdue_pred()).subquery())
+    ) or 0
+    return FindingSummary(total=total, open=open_count, overdue=overdue_count)
+
+
+@router.get("/audit-findings", response_model=Page[FindingRead], dependencies=[_READ],
             summary="All findings (remediation follow-up view)")
 async def list_findings(
     db: DbSession,
     status_filter: Annotated[AuditFindingStatus | None, Query(alias="status")] = None,
     overdue: bool = False,
-) -> list[FindingRead]:
-    # Exclude findings of archived engagements from the remediation follow-up view.
-    stmt = (
-        select(AuditFinding)
-        .join(AuditEngagement, AuditEngagement.id == AuditFinding.engagement_id)
-        .where(AuditEngagement.deleted.is_(False))
-    )
+    open: bool = False,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[FindingRead]:
+    stmt = _findings_base()
     if status_filter is not None:
         stmt = stmt.where(AuditFinding.status == status_filter)
-    rows = (await db.scalars(stmt.order_by(AuditFinding.due_date.is_(None), AuditFinding.due_date))).all()
-    result = [FindingRead.model_validate(f) for f in rows]
+    if open:
+        stmt = stmt.where(_open_pred())
     if overdue:
-        result = [f for f in result if f.is_overdue]
-    return result
+        stmt = stmt.where(_overdue_pred())
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            AuditFinding.title.ilike(like)
+            | AuditFinding.reference.ilike(like)
+            | AuditFinding.action_owner.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _FINDING_SORTABLE, default=AuditFinding.due_date)
+    else:
+        # Due soonest first, undated findings last.
+        stmt = stmt.order_by(AuditFinding.due_date.is_(None), AuditFinding.due_date)
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    return Page(items=[FindingRead.model_validate(f) for f in rows], total=total, limit=limit, offset=offset)

@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.core.permissions import PERMISSION_CATALOG
 from app.core.security import hash_password
 from app.models.identity import Permission, Role, User
@@ -251,18 +252,39 @@ router.include_router(roles_router)
 
 
 # ----------------------------------------------------------------------------- users
+# Allow-list of columns a client may sort the user register by. A bank has thousands of
+# staff, so the table is server-driven: sorted, searched and paged in SQL.
+_USER_SORTABLE = {
+    "email": User.email,
+    "full_name": User.full_name,
+    "is_active": User.is_active,
+    "created_at": User.created_at,
+}
+
+
 @router.get("", response_model=Page[UserRead], dependencies=[Depends(require("user:read"))])
 async def list_users(
     db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[UserRead]:
-    total = await db.scalar(select(func.count()).select_from(User)) or 0
+    stmt = select(User)
+    if search:
+        stmt = stmt.where(
+            User.email.ilike(f"%{search}%") | User.full_name.ilike(f"%{search}%")
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _USER_SORTABLE, default=User.email)
+    else:
+        stmt = stmt.order_by(User.email)
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (
         await db.scalars(
-            select(User)
-            .options(selectinload(User.roles).selectinload(Role.permissions))
-            .order_by(User.email)
+            stmt.options(selectinload(User.roles).selectinload(Role.permissions))
             .limit(limit)
             .offset(offset)
         )

@@ -10,7 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
-from app.models.enums import ShariahFindingStatus
+from app.core.listing import ListParams, apply_sort
+from app.models.enums import CharityStatus, ShariahFindingStatus
 from app.models.shariah import (
     CharityDisbursement,
     IslamicProduct,
@@ -57,13 +58,48 @@ async def _get(db, model, obj_id, name: str):
 
 
 # =============================================================== rulings / fatwas ===
+_RULING_SORTABLE = {
+    "reference": ShariahRuling.reference,
+    "title": ShariahRuling.title,
+    "subject": ShariahRuling.subject,
+    "status": ShariahRuling.status,
+    "approved_by": ShariahRuling.approved_by,
+    "next_review_date": ShariahRuling.next_review_date,
+    "created_at": ShariahRuling.created_at,
+}
+
+
 @router.get("/shariah-rulings", response_model=Page[RulingRead], dependencies=[_READ])
-async def list_rulings(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
-                       offset: Annotated[int, Query(ge=0)] = 0) -> Page[RulingRead]:
+async def list_rulings(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[RulingRead]:
     stmt = select(ShariahRuling).where(ShariahRuling.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            ShariahRuling.title.ilike(like)
+            | ShariahRuling.subject.ilike(like)
+            | ShariahRuling.reference.ilike(like)
+            | ShariahRuling.approved_by.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _RULING_SORTABLE, default=ShariahRuling.created_at)
+    else:
+        stmt = stmt.order_by(ShariahRuling.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(ShariahRuling.created_at.desc()).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[RulingRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+
+
+@router.get("/shariah-rulings/{rid}", response_model=RulingRead, dependencies=[_READ])
+async def get_ruling(rid: uuid.UUID, db: DbSession) -> RulingRead:
+    return RulingRead.model_validate(await _get(db, ShariahRuling, rid, "Ruling"))
 
 
 @router.post("/shariah-rulings", response_model=RulingRead, status_code=201, dependencies=[_WRITE])
@@ -95,13 +131,47 @@ async def delete_ruling(rid: uuid.UUID, db: DbSession) -> None:
 
 
 # =============================================================== islamic products ===
+_PRODUCT_SORTABLE = {
+    "reference": IslamicProduct.reference,
+    "name": IslamicProduct.name,
+    "shariah_mode": IslamicProduct.shariah_mode,
+    "status": IslamicProduct.status,
+    "owner": IslamicProduct.owner,
+    "launch_date": IslamicProduct.launch_date,
+    "created_at": IslamicProduct.created_at,
+}
+
+
 @router.get("/islamic-products", response_model=Page[ProductRead], dependencies=[_READ])
-async def list_products(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
-                        offset: Annotated[int, Query(ge=0)] = 0) -> Page[ProductRead]:
+async def list_products(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[ProductRead]:
     stmt = select(IslamicProduct).where(IslamicProduct.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            IslamicProduct.name.ilike(like)
+            | IslamicProduct.reference.ilike(like)
+            | IslamicProduct.owner.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _PRODUCT_SORTABLE, default=IslamicProduct.name)
+    else:
+        stmt = stmt.order_by(IslamicProduct.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(IslamicProduct.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ProductRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+
+
+@router.get("/islamic-products/{pid}", response_model=ProductRead, dependencies=[_READ])
+async def get_product(pid: uuid.UUID, db: DbSession) -> ProductRead:
+    return ProductRead.model_validate(await _get(db, IslamicProduct, pid, "Product"))
 
 
 @router.post("/islamic-products", response_model=ProductRead, status_code=201, dependencies=[_WRITE])
@@ -147,12 +217,41 @@ async def _load_review(db, rid: uuid.UUID) -> ShariahReview:
     return obj
 
 
+_REVIEW_SORTABLE = {
+    "reference": ShariahReview.reference,
+    "title": ShariahReview.title,
+    "status": ShariahReview.status,
+    "reviewer": ShariahReview.reviewer,
+    "planned_date": ShariahReview.planned_date,
+    "created_at": ShariahReview.created_at,
+}
+
+
 @router.get("/shariah-reviews", response_model=Page[ReviewRead], dependencies=[_READ])
-async def list_reviews(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
-                       offset: Annotated[int, Query(ge=0)] = 0) -> Page[ReviewRead]:
+async def list_reviews(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[ReviewRead]:
     stmt = select(ShariahReview).where(ShariahReview.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            ShariahReview.title.ilike(like)
+            | ShariahReview.reference.ilike(like)
+            | ShariahReview.reviewer.ilike(like)
+            | ShariahReview.scope.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _REVIEW_SORTABLE, default=ShariahReview.created_at)
+    else:
+        stmt = stmt.order_by(ShariahReview.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(ShariahReview.created_at.desc()).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ReviewRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -230,12 +329,60 @@ async def delete_finding(fid: uuid.UUID, db: DbSession) -> None:
 
 
 # ================================================= purification / charity ledger ===
+_CHARITY_SORTABLE = {
+    "reference": CharityDisbursement.reference,
+    "description": CharityDisbursement.description,
+    "amount": CharityDisbursement.amount,
+    "beneficiary": CharityDisbursement.beneficiary,
+    "status": CharityDisbursement.status,
+    "disbursement_date": CharityDisbursement.disbursement_date,
+    "created_at": CharityDisbursement.created_at,
+}
+
+
+@router.get("/charity-ledger-summary", dependencies=[_READ])
+async def charity_summary(db: DbSession) -> dict:
+    """Server-side aggregate for the purification ledger. Summing client-side over a
+    capped page silently understates the figure past the fetch limit — a Shariah-regulatory
+    number, so it must be computed over the whole (non-deleted) ledger on the server."""
+    disbursed_total = await db.scalar(
+        select(func.coalesce(func.sum(CharityDisbursement.amount), 0)).where(
+            CharityDisbursement.deleted.is_(False),
+            CharityDisbursement.status == CharityStatus.disbursed,
+        )
+    )
+    total = await db.scalar(
+        select(func.coalesce(func.sum(CharityDisbursement.amount), 0)).where(
+            CharityDisbursement.deleted.is_(False)
+        )
+    )
+    return {"disbursed_total": float(disbursed_total or 0), "total_amount": float(total or 0)}
+
+
 @router.get("/charity-ledger", response_model=Page[CharityRead], dependencies=[_READ])
-async def list_charity(db: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 100,
-                       offset: Annotated[int, Query(ge=0)] = 0) -> Page[CharityRead]:
+async def list_charity(
+    db: DbSession,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[CharityRead]:
     stmt = select(CharityDisbursement).where(CharityDisbursement.deleted.is_(False))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            CharityDisbursement.description.ilike(like)
+            | CharityDisbursement.reference.ilike(like)
+            | CharityDisbursement.beneficiary.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _CHARITY_SORTABLE, default=CharityDisbursement.created_at)
+    else:
+        stmt = stmt.order_by(CharityDisbursement.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(CharityDisbursement.created_at.desc()).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[CharityRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

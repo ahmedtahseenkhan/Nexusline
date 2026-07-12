@@ -1,13 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
-import { Field, TextInput, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
+import { Field, TextInput, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconPlus, IconPolicy } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
@@ -27,8 +32,6 @@ type Legal = {
   assets: Ref[];
 };
 
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 const WORKFLOW_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
   approved: "low",
   in_review: "medium",
@@ -42,6 +45,7 @@ const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: c
 const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 // Common obligation domains — eramba seeds similar categories; freeform via the picker too.
 const CATEGORY = opts(["privacy", "security", "financial", "employment", "environmental", "industry", "contractual", "other"]);
+const refToOpt = (r: Ref): AsyncOption => ({ value: r.id, label: r.name });
 
 type FormState = {
   name: string;
@@ -53,8 +57,8 @@ type FormState = {
   risk_magnifier: number | "";
   workflow_status: string;
   workflow_owner: string;
-  business_unit_ids: string[];
-  asset_ids: string[];
+  business_unit_ids: AsyncOption[];
+  asset_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
@@ -74,16 +78,14 @@ function fromLegal(l: Legal): FormState {
     risk_magnifier: l.risk_magnifier,
     workflow_status: l.workflow_status,
     workflow_owner: l.workflow_owner || "",
-    business_unit_ids: l.business_units.map((b) => b.id),
-    asset_ids: l.assets.map((a) => a.id),
+    business_unit_ids: l.business_units.map(refToOpt),
+    asset_ids: l.assets.map(refToOpt),
   };
 }
 
-export default function LegalPage() {
-  const [items, setItems] = useState<Legal[]>([]);
-  const [units, setUnits] = useState<Ref[]>([]);
-  const [assets, setAssets] = useState<Ref[]>([]);
+function LegalInner() {
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const [editing, setEditing] = useState<Legal | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -92,18 +94,13 @@ export default function LegalPage() {
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  async function load() {
-    try {
-      setItems((await apiCall<Page<Legal>>("GET", "/legals?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-    apiCall<Page<Ref>>("GET", "/business-units?limit=200").then((r) => setUnits(r.items)).catch(() => {});
-    apiCall<Page<Ref>>("GET", "/assets?limit=200").then((r) => setAssets(r.items)).catch(() => {});
-  }, []);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchLegals = useCallback((qs: string) => apiCall<PagedList<Legal>>("GET", `/legals?${qs}`), []);
+
+  const searchUnits = (q: string) =>
+    apiCall<PagedList<Ref>>("GET", `/business-units?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map(refToOpt));
+  const searchAssets = (q: string) =>
+    apiCall<PagedList<Ref>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map(refToOpt));
 
   function openNew() {
     setEditing(null);
@@ -135,14 +132,15 @@ export default function LegalPage() {
       risk_magnifier: f.risk_magnifier === "" ? 1.0 : f.risk_magnifier,
       workflow_status: f.workflow_status,
       workflow_owner: f.workflow_owner,
-      business_unit_ids: f.business_unit_ids,
-      asset_ids: f.asset_ids,
+      business_unit_ids: f.business_unit_ids.map((o) => o.value),
+      asset_ids: f.asset_ids.map((o) => o.value),
     };
     try {
       if (editing) await apiCall<Legal>("PATCH", `/legals/${editing.id}`, payload);
       else await apiCall<Legal>("POST", "/legals", payload);
       setShowForm(false);
-      await load();
+      reload();
+      toast(editing ? "Changes saved" : "Obligation created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save obligation");
     } finally {
@@ -151,26 +149,29 @@ export default function LegalPage() {
   }
 
   async function remove(l: Legal) {
-    if (!confirm(`Delete legal obligation "${l.name}"?`)) return;
+    if (!(await confirmDialog({ title: `Delete legal obligation "${l.name}"?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/legals/${l.id}`);
-      await load();
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
 
-  const unitOpts: Option[] = useMemo(
-    () => units.map((u) => ({ value: u.id, label: u.name })),
-    [units],
-  );
-  const assetOpts: Option[] = useMemo(
-    () => assets.map((a) => ({ value: a.id, label: a.name })),
-    [assets],
-  );
-
   const linkCount = (l: Legal) => l.business_units.length + l.assets.length;
+
+  const columns: Column<Legal>[] = [
+    { key: "reference", header: "Reference", sortable: true, render: (l) => <span className="ref">{l.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, render: (l) => <span className="cell-title">{l.name}</span> },
+    { key: "category", header: "Category", sortable: true, render: (l) => (l.category ? <Badge tone="neutral" plain>{cap(l.category)}</Badge> : <span className="muted">—</span>) },
+    { key: "jurisdiction", header: "Jurisdiction", sortable: true, render: (l) => <span className="muted">{l.jurisdiction || "—"}</span> },
+    { key: "risk_magnifier", header: "Risk magnifier", sortable: true, render: (l) => <Badge tone={l.risk_magnifier > 1 ? "medium" : "neutral"} plain>×{l.risk_magnifier}</Badge> },
+    { key: "links", header: "Links", align: "center", render: (l) => <span className="muted">{linkCount(l) || "—"}</span> },
+    { key: "workflow_status", header: "Workflow", sortable: true, render: (l) => <Badge tone={WORKFLOW_TONE[l.workflow_status] || "neutral"}>{cap(l.workflow_status)}</Badge> },
+    { key: "actions", header: "", render: (l) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(l)}>Delete</button></div> },
+  ];
 
   const generalTab = (
     <>
@@ -213,10 +214,10 @@ export default function LegalPage() {
   const linksTab = (
     <>
       <Field label="Business Units" help="Organizational units that must comply with this obligation.">
-        <MultiSelect value={f.business_unit_ids} onChange={(v) => set("business_unit_ids", v)} options={unitOpts} />
+        <AsyncMultiSelect search={searchUnits} value={f.business_unit_ids} onChange={(v) => set("business_unit_ids", v)} />
       </Field>
       <Field label="Assets" help="Assets in scope of this obligation (data, systems, processes it governs).">
-        <MultiSelect value={f.asset_ids} onChange={(v) => set("asset_ids", v)} options={assetOpts} />
+        <AsyncMultiSelect search={searchAssets} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} />
       </Field>
     </>
   );
@@ -229,7 +230,7 @@ export default function LegalPage() {
           <p>Legal &amp; regulatory obligations; the risk magnifier amplifies linked risks.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <ImportExport resource="legal" label="Legal &amp; Regulatory" onDone={load} />
+          <ImportExport resource="legal" label="Legal &amp; Regulatory" onDone={reload} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add legal
           </button>
@@ -238,57 +239,16 @@ export default function LegalPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card">
-        <div className="card-head">
-          <h3>Obligations</h3>
-          <span className="sub">{items.length} total</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Reference</th>
-                <th>Name</th>
-                <th>Category</th>
-                <th>Jurisdiction</th>
-                <th>Risk magnifier</th>
-                <th>Links</th>
-                <th>Workflow</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((l) => (
-                <tr key={l.id} style={{ cursor: "pointer" }} onClick={() => openEdit(l)}>
-                  <td className="muted">{l.reference || "—"}</td>
-                  <td className="cell-title">{l.name}</td>
-                  <td>{l.category ? <Badge tone="neutral" plain>{cap(l.category)}</Badge> : <span className="muted">—</span>}</td>
-                  <td className="muted">{l.jurisdiction || "—"}</td>
-                  <td><Badge tone={l.risk_magnifier > 1 ? "medium" : "neutral"} plain>×{l.risk_magnifier}</Badge></td>
-                  <td className="muted">{linkCount(l) || "—"}</td>
-                  <td><Badge tone={WORKFLOW_TONE[l.workflow_status] || "neutral"}>{cap(l.workflow_status)}</Badge></td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => remove(l)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={8}>
-                    <div className="empty">
-                      <span className="ico"><IconPolicy width={24} height={24} /></span>
-                      <h3>No obligations</h3>
-                      <p>Register your first legal or regulatory obligation.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<Legal>
+        columns={columns}
+        fetcher={fetchLegals}
+        rowKey={(l) => l.id}
+        onRowClick={(l) => openEdit(l)}
+        searchPlaceholder="Search obligations by name, reference or jurisdiction…"
+        defaultSort={{ by: "name", dir: "asc" }}
+        emptyMessage="No obligations. Register your first legal or regulatory obligation."
+        refreshKey={refreshKey}
+      />
 
       {showForm && (
         <FormModal
@@ -305,5 +265,13 @@ export default function LegalPage() {
         />
       )}
     </>
+  );
+}
+
+export default function LegalPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <LegalInner />
+    </Suspense>
   );
 }

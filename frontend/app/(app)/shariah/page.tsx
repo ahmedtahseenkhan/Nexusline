@@ -1,20 +1,27 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import {
   api,
+  apiCall,
   type ShariahRuling,
   type IslamicProduct,
   type ShariahReview,
   type ShariahFinding,
   type CharityDisbursement,
 } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -89,6 +96,8 @@ function SeverityBadge({ value }: { value: string | null }) {
   if (!value) return <span className="muted">—</span>;
   return <Badge tone={SEVERITY_TONE[value] || "neutral"}>{cap(value)}</Badge>;
 }
+
+const rulingLabel = (r: ShariahRuling) => `${r.reference || "—"} · ${r.title}`;
 
 // ------------------------------------------------------------------ form state
 type RulingForm = {
@@ -330,14 +339,22 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "ledger", label: "Purification Ledger" },
 ];
 
-export default function ShariahPage() {
+// ------------------------------------------------------------------ server typeahead
+const searchRulings = (q: string) =>
+  apiCall<PagedList<ShariahRuling>>("GET", `/shariah-rulings?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+    r.items.map((x) => ({ value: x.id, label: rulingLabel(x) })),
+  );
+const searchProducts = (q: string) =>
+  apiCall<PagedList<IslamicProduct>>("GET", `/islamic-products?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+    r.items.map((x) => ({ value: x.id, label: x.name, sub: x.reference })),
+  );
+
+// ================================================================= page =====
+function ShariahInner() {
   const [section, setSection] = useState<SectionId>("fatwa");
   const [error, setError] = useState<string | null>(null);
-
-  const [rulings, setRulings] = useState<ShariahRuling[]>([]);
-  const [products, setProducts] = useState<IslamicProduct[]>([]);
-  const [reviews, setReviews] = useState<ShariahReview[]>([]);
-  const [charities, setCharities] = useState<CharityDisbursement[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   // ---- ruling dialog ----
   const [editingRuling, setEditingRuling] = useState<ShariahRuling | null>(null);
@@ -351,19 +368,21 @@ export default function ShariahPage() {
   const [showProductForm, setShowProductForm] = useState(false);
   const [savingProduct, setSavingProduct] = useState(false);
   const [pf, setPf] = useState<ProductForm>(BLANK_PRODUCT);
+  const [rulingSelLabel, setRulingSelLabel] = useState(""); // display label for the approving ruling
   const setP = <K extends keyof ProductForm>(k: K, v: ProductForm[K]) => setPf((p) => ({ ...p, [k]: v }));
 
-  // ---- review dialog + expanded detail ----
+  // ---- review dialog + drawer detail ----
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<ShariahReview | null>(null);
   const [editingReview, setEditingReview] = useState<ShariahReview | null>(null);
   const [showReviewForm, setShowReviewForm] = useState(false);
   const [savingReview, setSavingReview] = useState(false);
   const [vf, setVf] = useState<ReviewForm>(BLANK_REVIEW);
+  const [productSelLabel, setProductSelLabel] = useState(""); // display label for the review's product
   const setV = <K extends keyof ReviewForm>(k: K, v: ReviewForm[K]) => setVf((p) => ({ ...p, [k]: v }));
 
-  const [open, setOpen] = useState<ShariahReview | null>(null);
   const [fd, setFd] = useState<FindingDraft>(BLANK_FINDING);
-  const setFD = <K extends keyof FindingDraft>(k: K, v: FindingDraft[K]) =>
-    setFd((p) => ({ ...p, [k]: v }));
+  const setFD = <K extends keyof FindingDraft>(k: K, v: FindingDraft[K]) => setFd((p) => ({ ...p, [k]: v }));
 
   // ---- charity dialog ----
   const [editingCharity, setEditingCharity] = useState<CharityDisbursement | null>(null);
@@ -372,62 +391,43 @@ export default function ShariahPage() {
   const [cf, setCf] = useState<CharityForm>(BLANK_CHARITY);
   const setC = <K extends keyof CharityForm>(k: K, v: CharityForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
-  // ------------------------------------------------------------- loaders
-  async function loadRulings() {
-    try {
-      const res = await api.shariahRulings();
-      setRulings(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load rulings");
-    }
-  }
-  async function loadProducts() {
-    try {
-      const res = await api.islamicProducts();
-      setProducts(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load products");
-    }
-  }
-  async function loadReviews(keepOpen?: string) {
-    try {
-      const res = await api.shariahReviews();
-      setReviews(res.items);
-      if (keepOpen) setOpen(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load reviews");
-    }
-  }
-  async function loadCharities() {
-    try {
-      const res = await api.charityLedger();
-      setCharities(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load purification ledger");
-    }
-  }
-  async function refreshOpen(id: string) {
-    const r = await api.shariahReview(id);
-    setOpen(r);
-    setReviews((prev) => prev.map((x) => (x.id === id ? r : x)));
-  }
-
-  useEffect(() => {
-    loadRulings();
-    loadProducts();
-    loadReviews();
-    loadCharities();
+  // ---- server summary (authoritative total, not a client reduce over a capped page) ----
+  const [disbursedTotal, setDisbursedTotal] = useState<number | null>(null);
+  const loadSummary = useCallback(() => {
+    apiCall<{ disbursed_total: number }>("GET", "/charity-ledger-summary")
+      .then((s) => setDisbursedTotal(s.disbursed_total ?? 0))
+      .catch(() => {});
   }, []);
+  useEffect(() => {
+    loadSummary();
+  }, [loadSummary]);
+
+  // ------------------------------------------------------------- table fetchers
+  const fetchRulings = useCallback((qs: string) => apiCall<PagedList<ShariahRuling>>("GET", `/shariah-rulings?${qs}`), []);
+  const fetchProducts = useCallback((qs: string) => apiCall<PagedList<IslamicProduct>>("GET", `/islamic-products?${qs}`), []);
+  const fetchReviews = useCallback((qs: string) => apiCall<PagedList<ShariahReview>>("GET", `/shariah-reviews?${qs}`), []);
+  const fetchCharities = useCallback((qs: string) => apiCall<PagedList<CharityDisbursement>>("GET", `/charity-ledger?${qs}`), []);
+
+  // ------------------------------------------------------------- review drawer detail
+  const loadDetail = useCallback((id: string) => {
+    apiCall<ShariahReview>("GET", `/shariah-reviews/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setDetail(null);
+  }, [openId, loadDetail]);
 
   // ------------------------------------------------------------- ruling CRUD
   function openNewRuling() {
     setEditingRuling(null);
     setRf(BLANK_RULING);
+    setError(null);
     setShowRulingForm(true);
   }
   function openEditRuling(r: ShariahRuling) {
     setEditingRuling(r);
     setRf(fromRuling(r));
+    setError(null);
     setShowRulingForm(true);
   }
   async function saveRuling() {
@@ -438,7 +438,8 @@ export default function ShariahPage() {
       if (editingRuling) await api.updateShariahRuling(editingRuling.id, payload);
       else await api.createShariahRuling(payload);
       setShowRulingForm(false);
-      await loadRulings();
+      reload();
+      toast(editingRuling ? "Changes saved" : "Ruling created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save ruling");
     } finally {
@@ -446,12 +447,13 @@ export default function ShariahPage() {
     }
   }
   async function removeRuling(r: ShariahRuling) {
-    if (!window.confirm(`Delete ruling ${r.reference || r.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete ruling ${r.reference || r.title}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteShariahRuling(r.id);
       setShowRulingForm(false);
-      await loadRulings();
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -461,12 +463,21 @@ export default function ShariahPage() {
   function openNewProduct() {
     setEditingProduct(null);
     setPf(BLANK_PRODUCT);
+    setRulingSelLabel("");
+    setError(null);
     setShowProductForm(true);
   }
   function openEditProduct(p: IslamicProduct) {
     setEditingProduct(p);
     setPf(fromProduct(p));
+    setRulingSelLabel("");
+    setError(null);
     setShowProductForm(true);
+    if (p.approving_ruling_id) {
+      apiCall<ShariahRuling>("GET", `/shariah-rulings/${p.approving_ruling_id}`)
+        .then((r) => setRulingSelLabel(rulingLabel(r)))
+        .catch(() => {});
+    }
   }
   async function saveProduct() {
     setError(null);
@@ -476,7 +487,8 @@ export default function ShariahPage() {
       if (editingProduct) await api.updateIslamicProduct(editingProduct.id, payload);
       else await api.createIslamicProduct(payload);
       setShowProductForm(false);
-      await loadProducts();
+      reload();
+      toast(editingProduct ? "Changes saved" : "Product created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save product");
     } finally {
@@ -484,12 +496,13 @@ export default function ShariahPage() {
     }
   }
   async function removeProduct(p: IslamicProduct) {
-    if (!window.confirm(`Delete product ${p.reference || p.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete product ${p.reference || p.name}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteIslamicProduct(p.id);
       setShowProductForm(false);
-      await loadProducts();
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -499,12 +512,21 @@ export default function ShariahPage() {
   function openNewReview() {
     setEditingReview(null);
     setVf(BLANK_REVIEW);
+    setProductSelLabel("");
+    setError(null);
     setShowReviewForm(true);
   }
   function openEditReview(r: ShariahReview) {
     setEditingReview(r);
     setVf(fromReview(r));
+    setProductSelLabel("");
+    setError(null);
     setShowReviewForm(true);
+    if (r.product_id) {
+      apiCall<IslamicProduct>("GET", `/islamic-products/${r.product_id}`)
+        .then((p) => setProductSelLabel(p.name))
+        .catch(() => {});
+    }
   }
   async function saveReview() {
     setError(null);
@@ -514,7 +536,9 @@ export default function ShariahPage() {
       if (editingReview) await api.updateShariahReview(editingReview.id, payload);
       else await api.createShariahReview(payload);
       setShowReviewForm(false);
-      await loadReviews(open?.id);
+      reload();
+      if (openId) loadDetail(openId);
+      toast(editingReview ? "Changes saved" : "Review created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save review");
     } finally {
@@ -522,28 +546,25 @@ export default function ShariahPage() {
     }
   }
   async function removeReview(r: ShariahReview) {
-    if (!window.confirm(`Delete review ${r.reference || r.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete review ${r.reference || r.title}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteShariahReview(r.id);
       setShowReviewForm(false);
-      if (open?.id === r.id) setOpen(null);
-      await loadReviews();
+      if (openId === r.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleRow(r: ShariahReview) {
-    setFd(BLANK_FINDING);
-    setOpen(open?.id === r.id ? null : r);
-  }
 
-  // ------------------------------------------------------------- finding CRUD (inline)
+  // ------------------------------------------------------------- finding CRUD (in drawer)
   async function addFinding() {
-    if (!open) return;
+    if (!detail) return;
     setError(null);
     try {
-      await api.addShariahFinding(open.id, {
+      await api.addShariahFinding(detail.id, {
         title: fd.title,
         description: fd.description,
         severity: fd.severity,
@@ -555,28 +576,33 @@ export default function ShariahPage() {
         status: fd.status,
       });
       setFd(BLANK_FINDING);
-      await refreshOpen(open.id);
+      loadDetail(detail.id);
+      reload();
+      toast("Finding raised");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add finding");
     }
   }
   async function changeFindingStatus(fid: string, status: string) {
-    if (!open) return;
+    if (!detail) return;
     setError(null);
     try {
       await api.updateShariahFinding(fid, { status });
-      await refreshOpen(open.id);
+      loadDetail(detail.id);
+      reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update finding");
     }
   }
   async function removeFinding(fid: string) {
-    if (!open) return;
-    if (!window.confirm("Remove this finding?")) return;
+    if (!detail) return;
+    if (!(await confirmDialog({ title: "Remove this finding?", danger: true }))) return;
     setError(null);
     try {
       await api.deleteShariahFinding(fid);
-      await refreshOpen(open.id);
+      loadDetail(detail.id);
+      reload();
+      toast("Finding removed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to remove finding");
     }
@@ -586,11 +612,13 @@ export default function ShariahPage() {
   function openNewCharity() {
     setEditingCharity(null);
     setCf(BLANK_CHARITY);
+    setError(null);
     setShowCharityForm(true);
   }
   function openEditCharity(c: CharityDisbursement) {
     setEditingCharity(c);
     setCf(fromCharity(c));
+    setError(null);
     setShowCharityForm(true);
   }
   async function saveCharity() {
@@ -601,7 +629,9 @@ export default function ShariahPage() {
       if (editingCharity) await api.updateCharity(editingCharity.id, payload);
       else await api.createCharity(payload);
       setShowCharityForm(false);
-      await loadCharities();
+      reload();
+      loadSummary();
+      toast(editingCharity ? "Changes saved" : "Disbursement recorded");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save disbursement");
     } finally {
@@ -609,28 +639,58 @@ export default function ShariahPage() {
     }
   }
   async function removeCharity(c: CharityDisbursement) {
-    if (!window.confirm(`Delete disbursement ${c.reference || c.description}?`)) return;
+    if (!(await confirmDialog({ title: `Delete disbursement ${c.reference || c.description}?`, danger: true }))) return;
     setError(null);
     try {
       await api.deleteCharity(c.id);
       setShowCharityForm(false);
-      await loadCharities();
+      reload();
+      loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
 
-  const rulingOpts: Option[] = rulings.map((r) => ({
-    value: r.id,
-    label: `${r.reference || "—"} · ${r.title}`,
-  }));
-  const productOpts: Option[] = products.map((p) => ({ value: p.id, label: p.name, sub: p.reference }));
+  // ------------------------------------------------------------- columns
+  const rulingCols: Column<ShariahRuling>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "subject", header: "Subject", sortable: true, render: (r) => <span className="muted">{r.subject || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={RULING_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
+    { key: "approved_by", header: "Approved by", sortable: true, render: (r) => <span className="muted">{r.approved_by || "—"}</span> },
+    { key: "next_review_date", header: "Next review", sortable: true, render: (r) => (r.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.next_review_date || "—"}</span>) },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditRuling(r)}>Edit</button> <button className="btn secondary sm" onClick={() => removeRuling(r)}>Delete</button></div> },
+  ];
+  const productCols: Column<IslamicProduct>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (p) => <span className="ref">{p.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, render: (p) => <span className="cell-title">{p.name}</span> },
+    { key: "shariah_mode", header: "Mode", sortable: true, render: (p) => <Badge tone="info">{cap(p.shariah_mode)}</Badge> },
+    { key: "status", header: "Status", sortable: true, render: (p) => <Badge tone={PRODUCT_STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge> },
+    { key: "owner", header: "Owner", sortable: true, render: (p) => <span className="muted">{p.owner || "—"}</span> },
+    { key: "launch_date", header: "Launch date", sortable: true, render: (p) => <span className="muted">{p.launch_date || "—"}</span> },
+    { key: "actions", header: "", render: (p) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditProduct(p)}>Edit</button> <button className="btn secondary sm" onClick={() => removeProduct(p)}>Delete</button></div> },
+  ];
+  const reviewCols: Column<ShariahReview>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={REVIEW_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
+    { key: "reviewer", header: "Reviewer", sortable: true, render: (r) => <span className="muted">{r.reviewer || "—"}</span> },
+    { key: "findings", header: "Findings", render: (r) => <span className="muted">{r.open_finding_count}/{r.finding_count} open</span> },
+    { key: "snc_income_total", header: "SNC income", render: (r) => <span className="muted">{money(r.snc_income_total)}</span> },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => setOpenId(r.id)}>Manage</button> <button className="btn secondary sm" onClick={() => removeReview(r)}>Delete</button></div> },
+  ];
+  const charityCols: Column<CharityDisbursement>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "description", header: "Description", sortable: true, render: (c) => <span className="cell-title">{c.description}</span> },
+    { key: "amount", header: "Amount", sortable: true, render: (c) => <span className="muted">{money(c.amount)} {c.currency}</span> },
+    { key: "beneficiary", header: "Beneficiary", sortable: true, render: (c) => <span className="muted">{c.beneficiary || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CHARITY_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
+    { key: "disbursement_date", header: "Disbursed", sortable: true, render: (c) => <span className="muted">{c.disbursement_date || "—"}</span> },
+    { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditCharity(c)}>Edit</button> <button className="btn secondary sm" onClick={() => removeCharity(c)}>Delete</button></div> },
+  ];
 
-  const disbursedTotal = charities
-    .filter((c) => c.status === "disbursed")
-    .reduce((s, c) => s + (c.amount || 0), 0);
-
-  // ------------------------------------------------------------- ruling form tabs
+  // ------------------------------------------------------------- ruling form tab
   const rulingGeneral = (
     <>
       <Field label="Title" required help="For example: Permissibility of commodity murabaha for liquidity.">
@@ -672,7 +732,7 @@ export default function ShariahPage() {
     </>
   );
 
-  // ------------------------------------------------------------- product form tabs
+  // ------------------------------------------------------------- product form tab
   const productGeneral = (
     <>
       <Field label="Name" required help="For example: Home Musharakah Finance.">
@@ -695,11 +755,15 @@ export default function ShariahPage() {
         </Field>
       </div>
       <Field label="Approving ruling" help="The Shariah ruling that approves this product structure.">
-        <Select
-          value={pf.approving_ruling_id}
-          onChange={(v) => setP("approving_ruling_id", v)}
-          options={rulingOpts}
-          placeholder="—"
+        <AsyncSelect
+          search={searchRulings}
+          value={pf.approving_ruling_id || null}
+          selectedLabel={rulingSelLabel}
+          onChange={(v, o) => {
+            setP("approving_ruling_id", v || "");
+            setRulingSelLabel(o?.label || "");
+          }}
+          placeholder="Search rulings…"
         />
       </Field>
       <Field label="Description">
@@ -722,7 +786,16 @@ export default function ShariahPage() {
       </Field>
       <div className="field-row">
         <Field label="Product" help="The Islamic product under review, if applicable.">
-          <Select value={vf.product_id} onChange={(v) => setV("product_id", v)} options={productOpts} placeholder="—" />
+          <AsyncSelect
+            search={searchProducts}
+            value={vf.product_id || null}
+            selectedLabel={productSelLabel}
+            onChange={(v, o) => {
+              setV("product_id", v || "");
+              setProductSelLabel(o?.label || "");
+            }}
+            placeholder="Search products…"
+          />
         </Field>
         <Field label="Review type">
           <Select value={vf.review_type} onChange={(v) => setV("review_type", v)} options={REVIEW_TYPE} />
@@ -772,7 +845,7 @@ export default function ShariahPage() {
     </>
   );
 
-  // ------------------------------------------------------------- charity form tabs
+  // ------------------------------------------------------------- charity form tab
   const charityGeneral = (
     <>
       <Field label="Description" required help="What the disbursement is for.">
@@ -855,309 +928,45 @@ export default function ShariahPage() {
 
       {/* ============================================= FATWA REGISTER */}
       {section === "fatwa" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Fatwa Register</h3>
-            <span className="sub">{rulings.length} total · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Title</th>
-                  <th>Subject</th>
-                  <th>Status</th>
-                  <th>Approved by</th>
-                  <th>Next review</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rulings.map((r) => (
-                  <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => openEditRuling(r)}>
-                    <td className="ref">{r.reference || "—"}</td>
-                    <td className="cell-title">{r.title}</td>
-                    <td className="muted">{r.subject || "—"}</td>
-                    <td><Badge tone={RULING_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge></td>
-                    <td className="muted">{r.approved_by || "—"}</td>
-                    <td>
-                      {r.is_review_overdue ? (
-                        <Badge tone="high">Overdue</Badge>
-                      ) : (
-                        <span className="muted">{r.next_review_date || "—"}</span>
-                      )}
-                    </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeRuling(r)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {rulings.length === 0 && (
-                  <tr>
-                    <td colSpan={7}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No rulings</h3>
-                        <p>Record Shariah Board rulings and fatwas to govern your products.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<ShariahRuling>
+          columns={rulingCols}
+          fetcher={fetchRulings}
+          rowKey={(r) => r.id}
+          onRowClick={(r) => openEditRuling(r)}
+          searchPlaceholder="Search rulings by title, subject or reference…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No rulings yet. Record Shariah Board rulings and fatwas to govern your products."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= ISLAMIC PRODUCTS */}
       {section === "products" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Islamic Products</h3>
-            <span className="sub">{products.length} total · click a row to edit</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Name</th>
-                  <th>Mode</th>
-                  <th>Status</th>
-                  <th>Owner</th>
-                  <th>Launch date</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {products.map((p) => (
-                  <tr key={p.id} style={{ cursor: "pointer" }} onClick={() => openEditProduct(p)}>
-                    <td className="ref">{p.reference || "—"}</td>
-                    <td className="cell-title">{p.name}</td>
-                    <td><Badge tone="info">{cap(p.shariah_mode)}</Badge></td>
-                    <td><Badge tone={PRODUCT_STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge></td>
-                    <td className="muted">{p.owner || "—"}</td>
-                    <td className="muted">{p.launch_date || "—"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeProduct(p)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {products.length === 0 && (
-                  <tr>
-                    <td colSpan={7}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No products</h3>
-                        <p>Register Islamic finance products and link them to approving rulings.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<IslamicProduct>
+          columns={productCols}
+          fetcher={fetchProducts}
+          rowKey={(p) => p.id}
+          onRowClick={(p) => openEditProduct(p)}
+          searchPlaceholder="Search products by name, reference or owner…"
+          defaultSort={{ by: "name", dir: "asc" }}
+          emptyMessage="No products yet. Register Islamic finance products and link them to approving rulings."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= SHARIAH REVIEWS */}
       {section === "reviews" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <h3>Shariah Reviews</h3>
-              <span className="sub">{reviews.length} total · click a row to manage SNC findings</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Title</th>
-                    <th>Status</th>
-                    <th>Reviewer</th>
-                    <th>Findings</th>
-                    <th>SNC income</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {reviews.map((r) => (
-                    <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => toggleRow(r)}>
-                      <td className="ref">{r.reference || "—"}</td>
-                      <td className="cell-title">{r.title}</td>
-                      <td><Badge tone={REVIEW_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge></td>
-                      <td className="muted">{r.reviewer || "—"}</td>
-                      <td className="muted">{r.open_finding_count}/{r.finding_count} open</td>
-                      <td className="muted">{money(r.snc_income_total)}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleRow(r)}>
-                            {open?.id === r.id ? "Hide" : "Manage"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => removeReview(r)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {reviews.length === 0 && (
-                    <tr>
-                      <td colSpan={7}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No reviews</h3>
-                          <p>Plan a Shariah review to record non-compliance findings and income to purify.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {open && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{open.reference} — {open.title}</h3>
-                    <span className="sub">
-                      {cap(open.status)} · reviewer {open.reviewer || "unassigned"}
-                      {open.rating ? " · rating " + cap(open.rating) : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-                    <div style={{ textAlign: "right" }}>
-                      <div className="muted" style={{ fontSize: 12 }}>SNC income to purify</div>
-                      <strong style={{ fontSize: 18 }}>{money(open.snc_income_total)}</strong>
-                    </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button className="btn secondary sm" onClick={() => api.pdfShariahReview(open.id, open.reference).catch(() => {})}>Report PDF</button>
-                      <button className="btn secondary sm" onClick={() => openEditReview(open)}>Edit</button>
-                      <button className="btn secondary sm" onClick={() => removeReview(open)}>Delete</button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* --- SNC findings --- */}
-                <div className="card-pad">
-                  <strong>SNC findings</strong>
-                  <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                    Shariah non-compliance issues raised by this review and their remediation status.
-                  </p>
-                  <form
-                    style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                    onSubmit={(ev) => { ev.preventDefault(); addFinding(); }}
-                  >
-                    <div style={{ flex: "1 1 180px" }}>
-                      <label className="label">Title</label>
-                      <input className="input" value={fd.title} onChange={(ev) => setFD("title", ev.target.value)} placeholder="Finding title" required />
-                    </div>
-                    <div style={{ width: 130 }}>
-                      <label className="label">Severity</label>
-                      <select className="select" value={fd.severity} onChange={(ev) => setFD("severity", ev.target.value)}>
-                        {RATING.map((r) => (<option key={r.value} value={r.value}>{r.label}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 160 }}>
-                      <label className="label">SNC income to purify</label>
-                      <input className="input" type="number" value={fd.snc_income_amount} onChange={(ev) => setFD("snc_income_amount", ev.target.value)} placeholder="0.00" />
-                    </div>
-                    <div style={{ flex: "1 1 200px" }}>
-                      <label className="label">Description</label>
-                      <input className="input" value={fd.description} onChange={(ev) => setFD("description", ev.target.value)} placeholder="What is non-compliant" />
-                    </div>
-                    <div style={{ flex: "1 1 180px" }}>
-                      <label className="label">Recommendation</label>
-                      <input className="input" value={fd.recommendation} onChange={(ev) => setFD("recommendation", ev.target.value)} placeholder="Proposed remediation" />
-                    </div>
-                    <div style={{ flex: "1 1 180px" }}>
-                      <label className="label">Management response</label>
-                      <input className="input" value={fd.management_response} onChange={(ev) => setFD("management_response", ev.target.value)} placeholder="Agreed action" />
-                    </div>
-                    <div style={{ width: 140 }}>
-                      <label className="label">Action owner</label>
-                      <input className="input" value={fd.action_owner} onChange={(ev) => setFD("action_owner", ev.target.value)} placeholder="Owner" />
-                    </div>
-                    <div style={{ width: 150 }}>
-                      <label className="label">Due date</label>
-                      <input className="input" type="date" value={fd.due_date} onChange={(ev) => setFD("due_date", ev.target.value)} />
-                    </div>
-                    <div style={{ width: 140 }}>
-                      <label className="label">Status</label>
-                      <select className="select" value={fd.status} onChange={(ev) => setFD("status", ev.target.value)}>
-                        {FINDING_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-                      </select>
-                    </div>
-                    <button className="btn">Add</button>
-                  </form>
-
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Ref</th>
-                          <th>Title</th>
-                          <th>Severity</th>
-                          <th>SNC income</th>
-                          <th>Action owner</th>
-                          <th>Due</th>
-                          <th>Status</th>
-                          <th></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {open.findings.map((fi: ShariahFinding) => (
-                          <tr key={fi.id}>
-                            <td className="ref">{fi.reference || "—"}</td>
-                            <td className="cell-title">{fi.title}</td>
-                            <td><SeverityBadge value={fi.severity} /></td>
-                            <td className="muted">{money(fi.snc_income_amount)}</td>
-                            <td className="muted">{fi.action_owner || "—"}</td>
-                            <td>
-                              {fi.is_overdue ? (
-                                <Badge tone="high">Overdue</Badge>
-                              ) : (
-                                <span className="muted">{fi.due_date || "—"}</span>
-                              )}
-                            </td>
-                            <td>
-                              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                                <Badge tone={FINDING_STATUS_TONE[fi.status] || "neutral"}>{cap(fi.status)}</Badge>
-                                <select
-                                  className="select"
-                                  style={{ width: 140 }}
-                                  value={fi.status}
-                                  onChange={(ev) => changeFindingStatus(fi.id, ev.target.value)}
-                                >
-                                  {FINDING_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-                                </select>
-                              </div>
-                            </td>
-                            <td>
-                              <button className="btn secondary sm" onClick={() => removeFinding(fi.id)}>Remove</button>
-                            </td>
-                          </tr>
-                        ))}
-                        {open.findings.length === 0 && (
-                          <tr><td colSpan={8}><span className="muted">No findings raised yet.</span></td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <RecordPanels model="shariah_review" entityId={open.id} />
-            </>
-          )}
-        </>
+        <DataTable<ShariahReview>
+          columns={reviewCols}
+          fetcher={fetchReviews}
+          rowKey={(r) => r.id}
+          onRowClick={(r) => setOpenId(r.id)}
+          activeKey={openId}
+          searchPlaceholder="Search reviews by title, reviewer or reference…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No reviews yet. Plan a Shariah review to record non-compliance findings and income to purify."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= PURIFICATION LEDGER */}
@@ -1166,63 +975,174 @@ export default function ShariahPage() {
           <div className="grid stat-grid">
             <div className="card stat">
               <div className="stat-top">
-                <span className="n">{money(disbursedTotal)}</span>
+                <span className="n">{disbursedTotal == null ? "…" : money(disbursedTotal)}</span>
               </div>
               <span className="l">Total disbursed</span>
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head">
-              <h3>Purification Ledger</h3>
-              <span className="sub">{charities.length} total · click a row to edit</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Description</th>
-                    <th>Amount</th>
-                    <th>Beneficiary</th>
-                    <th>Status</th>
-                    <th>Disbursed</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {charities.map((c) => (
-                    <tr key={c.id} style={{ cursor: "pointer" }} onClick={() => openEditCharity(c)}>
-                      <td className="ref">{c.reference || "—"}</td>
-                      <td className="cell-title">{c.description}</td>
-                      <td className="muted">{money(c.amount)} {c.currency}</td>
-                      <td className="muted">{c.beneficiary || "—"}</td>
-                      <td><Badge tone={CHARITY_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge></td>
-                      <td className="muted">{c.disbursement_date || "—"}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => removeCharity(c)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {charities.length === 0 && (
-                    <tr>
-                      <td colSpan={7}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No disbursements</h3>
-                          <p>Record purification of Shariah non-compliant income disbursed to charity.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <DataTable<CharityDisbursement>
+            columns={charityCols}
+            fetcher={fetchCharities}
+            rowKey={(c) => c.id}
+            onRowClick={(c) => openEditCharity(c)}
+            searchPlaceholder="Search ledger by description, beneficiary or reference…"
+            defaultSort={{ by: "created_at", dir: "desc" }}
+            emptyMessage="No disbursements yet. Record purification of Shariah non-compliant income disbursed to charity."
+            refreshKey={refreshKey}
+          />
         </>
       )}
+
+      {/* ============================================= REVIEW DRAWER (SNC findings) */}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
+        subtitle={
+          detail
+            ? `${cap(detail.status)} · reviewer ${detail.reviewer || "unassigned"}${detail.rating ? " · rating " + cap(detail.rating) : ""}`
+            : ""
+        }
+        width={900}
+        actions={
+          detail && (
+            <>
+              <button className="btn secondary sm" onClick={() => api.pdfShariahReview(detail.id, detail.reference).catch(() => {})}>Report PDF</button>
+              <button className="btn secondary sm" onClick={() => openEditReview(detail)}>Edit</button>
+              <button className="btn secondary sm" onClick={() => removeReview(detail)}>Delete</button>
+            </>
+          )
+        }
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 16, alignItems: "center", justifyContent: "space-between", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <Badge tone={REVIEW_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+                {detail.rating && <SeverityBadge value={detail.rating} />}
+                <Badge tone="neutral" plain>{detail.open_finding_count}/{detail.finding_count} open</Badge>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div className="muted" style={{ fontSize: 12 }}>SNC income to purify</div>
+                <strong style={{ fontSize: 18 }}>{money(detail.snc_income_total)}</strong>
+              </div>
+            </div>
+
+            {/* --- SNC findings --- */}
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>SNC findings</h3></div>
+              <div className="card-pad">
+                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+                  Shariah non-compliance issues raised by this review and their remediation status.
+                </p>
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(ev) => { ev.preventDefault(); addFinding(); }}
+                >
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Title</label>
+                    <input className="input" value={fd.title} onChange={(ev) => setFD("title", ev.target.value)} placeholder="Finding title" required />
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Severity</label>
+                    <select className="select" value={fd.severity} onChange={(ev) => setFD("severity", ev.target.value)}>
+                      {RATING.map((r) => (<option key={r.value} value={r.value}>{r.label}</option>))}
+                    </select>
+                  </div>
+                  <div style={{ width: 160 }}>
+                    <label className="label">SNC income to purify</label>
+                    <input className="input" type="number" value={fd.snc_income_amount} onChange={(ev) => setFD("snc_income_amount", ev.target.value)} placeholder="0.00" />
+                  </div>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label className="label">Description</label>
+                    <input className="input" value={fd.description} onChange={(ev) => setFD("description", ev.target.value)} placeholder="What is non-compliant" />
+                  </div>
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Recommendation</label>
+                    <input className="input" value={fd.recommendation} onChange={(ev) => setFD("recommendation", ev.target.value)} placeholder="Proposed remediation" />
+                  </div>
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Management response</label>
+                    <input className="input" value={fd.management_response} onChange={(ev) => setFD("management_response", ev.target.value)} placeholder="Agreed action" />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Action owner</label>
+                    <input className="input" value={fd.action_owner} onChange={(ev) => setFD("action_owner", ev.target.value)} placeholder="Owner" />
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label className="label">Due date</label>
+                    <input className="input" type="date" value={fd.due_date} onChange={(ev) => setFD("due_date", ev.target.value)} />
+                  </div>
+                  <div style={{ width: 140 }}>
+                    <label className="label">Status</label>
+                    <select className="select" value={fd.status} onChange={(ev) => setFD("status", ev.target.value)}>
+                      {FINDING_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+                    </select>
+                  </div>
+                  <button className="btn">Add</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Ref</th>
+                        <th>Title</th>
+                        <th>Severity</th>
+                        <th>SNC income</th>
+                        <th>Action owner</th>
+                        <th>Due</th>
+                        <th>Status</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.findings.map((fi: ShariahFinding) => (
+                        <tr key={fi.id}>
+                          <td className="ref">{fi.reference || "—"}</td>
+                          <td className="cell-title">{fi.title}</td>
+                          <td><SeverityBadge value={fi.severity} /></td>
+                          <td className="muted">{money(fi.snc_income_amount)}</td>
+                          <td className="muted">{fi.action_owner || "—"}</td>
+                          <td>
+                            {fi.is_overdue ? (
+                              <Badge tone="high">Overdue</Badge>
+                            ) : (
+                              <span className="muted">{fi.due_date || "—"}</span>
+                            )}
+                          </td>
+                          <td>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <Badge tone={FINDING_STATUS_TONE[fi.status] || "neutral"}>{cap(fi.status)}</Badge>
+                              <select
+                                className="select"
+                                style={{ width: 140 }}
+                                value={fi.status}
+                                onChange={(ev) => changeFindingStatus(fi.id, ev.target.value)}
+                              >
+                                {FINDING_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+                              </select>
+                            </div>
+                          </td>
+                          <td>
+                            <button className="btn secondary sm" onClick={() => removeFinding(fi.id)}>Remove</button>
+                          </td>
+                        </tr>
+                      ))}
+                      {detail.findings.length === 0 && (
+                        <tr><td colSpan={8}><span className="muted">No findings raised yet.</span></td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="shariah_review" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showRulingForm && (
@@ -1332,5 +1252,13 @@ export default function ShariahPage() {
         />
       )}
     </>
+  );
+}
+
+export default function ShariahPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ShariahInner />
+    </Suspense>
   );
 }

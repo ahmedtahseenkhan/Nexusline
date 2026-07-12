@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiCall, type Page } from "@/lib/api";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus, IconUsers } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ local types
 interface MeetingDecision {
@@ -105,12 +110,6 @@ const MEETING_STATUS_TONE: Record<string, Tone> = {
   held: "low",
   minuted: "low",
   cancelled: "neutral",
-};
-const DECISION_STATUS_TONE: Record<string, Tone> = {
-  open: "high",
-  in_progress: "info",
-  done: "low",
-  deferred: "medium",
 };
 const DECISION_TYPE_TONE: Record<string, Tone> = {
   decision: "info",
@@ -240,24 +239,28 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "tracker", label: "Action Tracker" },
 ];
 
-export default function GovernancePage() {
+// ================================================================ page ===== */
+function GovernanceInner() {
   const [section, setSection] = useState<SectionId>("committees");
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const [committees, setCommittees] = useState<Committee[]>([]);
-  const [tracker, setTracker] = useState<DecisionTrackerRow[]>([]);
   const [summary, setSummary] = useState<GovernanceSummary | null>(null);
   const [trackerFilter, setTrackerFilter] = useState<string>("");
   const [trackerOverdue, setTrackerOverdue] = useState(false);
 
-  // ---- committee dialog + expanded detail ----
+  // ---- committee drawer (expanded detail) ----
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<Committee | null>(null);
+
+  // ---- committee dialog ----
   const [editingCommittee, setEditingCommittee] = useState<Committee | null>(null);
   const [showCommitteeForm, setShowCommitteeForm] = useState(false);
   const [savingCommittee, setSavingCommittee] = useState(false);
   const [cf, setCf] = useState<CommitteeForm>(BLANK_COMMITTEE);
   const setC = <K extends keyof CommitteeForm>(k: K, v: CommitteeForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
-  const [openCommittee, setOpenCommittee] = useState<Committee | null>(null);
+  // ---- inside-drawer meeting + decision drafts ----
   const [openMeetingId, setOpenMeetingId] = useState<string | null>(null);
   const [meetingDraft, setMeetingDraft] = useState<MeetingDraft>(BLANK_MEETING_DRAFT);
   const setMD = <K extends keyof MeetingDraft>(k: K, v: MeetingDraft[K]) => setMeetingDraft((p) => ({ ...p, [k]: v }));
@@ -271,58 +274,50 @@ export default function GovernancePage() {
   const [mf, setMf] = useState<MeetingForm>(BLANK_MEETING);
   const setM = <K extends keyof MeetingForm>(k: K, v: MeetingForm[K]) => setMf((p) => ({ ...p, [k]: v }));
 
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+
   // ------------------------------------------------------------- loaders
-  async function loadCommittees(keepOpen?: string) {
-    try {
-      const res = await apiCall<Page<Committee>>("GET", "/governance?limit=200");
-      setCommittees(res.items);
-      if (keepOpen) setOpenCommittee(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load committees");
-    }
-  }
-  async function refreshCommittee(id: string) {
-    const c = await apiCall<Committee>("GET", `/governance/${id}`);
-    setOpenCommittee(c);
-    setCommittees((prev) => prev.map((x) => (x.id === id ? c : x)));
-  }
-  async function loadTracker() {
-    try {
-      const qs = new URLSearchParams();
-      if (trackerFilter) qs.set("status", trackerFilter);
-      if (trackerOverdue) qs.set("overdue", "true");
-      const q = qs.toString();
-      setTracker(await apiCall<DecisionTrackerRow[]>("GET", `/meeting-decisions${q ? `?${q}` : ""}`));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load action tracker");
-    }
-  }
-  async function loadSummary() {
-    try {
-      setSummary(await apiCall<GovernanceSummary>("GET", "/governance-summary"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load governance summary");
-    }
-  }
+  const fetchCommittees = useCallback(
+    (qs: string) => apiCall<PagedList<Committee>>("GET", `/governance?${qs}`),
+    [],
+  );
+  const fetchTracker = useCallback(
+    (qs: string) => apiCall<PagedList<DecisionTrackerRow>>("GET", `/meeting-decisions?${qs}`),
+    [],
+  );
+  const loadDetail = useCallback((id: string) => {
+    apiCall<Committee>("GET", `/governance/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  const loadSummary = useCallback(() => {
+    apiCall<GovernanceSummary>("GET", "/governance-summary")
+      .then(setSummary)
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load governance summary"));
+  }, []);
 
   useEffect(() => {
-    loadCommittees();
-    loadSummary();
-  }, []);
+    if (openId) loadDetail(openId);
+    else {
+      setDetail(null);
+      setOpenMeetingId(null);
+      setMeetingDraft(BLANK_MEETING_DRAFT);
+      setDecisionDraft(BLANK_DECISION_DRAFT);
+    }
+  }, [openId, loadDetail]);
   useEffect(() => {
-    if (section === "tracker") loadTracker();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [section, trackerFilter, trackerOverdue]);
+    loadSummary();
+  }, [loadSummary]);
 
   // ------------------------------------------------------------- committee CRUD
   function openNewCommittee() {
     setEditingCommittee(null);
     setCf(BLANK_COMMITTEE);
+    setError(null);
     setShowCommitteeForm(true);
   }
   function openEditCommittee(c: Committee) {
     setEditingCommittee(c);
     setCf(fromCommittee(c));
+    setError(null);
     setShowCommitteeForm(true);
   }
   async function saveCommittee() {
@@ -333,8 +328,10 @@ export default function GovernancePage() {
       if (editingCommittee) await apiCall<Committee>("PATCH", `/governance/${editingCommittee.id}`, payload);
       else await apiCall<Committee>("POST", "/governance", payload);
       setShowCommitteeForm(false);
-      await loadCommittees(openCommittee?.id);
-      await loadSummary();
+      reload();
+      if (openId) loadDetail(openId);
+      loadSummary();
+      toast(editingCommittee ? "Changes saved" : "Committee created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save committee");
     } finally {
@@ -342,39 +339,36 @@ export default function GovernancePage() {
     }
   }
   async function removeCommittee(c: Committee) {
-    if (!window.confirm(`Delete committee ${c.reference || c.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete committee ${c.reference || c.name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/governance/${c.id}`);
       setShowCommitteeForm(false);
-      if (openCommittee?.id === c.id) setOpenCommittee(null);
-      await loadCommittees();
-      await loadSummary();
+      if (openId === c.id) setOpenId(null);
+      reload();
+      loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleCommittee(c: Committee) {
-    setMeetingDraft(BLANK_MEETING_DRAFT);
-    setDecisionDraft(BLANK_DECISION_DRAFT);
-    setOpenMeetingId(null);
-    setOpenCommittee(openCommittee?.id === c.id ? null : c);
-  }
 
   // ------------------------------------------------------------- meeting CRUD (inline add + modal edit)
   async function addMeeting() {
-    if (!openCommittee) return;
+    if (!openId) return;
     setError(null);
     try {
-      await apiCall<Committee>("POST", `/governance/${openCommittee.id}/meetings`, {
+      await apiCall<Committee>("POST", `/governance/${openId}/meetings`, {
         title: meetingDraft.title,
         meeting_date: meetingDraft.meeting_date || null,
         location: meetingDraft.location,
         status: meetingDraft.status,
       });
       setMeetingDraft(BLANK_MEETING_DRAFT);
-      await refreshCommittee(openCommittee.id);
-      await loadSummary();
+      loadDetail(openId);
+      reload();
+      loadSummary();
+      toast("Meeting scheduled");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to schedule meeting");
     }
@@ -382,6 +376,7 @@ export default function GovernancePage() {
   function openEditMeeting(m: Meeting) {
     setEditingMeeting(m);
     setMf(fromMeeting(m));
+    setError(null);
     setShowMeetingForm(true);
   }
   async function saveMeeting() {
@@ -391,8 +386,9 @@ export default function GovernancePage() {
     try {
       await apiCall<Meeting>("PATCH", `/governance-meetings/${editingMeeting.id}`, meetingPayload(mf));
       setShowMeetingForm(false);
-      if (openCommittee) await refreshCommittee(openCommittee.id);
-      await loadSummary();
+      if (openId) loadDetail(openId);
+      loadSummary();
+      toast("Changes saved");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save meeting");
     } finally {
@@ -400,13 +396,15 @@ export default function GovernancePage() {
     }
   }
   async function removeMeeting(m: Meeting) {
-    if (!window.confirm(`Delete meeting ${m.reference || m.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete meeting ${m.reference || m.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/governance-meetings/${m.id}`);
       if (openMeetingId === m.id) setOpenMeetingId(null);
-      if (openCommittee) await refreshCommittee(openCommittee.id);
-      await loadSummary();
+      if (openId) loadDetail(openId);
+      reload();
+      loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete meeting");
     }
@@ -428,8 +426,9 @@ export default function GovernancePage() {
         status: decisionDraft.status,
       });
       setDecisionDraft(BLANK_DECISION_DRAFT);
-      if (openCommittee) await refreshCommittee(openCommittee.id);
-      await loadSummary();
+      if (openId) loadDetail(openId);
+      loadSummary();
+      toast("Item added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add decision / action");
     }
@@ -438,21 +437,22 @@ export default function GovernancePage() {
     setError(null);
     try {
       await apiCall<MeetingDecision>("PATCH", `/meeting-decisions/${d.id}`, { status: statusValue });
-      if (fromTracker) await loadTracker();
-      else if (openCommittee) await refreshCommittee(openCommittee.id);
-      await loadSummary();
+      if (fromTracker) reload();
+      else if (openId) loadDetail(openId);
+      loadSummary();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update decision");
     }
   }
   async function removeDecision(d: MeetingDecision, fromTracker = false) {
-    if (!window.confirm(`Remove ${d.reference || "this item"}?`)) return;
+    if (!(await confirmDialog({ title: `Remove ${d.reference || "this item"}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/meeting-decisions/${d.id}`);
-      if (fromTracker) await loadTracker();
-      else if (openCommittee) await refreshCommittee(openCommittee.id);
-      await loadSummary();
+      if (fromTracker) reload();
+      else if (openId) loadDetail(openId);
+      loadSummary();
+      toast("Removed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to remove item");
     }
@@ -537,6 +537,40 @@ export default function GovernancePage() {
     </>
   );
 
+  // ------------------------------------------------------------- columns
+  const committeeColumns: Column<Committee>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, render: (c) => <span className="cell-title">{c.name}</span> },
+    { key: "committee_type", header: "Type", sortable: true, render: (c) => <Badge tone="info">{cap(c.committee_type)}</Badge> },
+    { key: "chairperson", header: "Chairperson", sortable: true, render: (c) => <span className="muted">{c.chairperson || "—"}</span> },
+    { key: "meeting_frequency", header: "Frequency", render: (c) => <span className="muted">{cap(c.meeting_frequency)}</span> },
+    { key: "meeting_count", header: "Meetings", align: "center", render: (c) => <span className="muted">{c.meeting_count}</span> },
+    { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={COMMITTEE_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
+    { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditCommittee(c)}>Edit</button> <button className="btn secondary sm" onClick={() => removeCommittee(c)}>Delete</button></div> },
+  ];
+
+  const trackerColumns: Column<DecisionTrackerRow>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (d) => <span className="ref">{d.reference || "—"}</span> },
+    { key: "description", header: "Description", sortable: true, render: (d) => <span className="cell-title">{d.description}</span> },
+    { key: "decision_type", header: "Type", sortable: true, render: (d) => <Badge tone={DECISION_TYPE_TONE[d.decision_type] || "neutral"}>{cap(d.decision_type)}</Badge> },
+    { key: "committee", header: "Committee", sortable: true, render: (d) => <span className="muted">{d.committee_name || "—"}</span> },
+    { key: "meeting", header: "Meeting", sortable: true, render: (d) => <span className="muted">{d.meeting_title || "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (d) => <span className="muted">{d.owner || "—"}</span> },
+    { key: "due_date", header: "Due", sortable: true, render: (d) => (d.is_overdue ? <Badge tone="critical">Overdue · {d.due_date}</Badge> : <span className="muted">{d.due_date || "—"}</span>) },
+    {
+      key: "status",
+      header: "Status",
+      render: (d) => (
+        <div onClick={(e) => e.stopPropagation()}>
+          <select className="select" style={{ minWidth: 130 }} value={d.status} onChange={(e) => setDecisionStatus(d, e.target.value, true)}>
+            {DECISION_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+          </select>
+        </div>
+      ),
+    },
+    { key: "actions", header: "", render: (d) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeDecision(d, true)}>Remove</button></div> },
+  ];
+
   // ------------------------------------------------------------- render
   return (
     <>
@@ -590,165 +624,31 @@ export default function GovernancePage() {
 
       {/* ============================================= COMMITTEES & MEETINGS */}
       {section === "committees" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <h3>Committees</h3>
-              <span className="sub">{committees.length} total · click a row to manage meetings</span>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Name</th>
-                    <th>Type</th>
-                    <th>Chairperson</th>
-                    <th>Frequency</th>
-                    <th>Meetings</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {committees.map((c) => (
-                    <tr key={c.id} style={{ cursor: "pointer" }} onClick={() => toggleCommittee(c)}>
-                      <td className="ref">{c.reference || "—"}</td>
-                      <td className="cell-title">{c.name}</td>
-                      <td><Badge tone="info">{cap(c.committee_type)}</Badge></td>
-                      <td className="muted">{c.chairperson || "—"}</td>
-                      <td className="muted">{cap(c.meeting_frequency)}</td>
-                      <td className="muted">{c.meeting_count}</td>
-                      <td><Badge tone={COMMITTEE_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge></td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleCommittee(c)}>
-                            {openCommittee?.id === c.id ? "Hide" : "Manage"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => openEditCommittee(c)}>Edit</button>
-                          <button className="btn secondary sm" onClick={() => removeCommittee(c)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {committees.length === 0 && (
-                    <tr>
-                      <td colSpan={8}>
-                        <div className="empty">
-                          <span className="ico"><IconUsers width={24} height={24} /></span>
-                          <h3>No committees</h3>
-                          <p>Constitute board and management committees with their charters, membership and meeting cadence.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openCommittee && (
-            <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openCommittee.reference} — {openCommittee.name}</h3>
-                    <span className="sub">
-                      {cap(openCommittee.committee_type)} · {cap(openCommittee.status)}
-                      {openCommittee.chairperson ? " · chair " + openCommittee.chairperson : ""}
-                      {openCommittee.secretary ? " · secretary " + openCommittee.secretary : ""}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button className="btn secondary sm" onClick={() => openEditCommittee(openCommittee)}>Edit</button>
-                    <button className="btn secondary sm" onClick={() => removeCommittee(openCommittee)}>Delete</button>
-                  </div>
-                </div>
-
-                <div className="card-pad">
-                  <strong>Meetings</strong>
-                  <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                    Schedule a sitting, then expand it to record agenda, minutes and its decisions / actions.
-                  </p>
-                  <form
-                    style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                    onSubmit={(ev) => { ev.preventDefault(); addMeeting(); }}
-                  >
-                    <div style={{ flex: "1 1 220px" }}>
-                      <label className="label">Title</label>
-                      <input className="input" value={meetingDraft.title} onChange={(ev) => setMD("title", ev.target.value)} placeholder="Meeting title" required />
-                    </div>
-                    <div style={{ width: 160 }}>
-                      <label className="label">Date</label>
-                      <input className="input" type="date" value={meetingDraft.meeting_date} onChange={(ev) => setMD("meeting_date", ev.target.value)} />
-                    </div>
-                    <div style={{ width: 180 }}>
-                      <label className="label">Location</label>
-                      <input className="input" value={meetingDraft.location} onChange={(ev) => setMD("location", ev.target.value)} placeholder="Boardroom / video" />
-                    </div>
-                    <div style={{ width: 150 }}>
-                      <label className="label">Status</label>
-                      <select className="select" value={meetingDraft.status} onChange={(ev) => setMD("status", ev.target.value)}>
-                        {MEETING_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                      </select>
-                    </div>
-                    <button className="btn">Add</button>
-                  </form>
-
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Ref</th>
-                          <th>Title</th>
-                          <th>Date</th>
-                          <th>Location</th>
-                          <th>Quorum</th>
-                          <th>Items</th>
-                          <th>Status</th>
-                          <th></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {openCommittee.meetings.map((m) => (
-                          <MeetingRows
-                            key={m.id}
-                            meeting={m}
-                            open={openMeetingId === m.id}
-                            onToggle={() => toggleMeeting(m)}
-                            onEdit={() => openEditMeeting(m)}
-                            onDelete={() => removeMeeting(m)}
-                            decisionDraft={decisionDraft}
-                            setDD={setDD}
-                            onAddDecision={() => addDecision(m.id)}
-                            onDecisionStatus={(d, s) => setDecisionStatus(d, s)}
-                            onRemoveDecision={(d) => removeDecision(d)}
-                          />
-                        ))}
-                        {openCommittee.meetings.length === 0 && (
-                          <tr><td colSpan={8}><span className="muted">No meetings recorded yet.</span></td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <RecordPanels model="committee" entityId={openCommittee.id} />
-            </>
-          )}
-        </>
+        <DataTable<Committee>
+          columns={committeeColumns}
+          fetcher={fetchCommittees}
+          rowKey={(c) => c.id}
+          onRowClick={(c) => setOpenId(c.id)}
+          activeKey={openId}
+          searchPlaceholder="Search committees by name, chairperson or reference…"
+          defaultSort={{ by: "name", dir: "asc" }}
+          emptyMessage="No committees yet. Constitute board and management committees with their charters, membership and meeting cadence."
+          refreshKey={refreshKey}
+        />
       )}
 
       {/* ============================================= ACTION TRACKER */}
       {section === "tracker" && (
-        <div className="card">
-          <div className="card-head row-between">
-            <div>
-              <h3>Decision &amp; Action Tracker</h3>
-              <span className="sub">{tracker.length} items across all committees</span>
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <DataTable<DecisionTrackerRow>
+          columns={trackerColumns}
+          fetcher={fetchTracker}
+          rowKey={(d) => d.id}
+          searchPlaceholder="Search actions by description, owner, committee or meeting…"
+          filters={{ status: trackerFilter || undefined, overdue: trackerOverdue || undefined }}
+          emptyMessage="No decisions or actions. Log decisions, actions and resolutions against committee meetings — they roll up here for enterprise-wide follow-up."
+          refreshKey={refreshKey}
+          toolbarRight={
+            <>
               <select className="select" style={{ width: 170 }} value={trackerFilter} onChange={(e) => setTrackerFilter(e.target.value)}>
                 <option value="">All statuses</option>
                 {DECISION_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
@@ -758,72 +658,107 @@ export default function GovernancePage() {
                 <span className="track" />
                 <span className="txt">Overdue only</span>
               </label>
-            </div>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Description</th>
-                  <th>Type</th>
-                  <th>Committee</th>
-                  <th>Meeting</th>
-                  <th>Owner</th>
-                  <th>Due</th>
-                  <th>Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {tracker.map((d) => (
-                  <tr key={d.id} style={d.is_overdue ? { background: "var(--danger-bg, rgba(192,57,43,0.06))" } : undefined}>
-                    <td className="ref">{d.reference || "—"}</td>
-                    <td className="cell-title">{d.description}</td>
-                    <td><Badge tone={DECISION_TYPE_TONE[d.decision_type] || "neutral"}>{cap(d.decision_type)}</Badge></td>
-                    <td className="muted">{d.committee_name || "—"}</td>
-                    <td className="muted">{d.meeting_title || "—"}</td>
-                    <td className="muted">{d.owner || "—"}</td>
-                    <td>
-                      {d.is_overdue ? (
-                        <Badge tone="critical">Overdue · {d.due_date}</Badge>
-                      ) : (
-                        <span className="muted">{d.due_date || "—"}</span>
-                      )}
-                    </td>
-                    <td onClick={(e) => e.stopPropagation()}>
-                      <select
-                        className="select"
-                        style={{ minWidth: 130 }}
-                        value={d.status}
-                        onChange={(e) => setDecisionStatus(d, e.target.value, true)}
-                      >
-                        {DECISION_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                      </select>
-                    </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removeDecision(d, true)}>Remove</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {tracker.length === 0 && (
-                  <tr>
-                    <td colSpan={9}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No decisions or actions</h3>
-                        <p>Log decisions, actions and resolutions against committee meetings — they roll up here for enterprise-wide follow-up.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+            </>
+          }
+        />
       )}
+
+      {/* ============================================= COMMITTEE DRAWER */}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference || ""}${detail.reference ? " — " : ""}${detail.name}` : "…"}
+        subtitle={
+          detail
+            ? `${cap(detail.committee_type)} · ${cap(detail.status)}` +
+              (detail.chairperson ? ` · chair ${detail.chairperson}` : "") +
+              (detail.secretary ? ` · secretary ${detail.secretary}` : "")
+            : ""
+        }
+        width={760}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditCommittee(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeCommittee(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="card-pad">
+                <strong>Meetings</strong>
+                <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
+                  Schedule a sitting, then expand it to record agenda, minutes and its decisions / actions.
+                </p>
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(ev) => { ev.preventDefault(); addMeeting(); }}
+                >
+                  <div style={{ flex: "1 1 220px" }}>
+                    <label className="label">Title</label>
+                    <input className="input" value={meetingDraft.title} onChange={(ev) => setMD("title", ev.target.value)} placeholder="Meeting title" required />
+                  </div>
+                  <div style={{ width: 160 }}>
+                    <label className="label">Date</label>
+                    <input className="input" type="date" value={meetingDraft.meeting_date} onChange={(ev) => setMD("meeting_date", ev.target.value)} />
+                  </div>
+                  <div style={{ width: 180 }}>
+                    <label className="label">Location</label>
+                    <input className="input" value={meetingDraft.location} onChange={(ev) => setMD("location", ev.target.value)} placeholder="Boardroom / video" />
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label className="label">Status</label>
+                    <select className="select" value={meetingDraft.status} onChange={(ev) => setMD("status", ev.target.value)}>
+                      {MEETING_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+                    </select>
+                  </div>
+                  <button className="btn">Add</button>
+                </form>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Ref</th>
+                        <th>Title</th>
+                        <th>Date</th>
+                        <th>Location</th>
+                        <th>Quorum</th>
+                        <th>Items</th>
+                        <th>Status</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.meetings.map((m) => (
+                        <MeetingRows
+                          key={m.id}
+                          meeting={m}
+                          open={openMeetingId === m.id}
+                          onToggle={() => toggleMeeting(m)}
+                          onEdit={() => openEditMeeting(m)}
+                          onDelete={() => removeMeeting(m)}
+                          decisionDraft={decisionDraft}
+                          setDD={setDD}
+                          onAddDecision={() => addDecision(m.id)}
+                          onDecisionStatus={(d, s) => setDecisionStatus(d, s)}
+                          onRemoveDecision={(d) => removeDecision(d)}
+                        />
+                      ))}
+                      {detail.meetings.length === 0 && (
+                        <tr><td colSpan={8}><span className="muted">No meetings recorded yet.</span></td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="committee" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showCommitteeForm && (
@@ -870,6 +805,14 @@ export default function GovernancePage() {
         />
       )}
     </>
+  );
+}
+
+export default function GovernancePage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <GovernanceInner />
+    </Suspense>
   );
 }
 

@@ -5,11 +5,13 @@ import uuid
 from typing import Annotated, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, and_, func, not_, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.asset import Asset
+from app.models.enums import DpiaStatus
 from app.models.organization import Process
 from app.models.policy import Policy
 from app.models.privacy import ProcessingActivity
@@ -74,22 +76,71 @@ async def _next_ref(db) -> str:
     return await next_reference(db, ProcessingActivity, "ROPA")
 
 
+_ROPA_SORTABLE = {
+    "reference": ProcessingActivity.reference,
+    "name": ProcessingActivity.name,
+    "status": ProcessingActivity.status,
+    "lawful_basis": ProcessingActivity.lawful_basis,
+    "created_at": ProcessingActivity.created_at,
+}
+
+
+def _transfer_gap_clause():
+    """A transfer gap = cross-border transfer with no documented safeguard. Mirrors the
+    ``ProcessingActivity.has_transfer_gap`` property, but as a SQL predicate so the filter
+    runs in the database (the previous implementation filtered AFTER pagination, which
+    silently dropped rows and produced a wrong ``total``)."""
+    return and_(
+        ProcessingActivity.cross_border_transfer.is_(True),
+        or_(
+            ProcessingActivity.transfer_safeguard.is_(None),
+            func.trim(ProcessingActivity.transfer_safeguard) == "",
+        ),
+    )
+
+
+def _dpia_outstanding_clause():
+    """DPIA required but not yet completed — mirrors ``dpia_outstanding``."""
+    return and_(
+        ProcessingActivity.dpia_required.is_(True),
+        ProcessingActivity.dpia_status != DpiaStatus.completed,
+    )
+
+
 @router.get("", response_model=Page[RopaRead], dependencies=[Depends(require("privacy:read"))])
 async def list_ropa(
     db: DbSession,
+    search: str | None = None,
     transfer_gap: Annotated[bool | None, Query()] = None,
+    dpia_outstanding: Annotated[bool | None, Query()] = None,
+    special_category: Annotated[bool | None, Query()] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[RopaRead]:
     stmt: Select = select(ProcessingActivity).where(ProcessingActivity.deleted.is_(False))
-    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        await db.scalars(stmt.order_by(ProcessingActivity.name).limit(limit).offset(offset))
-    ).all()
-    items = [RopaRead.model_validate(r) for r in rows]
+    if search:
+        stmt = stmt.where(
+            ProcessingActivity.name.ilike(f"%{search}%")
+            | ProcessingActivity.reference.ilike(f"%{search}%")
+        )
     if transfer_gap is not None:
-        items = [i for i in items if i.has_transfer_gap == transfer_gap]
-    return Page(items=items, total=total, limit=limit, offset=offset)
+        clause = _transfer_gap_clause()
+        stmt = stmt.where(clause if transfer_gap else not_(clause))
+    if dpia_outstanding is not None:
+        clause = _dpia_outstanding_clause()
+        stmt = stmt.where(clause if dpia_outstanding else not_(clause))
+    if special_category is not None:
+        stmt = stmt.where(ProcessingActivity.special_category.is_(special_category))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _ROPA_SORTABLE, default=ProcessingActivity.name)
+    else:
+        stmt = stmt.order_by(ProcessingActivity.name)
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    return Page(items=[RopaRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=RopaRead, status_code=201, dependencies=[Depends(require("privacy:write"))])

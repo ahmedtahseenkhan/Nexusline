@@ -1,26 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RecordPanels from "@/components/RecordPanels";
 import RichText from "@/components/RichText";
-import {
-  Field,
-  TextInput,
-  TextArea,
-  Select,
-  MultiSelect,
-  NumberInput,
-  type Option,
-} from "@/components/fields";
+import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, ComplianceBadge } from "@/components/badges";
 import { IconCompliance, IconPlus, IconCheck } from "@/components/icons";
 
 /* ------------------------------------------------------------------ types */
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 type Framework = {
   id: string;
   name: string;
@@ -111,11 +108,6 @@ type GapAnalysis = {
   gaps: GapItem[];
 };
 
-type ControlOpt = { id: string; name: string; reference: string };
-type RiskOpt = { id: string; title: string; reference: string };
-type PolicyOpt = { id: string; title: string; reference: string };
-type LegalOpt = { id: string; name: string; reference: string };
-
 /* ------------------------------------------------------------------ helpers */
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
@@ -137,6 +129,12 @@ const SEVERITY_TONE: Record<string, "low" | "medium" | "high" | "critical"> = {
   high: "high",
   critical: "critical",
 };
+
+const enc = encodeURIComponent;
+const ctrlToOpt = (c: Ref): AsyncOption => ({ value: c.id, label: c.name || c.reference || c.id, sub: c.reference });
+const riskToOpt = (r: Ref): AsyncOption => ({ value: r.id, label: r.title || r.reference || r.id, sub: r.reference });
+const policyToOpt = (p: Ref): AsyncOption => ({ value: p.id, label: p.title || p.reference || p.id, sub: p.reference });
+const legalToOpt = (l: Ref): AsyncOption => ({ value: l.id, label: l.name || l.reference || l.id, sub: l.reference });
 
 /* ------------------------------------------------------------------ framework form */
 type FwState = {
@@ -184,10 +182,10 @@ type ReqState = {
   efficacy: number | "";
   implementation: string;
   audit_questionnaire: string;
-  legal_id: string;
-  control_ids: string[];
-  risk_ids: string[];
-  policy_ids: string[];
+  legal: AsyncOption | null;
+  control_ids: AsyncOption[];
+  risk_ids: AsyncOption[];
+  policy_ids: AsyncOption[];
 };
 
 const REQ_BLANK: ReqState = {
@@ -202,7 +200,7 @@ const REQ_BLANK: ReqState = {
   efficacy: "",
   implementation: "",
   audit_questionnaire: "",
-  legal_id: "",
+  legal: null,
   control_ids: [],
   risk_ids: [],
   policy_ids: [],
@@ -221,10 +219,10 @@ function fromRequirement(r: Requirement): ReqState {
     efficacy: r.efficacy ?? "",
     implementation: r.implementation || "",
     audit_questionnaire: r.audit_questionnaire || "",
-    legal_id: r.legal_id || "",
-    control_ids: r.controls.map((c) => c.id),
-    risk_ids: r.risks.map((c) => c.id),
-    policy_ids: r.policies.map((c) => c.id),
+    legal: r.legal ? legalToOpt(r.legal) : null,
+    control_ids: r.controls.map(ctrlToOpt),
+    risk_ids: r.risks.map(riskToOpt),
+    policy_ids: r.policies.map(policyToOpt),
   };
 }
 
@@ -241,10 +239,10 @@ function reqPayload(s: ReqState) {
     efficacy: s.efficacy === "" ? null : s.efficacy,
     implementation: s.implementation,
     audit_questionnaire: s.audit_questionnaire,
-    legal_id: s.legal_id || null,
-    control_ids: s.control_ids,
-    risk_ids: s.risk_ids,
-    policy_ids: s.policy_ids,
+    legal_id: s.legal?.value || null,
+    control_ids: s.control_ids.map((o) => o.value),
+    risk_ids: s.risk_ids.map((o) => o.value),
+    policy_ids: s.policy_ids.map((o) => o.value),
   };
 }
 
@@ -265,22 +263,18 @@ const FINDING_BLANK: FindingState = {
 };
 
 /* ================================================================== page */
-export default function CompliancePage() {
+function ComplianceInner() {
+  const [openId, setOpenId] = useRecordParam("id"); // open requirement id (deep-linkable)
   const [frameworks, setFrameworks] = useState<Framework[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [requirements, setRequirements] = useState<Requirement[]>([]);
   const [gap, setGap] = useState<GapAnalysis | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const [openReq, setOpenReq] = useState<Requirement | null>(null);
+  // requirement detail (drawer)
+  const [detail, setDetail] = useState<Requirement | null>(null);
   const [crosswalks, setCrosswalks] = useState<CrosswalkItem[]>([]);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
-
-  // option sources
-  const [controls, setControls] = useState<ControlOpt[]>([]);
-  const [risks, setRisks] = useState<RiskOpt[]>([]);
-  const [policies, setPolicies] = useState<PolicyOpt[]>([]);
-  const [legals, setLegals] = useState<LegalOpt[]>([]);
 
   // framework modal
   const [showFw, setShowFw] = useState(false);
@@ -293,6 +287,111 @@ export default function CompliancePage() {
   const [showLib, setShowLib] = useState(false);
   const [templates, setTemplates] = useState<FwTemplate[]>([]);
   const [loadingTpl, setLoadingTpl] = useState<string | null>(null);
+
+  // requirement modal
+  const [showReq, setShowReq] = useState(false);
+  const [editingReq, setEditingReq] = useState<Requirement | null>(null);
+  const [rq, setRq] = useState<ReqState>(REQ_BLANK);
+  const [savingReq, setSavingReq] = useState(false);
+  const [crosswalkSel, setCrosswalkSel] = useState<AsyncOption[]>([]);
+
+  // finding modal
+  const [showFinding, setShowFinding] = useState(false);
+  const [findingReq, setFindingReq] = useState<Requirement | null>(null);
+  const [fd, setFd] = useState<FindingState>(FINDING_BLANK);
+  const [savingFinding, setSavingFinding] = useState(false);
+
+  const setF = <K extends keyof FwState>(k: K, v: FwState[K]) => setFw((p) => ({ ...p, [k]: v }));
+  const setR = <K extends keyof ReqState>(k: K, v: ReqState[K]) => setRq((p) => ({ ...p, [k]: v }));
+  const setFi = <K extends keyof FindingState>(k: K, v: FindingState[K]) => setFd((p) => ({ ...p, [k]: v }));
+
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  /* ---------------------------------------------------------------- loaders */
+  const loadFrameworks = useCallback(async (selectId?: string) => {
+    const fwPage = await apiCall<PagedList<Framework>>("GET", "/frameworks?limit=200&sort_by=name&sort_dir=asc");
+    setFrameworks(fwPage.items);
+    setSelected((cur) => {
+      if (selectId) return selectId;
+      if (cur && fwPage.items.some((f) => f.id === cur)) return cur;
+      return fwPage.items[0]?.id ?? null;
+    });
+    return fwPage.items;
+  }, []);
+
+  // server typeahead pickers
+  const searchControls = (q: string) =>
+    apiCall<PagedList<{ id: string; name: string; reference: string }>>("GET", `/controls?search=${enc(q)}&limit=20`).then((r) =>
+      r.items.map((c) => ({ value: c.id, label: c.name, sub: c.reference })),
+    );
+  const searchRisks = (q: string) =>
+    apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${enc(q)}&limit=20`).then((r) =>
+      r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })),
+    );
+  const searchPolicies = (q: string) =>
+    apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/policies?search=${enc(q)}&limit=20`).then((r) =>
+      r.items.map((p) => ({ value: p.id, label: p.title, sub: p.reference })),
+    );
+  const searchLegals = (q: string) =>
+    apiCall<PagedList<{ id: string; name: string; reference: string }>>("GET", `/legals?search=${enc(q)}&limit=20`).then((r) =>
+      r.items.map((l) => ({ value: l.id, label: l.name, sub: l.reference })),
+    );
+  const searchCrosswalks = (q: string) =>
+    apiCall<{ id: string; reference: string; title: string; framework: string }[]>("GET", `/requirements?search=${enc(q)}&limit=20`).then((rows) =>
+      rows
+        .filter((r) => r.id !== editingReq?.id)
+        .map((r) => ({ value: r.id, label: `${r.reference ? r.reference + " — " : ""}${r.title}`, sub: r.framework })),
+    );
+
+  // DataTable fetcher — paginated/searchable/sortable requirements for the selected framework
+  const fetchRequirements = useCallback(
+    (qs: string): Promise<PagedList<Requirement>> => {
+      if (!selected) return Promise.resolve({ items: [], total: 0, limit: 0, offset: 0 });
+      return apiCall<PagedList<Requirement>>("GET", `/frameworks/${selected}/requirements?${qs}`);
+    },
+    [selected],
+  );
+
+  useEffect(() => {
+    loadFrameworks().catch((e) => setError(e instanceof Error ? e.message : "Failed to load frameworks"));
+  }, [loadFrameworks]);
+
+  // gap analysis stat cards for the selected framework (server-computed)
+  useEffect(() => {
+    if (!selected) {
+      setGap(null);
+      return;
+    }
+    apiCall<GapAnalysis>("GET", `/frameworks/${selected}/gap-analysis`)
+      .then(setGap)
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load gap analysis"));
+  }, [selected, refreshKey]);
+
+  // requirement detail drawer
+  const loadDetail = useCallback((id: string) => {
+    apiCall<Requirement>("GET", `/requirements/${id}`).then(setDetail).catch(() => setDetail(null));
+    setCrosswalks([]);
+    setEvidence([]);
+    Promise.all([
+      apiCall<CrosswalkItem[]>("GET", `/requirements/${id}/crosswalks`),
+      apiCall<Evidence[]>("GET", `/requirements/${id}/evidence`),
+    ])
+      .then(([cw, ev]) => {
+        setCrosswalks(cw);
+        setEvidence(ev);
+      })
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else {
+      setDetail(null);
+      setCrosswalks([]);
+      setEvidence([]);
+    }
+  }, [openId, loadDetail]);
+
+  /* ---------------------------------------------------------------- library ops */
   async function openLibrary() {
     setError(null);
     setShowLib(true);
@@ -309,6 +408,7 @@ export default function CompliancePage() {
       const created = await apiCall<Framework>("POST", `/framework-templates/${key}/load`);
       setShowLib(false);
       await loadFrameworks(created.id);
+      toast("Framework loaded");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load framework");
     } finally {
@@ -316,95 +416,17 @@ export default function CompliancePage() {
     }
   }
 
-  // requirement modal
-  const [showReq, setShowReq] = useState(false);
-  const [editingReq, setEditingReq] = useState<Requirement | null>(null);
-  const [rq, setRq] = useState<ReqState>(REQ_BLANK);
-  const [savingReq, setSavingReq] = useState(false);
-  const [crosswalkIds, setCrosswalkIds] = useState<string[]>([]);
-  const [allRequirements, setAllRequirements] = useState<CrosswalkItem[]>([]);
-
-  // finding modal
-  const [showFinding, setShowFinding] = useState(false);
-  const [findingReq, setFindingReq] = useState<Requirement | null>(null);
-  const [fd, setFd] = useState<FindingState>(FINDING_BLANK);
-  const [savingFinding, setSavingFinding] = useState(false);
-
-  const setF = <K extends keyof FwState>(k: K, v: FwState[K]) => setFw((p) => ({ ...p, [k]: v }));
-  const setR = <K extends keyof ReqState>(k: K, v: ReqState[K]) => setRq((p) => ({ ...p, [k]: v }));
-  const setFi = <K extends keyof FindingState>(k: K, v: FindingState[K]) =>
-    setFd((p) => ({ ...p, [k]: v }));
-
-  /* ---------------------------------------------------------------- loaders */
-  async function loadFrameworks(selectId?: string) {
-    const fwPage = await apiCall<Page<Framework>>("GET", "/frameworks");
-    setFrameworks(fwPage.items);
-    if (selectId) setSelected(selectId);
-    else if (!selected && fwPage.items.length) setSelected(fwPage.items[0].id);
-    return fwPage.items;
-  }
-
-  async function loadRequirements(frameworkId: string) {
-    const [reqs, g] = await Promise.all([
-      apiCall<Requirement[]>("GET", `/frameworks/${frameworkId}/requirements`),
-      apiCall<GapAnalysis>("GET", `/frameworks/${frameworkId}/gap-analysis`),
-    ]);
-    setRequirements(reqs);
-    setGap(g);
-  }
-
-  useEffect(() => {
-    loadFrameworks().catch((e) => setError(e.message));
-    apiCall<Page<ControlOpt>>("GET", "/controls?limit=200")
-      .then((r) => setControls(r.items))
-      .catch(() => {});
-    apiCall<Page<RiskOpt>>("GET", "/risks?limit=200")
-      .then((r) => setRisks(r.items))
-      .catch(() => {});
-    apiCall<Page<PolicyOpt>>("GET", "/policies?limit=200")
-      .then((r) => setPolicies(r.items))
-      .catch(() => {});
-    apiCall<Page<LegalOpt>>("GET", "/legals?limit=200")
-      .then((r) => setLegals(r.items))
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (!selected) return;
-    setOpenReq(null);
-    loadRequirements(selected).catch((e) => setError(e.message));
-  }, [selected]);
-
-  async function openRequirementDetail(r: Requirement) {
-    if (openReq?.id === r.id) {
-      setOpenReq(null);
-      return;
-    }
-    setOpenReq(r);
-    setCrosswalks([]);
-    setEvidence([]);
-    try {
-      const [cw, ev] = await Promise.all([
-        apiCall<CrosswalkItem[]>("GET", `/requirements/${r.id}/crosswalks`),
-        apiCall<Evidence[]>("GET", `/requirements/${r.id}/evidence`),
-      ]);
-      setCrosswalks(cw);
-      setEvidence(ev);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load detail");
-    }
-  }
-
   /* ---------------------------------------------------------------- framework ops */
   function openNewFw() {
     setEditingFw(null);
     setFw(FW_BLANK);
+    setError(null);
     setShowFw(true);
   }
   function openEditFw(f: Framework) {
     setEditingFw(f);
     setFw(fromFramework(f));
+    setError(null);
     setShowFw(true);
   }
   async function saveFw() {
@@ -419,6 +441,8 @@ export default function CompliancePage() {
         await loadFrameworks(created.id);
       }
       setShowFw(false);
+      reload();
+      toast(editingFw ? "Changes saved" : "Framework created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save framework");
     } finally {
@@ -427,7 +451,7 @@ export default function CompliancePage() {
   }
   async function deleteFw() {
     if (!editingFw) return;
-    if (!window.confirm(`Delete framework "${editingFw.name}" and all its requirements?`)) return;
+    if (!(await confirmDialog({ title: `Delete framework "${editingFw.name}"?`, message: "This deletes all of its requirements. This cannot be undone.", danger: true }))) return;
     setError(null);
     setSavingFw(true);
     try {
@@ -436,6 +460,7 @@ export default function CompliancePage() {
       setSelected(null);
       const remaining = await loadFrameworks();
       setSelected(remaining[0]?.id ?? null);
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete framework");
     } finally {
@@ -444,45 +469,23 @@ export default function CompliancePage() {
   }
 
   /* ---------------------------------------------------------------- requirement ops */
-  async function ensureAllRequirements() {
-    // Pull every requirement across frameworks to offer as crosswalk targets.
-    try {
-      const all: CrosswalkItem[] = [];
-      for (const f of frameworks) {
-        const reqs = await apiCall<Requirement[]>("GET", `/frameworks/${f.id}/requirements`);
-        for (const r of reqs)
-          all.push({
-            id: r.id,
-            reference: r.reference,
-            title: r.title,
-            status: r.status,
-            framework_id: f.id,
-            framework_name: f.name,
-          });
-      }
-      setAllRequirements(all);
-    } catch {
-      /* ignore */
-    }
-  }
-
-  async function openNewReq() {
+  function openNewReq() {
     setEditingReq(null);
     setRq(REQ_BLANK);
-    setCrosswalkIds([]);
+    setCrosswalkSel([]);
+    setError(null);
     setShowReq(true);
-    ensureAllRequirements();
   }
   async function openEditReq(r: Requirement) {
     setEditingReq(r);
     setRq(fromRequirement(r));
+    setError(null);
     setShowReq(true);
-    ensureAllRequirements();
     try {
       const cw = await apiCall<CrosswalkItem[]>("GET", `/requirements/${r.id}/crosswalks`);
-      setCrosswalkIds(cw.map((c) => c.id));
+      setCrosswalkSel(cw.map((c) => ({ value: c.id, label: `${c.reference ? c.reference + " — " : ""}${c.title}`, sub: c.framework_name })));
     } catch {
-      setCrosswalkIds([]);
+      setCrosswalkSel([]);
     }
   }
   async function saveReq() {
@@ -492,47 +495,39 @@ export default function CompliancePage() {
     try {
       let reqId: string;
       if (editingReq) {
-        const updated = await apiCall<Requirement>(
-          "PATCH",
-          `/requirements/${editingReq.id}`,
-          reqPayload(rq),
-        );
+        const updated = await apiCall<Requirement>("PATCH", `/requirements/${editingReq.id}`, reqPayload(rq));
         reqId = updated.id;
       } else {
-        const created = await apiCall<Requirement>(
-          "POST",
-          `/frameworks/${selected}/requirements`,
-          reqPayload(rq),
-        );
+        const created = await apiCall<Requirement>("POST", `/frameworks/${selected}/requirements`, reqPayload(rq));
         reqId = created.id;
       }
       // Crosswalks are managed via their own endpoint (PUT replaces the set).
       await apiCall<CrosswalkItem[]>("PUT", `/requirements/${reqId}/crosswalks`, {
-        related_requirement_ids: crosswalkIds,
+        related_requirement_ids: crosswalkSel.map((o) => o.value),
       });
       setShowReq(false);
-      await loadRequirements(selected);
+      reload();
       await loadFrameworks(selected);
+      if (openId === reqId) loadDetail(reqId);
+      toast(editingReq ? "Changes saved" : "Requirement created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save requirement");
     } finally {
       setSavingReq(false);
     }
   }
-  async function deleteReq() {
-    if (!editingReq || !selected) return;
-    if (!window.confirm(`Delete requirement "${editingReq.reference || editingReq.title}"?`)) return;
+  async function deleteReq(r: Requirement) {
+    if (!(await confirmDialog({ title: `Delete requirement "${r.reference || r.title}"?`, danger: true }))) return;
     setError(null);
-    setSavingReq(true);
     try {
-      await apiCall("DELETE", `/requirements/${editingReq.id}`);
+      await apiCall("DELETE", `/requirements/${r.id}`);
+      if (openId === r.id) setOpenId(null);
       setShowReq(false);
-      await loadRequirements(selected);
-      await loadFrameworks(selected);
+      reload();
+      if (selected) await loadFrameworks(selected);
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete requirement");
-    } finally {
-      setSavingReq(false);
     }
   }
 
@@ -540,10 +535,11 @@ export default function CompliancePage() {
   function openFinding(r: Requirement) {
     setFindingReq(r);
     setFd(FINDING_BLANK);
+    setError(null);
     setShowFinding(true);
   }
   async function saveFinding() {
-    if (!findingReq || !selected) return;
+    if (!findingReq) return;
     setError(null);
     setSavingFinding(true);
     try {
@@ -555,11 +551,9 @@ export default function CompliancePage() {
         deadline: fd.deadline || null,
       });
       setShowFinding(false);
-      await loadRequirements(selected);
-      if (openReq?.id === findingReq.id) {
-        const fresh = await apiCall<Requirement>("GET", `/requirements/${findingReq.id}`);
-        setOpenReq(fresh);
-      }
+      reload();
+      if (openId === findingReq.id) loadDetail(findingReq.id);
+      toast("Finding raised");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add finding");
     } finally {
@@ -570,44 +564,13 @@ export default function CompliancePage() {
     setError(null);
     try {
       await apiCall("POST", `/findings/${findingId}/close`);
-      if (selected) await loadRequirements(selected);
-      if (openReq) {
-        const fresh = await apiCall<Requirement>("GET", `/requirements/${openReq.id}`);
-        setOpenReq(fresh);
-      }
+      reload();
+      if (openId) loadDetail(openId);
+      toast("Finding closed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to close finding");
     }
   }
-
-  /* ---------------------------------------------------------------- options */
-  const controlOpts: Option[] = useMemo(
-    () => controls.map((c) => ({ value: c.id, label: c.name, sub: c.reference })),
-    [controls],
-  );
-  const riskOpts: Option[] = useMemo(
-    () => risks.map((r) => ({ value: r.id, label: r.title, sub: r.reference })),
-    [risks],
-  );
-  const policyOpts: Option[] = useMemo(
-    () => policies.map((p) => ({ value: p.id, label: p.title, sub: p.reference })),
-    [policies],
-  );
-  const legalOpts: Option[] = useMemo(
-    () => legals.map((l) => ({ value: l.id, label: l.name, sub: l.reference })),
-    [legals],
-  );
-  const crosswalkOpts: Option[] = useMemo(
-    () =>
-      allRequirements
-        .filter((r) => r.id !== editingReq?.id)
-        .map((r) => ({
-          value: r.id,
-          label: `${r.reference ? r.reference + " — " : ""}${r.title}`,
-          sub: r.framework_name,
-        })),
-    [allRequirements, editingReq],
-  );
 
   /* ---------------------------------------------------------------- tabs: framework */
   const fwGeneralTab = (
@@ -695,19 +658,25 @@ export default function CompliancePage() {
   const reqMappingsTab = (
     <>
       <Field label="Mapped Controls" help="Controls that satisfy this requirement (map once, comply many).">
-        <MultiSelect value={rq.control_ids} onChange={(v) => setR("control_ids", v)} options={controlOpts} />
+        <AsyncMultiSelect search={searchControls} value={rq.control_ids} onChange={(v) => setR("control_ids", v)} />
       </Field>
       <Field label="Related Risks" help="Risks this requirement helps mitigate.">
-        <MultiSelect value={rq.risk_ids} onChange={(v) => setR("risk_ids", v)} options={riskOpts} />
+        <AsyncMultiSelect search={searchRisks} value={rq.risk_ids} onChange={(v) => setR("risk_ids", v)} />
       </Field>
       <Field label="Related Policies" help="Policies that document this requirement.">
-        <MultiSelect value={rq.policy_ids} onChange={(v) => setR("policy_ids", v)} options={policyOpts} />
+        <AsyncMultiSelect search={searchPolicies} value={rq.policy_ids} onChange={(v) => setR("policy_ids", v)} />
       </Field>
       <Field label="Legal Obligation" help="The law/regulation this requirement discharges.">
-        <Select value={rq.legal_id} onChange={(v) => setR("legal_id", v)} options={legalOpts} placeholder="None" />
+        <AsyncSelect
+          search={searchLegals}
+          value={rq.legal?.value ?? null}
+          selectedLabel={rq.legal?.label}
+          onChange={(_v, opt) => setR("legal", opt)}
+          placeholder="None"
+        />
       </Field>
       <Field label="Crosswalks" help="Equivalent requirements in other frameworks (e.g. ISO A.5.15 ≡ SOC2 CC6.1).">
-        <MultiSelect value={crosswalkIds} onChange={setCrosswalkIds} options={crosswalkOpts} />
+        <AsyncMultiSelect search={searchCrosswalks} value={crosswalkSel} onChange={setCrosswalkSel} />
       </Field>
     </>
   );
@@ -740,8 +709,28 @@ export default function CompliancePage() {
     </>
   );
 
-  const linkCount = (r: Requirement) =>
-    r.controls.length + r.risks.length + r.policies.length;
+  /* ---------------------------------------------------------------- table columns */
+  const columns: Column<Requirement>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
+    { key: "title", header: "Requirement", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "domain", header: "Domain", sortable: true, render: (r) => <span className="muted">{r.domain || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (r) => <ComplianceBadge value={r.status} /> },
+    { key: "covered", header: "Covered", render: (r) => (r.is_covered ? <Badge tone="low" plain>Yes</Badge> : <Badge tone="high" plain>No</Badge>) },
+    { key: "controls", header: "Controls", align: "center", render: (r) => <span className="muted">{r.controls.length}</span> },
+    { key: "policies", header: "Policies", align: "center", render: (r) => <span className="muted">{r.policies.length}</span> },
+    { key: "evidence", header: "Evidence", align: "center", render: (r) => (r.evidence_count > 0 ? <Badge tone="low" plain>{r.evidence_count}</Badge> : <span className="muted">0</span>) },
+    { key: "findings", header: "Findings", align: "center", render: (r) => (r.open_findings > 0 ? <Badge tone="high" plain>{r.open_findings}</Badge> : <span className="muted">0</span>) },
+    {
+      key: "actions",
+      header: "",
+      render: (r) => (
+        <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => openEditReq(r)}>Edit</button>
+          <button className="btn secondary sm" onClick={() => openFinding(r)}>Finding</button>
+        </div>
+      ),
+    },
+  ];
 
   /* ================================================================ render */
   const selectedFw = frameworks.find((f) => f.id === selected) || null;
@@ -779,11 +768,7 @@ export default function CompliancePage() {
           </button>
           {selected && (
             <>
-              <ImportExport
-                resource="requirements"
-                label="Requirements"
-                onDone={() => { if (selected) loadRequirements(selected); }}
-              />
+              <ImportExport resource="requirements" label="Requirements" onDone={reload} />
               <button className="btn" onClick={openNewReq}>
                 <IconPlus width={16} height={16} /> Requirement
               </button>
@@ -818,181 +803,30 @@ export default function CompliancePage() {
         </div>
       )}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Requirements</h3>
-          <span className="sub">{gap?.framework_name} · click a row for crosswalks &amp; evidence</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Requirement</th>
-                <th>Domain</th>
-                <th>Status</th>
-                <th>Covered</th>
-                <th>Controls</th>
-                <th>Policies</th>
-                <th>Evidence</th>
-                <th>Findings</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {requirements.map((r) => (
-                <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => openRequirementDetail(r)}>
-                  <td className="ref">{r.reference}</td>
-                  <td className="cell-title">{r.title}</td>
-                  <td className="muted">{r.domain || "—"}</td>
-                  <td><ComplianceBadge value={r.status} /></td>
-                  <td>
-                    {r.is_covered ? (
-                      <Badge tone="low" plain>Yes</Badge>
-                    ) : (
-                      <Badge tone="high" plain>No</Badge>
-                    )}
-                  </td>
-                  <td className="muted">{r.controls.length}</td>
-                  <td className="muted">{r.policies.length}</td>
-                  <td>
-                    {r.evidence_count > 0 ? (
-                      <Badge tone="low" plain>{r.evidence_count}</Badge>
-                    ) : (
-                      <span className="muted">0</span>
-                    )}
-                  </td>
-                  <td>
-                    {r.open_findings > 0 ? (
-                      <Badge tone="high" plain>{r.open_findings}</Badge>
-                    ) : (
-                      <span className="muted">0</span>
-                    )}
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => openEditReq(r)}>
-                        Edit
-                      </button>
-                      <button className="btn secondary sm" onClick={() => openFinding(r)}>
-                        Finding
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {requirements.length === 0 && (
-                <tr>
-                  <td colSpan={10}>
-                    <div className="empty">
-                      <span className="ico"><IconCompliance width={24} height={24} /></span>
-                      <h3>No requirements</h3>
-                      <p>Add the first requirement to this framework.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {openReq && (
-        <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 16 }}>
-          <div className="card">
-            <div className="card-head">
-              <h3>Crosswalks · {openReq.reference}</h3>
-              <span className="sub">Equivalent requirements</span>
-            </div>
-            <div className="card-pad">
-              {crosswalks.length ? (
-                crosswalks.map((c) => (
-                  <div key={c.id} className="activity-item">
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13 }}>
-                        <span className="ref">{c.reference}</span> — {c.title}
-                      </div>
-                      <div className="when">
-                        <Badge tone="info" plain>{c.framework_name}</Badge>{" "}
-                        <ComplianceBadge value={c.status} />
-                      </div>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <span className="muted">No crosswalks mapped for this requirement.</span>
-              )}
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-head">
-              <h3>Evidence · {openReq.reference}</h3>
-              <span className="sub">Via mapped controls</span>
-            </div>
-            <div className="card-pad">
-              {evidence.length ? (
-                evidence.map((ev) => (
-                  <div key={ev.id} className="activity-item">
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13 }}>{ev.title}</div>
-                      <div className="when">
-                        <Badge tone="info" plain>{ev.evidence_type}</Badge>{" "}
-                        {ev.control ? ev.control.reference || ev.control.name : ""}
-                      </div>
-                    </div>
-                    <Badge tone={ev.status === "valid" ? "low" : "neutral"}>{ev.status}</Badge>
-                  </div>
-                ))
-              ) : (
-                <span className="muted">No evidence collected yet.</span>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {openReq && openReq.findings.length > 0 && (
-        <div className="card" style={{ marginBottom: 16 }}>
-          <div className="card-head">
-            <h3>Findings · {openReq.reference}</h3>
-            <span className="sub">{openReq.open_findings} open</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Finding</th>
-                  <th>Severity</th>
-                  <th>Status</th>
-                  <th>Deadline</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {openReq.findings.map((fnd) => (
-                  <tr key={fnd.id}>
-                    <td className="cell-title">{fnd.title}</td>
-                    <td><Badge tone={SEVERITY_TONE[fnd.severity] || "neutral"}>{fnd.severity}</Badge></td>
-                    <td><Badge tone={fnd.status === "open" ? "high" : "low"}>{fnd.status}</Badge></td>
-                    <td className="muted">{fnd.deadline || "—"}</td>
-                    <td>
-                      {fnd.status === "open" && (
-                        <button className="btn secondary sm" onClick={() => closeFinding(fnd.id)}>
-                          <IconCheck width={14} height={14} /> Close
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {selected ? (
+        <DataTable<Requirement>
+          columns={columns}
+          fetcher={fetchRequirements}
+          rowKey={(r) => r.id}
+          onRowClick={(r) => setOpenId(r.id)}
+          activeKey={openId}
+          searchPlaceholder="Search requirements by title or reference…"
+          defaultSort={{ by: "reference", dir: "asc" }}
+          emptyMessage="No requirements yet. Add the first requirement to this framework."
+          refreshKey={refreshKey}
+        />
+      ) : (
+        <div className="card">
+          <div className="empty" style={{ padding: 28 }}>
+            <span className="ico"><IconCompliance width={24} height={24} /></span>
+            <h3>No frameworks yet</h3>
+            <p>Create a framework or load one from the library to start tracking compliance.</p>
           </div>
         </div>
       )}
 
       {gap && gap.gaps.length > 0 && (
-        <div className="card">
+        <div className="card" style={{ marginTop: 16 }}>
           <div className="card-head">
             <h3>Gap analysis</h3>
             <span className="sub">{gap.gaps.length} open</span>
@@ -1009,7 +843,7 @@ export default function CompliancePage() {
               </thead>
               <tbody>
                 {gap.gaps.map((g) => (
-                  <tr key={g.id}>
+                  <tr key={g.id} style={{ cursor: "pointer" }} onClick={() => setOpenId(g.id)}>
                     <td className="ref">{g.reference}</td>
                     <td className="cell-title">{g.title}</td>
                     <td><ComplianceBadge value={g.status} /></td>
@@ -1023,6 +857,109 @@ export default function CompliancePage() {
       )}
 
       {selectedFw && <RecordPanels model="framework" entityId={selectedFw.id} />}
+
+      {/* -------------------------------------------------- requirement detail drawer */}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? detail.reference || detail.title : "…"}
+        subtitle={detail ? detail.title : ""}
+        width={720}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditReq(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => openFinding(detail)}>Finding</button>
+            <button className="btn secondary sm" onClick={() => deleteReq(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              <ComplianceBadge value={detail.status} />
+              {detail.is_covered ? <Badge tone="low" plain>Covered</Badge> : <Badge tone="high" plain>Not covered</Badge>}
+              {detail.domain && <Badge tone="neutral" plain>{detail.domain}</Badge>}
+              {detail.open_findings > 0 && <Badge tone="high" plain>{detail.open_findings} open findings</Badge>}
+            </div>
+
+            {(detail.controls.length > 0 || detail.policies.length > 0 || detail.risks.length > 0 || detail.legal) && (
+              <div style={{ marginBottom: 16, fontSize: 13 }}>
+                {detail.controls.length > 0 && <div><span className="muted">Controls: </span>{detail.controls.map((c) => c.reference || c.name).join(", ")}</div>}
+                {detail.policies.length > 0 && <div><span className="muted">Policies: </span>{detail.policies.map((p) => p.reference || p.title).join(", ")}</div>}
+                {detail.risks.length > 0 && <div><span className="muted">Risks: </span>{detail.risks.map((r) => r.reference || r.title).join(", ")}</div>}
+                {detail.legal && <div><span className="muted">Legal: </span>{detail.legal.name || detail.legal.reference}</div>}
+              </div>
+            )}
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Crosswalks</h3><span className="sub">Equivalent requirements</span></div>
+              <div className="card-pad">
+                {crosswalks.length ? (
+                  crosswalks.map((c) => (
+                    <div key={c.id} className="activity-item">
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13 }}><span className="ref">{c.reference}</span> — {c.title}</div>
+                        <div className="when"><Badge tone="info" plain>{c.framework_name}</Badge> <ComplianceBadge value={c.status} /></div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <span className="muted">No crosswalks mapped for this requirement.</span>
+                )}
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Evidence</h3><span className="sub">Via mapped controls</span></div>
+              <div className="card-pad">
+                {evidence.length ? (
+                  evidence.map((ev) => (
+                    <div key={ev.id} className="activity-item">
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13 }}>{ev.title}</div>
+                        <div className="when"><Badge tone="info" plain>{ev.evidence_type}</Badge> {ev.control ? ev.control.reference || ev.control.name : ""}</div>
+                      </div>
+                      <Badge tone={ev.status === "valid" ? "low" : "neutral"}>{ev.status}</Badge>
+                    </div>
+                  ))
+                ) : (
+                  <span className="muted">No evidence collected yet.</span>
+                )}
+              </div>
+            </div>
+
+            {detail.findings.length > 0 && (
+              <div className="card" style={{ marginBottom: 14 }}>
+                <div className="card-head"><h3>Findings</h3><span className="sub">{detail.open_findings} open</span></div>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr><th>Finding</th><th>Severity</th><th>Status</th><th>Deadline</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      {detail.findings.map((fnd) => (
+                        <tr key={fnd.id}>
+                          <td className="cell-title">{fnd.title}</td>
+                          <td><Badge tone={SEVERITY_TONE[fnd.severity] || "neutral"}>{fnd.severity}</Badge></td>
+                          <td><Badge tone={fnd.status === "open" ? "high" : "low"}>{fnd.status}</Badge></td>
+                          <td className="muted">{fnd.deadline || "—"}</td>
+                          <td>
+                            {fnd.status === "open" && (
+                              <button className="btn secondary sm" onClick={() => closeFinding(fnd.id)}>
+                                <IconCheck width={14} height={14} /> Close
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </RecordDrawer>
 
       {showLib && (
         <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setShowLib(false)}>
@@ -1099,7 +1036,7 @@ export default function CompliancePage() {
           saveLabel={editingReq ? "Save changes" : "Create requirement"}
           footerLeft={
             editingReq ? (
-              <button className="btn secondary" style={{ color: "var(--red)" }} onClick={deleteReq} disabled={savingReq} type="button">
+              <button className="btn secondary" style={{ color: "var(--red)" }} onClick={() => deleteReq(editingReq)} disabled={savingReq} type="button">
                 Delete
               </button>
             ) : undefined
@@ -1146,5 +1083,13 @@ export default function CompliancePage() {
         />
       )}
     </>
+  );
+}
+
+export default function CompliancePage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ComplianceInner />
+    </Suspense>
   );
 }

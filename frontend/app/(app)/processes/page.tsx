@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
-import { Field, TextInput, TextArea, Select, MultiSelect, NumberInput, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
-import { IconLayers, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
@@ -27,8 +32,6 @@ type Process = {
   assets: Ref[];
 };
 
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 // ----------------------------------------------------------------- option sets
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
@@ -44,6 +47,7 @@ const WORKFLOW_TONE: Record<string, "low" | "medium" | "high" | "critical" | "ne
 };
 
 const hrs = (v: number | null) => (v != null ? `${v}h` : "—");
+const refToOpt = (a: Ref): AsyncOption => ({ value: a.id, label: a.name });
 
 // ----------------------------------------------------------------- form state
 type FormState = {
@@ -57,7 +61,7 @@ type FormState = {
   rto_hours: number | "";
   rpo_hours: number | "";
   rpd_hours: number | "";
-  asset_ids: string[];
+  asset_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
@@ -78,7 +82,7 @@ function fromProcess(p: Process): FormState {
     rto_hours: p.rto_hours ?? "",
     rpo_hours: p.rpo_hours ?? "",
     rpd_hours: p.rpd_hours ?? "",
-    asset_ids: p.assets.map((a) => a.id),
+    asset_ids: p.assets.map(refToOpt),
   };
 }
 
@@ -94,15 +98,14 @@ function toPayload(f: FormState) {
     rto_hours: f.rto_hours === "" ? null : f.rto_hours,
     rpo_hours: f.rpo_hours === "" ? null : f.rpo_hours,
     rpd_hours: f.rpd_hours === "" ? null : f.rpd_hours,
-    asset_ids: f.asset_ids,
+    asset_ids: f.asset_ids.map((o) => o.value),
   };
 }
 
-export default function ProcessesPage() {
-  const [items, setItems] = useState<Process[]>([]);
+function ProcessesInner() {
   const [units, setUnits] = useState<Ref[]>([]);
-  const [assets, setAssets] = useState<Ref[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const [editing, setEditing] = useState<Process | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -111,18 +114,15 @@ export default function ProcessesPage() {
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  async function load() {
-    try {
-      setItems((await apiCall<Page<Process>>("GET", "/processes?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchProcesses = useCallback((qs: string) => apiCall<PagedList<Process>>("GET", `/processes?${qs}`), []);
+
   useEffect(() => {
-    load();
-    apiCall<Page<Ref>>("GET", "/business-units?limit=200").then((r) => setUnits(r.items)).catch(() => {});
-    apiCall<Page<Ref>>("GET", "/assets?limit=200").then((r) => setAssets(r.items)).catch(() => {});
+    apiCall<PagedList<Ref>>("GET", "/business-units?limit=200").then((r) => setUnits(r.items)).catch(() => {});
   }, []);
+
+  const searchAssets = (q: string) =>
+    apiCall<PagedList<Ref>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map(refToOpt));
 
   function openNew() {
     setEditing(null);
@@ -145,7 +145,8 @@ export default function ProcessesPage() {
       if (editing) await apiCall<Process>("PATCH", `/processes/${editing.id}`, payload);
       else await apiCall<Process>("POST", "/processes", payload);
       setShowForm(false);
-      await load();
+      reload();
+      toast(editing ? "Changes saved" : "Process created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save process");
     } finally {
@@ -154,11 +155,12 @@ export default function ProcessesPage() {
   }
 
   async function remove(p: Process) {
-    if (!confirm(`Delete process "${p.name}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog({ title: `Delete process "${p.name}"?`, message: "This cannot be undone.", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/processes/${p.id}`);
-      await load();
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -168,10 +170,19 @@ export default function ProcessesPage() {
     () => units.map((u) => ({ value: u.id, label: u.name })),
     [units],
   );
-  const assetOpts: Option[] = useMemo(
-    () => assets.map((a) => ({ value: a.id, label: a.name })),
-    [assets],
-  );
+
+  const columns: Column<Process>[] = [
+    { key: "name", header: "Name", sortable: true, render: (p) => <span className="cell-title">{p.name}</span> },
+    { key: "business_unit", header: "Business unit", render: (p) => <span className="muted">{p.business_unit ? p.business_unit.name : "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (p) => <span className="muted">{p.owner || "—"}</span> },
+    { key: "criticality", header: "Criticality", sortable: true, render: (p) => <Severity value={p.criticality} /> },
+    { key: "rto", header: "RTO", render: (p) => <span className="muted">{hrs(p.rto_hours)}</span> },
+    { key: "rpo", header: "RPO", render: (p) => <span className="muted">{hrs(p.rpo_hours)}</span> },
+    { key: "mtd", header: "MTD", render: (p) => <span className="muted">{hrs(p.rpd_hours)}</span> },
+    { key: "assets", header: "Assets", align: "center", render: (p) => <span className="muted">{p.assets.length || "—"}</span> },
+    { key: "workflow_status", header: "Workflow", sortable: true, render: (p) => <Badge tone={WORKFLOW_TONE[p.workflow_status] || "neutral"}>{cap(p.workflow_status)}</Badge> },
+    { key: "actions", header: "", render: (p) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(p)}>Delete</button></div> },
+  ];
 
   const generalTab = (
     <>
@@ -224,7 +235,7 @@ export default function ProcessesPage() {
 
   const linksTab = (
     <Field label="Related Assets" help="Assets (systems, data, services) this process depends on.">
-      <MultiSelect value={f.asset_ids} onChange={(v) => set("asset_ids", v)} options={assetOpts} />
+      <AsyncMultiSelect search={searchAssets} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} />
     </Field>
   );
 
@@ -236,7 +247,7 @@ export default function ProcessesPage() {
           <p>Processes with continuity objectives (RTO / RPO / MTD), criticality and asset dependencies for impact analysis.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <ImportExport resource="processes" label="Processes" onDone={load} />
+          <ImportExport resource="processes" label="Processes" onDone={reload} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add process
           </button>
@@ -245,61 +256,16 @@ export default function ProcessesPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card">
-        <div className="card-head">
-          <h3>Processes</h3>
-          <span className="sub">{items.length} total</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Business unit</th>
-                <th>Owner</th>
-                <th>Criticality</th>
-                <th>RTO</th>
-                <th>RPO</th>
-                <th>MTD</th>
-                <th>Assets</th>
-                <th>Workflow</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((p) => (
-                <tr key={p.id} style={{ cursor: "pointer" }} onClick={() => openEdit(p)}>
-                  <td className="cell-title">{p.name}</td>
-                  <td className="muted">{p.business_unit ? p.business_unit.name : "—"}</td>
-                  <td className="muted">{p.owner || "—"}</td>
-                  <td><Severity value={p.criticality} /></td>
-                  <td className="muted">{hrs(p.rto_hours)}</td>
-                  <td className="muted">{hrs(p.rpo_hours)}</td>
-                  <td className="muted">{hrs(p.rpd_hours)}</td>
-                  <td className="muted">{p.assets.length || "—"}</td>
-                  <td><Badge tone={WORKFLOW_TONE[p.workflow_status] || "neutral"}>{cap(p.workflow_status)}</Badge></td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => remove(p)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={10}>
-                    <div className="empty">
-                      <span className="ico"><IconLayers width={24} height={24} /></span>
-                      <h3>No processes</h3>
-                      <p>Add your first business process to start impact analysis.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<Process>
+        columns={columns}
+        fetcher={fetchProcesses}
+        rowKey={(p) => p.id}
+        onRowClick={(p) => openEdit(p)}
+        searchPlaceholder="Search processes by name or owner…"
+        defaultSort={{ by: "name", dir: "asc" }}
+        emptyMessage="No processes. Add your first business process to start impact analysis."
+        refreshKey={refreshKey}
+      />
 
       {showForm && (
         <FormModal
@@ -317,5 +283,13 @@ export default function ProcessesPage() {
         />
       )}
     </>
+  );
+}
+
+export default function ProcessesPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ProcessesInner />
+    </Suspense>
   );
 }

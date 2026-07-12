@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Select, func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.governance import (
     Committee,
     CommitteeStatus,
@@ -51,6 +52,27 @@ async def _next_ref(db, model, prefix: str) -> str:
     return await next_reference(db, model, prefix)
 
 
+_COMMITTEE_SORTABLE = {
+    "name": Committee.name,
+    "reference": Committee.reference,
+    "committee_type": Committee.committee_type,
+    "chairperson": Committee.chairperson,
+    "status": Committee.status,
+    "created_at": Committee.created_at,
+}
+_DECISION_SORTABLE = {
+    "reference": MeetingDecision.reference,
+    "description": MeetingDecision.description,
+    "decision_type": MeetingDecision.decision_type,
+    "owner": MeetingDecision.owner,
+    "status": MeetingDecision.status,
+    "due_date": MeetingDecision.due_date,
+    "committee": Committee.name,
+    "meeting": Meeting.title,
+    "created_at": MeetingDecision.created_at,
+}
+
+
 # ============================================================== committees ===
 async def _load_committee(db, cid: uuid.UUID) -> Committee:
     obj = await db.scalar(
@@ -67,6 +89,8 @@ async def list_committees(
     search: str | None = None,
     committee_type: CommitteeType | None = None,
     status_filter: Annotated[CommitteeStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[CommitteeRead]:
@@ -82,8 +106,13 @@ async def list_committees(
             | Committee.chairperson.ilike(like)
             | Committee.reference.ilike(like)
         )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _COMMITTEE_SORTABLE, default=Committee.name)
+    else:
+        stmt = stmt.order_by(Committee.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(Committee.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[CommitteeRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -213,13 +242,18 @@ async def delete_decision(did: uuid.UUID, db: DbSession) -> None:
     await db.flush()
 
 
-@router.get("/meeting-decisions", response_model=list[DecisionTrackerRow], dependencies=[_READ],
+@router.get("/meeting-decisions", response_model=Page[DecisionTrackerRow], dependencies=[_READ],
             summary="Enterprise decision / action tracker across all committees")
 async def list_decisions(
     db: DbSession,
+    search: str | None = None,
     status_filter: Annotated[DecisionStatus | None, Query(alias="status")] = None,
     overdue: bool = False,
-) -> list[DecisionTrackerRow]:
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[DecisionTrackerRow]:
     stmt = (
         select(MeetingDecision, Meeting, Committee)
         .join(Meeting, MeetingDecision.meeting_id == Meeting.id)
@@ -228,8 +262,35 @@ async def list_decisions(
     )
     if status_filter is not None:
         stmt = stmt.where(MeetingDecision.status == status_filter)
-    stmt = stmt.order_by(MeetingDecision.due_date.is_(None), MeetingDecision.due_date, MeetingDecision.created_at)
-    rows = (await db.execute(stmt)).all()
+    if overdue:
+        # `is_overdue` mirrored as SQL so the filter works with server-side pagination.
+        stmt = stmt.where(
+            MeetingDecision.status.in_([DecisionStatus.open, DecisionStatus.in_progress]),
+            MeetingDecision.due_date.is_not(None),
+            MeetingDecision.due_date < date.today(),
+        )
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            MeetingDecision.description.ilike(like)
+            | MeetingDecision.owner.ilike(like)
+            | MeetingDecision.reference.ilike(like)
+            | Committee.name.ilike(like)
+            | Meeting.title.ilike(like)
+        )
+    total = await db.scalar(
+        select(func.count()).select_from(
+            stmt.with_only_columns(MeetingDecision.id).order_by(None).subquery()
+        )
+    ) or 0
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _DECISION_SORTABLE, default=MeetingDecision.due_date)
+    else:
+        stmt = stmt.order_by(
+            MeetingDecision.due_date.is_(None), MeetingDecision.due_date, MeetingDecision.created_at
+        )
+    rows = (await db.execute(stmt.limit(limit).offset(offset))).all()
     result: list[DecisionTrackerRow] = []
     for decision, meeting, committee in rows:
         row = DecisionTrackerRow.model_validate(decision)
@@ -240,9 +301,7 @@ async def list_decisions(
         row.meeting_title = meeting.title
         row.meeting_date = meeting.meeting_date
         result.append(row)
-    if overdue:
-        result = [r for r in result if r.is_overdue]
-    return result
+    return Page(items=result, total=total, limit=limit, offset=offset)
 
 
 # ================================================================== summary ===

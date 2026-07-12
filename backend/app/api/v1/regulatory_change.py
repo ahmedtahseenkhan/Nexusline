@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Select, func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.regulatory_change import (
     Applicability,
     Obligation,
@@ -41,6 +42,38 @@ router = APIRouter(tags=["regulatory change"])
 _READ = Depends(require("regchange:read"))
 _WRITE = Depends(require("regchange:write"))
 
+_CHANGE_SORTABLE = {
+    "reference": RegulatoryChange.reference,
+    "title": RegulatoryChange.title,
+    "regulator": RegulatoryChange.regulator,
+    "circular_ref": RegulatoryChange.circular_ref,
+    "status": RegulatoryChange.status,
+    "applicability": RegulatoryChange.applicability,
+    "priority": RegulatoryChange.priority,
+    "effective_date": RegulatoryChange.effective_date,
+    "issued_date": RegulatoryChange.issued_date,
+    "created_at": RegulatoryChange.created_at,
+}
+_OBLIGATION_SORTABLE = {
+    "reference": Obligation.reference,
+    "title": Obligation.title,
+    "obligation_type": Obligation.obligation_type,
+    "owner": Obligation.owner,
+    "business_unit": Obligation.business_unit,
+    "status": Obligation.status,
+    "due_date": Obligation.due_date,
+    "created_at": Obligation.created_at,
+}
+_RETURN_SORTABLE = {
+    "reference": RegulatoryReturn.reference,
+    "name": RegulatoryReturn.name,
+    "regulator": RegulatoryReturn.regulator,
+    "frequency": RegulatoryReturn.frequency,
+    "next_due_date": RegulatoryReturn.next_due_date,
+    "status": RegulatoryReturn.status,
+    "created_at": RegulatoryReturn.created_at,
+}
+
 
 async def _next_ref(db, model, prefix: str) -> str:
     return await next_reference(db, model, prefix)
@@ -69,6 +102,8 @@ async def list_changes(
     search: str | None = None,
     status_filter: Annotated[RegChangeStatus | None, Query(alias="status")] = None,
     applicability: Applicability | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[RegulatoryChangeRead]:
@@ -84,10 +119,13 @@ async def list_changes(
             | RegulatoryChange.circular_ref.ilike(like)
             | RegulatoryChange.reference.ilike(like)
         )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _CHANGE_SORTABLE, default=RegulatoryChange.created_at)
+    else:
+        stmt = stmt.order_by(RegulatoryChange.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(
-        stmt.order_by(RegulatoryChange.created_at.desc()).limit(limit).offset(offset)
-    )).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[RegulatoryChangeRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -144,6 +182,8 @@ async def list_obligations(
     db: DbSession,
     search: str | None = None,
     status_filter: Annotated[ObligationStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ObligationRead]:
@@ -160,10 +200,13 @@ async def list_obligations(
     if search:
         like = f"%{search}%"
         stmt = stmt.where(Obligation.title.ilike(like) | Obligation.reference.ilike(like))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _OBLIGATION_SORTABLE, default=Obligation.created_at)
+    else:
+        stmt = stmt.order_by(Obligation.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(
-        stmt.order_by(Obligation.created_at.desc()).limit(limit).offset(offset)
-    )).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ObligationRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -207,18 +250,31 @@ async def _load_return(db, rid) -> RegulatoryReturn:
 @router.get("/regulatory-returns", response_model=Page[RegulatoryReturnRead], dependencies=[_READ])
 async def list_returns(
     db: DbSession,
+    search: str | None = None,
     status_filter: Annotated[ReturnStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[RegulatoryReturnRead]:
     stmt: Select = select(RegulatoryReturn).where(RegulatoryReturn.deleted.is_(False))
     if status_filter is not None:
         stmt = stmt.where(RegulatoryReturn.status == status_filter)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            RegulatoryReturn.name.ilike(like)
+            | RegulatoryReturn.reference.ilike(like)
+            | RegulatoryReturn.regulator.ilike(like)
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _RETURN_SORTABLE, default=RegulatoryReturn.next_due_date)
+    else:
+        # Default: soonest-due first, nulls last.
+        stmt = stmt.order_by(RegulatoryReturn.next_due_date.is_(None), RegulatoryReturn.next_due_date)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(
-        stmt.order_by(RegulatoryReturn.next_due_date.is_(None), RegulatoryReturn.next_due_date)
-        .limit(limit).offset(offset)
-    )).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[RegulatoryReturnRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
