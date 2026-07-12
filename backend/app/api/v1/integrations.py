@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.integrations import (
     AutomatedControlTest,
     CcmResult,
@@ -43,6 +44,25 @@ router = APIRouter(tags=["integrations"])
 _READ = Depends(require("ccm:read"))
 _WRITE = Depends(require("ccm:write"))
 
+_CONNECTOR_SORTABLE = {
+    "name": Connector.name,
+    "reference": Connector.reference,
+    "status": Connector.status,
+    "connector_type": Connector.connector_type,
+    "last_sync": Connector.last_sync,
+    "created_at": Connector.created_at,
+}
+_CCT_SORTABLE = {
+    "name": AutomatedControlTest.name,
+    "reference": AutomatedControlTest.reference,
+    "control_ref": AutomatedControlTest.control_ref,
+    "status": AutomatedControlTest.status,
+    "last_result": AutomatedControlTest.last_result,
+    "pass_rate": AutomatedControlTest.pass_rate,
+    "last_run": AutomatedControlTest.last_run,
+    "created_at": AutomatedControlTest.created_at,
+}
+
 
 async def _next_ref(db, model, prefix: str) -> str:
     return await next_reference(db, model, prefix)
@@ -68,6 +88,9 @@ async def list_connectors(
     db: DbSession,
     status: ConnectorStatus | None = None,
     connector_type: ConnectorType | None = None,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ConnectorRead]:
@@ -76,8 +99,15 @@ async def list_connectors(
         stmt = stmt.where(Connector.status == status)
     if connector_type is not None:
         stmt = stmt.where(Connector.connector_type == connector_type)
+    if search:
+        stmt = stmt.where(Connector.name.ilike(f"%{search}%") | Connector.reference.ilike(f"%{search}%"))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _CONNECTOR_SORTABLE, default=Connector.name)
+    else:
+        stmt = stmt.order_by(Connector.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(Connector.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[ConnectorRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
@@ -129,6 +159,9 @@ async def list_tests(
     db: DbSession,
     status: CcmStatus | None = None,
     last_result: CcmResult | None = None,
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[CctRead]:
@@ -137,8 +170,19 @@ async def list_tests(
         stmt = stmt.where(AutomatedControlTest.status == status)
     if last_result is not None:
         stmt = stmt.where(AutomatedControlTest.last_result == last_result)
+    if search:
+        stmt = stmt.where(
+            AutomatedControlTest.name.ilike(f"%{search}%")
+            | AutomatedControlTest.reference.ilike(f"%{search}%")
+            | AutomatedControlTest.control_ref.ilike(f"%{search}%")
+        )
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _CCT_SORTABLE, default=AutomatedControlTest.name)
+    else:
+        stmt = stmt.order_by(AutomatedControlTest.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.order_by(AutomatedControlTest.name).limit(limit).offset(offset))).all()
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     return Page(items=[CctRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 

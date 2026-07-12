@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, type FieldInfo, type StatusRule } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { api, apiCall, type FieldInfo, type StatusRule } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import { IconPlus } from "@/components/icons";
 
 const OP_LABEL: Record<string, string> = {
@@ -10,11 +13,13 @@ const OP_LABEL: Record<string, string> = {
 };
 
 export default function StatusRulesPage() {
-  const [rules, setRules] = useState<StatusRule[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [operators, setOperators] = useState<string[]>([]);
   const [fields, setFields] = useState<FieldInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [filterModel, setFilterModel] = useState("");
+  const [ruleCount, setRuleCount] = useState(0);
 
   const [model, setModel] = useState("risk");
   const [field, setField] = useState("");
@@ -23,15 +28,16 @@ export default function StatusRulesPage() {
   const [label, setLabel] = useState("");
   const [color, setColor] = useState("#dc2626");
 
-  async function loadRules() {
-    setRules(await api.statusRules().catch(() => []));
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchRules = useCallback((qs: string) => apiCall<PagedList<StatusRule>>("GET", `/status-rules?${qs}`), []);
+
   useEffect(() => {
     Promise.all([api.statusRuleModels(), api.statusRuleOperators()]).then(([m, o]) => {
       setModels(m); setOperators(o);
-    });
-    loadRules();
-  }, []);
+    }).catch(() => {});
+    // Count rules for the chosen module so a new rule's priority is appended.
+    api.statusRules(model).then((r) => setRuleCount(r.length)).catch(() => setRuleCount(0));
+  }, [model]);
   useEffect(() => {
     api.statusRuleFields(model).then((f) => { setFields(f); setField(f[0]?.key || ""); }).catch(() => setFields([]));
   }, [model]);
@@ -43,19 +49,33 @@ export default function StatusRulesPage() {
     e.preventDefault();
     setError(null);
     try {
-      await api.createStatusRule({ model, field, operator, value, label, color, priority: rules.filter((r) => r.model === model).length + 1 });
+      await api.createStatusRule({ model, field, operator, value, label, color, priority: ruleCount + 1 });
       setLabel(""); setValue("");
-      await loadRules();
+      reload();
+      setRuleCount((c) => c + 1);
+      toast("Rule created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
     }
   }
-  async function remove(id: string) {
-    await api.deleteStatusRule(id).catch(() => {});
-    await loadRules();
+  async function remove(r: StatusRule) {
+    if (!(await confirmDialog({ title: `Delete rule "${r.label}"?`, danger: true }))) return;
+    try {
+      await api.deleteStatusRule(r.id);
+      reload();
+      toast("Deleted");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    }
   }
 
-  const byModel = rules.reduce<Record<string, StatusRule[]>>((a, r) => { (a[r.model] ||= []).push(r); return a; }, {});
+  const columns: Column<StatusRule>[] = [
+    { key: "model", header: "Module", sortable: true, render: (r) => <span className="muted" style={{ textTransform: "capitalize" }}>{r.model}</span> },
+    { key: "label", header: "Label", sortable: true, render: (r) => <span style={{ background: `${r.color}1a`, color: r.color, border: `1px solid ${r.color}55`, borderRadius: 99, padding: "2px 10px", fontSize: 12, fontWeight: 600 }}>{r.label}</span> },
+    { key: "condition", header: "Condition", render: (r) => <code style={{ fontSize: 12 }}>{r.field} {OP_LABEL[r.operator] || r.operator} {r.value}</code> },
+    { key: "priority", header: "Priority", sortable: true, align: "center", render: (r) => <span className="muted">{r.priority}</span> },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(r)}>Delete</button></div> },
+  ];
 
   return (
     <>
@@ -111,30 +131,21 @@ export default function StatusRulesPage() {
         </div>
       </form>
 
-      {Object.keys(byModel).length === 0 && (
-        <div className="card card-pad"><div className="empty"><h3>No rules yet</h3><p>Create one above.</p></div></div>
-      )}
-
-      {Object.entries(byModel).map(([m, list]) => (
-        <div className="card" key={m} style={{ marginBottom: 16 }}>
-          <div className="card-head"><h3 style={{ textTransform: "capitalize" }}>{m}</h3><span className="sub">{list.length} rule{list.length !== 1 ? "s" : ""}</span></div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Label</th><th>Condition</th><th>Priority</th><th></th></tr></thead>
-              <tbody>
-                {list.map((r) => (
-                  <tr key={r.id}>
-                    <td><span style={{ background: `${r.color}1a`, color: r.color, border: `1px solid ${r.color}55`, borderRadius: 99, padding: "2px 10px", fontSize: 12, fontWeight: 600 }}>{r.label}</span></td>
-                    <td className="muted"><code style={{ fontSize: 12 }}>{r.field} {OP_LABEL[r.operator] || r.operator} {r.value}</code></td>
-                    <td className="muted">{r.priority}</td>
-                    <td><button className="btn secondary sm" onClick={() => remove(r.id)}>Delete</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ))}
+      <DataTable<StatusRule>
+        columns={columns}
+        fetcher={fetchRules}
+        rowKey={(r) => r.id}
+        searchPlaceholder="Search rules by label or field…"
+        filters={{ model: filterModel || undefined }}
+        toolbarRight={
+          <select className="input" style={{ maxWidth: 180 }} value={filterModel} onChange={(e) => setFilterModel(e.target.value)}>
+            <option value="">All modules</option>
+            {models.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        }
+        emptyMessage="No rules yet. Create one above."
+        refreshKey={refreshKey}
+      />
     </>
   );
 }

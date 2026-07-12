@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.status_rule import StatusRule
+from app.schemas.common import Page
 from app.schemas.status_rule import (
     BulkEvaluateRequest,
     StatusLabel,
@@ -18,6 +21,14 @@ from app.schemas.status_rule import (
 from app.services import status_rules as engine
 
 router = APIRouter(prefix="/status-rules", tags=["status-rules"])
+
+_STATUS_RULE_SORTABLE = {
+    "label": StatusRule.label,
+    "model": StatusRule.model,
+    "field": StatusRule.field,
+    "priority": StatusRule.priority,
+    "created_at": StatusRule.created_at,
+}
 
 
 async def _load(db, rule_id: uuid.UUID) -> StatusRule:
@@ -48,15 +59,30 @@ async def fields(model: str, _: CurrentUser) -> list[dict]:
     return engine.evaluable_fields(model)
 
 
-@router.get("", response_model=list[StatusRuleRead])
+@router.get("", response_model=Page[StatusRuleRead])
 async def list_rules(
-    db: DbSession, _: CurrentUser, model: str | None = Query(default=None)
-) -> list[StatusRuleRead]:
+    db: DbSession,
+    _: CurrentUser,
+    model: str | None = Query(default=None),
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[StatusRuleRead]:
     stmt = select(StatusRule)
     if model:
         stmt = stmt.where(StatusRule.model == model)
-    rows = (await db.scalars(stmt.order_by(StatusRule.model, StatusRule.priority))).all()
-    return [StatusRuleRead.model_validate(r) for r in rows]
+    if search:
+        stmt = stmt.where(StatusRule.label.ilike(f"%{search}%") | StatusRule.field.ilike(f"%{search}%"))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _STATUS_RULE_SORTABLE, default=StatusRule.model)
+    else:
+        stmt = stmt.order_by(StatusRule.model, StatusRule.priority)
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    return Page(items=[StatusRuleRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=StatusRuleRead, status_code=201, dependencies=[Depends(require("automation:manage"))])

@@ -1,13 +1,16 @@
 "use client";
 
-import { Fragment, useEffect, useState } from "react";
-import { api, type Webhook, type WebhookDelivery } from "@/lib/api";
+import { useCallback, useState } from "react";
+import { api, apiCall, type Webhook, type WebhookDelivery } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 
 export default function WebhooksPage() {
-  const [hooks, setHooks] = useState<Webhook[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -16,16 +19,8 @@ export default function WebhooksPage() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
 
-  async function load() {
-    try {
-      setHooks(await api.webhooks());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-  }, []);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchWebhooks = useCallback((qs: string) => apiCall<PagedList<Webhook>>("GET", `/webhooks?${qs}`), []);
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -33,36 +28,67 @@ export default function WebhooksPage() {
     try {
       await api.createWebhook({ name, url, events, secret });
       setName(""); setUrl(""); setEvents("*"); setSecret(""); setShowForm(false);
-      await load();
+      reload();
+      toast("Webhook created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
     }
   }
 
   async function toggle(h: Webhook) {
-    await api.updateWebhook(h.id, { enabled: !h.enabled }).catch(() => {});
-    await load();
+    try {
+      await api.updateWebhook(h.id, { enabled: !h.enabled });
+      reload();
+      toast(h.enabled ? "Webhook disabled" : "Webhook enabled");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Update failed");
+    }
   }
   async function test(h: Webhook) {
     setError(null);
     try {
       await api.testWebhook(h.id);
-      await load();
+      reload();
       if (openId === h.id) setDeliveries(await api.webhookDeliveries(h.id));
+      toast("Test event sent");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Test failed");
     }
   }
-  async function remove(id: string) {
-    await api.deleteWebhook(id).catch(() => {});
-    if (openId === id) setOpenId(null);
-    await load();
+  async function remove(h: Webhook) {
+    if (!(await confirmDialog({ title: `Delete webhook "${h.name}"?`, danger: true }))) return;
+    try {
+      await api.deleteWebhook(h.id);
+      if (openId === h.id) setOpenId(null);
+      reload();
+      toast("Deleted");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    }
   }
   async function openDeliveries(h: Webhook) {
     if (openId === h.id) { setOpenId(null); return; }
     setOpenId(h.id);
     setDeliveries(await api.webhookDeliveries(h.id).catch(() => []));
   }
+
+  const columns: Column<Webhook>[] = [
+    { key: "name", header: "Name", sortable: true, render: (h) => <span className="cell-title">{h.name}</span> },
+    { key: "url", header: "URL", sortable: true, render: (h) => <span className="muted" style={{ display: "inline-block", maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "bottom" }}>{h.url}</span> },
+    { key: "events", header: "Events", render: (h) => <code style={{ fontSize: 12 }}>{h.events}</code> },
+    { key: "status", header: "Status", render: (h) => (h.enabled ? <Badge tone="low">enabled</Badge> : <Badge tone="neutral">disabled</Badge>) },
+    { key: "last_status", header: "Last", sortable: true, render: (h) => (h.last_status ? <Badge tone={h.last_status < 300 ? "low" : "high"}>{h.last_status}</Badge> : <span className="muted">—</span>) },
+    {
+      key: "actions", header: "", render: (h) => (
+        <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          <button className="btn secondary sm" onClick={() => test(h)}>Test</button>
+          <button className="btn secondary sm" onClick={() => toggle(h)}>{h.enabled ? "Disable" : "Enable"}</button>
+          <button className="btn secondary sm" onClick={() => openDeliveries(h)}>{openId === h.id ? "Hide" : "Log"}</button>
+          <button className="btn secondary sm" onClick={() => remove(h)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
 
   return (
     <>
@@ -104,54 +130,32 @@ export default function WebhooksPage() {
         </form>
       )}
 
-      <div className="card">
-        <div className="card-head"><h3>Endpoints</h3><span className="sub">{hooks.length} configured</span></div>
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Name</th><th>URL</th><th>Events</th><th>Status</th><th>Last</th><th></th></tr></thead>
-            <tbody>
-              {hooks.map((h) => (
-                <Fragment key={h.id}>
-                  <tr>
-                    <td className="cell-title">{h.name}</td>
-                    <td className="muted" style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.url}</td>
-                    <td><code style={{ fontSize: 12 }}>{h.events}</code></td>
-                    <td>{h.enabled ? <Badge tone="low">enabled</Badge> : <Badge tone="neutral">disabled</Badge>}</td>
-                    <td className="muted">{h.last_status ? <Badge tone={h.last_status < 300 ? "low" : "high"}>{h.last_status}</Badge> : "—"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button className="btn secondary sm" onClick={() => test(h)}>Test</button>
-                        <button className="btn secondary sm" onClick={() => toggle(h)}>{h.enabled ? "Disable" : "Enable"}</button>
-                        <button className="btn secondary sm" onClick={() => openDeliveries(h)}>{openId === h.id ? "Hide" : "Log"}</button>
-                        <button className="btn secondary sm" onClick={() => remove(h.id)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                  {openId === h.id && (
-                    <tr>
-                      <td colSpan={6} style={{ background: "var(--surface-2, #f8fafc)" }}>
-                        <div style={{ padding: "4px 2px" }}>
-                          <b style={{ fontSize: 12 }}>Recent deliveries</b>
-                          {deliveries.length === 0 && <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>none yet</span>}
-                          {deliveries.map((d) => (
-                            <div key={d.id} style={{ display: "flex", gap: 10, fontSize: 12, marginTop: 4, alignItems: "center" }}>
-                              <Badge tone={d.success ? "low" : "high"}>{d.success ? "ok" : "fail"}</Badge>
-                              <code>{d.event}</code>
-                              <span className="muted">{d.status_code ?? (d.error || "no response")}</span>
-                              <span className="muted" style={{ marginLeft: "auto" }}>{new Date(d.created_at).toLocaleString()}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              ))}
-              {hooks.length === 0 && <tr><td colSpan={6}><div className="empty"><h3>No webhooks</h3><p>Add one to start streaming events.</p></div></td></tr>}
-            </tbody>
-          </table>
+      <DataTable<Webhook>
+        columns={columns}
+        fetcher={fetchWebhooks}
+        rowKey={(h) => h.id}
+        searchPlaceholder="Search webhooks by name or URL…"
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        emptyMessage="No webhooks yet. Add one to start streaming events."
+        refreshKey={refreshKey}
+      />
+
+      {openId && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-head"><h3>Recent deliveries</h3><span className="sub">last 50 · newest first</span></div>
+          <div className="card-pad">
+            {deliveries.length === 0 && <span className="muted" style={{ fontSize: 12 }}>none yet</span>}
+            {deliveries.map((d) => (
+              <div key={d.id} style={{ display: "flex", gap: 10, fontSize: 12, marginTop: 4, alignItems: "center" }}>
+                <Badge tone={d.success ? "low" : "high"}>{d.success ? "ok" : "fail"}</Badge>
+                <code>{d.event}</code>
+                <span className="muted">{d.status_code ?? (d.error || "no response")}</span>
+                <span className="muted" style={{ marginLeft: "auto" }}>{new Date(d.created_at).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </>
   );
 }

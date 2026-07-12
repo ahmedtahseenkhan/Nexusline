@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiCall, type Page } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ local types
 interface Connector {
@@ -263,10 +266,20 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 export default function IntegrationsPage() {
   const [section, setSection] = useState<SectionId>("connectors");
   const [error, setError] = useState<string | null>(null);
+  const [connectorsKey, setConnectorsKey] = useState(0);
+  const [testsKey, setTestsKey] = useState(0);
+  const [connectorStatus, setConnectorStatus] = useState("");
+  const [testStatus, setTestStatus] = useState("");
 
+  // Connectors are also kept as a flat list to power the CCM connector dropdown and
+  // the connector-name lookup in the tests table (independent of the paged table view).
   const [connectors, setConnectors] = useState<Connector[]>([]);
-  const [tests, setTests] = useState<AutomatedControlTest[]>([]);
   const [summary, setSummary] = useState<IntegrationsSummary | null>(null);
+
+  const reloadConnectors = useCallback(() => setConnectorsKey((k) => k + 1), []);
+  const reloadTests = useCallback(() => setTestsKey((k) => k + 1), []);
+  const fetchConnectors = useCallback((qs: string) => apiCall<PagedList<Connector>>("GET", `/connectors?${qs}`), []);
+  const fetchTests = useCallback((qs: string) => apiCall<PagedList<AutomatedControlTest>>("GET", `/automated-control-tests?${qs}`), []);
 
   // ---- connector dialog ----
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
@@ -303,15 +316,6 @@ export default function IntegrationsPage() {
       setError(e instanceof Error ? e.message : "Failed to load connectors");
     }
   }
-  async function loadTests(keepOpen?: string) {
-    try {
-      const res = await apiCall<Page<AutomatedControlTest>>("GET", "/automated-control-tests?limit=200");
-      setTests(res.items);
-      if (keepOpen) setOpenTest(res.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load control tests");
-    }
-  }
   async function loadSummary() {
     try {
       setSummary(await apiCall<IntegrationsSummary>("GET", "/integrations-summary"));
@@ -322,12 +326,10 @@ export default function IntegrationsPage() {
   async function refreshTest(id: string) {
     const t = await apiCall<AutomatedControlTest>("GET", `/automated-control-tests/${id}`);
     setOpenTest(t);
-    setTests((prev) => prev.map((x) => (x.id === id ? t : x)));
   }
 
   useEffect(() => {
     loadConnectors();
-    loadTests();
     loadSummary();
   }, []);
 
@@ -351,7 +353,9 @@ export default function IntegrationsPage() {
       else await apiCall<Connector>("POST", "/connectors", payload);
       setShowConnectorForm(false);
       await loadConnectors();
+      reloadConnectors();
       await loadSummary();
+      toast(editingConnector ? "Changes saved" : "Connector created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save connector");
     } finally {
@@ -359,13 +363,15 @@ export default function IntegrationsPage() {
     }
   }
   async function removeConnector(c: Connector) {
-    if (!window.confirm(`Delete connector ${c.reference || c.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete connector ${c.reference || c.name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/connectors/${c.id}`);
       setShowConnectorForm(false);
       await loadConnectors();
+      reloadConnectors();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -390,8 +396,10 @@ export default function IntegrationsPage() {
       if (editingCct) await apiCall<AutomatedControlTest>("PATCH", `/automated-control-tests/${editingCct.id}`, payload);
       else await apiCall<AutomatedControlTest>("POST", "/automated-control-tests", payload);
       setShowCctForm(false);
-      await loadTests(openTest?.id);
+      reloadTests();
+      if (openTest) await refreshTest(openTest.id);
       await loadSummary();
+      toast(editingCct ? "Changes saved" : "Control test created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save control test");
     } finally {
@@ -399,21 +407,23 @@ export default function IntegrationsPage() {
     }
   }
   async function removeCct(t: AutomatedControlTest) {
-    if (!window.confirm(`Delete control test ${t.reference || t.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete control test ${t.reference || t.name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/automated-control-tests/${t.id}`);
       setShowCctForm(false);
       if (openTest?.id === t.id) setOpenTest(null);
-      await loadTests();
+      reloadTests();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
-  function toggleTest(t: AutomatedControlTest) {
+  async function toggleTest(t: AutomatedControlTest) {
     setRd(BLANK_RUN);
-    setOpenTest(openTest?.id === t.id ? null : t);
+    if (openTest?.id === t.id) { setOpenTest(null); return; }
+    await refreshTest(t.id);
   }
 
   // ------------------------------------------------------------- runs (inline)
@@ -430,19 +440,23 @@ export default function IntegrationsPage() {
       });
       setRd(BLANK_RUN);
       await refreshTest(openTest.id);
+      reloadTests();
       await loadSummary();
+      toast("Run recorded");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to record run");
     }
   }
   async function removeRun(runId: string) {
     if (!openTest) return;
-    if (!window.confirm("Remove this run?")) return;
+    if (!(await confirmDialog({ title: "Remove this run?", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/control-test-runs/${runId}`);
       await refreshTest(openTest.id);
+      reloadTests();
       await loadSummary();
+      toast("Run removed");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to remove run");
     }
@@ -536,6 +550,45 @@ export default function IntegrationsPage() {
     </>
   );
 
+  // ------------------------------------------------------------- table columns
+  const connectorColumns: Column<Connector>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, render: (c) => <span className="cell-title">{c.name}</span> },
+    { key: "connector_type", header: "Type", sortable: true, render: (c) => <Badge tone="info">{cap(c.connector_type)}</Badge> },
+    { key: "owner", header: "Owner", render: (c) => <span className="muted">{c.owner || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (c) => (
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <Badge tone={CONNECTOR_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge>
+        {c.is_stale && <Badge tone="high">Stale</Badge>}
+      </div>
+    ) },
+    { key: "last_sync", header: "Last sync", sortable: true, render: (c) => <span className="muted">{c.last_sync || "never"}</span> },
+    { key: "actions", header: "", render: (c) => (
+      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
+        <button className="btn secondary sm" onClick={() => openEditConnector(c)}>Edit</button>
+        <button className="btn secondary sm" onClick={() => removeConnector(c)}>Delete</button>
+      </div>
+    ) },
+  ];
+
+  const testColumns: Column<AutomatedControlTest>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (t) => <span className="ref">{t.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, render: (t) => <span className="cell-title">{t.name}</span> },
+    { key: "control_ref", header: "Control", sortable: true, render: (t) => <span className="muted">{t.control_ref || "—"}</span> },
+    { key: "connector", header: "Connector", render: (t) => <span className="muted">{connectorName(t.connector_id)}</span> },
+    { key: "last_result", header: "Last result", sortable: true, render: (t) => <ResultBadge value={t.last_result} /> },
+    { key: "pass_rate", header: "Pass rate", sortable: true, render: (t) => <PassRateBar value={t.pass_rate} /> },
+    { key: "last_run", header: "Last run", sortable: true, render: (t) => <span className="muted">{t.last_run || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (t) => <Badge tone={CCM_STATUS_TONE[t.status] || "neutral"}>{cap(t.status)}</Badge> },
+    { key: "actions", header: "", render: (t) => (
+      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
+        <button className="btn secondary sm" onClick={() => toggleTest(t)}>{openTest?.id === t.id ? "Hide" : "Runs"}</button>
+        <button className="btn secondary sm" onClick={() => openEditCct(t)}>Edit</button>
+        <button className="btn secondary sm" onClick={() => removeCct(t)}>Delete</button>
+      </div>
+    ) },
+  ];
+
   // ------------------------------------------------------------- render
   return (
     <>
@@ -594,126 +647,50 @@ export default function IntegrationsPage() {
 
       {/* ============================================= CONNECTORS */}
       {section === "connectors" && (
-        <div className="card">
-          <div className="card-head">
-            <h3>Connectors</h3>
-            <span className="sub">{connectors.length} total · registered integrations into the bank&apos;s sources</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Name</th>
-                  <th>Type</th>
-                  <th>Owner</th>
-                  <th>Status</th>
-                  <th>Last sync</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {connectors.map((c) => (
-                  <tr key={c.id} style={{ cursor: "pointer" }} onClick={() => openEditConnector(c)}>
-                    <td className="ref">{c.reference || "—"}</td>
-                    <td className="cell-title">{c.name}</td>
-                    <td><Badge tone="info">{cap(c.connector_type)}</Badge></td>
-                    <td className="muted">{c.owner || "—"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <Badge tone={CONNECTOR_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge>
-                        {c.is_stale && <Badge tone="high">Stale</Badge>}
-                      </div>
-                    </td>
-                    <td className="muted">{c.last_sync || "never"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => openEditConnector(c)}>Edit</button>
-                        <button className="btn secondary sm" onClick={() => removeConnector(c)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {connectors.length === 0 && (
-                  <tr>
-                    <td colSpan={7}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No connectors</h3>
-                        <p>Register an integration into a source of truth (AD, SIEM, EDR, CMDB, core banking, cloud) to power continuous controls monitoring.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DataTable<Connector>
+          columns={connectorColumns}
+          fetcher={fetchConnectors}
+          rowKey={(c) => c.id}
+          onRowClick={openEditConnector}
+          searchPlaceholder="Search connectors by name or reference…"
+          defaultSort={{ by: "name", dir: "asc" }}
+          filters={{ status: connectorStatus || undefined }}
+          toolbarRight={
+            <select className="input" style={{ maxWidth: 180 }} value={connectorStatus} onChange={(e) => setConnectorStatus(e.target.value)}>
+              <option value="">All statuses</option>
+              {CONNECTOR_STATUS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          }
+          emptyMessage="No connectors. Register an integration into a source of truth (AD, SIEM, EDR, CMDB, core banking, cloud) to power continuous controls monitoring."
+          refreshKey={connectorsKey}
+        />
       )}
 
       {/* ============================================= CCM */}
       {section === "ccm" && (
         <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head">
-              <h3>Continuous Controls Monitoring</h3>
-              <span className="sub">{tests.length} total · click a row to record a run &amp; view history</span>
-            </div>
-            <p className="muted" style={{ padding: "0 16px 12px", fontSize: 13 }}>
-              Runtime execution is manual for now — record a run and its outcome rolls up onto the test&apos;s last result and pass-rate.
-            </p>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Name</th>
-                    <th>Control</th>
-                    <th>Connector</th>
-                    <th>Last result</th>
-                    <th>Pass rate</th>
-                    <th>Last run</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tests.map((t) => (
-                    <tr key={t.id} style={{ cursor: "pointer" }} onClick={() => toggleTest(t)}>
-                      <td className="ref">{t.reference || "—"}</td>
-                      <td className="cell-title">{t.name}</td>
-                      <td className="muted">{t.control_ref || "—"}</td>
-                      <td className="muted">{connectorName(t.connector_id)}</td>
-                      <td><ResultBadge value={t.last_result} /></td>
-                      <td><PassRateBar value={t.pass_rate} /></td>
-                      <td className="muted">{t.last_run || "—"}</td>
-                      <td><Badge tone={CCM_STATUS_TONE[t.status] || "neutral"}>{cap(t.status)}</Badge></td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleTest(t)}>
-                            {openTest?.id === t.id ? "Hide" : "Runs"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => openEditCct(t)}>Edit</button>
-                          <button className="btn secondary sm" onClick={() => removeCct(t)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {tests.length === 0 && (
-                    <tr>
-                      <td colSpan={9}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No control tests</h3>
-                          <p>Define an automated control test (e.g. &quot;all privileged accounts have MFA enabled&quot;) and record its runs over time.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+            Runtime execution is manual for now — click a row to record a run; its outcome rolls up onto the test&apos;s last result and pass-rate.
+          </p>
+          <DataTable<AutomatedControlTest>
+            columns={testColumns}
+            fetcher={fetchTests}
+            rowKey={(t) => t.id}
+            onRowClick={toggleTest}
+            activeKey={openTest?.id ?? null}
+            searchPlaceholder="Search tests by name, reference or control…"
+            defaultSort={{ by: "name", dir: "asc" }}
+            filters={{ status: testStatus || undefined }}
+            toolbarRight={
+              <select className="input" style={{ maxWidth: 180 }} value={testStatus} onChange={(e) => setTestStatus(e.target.value)}>
+                <option value="">All statuses</option>
+                {CCM_STATUS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            }
+            emptyMessage='No control tests. Define an automated control test (e.g. "all privileged accounts have MFA enabled") and record its runs over time.'
+            refreshKey={testsKey}
+          />
+          <div style={{ marginBottom: 16 }} />
 
           {openTest && (
             <>

@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, type FieldInfo, type FilterResults, type SavedFilter } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { api, apiCall, type FieldInfo, type FilterResults, type SavedFilter } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 
@@ -12,12 +15,13 @@ const OP_LABEL: Record<string, string> = {
 type Cond = { field: string; operator: string; value: string };
 
 export default function FiltersPage() {
-  const [filters, setFilters] = useState<SavedFilter[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [operators, setOperators] = useState<string[]>([]);
   const [fields, setFields] = useState<FieldInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<Record<string, FilterResults>>({});
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [filterModel, setFilterModel] = useState("");
+  const [ran, setRan] = useState<{ filter: SavedFilter; results: FilterResults } | null>(null);
 
   const [model, setModel] = useState("risk");
   const [name, setName] = useState("");
@@ -25,12 +29,11 @@ export default function FiltersPage() {
   const [shared, setShared] = useState(true);
   const [conds, setConds] = useState<Cond[]>([{ field: "", operator: "eq", value: "" }]);
 
-  async function loadFilters() {
-    setFilters(await api.filters().catch(() => []));
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchFilters = useCallback((qs: string) => apiCall<PagedList<SavedFilter>>("GET", `/filters?${qs}`), []);
+
   useEffect(() => {
-    Promise.all([api.statusRuleModels(), api.statusRuleOperators()]).then(([m, o]) => { setModels(m); setOperators(o); });
-    loadFilters();
+    Promise.all([api.statusRuleModels(), api.statusRuleOperators()]).then(([m, o]) => { setModels(m); setOperators(o); }).catch(() => {});
   }, []);
   useEffect(() => {
     api.filterFields(model).then((f) => {
@@ -50,21 +53,49 @@ export default function FiltersPage() {
       await api.createFilter({ name, model, match_mode: matchMode, shared, conditions: conds.filter((c) => c.field) });
       setName("");
       setConds([{ field: fields[0]?.key || "", operator: "eq", value: "" }]);
-      await loadFilters();
+      reload();
+      toast("Filter saved");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
     }
   }
-  async function run(id: string) {
-    const res = await api.runFilter(id);
-    setResults((r) => ({ ...r, [id]: res }));
+  async function run(f: SavedFilter) {
+    try {
+      const res = await api.runFilter(f.id);
+      setRan({ filter: f, results: res });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Run failed");
+    }
   }
-  async function remove(id: string) {
-    await api.deleteFilter(id).catch((e) => setError(e instanceof Error ? e.message : "Delete failed"));
-    await loadFilters();
+  async function remove(f: SavedFilter) {
+    if (!(await confirmDialog({ title: `Delete filter "${f.name}"?`, danger: true }))) return;
+    try {
+      await api.deleteFilter(f.id);
+      if (ran?.filter.id === f.id) setRan(null);
+      reload();
+      toast("Deleted");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    }
   }
 
   const needsValue = (op: string) => !["overdue", "is_true", "is_false", "not_empty"].includes(op);
+
+  const columns: Column<SavedFilter>[] = [
+    { key: "name", header: "Name", sortable: true, render: (f) => <span className="cell-title">{f.name}</span> },
+    { key: "model", header: "Module", sortable: true, render: (f) => <Badge tone="neutral">{f.model}</Badge> },
+    { key: "match_mode", header: "Match", render: (f) => <span className="muted">{f.match_mode}</span> },
+    { key: "conditions", header: "Conditions", render: (f) => <span className="muted">{f.conditions.map((c) => `${c.field} ${OP_LABEL[c.operator] || c.operator} ${c.value}`).join("; ") || "—"}</span> },
+    { key: "shared", header: "Visibility", render: (f) => (f.shared ? <Badge tone="info">shared</Badge> : <Badge tone="neutral">personal</Badge>) },
+    {
+      key: "actions", header: "", render: (f) => (
+        <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          <button className="btn sm" onClick={() => run(f)}>Run</button>
+          <button className="btn secondary sm" onClick={() => remove(f)}>Delete</button>
+        </div>
+      ),
+    },
+  ];
 
   return (
     <>
@@ -138,41 +169,39 @@ export default function FiltersPage() {
         </div>
       </form>
 
-      {filters.length === 0 && <div className="card card-pad"><div className="empty"><h3>No saved filters</h3><p>Create one above.</p></div></div>}
+      <DataTable<SavedFilter>
+        columns={columns}
+        fetcher={fetchFilters}
+        rowKey={(f) => f.id}
+        searchPlaceholder="Search filters by name…"
+        filters={{ model: filterModel || undefined }}
+        toolbarRight={
+          <select className="input" style={{ maxWidth: 180 }} value={filterModel} onChange={(e) => setFilterModel(e.target.value)}>
+            <option value="">All modules</option>
+            {models.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        }
+        emptyMessage="No saved filters yet. Create one above."
+        refreshKey={refreshKey}
+      />
 
-      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 16 }}>
-        {filters.map((f) => (
-          <div className="card" key={f.id}>
-            <div className="card-head">
-              <h3>{f.name}</h3>
-              {f.shared ? <Badge tone="info">shared</Badge> : <Badge tone="neutral">personal</Badge>}
+      {ran && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-head row-between">
+            <div>
+              <h3>{ran.filter.name}</h3>
+              <span className="sub">{ran.results.count} of {ran.results.total} match</span>
             </div>
-            <div className="card-pad">
-              <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-                <Badge tone="neutral">{f.model}</Badge> · match {f.match_mode}
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
-                {f.conditions.map((c, i) => (
-                  <code key={i} style={{ fontSize: 12 }}>{c.field} {OP_LABEL[c.operator] || c.operator} {c.value}</code>
-                ))}
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn sm" onClick={() => run(f.id)}>Run</button>
-                <button className="btn secondary sm" onClick={() => remove(f.id)}>Delete</button>
-              </div>
-              {results[f.id] && (
-                <div style={{ marginTop: 12 }}>
-                  <b style={{ fontSize: 13 }}>{results[f.id].count} of {results[f.id].total} match</b>
-                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>
-                    {results[f.id].matches.map((m) => <Badge key={m.id} tone="low">{m.label}</Badge>)}
-                    {results[f.id].count === 0 && <span className="muted" style={{ fontSize: 12 }}>No records match</span>}
-                  </div>
-                </div>
-              )}
+            <button className="btn secondary sm" onClick={() => setRan(null)}>Close</button>
+          </div>
+          <div className="card-pad">
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+              {ran.results.matches.map((m) => <Badge key={m.id} tone="low">{m.label}</Badge>)}
+              {ran.results.count === 0 && <span className="muted" style={{ fontSize: 12 }}>No records match</span>}
             </div>
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </>
   );
 }

@@ -1,16 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconCheck, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 type VulnFinding = {
   id: string;
   reference: string;
@@ -67,7 +70,6 @@ type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 
 // ------------------------------------------------------------------ enum lists
 const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
@@ -239,28 +241,31 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "patches", label: "Patches" },
 ];
 
-export default function VulnerabilitiesPage() {
+/* ================================================================ page ===== */
+function VulnerabilitiesInner() {
   const [section, setSection] = useState<SectionId>("findings");
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  const [findings, setFindings] = useState<VulnFinding[]>([]);
-  const [patches, setPatches] = useState<PatchRecord[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
 
+  // ---- finding detail drawer (URL-driven) ----
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<VulnFinding | null>(null);
+
   // ---- finding filters ----
-  const [fSearch, setFSearch] = useState("");
   const [fSeverity, setFSeverity] = useState("");
   const [fStatus, setFStatus] = useState("");
   const [fSource, setFSource] = useState("");
   const [fOverdue, setFOverdue] = useState(false);
 
-  // ---- finding dialog + expanded detail ----
+  // ---- finding dialog ----
   const [editingFinding, setEditingFinding] = useState<VulnFinding | null>(null);
   const [showFindingForm, setShowFindingForm] = useState(false);
   const [savingFinding, setSavingFinding] = useState(false);
   const [ff, setFf] = useState<FindingForm>(BLANK_FINDING);
   const setF = <K extends keyof FindingForm>(k: K, v: FindingForm[K]) => setFf((p) => ({ ...p, [k]: v }));
-  const [openFinding, setOpenFinding] = useState<VulnFinding | null>(null);
 
   // ---- patch filters ----
   const [pStatus, setPStatus] = useState("");
@@ -274,63 +279,45 @@ export default function VulnerabilitiesPage() {
   const setP = <K extends keyof PatchForm>(k: K, v: PatchForm[K]) => setPf((p) => ({ ...p, [k]: v }));
 
   // ------------------------------------------------------------- loaders
-  async function loadFindings() {
-    try {
-      const qs = new URLSearchParams();
-      if (fSearch) qs.set("search", fSearch);
-      if (fSeverity) qs.set("severity", fSeverity);
-      if (fStatus) qs.set("status", fStatus);
-      if (fSource) qs.set("source", fSource);
-      if (fOverdue) qs.set("overdue", "true");
-      const q = qs.toString();
-      const res = await apiCall<Page<VulnFinding>>("GET", `/vuln-findings${q ? `?${q}` : ""}`);
-      setFindings(res.items);
-      if (openFinding) setOpenFinding(res.items.find((x) => x.id === openFinding.id) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load findings");
-    }
-  }
-  async function loadPatches() {
-    try {
-      const qs = new URLSearchParams();
-      if (pStatus) qs.set("status", pStatus);
-      if (pCategory) qs.set("category", pCategory);
-      const q = qs.toString();
-      const res = await apiCall<Page<PatchRecord>>("GET", `/patch-records${q ? `?${q}` : ""}`);
-      setPatches(res.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load patches");
-    }
-  }
-  async function loadSummary() {
+  const fetchFindings = useCallback(
+    (qs: string) => apiCall<PagedList<VulnFinding>>("GET", `/vuln-findings?${qs}`),
+    [],
+  );
+  const fetchPatches = useCallback(
+    (qs: string) => apiCall<PagedList<PatchRecord>>("GET", `/patch-records?${qs}`),
+    [],
+  );
+
+  const loadDetail = useCallback((id: string) => {
+    apiCall<VulnFinding>("GET", `/vuln-findings/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setDetail(null);
+  }, [openId, loadDetail]);
+
+  const loadSummary = useCallback(async () => {
     try {
       setSummary(await apiCall<Summary>("GET", "/vulnerability-summary"));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load summary");
     }
-  }
-
-  useEffect(() => {
-    loadSummary();
   }, []);
   useEffect(() => {
-    loadFindings();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fSearch, fSeverity, fStatus, fSource, fOverdue]);
-  useEffect(() => {
-    loadPatches();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pStatus, pCategory]);
+    loadSummary();
+  }, [loadSummary, refreshKey]);
 
   // ------------------------------------------------------------- finding CRUD
   function openNewFinding() {
     setEditingFinding(null);
     setFf(BLANK_FINDING);
+    setError(null);
     setShowFindingForm(true);
   }
   function openEditFinding(v: VulnFinding) {
     setEditingFinding(v);
     setFf(fromFinding(v));
+    setError(null);
     setShowFindingForm(true);
   }
   async function saveFinding() {
@@ -341,8 +328,9 @@ export default function VulnerabilitiesPage() {
       if (editingFinding) await apiCall("PATCH", `/vuln-findings/${editingFinding.id}`, payload);
       else await apiCall("POST", "/vuln-findings", payload);
       setShowFindingForm(false);
-      await loadFindings();
-      await loadSummary();
+      reload();
+      if (openId) loadDetail(openId);
+      toast(editingFinding ? "Changes saved" : "Finding logged");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save finding");
     } finally {
@@ -350,31 +338,30 @@ export default function VulnerabilitiesPage() {
     }
   }
   async function removeFinding(v: VulnFinding) {
-    if (!window.confirm(`Delete vulnerability ${v.reference || v.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete vulnerability ${v.reference || v.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/vuln-findings/${v.id}`);
       setShowFindingForm(false);
-      if (openFinding?.id === v.id) setOpenFinding(null);
-      await loadFindings();
-      await loadSummary();
+      if (openId === v.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
-  }
-  function toggleFinding(v: VulnFinding) {
-    setOpenFinding(openFinding?.id === v.id ? null : v);
   }
 
   // ------------------------------------------------------------- patch CRUD
   function openNewPatch() {
     setEditingPatch(null);
     setPf(BLANK_PATCH);
+    setError(null);
     setShowPatchForm(true);
   }
   function openEditPatch(p: PatchRecord) {
     setEditingPatch(p);
     setPf(fromPatch(p));
+    setError(null);
     setShowPatchForm(true);
   }
   async function savePatch() {
@@ -385,8 +372,8 @@ export default function VulnerabilitiesPage() {
       if (editingPatch) await apiCall("PATCH", `/patch-records/${editingPatch.id}`, payload);
       else await apiCall("POST", "/patch-records", payload);
       setShowPatchForm(false);
-      await loadPatches();
-      await loadSummary();
+      reload();
+      toast(editingPatch ? "Changes saved" : "Patch created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save patch");
     } finally {
@@ -394,17 +381,43 @@ export default function VulnerabilitiesPage() {
     }
   }
   async function removePatch(p: PatchRecord) {
-    if (!window.confirm(`Delete patch ${p.reference || p.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete patch ${p.reference || p.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall("DELETE", `/patch-records/${p.id}`);
       setShowPatchForm(false);
-      await loadPatches();
-      await loadSummary();
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
+
+  // ------------------------------------------------------------- columns
+  const findingColumns: Column<VulnFinding>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (v) => <span className="ref">{v.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (v) => <span className="cell-title">{v.title}</span> },
+    { key: "cve_id", header: "CVE", render: (v) => <span className="muted">{v.cve_id || "—"}</span> },
+    { key: "cvss_score", header: "CVSS", sortable: true, render: (v) => <span className="muted">{v.cvss_score != null ? Number(v.cvss_score).toFixed(1) : "—"}</span> },
+    { key: "severity", header: "Severity", sortable: true, render: (v) => <Badge tone={SEVERITY_TONE[v.severity] || "neutral"}>{cap(v.severity)}</Badge> },
+    { key: "asset_name", header: "Asset", sortable: true, render: (v) => <span className="muted">{v.asset_name || v.asset_ip || "—"}</span> },
+    { key: "source", header: "Source", render: (v) => <span className="muted">{cap(v.source)}</span> },
+    { key: "status", header: "Status", sortable: true, render: (v) => <Badge tone={VULN_STATUS_TONE[v.status] || "neutral"}>{cap(v.status)}</Badge> },
+    { key: "due_date", header: "SLA / Due", sortable: true, render: (v) => (v.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{v.due_date || `${v.sla_days}d SLA`}</span>) },
+    { key: "actions", header: "", render: (v) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditFinding(v)}>Edit</button> <button className="btn secondary sm" onClick={() => removeFinding(v)}>Delete</button></div> },
+  ];
+
+  const patchColumns: Column<PatchRecord>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (p) => <span className="ref">{p.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (p) => <span className="cell-title">{p.title}</span> },
+    { key: "vendor", header: "Vendor", sortable: true, render: (p) => <span className="muted">{p.vendor || "—"}</span> },
+    { key: "patch_ref", header: "Patch ref", render: (p) => <span className="muted">{p.patch_ref || "—"}</span> },
+    { key: "category", header: "Category", render: (p) => <span className="muted">{cap(p.category)}</span> },
+    { key: "status", header: "Status", sortable: true, render: (p) => <Badge tone={PATCH_STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge> },
+    { key: "released_date", header: "Released", sortable: true, render: (p) => <span className="muted">{p.released_date || "—"}</span> },
+    { key: "deployed_date", header: "Deployed", sortable: true, render: (p) => <span className="muted">{p.deployed_date || "—"}</span> },
+    { key: "actions", header: "", render: (p) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removePatch(p)}>Delete</button></div> },
+  ];
 
   // ------------------------------------------------------------- finding form tabs
   const findingGeneral = (
@@ -588,181 +601,50 @@ export default function VulnerabilitiesPage() {
 
       {/* ============================================= FINDINGS */}
       {section === "findings" && (
-        <>
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-head row-between">
-              <div>
-                <h3>Vulnerabilities</h3>
-                <span className="sub">{findings.length} shown · click a row to expand</span>
-              </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <input
-                  className="input"
-                  style={{ width: 200 }}
-                  value={fSearch}
-                  onChange={(e) => setFSearch(e.target.value)}
-                  placeholder="Search title / CVE / asset"
-                />
-                <select className="select" style={{ width: 150 }} value={fSeverity} onChange={(e) => setFSeverity(e.target.value)}>
-                  <option value="">All severities</option>
-                  {VULN_SEVERITY.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-                </select>
-                <select className="select" style={{ width: 150 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
-                  <option value="">All statuses</option>
-                  {VULN_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-                </select>
-                <select className="select" style={{ width: 140 }} value={fSource} onChange={(e) => setFSource(e.target.value)}>
-                  <option value="">All sources</option>
-                  {VULN_SOURCE.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-                </select>
-                <label className="switch">
-                  <input type="checkbox" checked={fOverdue} onChange={(e) => setFOverdue(e.target.checked)} />
-                  <span className="track" />
-                  <span className="txt">Overdue only</span>
-                </label>
-              </div>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ref</th>
-                    <th>Title</th>
-                    <th>CVE</th>
-                    <th>CVSS</th>
-                    <th>Severity</th>
-                    <th>Asset</th>
-                    <th>Source</th>
-                    <th>Status</th>
-                    <th>SLA / Due</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {findings.map((v) => (
-                    <tr key={v.id} style={{ cursor: "pointer" }} onClick={() => toggleFinding(v)}>
-                      <td className="ref">{v.reference || "—"}</td>
-                      <td className="cell-title">{v.title}</td>
-                      <td className="muted">{v.cve_id || "—"}</td>
-                      <td className="muted">{v.cvss_score != null ? Number(v.cvss_score).toFixed(1) : "—"}</td>
-                      <td><Badge tone={SEVERITY_TONE[v.severity] || "neutral"}>{cap(v.severity)}</Badge></td>
-                      <td className="muted">{v.asset_name || v.asset_ip || "—"}</td>
-                      <td className="muted">{cap(v.source)}</td>
-                      <td><Badge tone={VULN_STATUS_TONE[v.status] || "neutral"}>{cap(v.status)}</Badge></td>
-                      <td>
-                        {v.is_overdue ? (
-                          <Badge tone="critical">Overdue</Badge>
-                        ) : (
-                          <span className="muted">{v.due_date || `${v.sla_days}d SLA`}</span>
-                        )}
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                          <button className="btn secondary sm" onClick={() => toggleFinding(v)}>
-                            {openFinding?.id === v.id ? "Hide" : "View"}
-                          </button>
-                          <button className="btn secondary sm" onClick={() => openEditFinding(v)}>Edit</button>
-                          <button className="btn secondary sm" onClick={() => removeFinding(v)}>Delete</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {findings.length === 0 && (
-                    <tr>
-                      <td colSpan={10}>
-                        <div className="empty">
-                          <span className="ico"><IconCheck width={24} height={24} /></span>
-                          <h3>No vulnerabilities</h3>
-                          <p>Log scanner findings against assets to track remediation against severity-based SLAs.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {openFinding && (
+        <DataTable<VulnFinding>
+          columns={findingColumns}
+          fetcher={fetchFindings}
+          rowKey={(v) => v.id}
+          onRowClick={(v) => setOpenId(v.id)}
+          activeKey={openId}
+          searchPlaceholder="Search title / CVE / asset…"
+          filters={{
+            severity: fSeverity || undefined,
+            status: fStatus || undefined,
+            source: fSource || undefined,
+            overdue: fOverdue || undefined,
+          }}
+          emptyMessage="No vulnerabilities. Log scanner findings against assets to track remediation against severity-based SLAs."
+          refreshKey={refreshKey}
+          toolbarRight={
             <>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head row-between">
-                  <div>
-                    <h3>{openFinding.reference} — {openFinding.title}</h3>
-                    <span className="sub">
-                      {cap(openFinding.severity)} · CVSS {openFinding.cvss_score != null ? Number(openFinding.cvss_score).toFixed(1) : "—"}
-                      {openFinding.cve_id ? " · " + openFinding.cve_id : ""} · {cap(openFinding.status)}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-                    <div style={{ textAlign: "right" }}>
-                      <div className="muted" style={{ fontSize: 12 }}>Remediation SLA</div>
-                      <strong style={{ fontSize: 18 }}>{openFinding.sla_days} days</strong>
-                    </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button className="btn secondary sm" onClick={() => openEditFinding(openFinding)}>Edit</button>
-                      <button className="btn secondary sm" onClick={() => removeFinding(openFinding)}>Delete</button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="card-pad">
-                  <div className="field-row">
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Affected asset</div>
-                      <div>{openFinding.asset_name || "—"}{openFinding.asset_ip ? ` (${openFinding.asset_ip})` : ""}</div>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Owner</div>
-                      <div>{openFinding.owner || "—"}</div>
-                    </div>
-                    <div>
-                      <div className="muted" style={{ fontSize: 12 }}>Discovered / Due</div>
-                      <div>{openFinding.discovered_date || "—"} → {openFinding.due_date || "—"}</div>
-                    </div>
-                  </div>
-                  <div style={{ marginTop: 12 }}>
-                    <strong>Description</strong>
-                    <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
-                      {openFinding.description || "No description recorded."}
-                    </p>
-                  </div>
-                  <div style={{ marginTop: 12 }}>
-                    <strong>Remediation</strong>
-                    <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
-                      {openFinding.remediation || "No remediation recorded."}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <RecordPanels model="vuln_finding" entityId={openFinding.id} />
+              <select className="select" style={{ width: 150 }} value={fSeverity} onChange={(e) => setFSeverity(e.target.value)}>
+                <option value="">All severities</option>
+                {VULN_SEVERITY.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+              </select>
+              <select className="select" style={{ width: 150 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
+                <option value="">All statuses</option>
+                {VULN_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+              </select>
+              <select className="select" style={{ width: 140 }} value={fSource} onChange={(e) => setFSource(e.target.value)}>
+                <option value="">All sources</option>
+                {VULN_SOURCE.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+              </select>
+              <label className="switch">
+                <input type="checkbox" checked={fOverdue} onChange={(e) => setFOverdue(e.target.checked)} />
+                <span className="track" />
+                <span className="txt">Overdue only</span>
+              </label>
             </>
-          )}
-        </>
+          }
+        />
       )}
 
       {/* ============================================= PATCHES */}
       {section === "patches" && (
-        <div className="card">
-          <div className="card-head row-between">
-            <div>
-              <h3>Patches</h3>
-              <span className="sub">{patches.length} shown · click a row to edit</span>
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <select className="select" style={{ width: 160 }} value={pStatus} onChange={(e) => setPStatus(e.target.value)}>
-                <option value="">All statuses</option>
-                {PATCH_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-              </select>
-              <select className="select" style={{ width: 160 }} value={pCategory} onChange={(e) => setPCategory(e.target.value)}>
-                <option value="">All categories</option>
-                {PATCH_CATEGORY.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
-              </select>
-            </div>
-          </div>
+        <>
           {summary && summary.total_patches > 0 && (
-            <div className="card-pad" style={{ paddingBottom: 0 }}>
+            <div className="card card-pad" style={{ marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
                 <span className="muted">Deployed / total patches</span>
                 <strong>{summary.patch_compliance_pct}%</strong>
@@ -778,55 +660,93 @@ export default function VulnerabilitiesPage() {
               </div>
             </div>
           )}
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Title</th>
-                  <th>Vendor</th>
-                  <th>Patch ref</th>
-                  <th>Category</th>
-                  <th>Status</th>
-                  <th>Released</th>
-                  <th>Deployed</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {patches.map((p) => (
-                  <tr key={p.id} style={{ cursor: "pointer" }} onClick={() => openEditPatch(p)}>
-                    <td className="ref">{p.reference || "—"}</td>
-                    <td className="cell-title">{p.title}</td>
-                    <td className="muted">{p.vendor || "—"}</td>
-                    <td className="muted">{p.patch_ref || "—"}</td>
-                    <td className="muted">{cap(p.category)}</td>
-                    <td><Badge tone={PATCH_STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge></td>
-                    <td className="muted">{p.released_date || "—"}</td>
-                    <td className="muted">{p.deployed_date || "—"}</td>
-                    <td>
-                      <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                        <button className="btn secondary sm" onClick={() => removePatch(p)}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {patches.length === 0 && (
-                  <tr>
-                    <td colSpan={9}>
-                      <div className="empty">
-                        <span className="ico"><IconCheck width={24} height={24} /></span>
-                        <h3>No patches</h3>
-                        <p>Track the patch-deployment pipeline from pending through testing to deployed.</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+          <DataTable<PatchRecord>
+            columns={patchColumns}
+            fetcher={fetchPatches}
+            rowKey={(p) => p.id}
+            onRowClick={(p) => openEditPatch(p)}
+            searchPlaceholder="Search title / vendor / patch ref…"
+            filters={{ status: pStatus || undefined, category: pCategory || undefined }}
+            emptyMessage="No patches. Track the patch-deployment pipeline from pending through testing to deployed."
+            refreshKey={refreshKey}
+            toolbarRight={
+              <>
+                <select className="select" style={{ width: 160 }} value={pStatus} onChange={(e) => setPStatus(e.target.value)}>
+                  <option value="">All statuses</option>
+                  {PATCH_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+                </select>
+                <select className="select" style={{ width: 160 }} value={pCategory} onChange={(e) => setPCategory(e.target.value)}>
+                  <option value="">All categories</option>
+                  {PATCH_CATEGORY.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}
+                </select>
+              </>
+            }
+          />
+        </>
       )}
+
+      {/* ============================================= FINDING DETAIL DRAWER */}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
+        subtitle={
+          detail
+            ? `${cap(detail.severity)} · CVSS ${detail.cvss_score != null ? Number(detail.cvss_score).toFixed(1) : "—"}${detail.cve_id ? " · " + detail.cve_id : ""} · ${cap(detail.status)}`
+            : ""
+        }
+        width={720}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEditFinding(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => removeFinding(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              <Badge tone={SEVERITY_TONE[detail.severity] || "neutral"}>{cap(detail.severity)}</Badge>
+              <Badge tone={VULN_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              {detail.is_overdue && <Badge tone="critical">Overdue</Badge>}
+              <span className="muted" style={{ marginLeft: "auto" }}>Remediation SLA: <strong>{detail.sla_days} days</strong></span>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-pad">
+                <div className="field-row">
+                  <div>
+                    <div className="muted" style={{ fontSize: 12 }}>Affected asset</div>
+                    <div>{detail.asset_name || "—"}{detail.asset_ip ? ` (${detail.asset_ip})` : ""}</div>
+                  </div>
+                  <div>
+                    <div className="muted" style={{ fontSize: 12 }}>Owner</div>
+                    <div>{detail.owner || "—"}</div>
+                  </div>
+                  <div>
+                    <div className="muted" style={{ fontSize: 12 }}>Discovered / Due</div>
+                    <div>{detail.discovered_date || "—"} → {detail.due_date || "—"}</div>
+                  </div>
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <strong>Description</strong>
+                  <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
+                    {detail.description || "No description recorded."}
+                  </p>
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <strong>Remediation</strong>
+                  <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
+                    {detail.remediation || "No remediation recorded."}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <RecordPanels model="vuln_finding" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {/* ============================================= MODALS */}
       {showFindingForm && (
@@ -887,5 +807,13 @@ export default function VulnerabilitiesPage() {
         />
       )}
     </>
+  );
+}
+
+export default function VulnerabilitiesPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <VulnerabilitiesInner />
+    </Suspense>
   );
 }

@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import Link from "next/link";
-import { api, type ApprovalRequest } from "@/lib/api";
+import { api, apiCall, type ApprovalRequest } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
 
@@ -14,51 +17,130 @@ const TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
 };
 
 export default function ApprovalsPage() {
-  const [items, setItems] = useState<ApprovalRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  // per-row rejection reason (kept in the row, replaces window.prompt)
+  const [rejectReason, setRejectReason] = useState<Record<string, string>>({});
+  const setReason = (id: string, v: string) => setRejectReason((p) => ({ ...p, [id]: v }));
+
+  // ---- new request form ----
   const [showForm, setShowForm] = useState(false);
   const [title, setTitle] = useState("");
   const [approver, setApprover] = useState("");
   const [description, setDescription] = useState("");
   const [required, setRequired] = useState(1);
 
-  async function load() {
-    try {
-      setItems((await api.approvals()).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-  }, []);
+  const fetchApprovals = useCallback(
+    (qs: string) => apiCall<PagedList<ApprovalRequest>>("GET", `/approvals?${qs}`),
+    [],
+  );
 
-  async function act(fn: Promise<unknown>) {
+  async function act(fn: Promise<unknown>, okMsg: string) {
     setError(null);
     try {
       await fn;
-      await load();
+      reload();
+      toast(okMsg);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Action failed");
+      toast(e instanceof Error ? e.message : "Action failed", "error");
     }
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    await act(api.submitApproval({ title, approver, description, required_approvals: required }));
-    setShowForm(false);
-    setTitle("");
-    setApprover("");
-    setDescription("");
-    setRequired(1);
+    setError(null);
+    try {
+      await api.submitApproval({ title, approver, description, required_approvals: required });
+      setShowForm(false);
+      setTitle("");
+      setApprover("");
+      setDescription("");
+      setRequired(1);
+      reload();
+      toast("Submitted for approval");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to submit");
+    }
   }
 
-  function reject(id: string) {
-    const reason = window.prompt("Reason for rejection (required):");
-    if (reason && reason.trim()) act(api.decideApproval(id, false, reason.trim()));
+  async function reject(a: ApprovalRequest) {
+    const reason = (rejectReason[a.id] || "").trim();
+    if (!reason) {
+      toast("Enter a rejection reason first", "error");
+      return;
+    }
+    if (!(await confirmDialog({ title: `Reject ${a.reference}?`, message: reason, danger: true, confirmLabel: "Reject" }))) return;
+    await act(api.decideApproval(a.id, false, reason), "Request rejected");
+    setReason(a.id, "");
   }
 
-  const pending = items.filter((i) => i.status === "pending");
+  // -------------------------------------------------------- pending columns
+  const pendingColumns: Column<ApprovalRequest>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (a) => <span className="ref">{a.reference}</span> },
+    {
+      key: "title",
+      header: "Title",
+      render: (a) => (
+        <span className="cell-title">
+          {a.title}
+          {a.link && a.entity_label && <Link href={a.link} style={{ marginLeft: 8, fontSize: 12 }}>{a.entity_label}</Link>}
+        </span>
+      ),
+    },
+    { key: "maker", header: "Maker", render: (a) => <span className="muted">{a.requested_by_email}</span> },
+    {
+      key: "approvals",
+      header: "Approvals",
+      render: (a) => (
+        <Badge tone={a.approvals_received >= a.required_approvals ? "low" : "medium"}>
+          {a.approvals_received}/{a.required_approvals}
+        </Badge>
+      ),
+    },
+    {
+      key: "due_date",
+      header: "Due",
+      sortable: true,
+      render: (a) => (
+        <span className="muted">
+          {a.due_date || "—"}
+          {a.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      header: "",
+      render: (a) => (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true), "Decision recorded")} title="An independent checker approves">
+            <IconCheck width={13} height={13} /> Approve
+          </button>
+          <input
+            className="input"
+            style={{ width: 150 }}
+            placeholder="Rejection reason"
+            value={rejectReason[a.id] || ""}
+            onChange={(e) => setReason(a.id, e.target.value)}
+          />
+          <button className="btn secondary sm" onClick={() => reject(a)}>Reject</button>
+          <button className="btn secondary sm" onClick={() => act(api.cancelApproval(a.id), "Request cancelled")}>Cancel</button>
+        </div>
+      ),
+    },
+  ];
+
+  // -------------------------------------------------------- all-requests columns
+  const allColumns: Column<ApprovalRequest>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (a) => <span className="ref">{a.reference}</span> },
+    { key: "title", header: "Title", render: (a) => <span className="cell-title">{a.title}</span> },
+    { key: "status", header: "Status", sortable: true, render: (a) => <Badge tone={TONE[a.status] || "neutral"}>{a.status}</Badge> },
+    { key: "decided_by", header: "Decided by", render: (a) => <span className="muted">{a.decided_by_email || "—"}</span> },
+    { key: "comment", header: "Comment", render: (a) => <span className="muted">{a.decision_comment || "—"}</span> },
+  ];
 
   return (
     <>
@@ -105,66 +187,34 @@ export default function ApprovalsPage() {
         </form>
       )}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Awaiting decision</h3>
-          <span className="sub">{pending.length} pending</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Ref</th><th>Title</th><th>Maker</th><th>Approvals</th><th>Due</th><th></th></tr></thead>
-            <tbody>
-              {pending.map((a) => (
-                <tr key={a.id}>
-                  <td className="ref">{a.reference}</td>
-                  <td className="cell-title">
-                    {a.title}
-                    {a.link && a.entity_label && <Link href={a.link} style={{ marginLeft: 8, fontSize: 12 }}>{a.entity_label}</Link>}
-                  </td>
-                  <td className="muted">{a.requested_by_email}</td>
-                  <td>
-                    <Badge tone={a.approvals_received >= a.required_approvals ? "low" : "medium"}>
-                      {a.approvals_received}/{a.required_approvals}
-                    </Badge>
-                  </td>
-                  <td className="muted">{a.due_date || "—"}{a.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}</td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true))} title="An independent checker approves"><IconCheck width={13} height={13} /> Approve</button>
-                      <button className="btn secondary sm" onClick={() => reject(a.id)}>Reject</button>
-                      <button className="btn secondary sm" onClick={() => act(api.cancelApproval(a.id))}>Cancel</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {pending.length === 0 && (<tr><td colSpan={6}><div className="empty"><span className="ico"><IconCheck width={24} height={24} /></span><h3>Nothing awaiting approval</h3></div></td></tr>)}
-            </tbody>
-          </table>
-        </div>
+      <div style={{ marginBottom: 8 }}>
+        <h3 style={{ margin: "0 0 8px" }}>Awaiting decision</h3>
+      </div>
+      <div style={{ marginBottom: 24 }}>
+        <DataTable<ApprovalRequest>
+          columns={pendingColumns}
+          fetcher={fetchApprovals}
+          rowKey={(a) => a.id}
+          filters={{ status: "pending" }}
+          defaultSort={{ by: "created_at", dir: "asc" }}
+          searchPlaceholder="Search pending…"
+          emptyMessage="Nothing awaiting approval."
+          refreshKey={refreshKey}
+        />
       </div>
 
-      <div className="card">
-        <div className="card-head">
-          <h3>All requests</h3>
-          <span className="sub">{items.length} total</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Ref</th><th>Title</th><th>Status</th><th>Decided by</th><th>Comment</th></tr></thead>
-            <tbody>
-              {items.map((a) => (
-                <tr key={a.id}>
-                  <td className="ref">{a.reference}</td>
-                  <td className="cell-title">{a.title}</td>
-                  <td><Badge tone={TONE[a.status] || "neutral"}>{a.status}</Badge></td>
-                  <td className="muted">{a.decided_by_email || "—"}</td>
-                  <td className="muted">{a.decision_comment || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      <div style={{ marginBottom: 8 }}>
+        <h3 style={{ margin: "0 0 8px" }}>All requests</h3>
       </div>
+      <DataTable<ApprovalRequest>
+        columns={allColumns}
+        fetcher={fetchApprovals}
+        rowKey={(a) => a.id}
+        defaultSort={{ by: "created_at", dir: "desc" }}
+        searchPlaceholder="Search requests…"
+        emptyMessage="No approval requests yet."
+        refreshKey={refreshKey}
+      />
     </>
   );
 }

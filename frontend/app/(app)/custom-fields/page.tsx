@@ -1,16 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, type CustomField } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { api, apiCall, type CustomField } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 
 const TYPES = ["text", "textarea", "number", "date", "select", "checkbox"];
 
 export default function CustomFieldsPage() {
-  const [fields, setFields] = useState<CustomField[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [filterModel, setFilterModel] = useState("");
 
   const [model, setModel] = useState("project");
   const [label, setLabel] = useState("");
@@ -18,17 +22,11 @@ export default function CustomFieldsPage() {
   const [options, setOptions] = useState("");
   const [required, setRequired] = useState(false);
 
-  async function load() {
-    try {
-      const [f, m] = await Promise.all([api.customFields(), api.customFieldModels()]);
-      setFields(f);
-      setModels(m);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchFields = useCallback((qs: string) => apiCall<PagedList<CustomField>>("GET", `/custom-fields?${qs}`), []);
+
   useEffect(() => {
-    load();
+    api.customFieldModels().then(setModels).catch(() => {});
   }, []);
 
   async function create(e: React.FormEvent) {
@@ -39,26 +37,33 @@ export default function CustomFieldsPage() {
       setLabel("");
       setOptions("");
       setRequired(false);
-      await load();
+      reload();
+      toast("Custom field added");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
     }
   }
 
-  async function remove(id: string) {
+  async function remove(f: CustomField) {
+    if (!(await confirmDialog({ title: `Delete field "${f.label}"?`, message: "Existing values for this field will be removed.", danger: true }))) return;
     setError(null);
     try {
-      await api.deleteCustomField(id);
-      await load();
+      await api.deleteCustomField(f.id);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
     }
   }
 
-  const byModel = fields.reduce<Record<string, CustomField[]>>((acc, f) => {
-    (acc[f.model] ||= []).push(f);
-    return acc;
-  }, {});
+  const columns: Column<CustomField>[] = [
+    { key: "model", header: "Module", sortable: true, render: (f) => <span className="muted" style={{ textTransform: "capitalize" }}>{f.model.replace(/_/g, " ")}</span> },
+    { key: "label", header: "Label", sortable: true, render: (f) => <span className="cell-title">{f.label}</span> },
+    { key: "field_type", header: "Type", sortable: true, render: (f) => <Badge tone="info">{f.field_type}</Badge> },
+    { key: "required", header: "Required", render: (f) => (f.required ? <Badge tone="medium">required</Badge> : <span className="muted">optional</span>) },
+    { key: "options", header: "Options", render: (f) => <span className="muted">{f.options ? f.options.split("\n").filter(Boolean).join(", ") : "—"}</span> },
+    { key: "actions", header: "", render: (f) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(f)}>Delete</button></div> },
+  ];
 
   return (
     <>
@@ -100,36 +105,21 @@ export default function CustomFieldsPage() {
         )}
       </form>
 
-      {Object.keys(byModel).length === 0 && (
-        <div className="card card-pad"><div className="empty"><h3>No custom fields yet</h3><p>Add one above to extend a module.</p></div></div>
-      )}
-
-      {Object.entries(byModel).map(([m, list]) => (
-        <div className="card" key={m} style={{ marginBottom: 16 }}>
-          <div className="card-head">
-            <h3 style={{ textTransform: "capitalize" }}>{m.replace(/_/g, " ")}</h3>
-            <span className="sub">{list.length} field{list.length !== 1 ? "s" : ""}</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Label</th><th>Type</th><th>Required</th><th>Options</th><th></th></tr></thead>
-              <tbody>
-                {list.map((f) => (
-                  <tr key={f.id}>
-                    <td className="cell-title">{f.label}</td>
-                    <td><Badge tone="info">{f.field_type}</Badge></td>
-                    <td>{f.required ? <Badge tone="medium">required</Badge> : <span className="muted">optional</span>}</td>
-                    <td className="muted">{f.options ? f.options.split("\n").filter(Boolean).join(", ") : "—"}</td>
-                    <td>
-                      <button className="btn secondary sm" onClick={() => remove(f.id)} title="Delete">Delete</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ))}
+      <DataTable<CustomField>
+        columns={columns}
+        fetcher={fetchFields}
+        rowKey={(f) => f.id}
+        searchPlaceholder="Search fields by label…"
+        filters={{ model: filterModel || undefined }}
+        toolbarRight={
+          <select className="input" style={{ maxWidth: 200 }} value={filterModel} onChange={(e) => setFilterModel(e.target.value)}>
+            <option value="">All modules</option>
+            {models.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        }
+        emptyMessage="No custom fields yet. Add one above to extend a module."
+        refreshKey={refreshKey}
+      />
     </>
   );
 }

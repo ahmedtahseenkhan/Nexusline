@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession
+from app.core.listing import ListParams, apply_sort
 from app.models.saved_filter import SavedFilter
+from app.schemas.common import Page
 from app.schemas.saved_filter import (
     FilterMatch,
     FilterResults,
@@ -18,6 +21,12 @@ from app.schemas.saved_filter import (
 from app.services import status_rules as engine
 
 router = APIRouter(prefix="/filters", tags=["filters"])
+
+_FILTER_SORTABLE = {
+    "name": SavedFilter.name,
+    "model": SavedFilter.model,
+    "created_at": SavedFilter.created_at,
+}
 
 
 # Read permission required to run a filter over each model (mirrors the module RBAC).
@@ -70,17 +79,32 @@ async def fields(model: str, _: CurrentUser) -> list[dict]:
     return engine.evaluable_fields(model)
 
 
-@router.get("", response_model=list[SavedFilterRead])
+@router.get("", response_model=Page[SavedFilterRead])
 async def list_filters(
-    db: DbSession, user: CurrentUser, model: str | None = Query(default=None)
-) -> list[SavedFilterRead]:
+    db: DbSession,
+    user: CurrentUser,
+    model: str | None = Query(default=None),
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[SavedFilterRead]:
     stmt = select(SavedFilter).where(
         or_(SavedFilter.shared.is_(True), SavedFilter.owner_id == user.id)
     )
     if model:
         stmt = stmt.where(SavedFilter.model == model)
-    rows = (await db.scalars(stmt.order_by(SavedFilter.name))).all()
-    return [SavedFilterRead.model_validate(r) for r in rows]
+    if search:
+        stmt = stmt.where(SavedFilter.name.ilike(f"%{search}%"))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _FILTER_SORTABLE, default=SavedFilter.name)
+    else:
+        stmt = stmt.order_by(SavedFilter.name)
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    return Page(items=[SavedFilterRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=SavedFilterRead, status_code=201)

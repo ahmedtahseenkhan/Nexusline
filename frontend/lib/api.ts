@@ -1442,7 +1442,7 @@ export const api = {
     request<ApprovalRequest>(`/approvals/${id}/cancel`, { method: "POST" }),
   customFieldModels: () => request<string[]>("/custom-fields/models"),
   customFields: (model?: string) =>
-    request<CustomField[]>(`/custom-fields${model ? `?model=${model}` : ""}`),
+    request<Page<CustomField>>(`/custom-fields?limit=200${model ? `&model=${model}` : ""}`).then((r) => r.items),
   createCustomField: (payload: Record<string, unknown>) =>
     request<CustomField>("/custom-fields", { method: "POST", body: JSON.stringify(payload) }),
   deleteCustomField: (id: string) =>
@@ -1485,7 +1485,7 @@ export const api = {
     request<CollabTag[]>(`/collab/${entityType}/${entityId}/tags`, { method: "POST", body: JSON.stringify(payload) }),
   unassignTag: (entityType: string, entityId: string, tagId: string) =>
     request<void>(`/collab/${entityType}/${entityId}/tags/${tagId}`, { method: "DELETE" }),
-  webhooks: () => request<Webhook[]>("/webhooks"),
+  webhooks: () => request<Page<Webhook>>("/webhooks?limit=200").then((r) => r.items),
   createWebhook: (payload: Record<string, unknown>) =>
     request<Webhook>("/webhooks", { method: "POST", body: JSON.stringify(payload) }),
   updateWebhook: (id: string, payload: Record<string, unknown>) =>
@@ -1497,7 +1497,7 @@ export const api = {
   statusRuleOperators: () => request<string[]>("/status-rules/operators"),
   statusRuleFields: (model: string) => request<FieldInfo[]>(`/status-rules/fields/${model}`),
   statusRules: (model?: string) =>
-    request<StatusRule[]>(`/status-rules${model ? `?model=${model}` : ""}`),
+    request<Page<StatusRule>>(`/status-rules?limit=200${model ? `&model=${model}` : ""}`).then((r) => r.items),
   createStatusRule: (payload: Record<string, unknown>) =>
     request<StatusRule>("/status-rules", { method: "POST", body: JSON.stringify(payload) }),
   deleteStatusRule: (id: string) => request<void>(`/status-rules/${id}`, { method: "DELETE" }),
@@ -1508,7 +1508,8 @@ export const api = {
   attest: (entityType: string, entityId: string, payload: Record<string, unknown>) =>
     request<AttestationStatus>(`/attestations/${entityType}/${entityId}`, { method: "POST", body: JSON.stringify(payload) }),
   filterFields: (model: string) => request<FieldInfo[]>(`/filters/fields/${model}`),
-  filters: (model?: string) => request<SavedFilter[]>(`/filters${model ? `?model=${model}` : ""}`),
+  filters: (model?: string) =>
+    request<Page<SavedFilter>>(`/filters?limit=200${model ? `&model=${model}` : ""}`).then((r) => r.items),
   createFilter: (payload: Record<string, unknown>) =>
     request<SavedFilter>("/filters", { method: "POST", body: JSON.stringify(payload) }),
   deleteFilter: (id: string) => request<void>(`/filters/${id}`, { method: "DELETE" }),

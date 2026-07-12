@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.custom_field import CUSTOM_FIELD_MODELS, CustomField, CustomFieldValue
+from app.schemas.common import Page
 from app.schemas.custom_field import (
     CustomFieldCreate,
     CustomFieldRead,
@@ -17,6 +20,14 @@ from app.schemas.custom_field import (
 )
 
 router = APIRouter(prefix="/custom-fields", tags=["custom-fields"])
+
+_CUSTOM_FIELD_SORTABLE = {
+    "label": CustomField.label,
+    "model": CustomField.model,
+    "field_type": CustomField.field_type,
+    "order_index": CustomField.order_index,
+    "created_at": CustomField.created_at,
+}
 
 
 async def _load(db, field_id: uuid.UUID) -> CustomField:
@@ -32,17 +43,30 @@ async def list_models(_: CurrentUser) -> list[str]:
     return CUSTOM_FIELD_MODELS
 
 
-@router.get("", response_model=list[CustomFieldRead])
+@router.get("", response_model=Page[CustomFieldRead])
 async def list_fields(
     db: DbSession,
     _: CurrentUser,
     model: str | None = Query(default=None),
-) -> list[CustomFieldRead]:
+    search: str | None = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[CustomFieldRead]:
     stmt = select(CustomField)
     if model:
         stmt = stmt.where(CustomField.model == model)
-    rows = (await db.scalars(stmt.order_by(CustomField.model, CustomField.order_index))).all()
-    return [CustomFieldRead.model_validate(r) for r in rows]
+    if search:
+        stmt = stmt.where(CustomField.label.ilike(f"%{search}%"))
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        stmt = apply_sort(stmt, params, _CUSTOM_FIELD_SORTABLE, default=CustomField.model)
+    else:
+        stmt = stmt.order_by(CustomField.model, CustomField.order_index)
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    return Page(items=[CustomFieldRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=CustomFieldRead, status_code=201, dependencies=[Depends(require("customfield:manage"))])

@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, require
+from app.core.listing import ListParams, apply_sort
 from app.models.approval import ApprovalAction, ApprovalRequest
 from app.models.enums import ApprovalStatus
 from app.schemas.approval import ApprovalCreate, ApprovalDecision, ApprovalRead
@@ -19,6 +20,14 @@ from app.services.refs import next_reference
 from app.services import audit
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
+
+# Allow-listed sort columns for the approval queue.
+_SORTABLE = {
+    "created_at": ApprovalRequest.created_at,
+    "status": ApprovalRequest.status,
+    "due_date": ApprovalRequest.due_date,
+    "reference": ApprovalRequest.reference,
+}
 
 
 async def _load(db, approval_id: uuid.UUID) -> ApprovalRequest:
@@ -39,18 +48,28 @@ async def _next_ref(db) -> str:
 @router.get("", response_model=Page[ApprovalRead], dependencies=[Depends(require("workflow:read"))])
 async def list_approvals(
     db: DbSession,
+    search: str | None = None,
     status_filter: Annotated[ApprovalStatus | None, Query(alias="status")] = None,
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ApprovalRead]:
     stmt: Select = select(ApprovalRequest)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(ApprovalRequest.title.ilike(like) | ApprovalRequest.reference.ilike(like))
     if status_filter is not None:
         stmt = stmt.where(ApprovalRequest.status == status_filter)
+    if sort_by:
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=None)
+        stmt = apply_sort(stmt, params, _SORTABLE, default=ApprovalRequest.created_at)
+    else:
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (
         await db.scalars(
             stmt.options(selectinload(ApprovalRequest.actions))
-            .order_by(ApprovalRequest.created_at.desc())
             .limit(limit)
             .offset(offset)
         )
