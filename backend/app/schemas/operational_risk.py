@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
+from app.schemas.common import GraphRef
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
@@ -33,7 +34,8 @@ class RcsaRiskBase(BaseModel):
 
 
 class RcsaRiskCreate(RcsaRiskBase):
-    pass
+    risk_id: uuid.UUID | None = None
+    control_id: uuid.UUID | None = None
 
 
 class RcsaRiskUpdate(BaseModel):
@@ -48,6 +50,8 @@ class RcsaRiskUpdate(BaseModel):
     action: str | None = None
     action_owner: str | None = None
     due_date: date | None = None
+    risk_id: uuid.UUID | None = None
+    control_id: uuid.UUID | None = None
 
 
 class RcsaRiskRead(RcsaRiskBase):
@@ -56,6 +60,10 @@ class RcsaRiskRead(RcsaRiskBase):
     assessment_id: uuid.UUID
     inherent_score: int
     residual_score: int
+    risk_id: uuid.UUID | None = None
+    control_id: uuid.UUID | None = None
+    risk: GraphRef | None = None
+    control: GraphRef | None = None
     created_at: datetime
 
 
@@ -132,7 +140,7 @@ class KriBase(BaseModel):
 
 
 class KriCreate(KriBase):
-    pass
+    risk_ids: list[uuid.UUID] = []
 
 
 class KriUpdate(BaseModel):
@@ -149,6 +157,7 @@ class KriUpdate(BaseModel):
     current_value: float | None = None
     last_measured_date: date | None = None
     workflow_status: WorkflowState | None = None
+    risk_ids: list[uuid.UUID] | None = None
 
 
 class KriRead(KriBase):
@@ -158,6 +167,7 @@ class KriRead(KriBase):
     status: KriStatus
     is_breached: bool
     created_at: datetime
+    risks: list[GraphRef] = []
     measurements: list[MeasurementRead] = []
 
 
@@ -180,7 +190,8 @@ class LossEventBase(BaseModel):
 
 
 class LossEventCreate(LossEventBase):
-    pass
+    incident_id: uuid.UUID | None = None
+    risk_ids: list[uuid.UUID] = []
 
 
 class LossEventUpdate(BaseModel):
@@ -198,6 +209,8 @@ class LossEventUpdate(BaseModel):
     root_cause: str | None = None
     action_owner: str | None = None
     workflow_status: WorkflowState | None = None
+    incident_id: uuid.UUID | None = None
+    risk_ids: list[uuid.UUID] | None = None
 
 
 class LossEventRead(LossEventBase):
@@ -205,4 +218,7 @@ class LossEventRead(LossEventBase):
     id: uuid.UUID
     reference: str
     net_loss: float
+    incident_id: uuid.UUID | None = None
+    incident: GraphRef | None = None
+    risks: list[GraphRef] = []
     created_at: datetime

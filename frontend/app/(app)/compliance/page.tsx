@@ -68,6 +68,7 @@ type Requirement = {
   // reverse graph links (read-only, from GET /requirements/{id})
   assets?: Ref[];
   exceptions?: Ref[];
+  audit_findings?: Ref[];
   findings: Finding[];
   is_covered: boolean;
   open_findings: number;
@@ -893,6 +894,7 @@ function ComplianceInner() {
               <RelatedChips label="Policies" items={detail.policies} href="/policies" />
               <RelatedChips label="Information assets" items={detail.assets} href="/information-assets" />
               <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
+              <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
             </div>
             {detail.legal && (
               <div style={{ marginBottom: 16, fontSize: 13 }}>

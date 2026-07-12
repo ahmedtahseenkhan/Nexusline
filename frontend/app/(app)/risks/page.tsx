@@ -71,6 +71,7 @@ type RiskRow = {
   projects?: Ref[];
   goals?: Ref[];
   processing_activities?: Ref[];
+  audit_findings?: Ref[];
 };
 
 type Page<T> = { items: T[] };
@@ -679,6 +680,7 @@ function RisksPage() {
               <RelatedChips label="Projects" items={detail.projects} href="/projects" />
               <RelatedChips label="Goals" items={detail.goals} href="/goals" />
               <RelatedChips label="Processing activities" items={detail.processing_activities} href="/privacy" />
+              <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
             </div>
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>

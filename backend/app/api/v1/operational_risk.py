@@ -12,6 +12,7 @@ from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.models.risk import Risk
 from app.models.operational_risk import (
     KeyRiskIndicator,
     KriMeasurement,
@@ -53,6 +54,12 @@ async def _get(db, model, obj_id, name):
     if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
+
+
+async def _resolve(db, model, ids):
+    if not ids:
+        return []
+    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
 
 
 # ==================================================================== RCSA ===
@@ -196,7 +203,8 @@ async def list_kris(db: DbSession, search: str | None = None,
 
 @router.post("/kris", response_model=KriRead, status_code=201, dependencies=[_WRITE])
 async def create_kri(body: KriCreate, db: DbSession, user: CurrentUser) -> KriRead:
-    obj = KeyRiskIndicator(tenant_id=user.tenant_id, **body.model_dump())
+    obj = KeyRiskIndicator(tenant_id=user.tenant_id, **body.model_dump(exclude={"risk_ids"}))
+    obj.risks = await _resolve(db, Risk, body.risk_ids)
     obj.reference = await _next_ref(db, KeyRiskIndicator, "KRI")
     db.add(obj)
     await db.flush()
@@ -211,8 +219,10 @@ async def get_kri(kid: uuid.UUID, db: DbSession) -> KriRead:
 @router.patch("/kris/{kid}", response_model=KriRead, dependencies=[_WRITE])
 async def update_kri(kid: uuid.UUID, body: KriUpdate, db: DbSession) -> KriRead:
     obj = await _load_kri(db, kid)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    for k, v in body.model_dump(exclude_unset=True, exclude={"risk_ids"}).items():
         setattr(obj, k, v)
+    if body.risk_ids is not None:
+        obj.risks = await _resolve(db, Risk, body.risk_ids)
     await db.flush()
     return KriRead.model_validate(await _load_kri(db, kid))
 
@@ -279,20 +289,23 @@ async def list_loss_events(db: DbSession, search: str | None = None,
 
 @router.post("/loss-events", response_model=LossEventRead, status_code=201, dependencies=[_WRITE])
 async def create_loss_event(body: LossEventCreate, db: DbSession, user: CurrentUser) -> LossEventRead:
-    obj = LossEvent(tenant_id=user.tenant_id, **body.model_dump())
+    obj = LossEvent(tenant_id=user.tenant_id, **body.model_dump(exclude={"risk_ids"}))
+    obj.risks = await _resolve(db, Risk, body.risk_ids)
     obj.reference = await _next_ref(db, LossEvent, "LOSS")
     db.add(obj)
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="loss_event",
                            entity_id=obj.id, summary=f"Logged loss event {obj.reference}: {obj.title}")
-    return LossEventRead.model_validate(obj)
+    return LossEventRead.model_validate(await _get(db, LossEvent, obj.id, "Loss event"))
 
 
 @router.patch("/loss-events/{lid}", response_model=LossEventRead, dependencies=[_WRITE])
 async def update_loss_event(lid: uuid.UUID, body: LossEventUpdate, db: DbSession) -> LossEventRead:
     obj = await _get(db, LossEvent, lid, "Loss event")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    for k, v in body.model_dump(exclude_unset=True, exclude={"risk_ids"}).items():
         setattr(obj, k, v)
+    if body.risk_ids is not None:
+        obj.risks = await _resolve(db, Risk, body.risk_ids)
     await db.flush()
     return LossEventRead.model_validate(obj)
 

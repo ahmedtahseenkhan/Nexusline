@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Date, ForeignKey, Integer, Numeric, String, Text, Uuid
+from sqlalchemy import Column, Date, ForeignKey, Integer, Numeric, String, Table, Text, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -89,6 +89,17 @@ class RcsaRisk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     action_owner: Mapped[str] = mapped_column(String(200), default="")
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
+    # Reconcile the RCSA line with the enterprise register + control catalog (Basel loop):
+    # optional links to the risk this line assesses and the control that mitigates it.
+    risk_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    control_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("controls.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    risk: Mapped["Risk | None"] = relationship("Risk", lazy="selectin")  # noqa: F821
+    control: Mapped["Control | None"] = relationship("Control", lazy="selectin")  # noqa: F821
+
     assessment: Mapped[RcsaAssessment] = relationship(back_populates="risks")
 
     @property
@@ -101,6 +112,20 @@ class RcsaRisk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
 
 
 # =================================================================== KRIs ===
+# A KRI indicates one or more enterprise risks; a loss event materialises risks and
+# often originates from an incident.
+kri_risks = Table(
+    "kri_risks", Base.metadata,
+    Column("kri_id", Uuid, ForeignKey("key_risk_indicators.id", ondelete="CASCADE"), primary_key=True),
+    Column("risk_id", Uuid, ForeignKey("risks.id", ondelete="CASCADE"), primary_key=True),
+)
+loss_event_risks = Table(
+    "loss_event_risks", Base.metadata,
+    Column("loss_event_id", Uuid, ForeignKey("loss_events.id", ondelete="CASCADE"), primary_key=True),
+    Column("risk_id", Uuid, ForeignKey("risks.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
 class KeyRiskIndicator(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "key_risk_indicators"
 
@@ -124,6 +149,9 @@ class KeyRiskIndicator(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflo
     current_value: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     last_measured_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
+    risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
+        "Risk", secondary=kri_risks, lazy="selectin",
+    )
     measurements: Mapped[list["KriMeasurement"]] = relationship(
         back_populates="kri", cascade="all, delete-orphan", lazy="selectin",
         order_by="KriMeasurement.as_of_date",
@@ -193,6 +221,15 @@ class LossEvent(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
     accounting_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     root_cause: Mapped[str] = mapped_column(Text, default="")
     action_owner: Mapped[str] = mapped_column(String(200), default="")
+
+    # Loss data calibrates risk scoring and often stems from a logged incident.
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    incident: Mapped["Incident | None"] = relationship("Incident", lazy="selectin")  # noqa: F821
+    risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
+        "Risk", secondary=loss_event_risks, lazy="selectin",
+    )
 
     @property
     def net_loss(self) -> float:

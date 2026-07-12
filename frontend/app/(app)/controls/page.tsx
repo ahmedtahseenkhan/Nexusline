@@ -30,7 +30,7 @@ type Control = {
   maintenance_count: number; last_maintenance_result: string | null; is_maintenance_overdue: boolean;
   policies: LinkRef[]; requirements: LinkRef[]; risks: LinkRef[];
   // reverse graph links (read-only, from GET /controls/{id})
-  incidents?: LinkRef[]; exceptions?: LinkRef[]; projects?: LinkRef[];
+  incidents?: LinkRef[]; exceptions?: LinkRef[]; projects?: LinkRef[]; audit_findings?: LinkRef[];
 };
 type ControlAudit = { id: string; result: string; conducted_date: string | null; result_description: string; auditor: string };
 type ControlMaintenance = { id: string; result: string; task: string; conducted_date: string | null };
@@ -331,6 +331,7 @@ function ControlsInner() {
               <RelatedChips label="Incidents" items={detail.incidents} href="/incidents" />
               <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
               <RelatedChips label="Projects" items={detail.projects} href="/projects" />
+              <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
             </div>
 
             <RecordPanels model="control" entityId={detail.id} />

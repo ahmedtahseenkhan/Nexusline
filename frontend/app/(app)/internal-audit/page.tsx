@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useState } from "react";
 import {
   api,
   apiCall,
@@ -16,6 +16,9 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import RichText from "@/components/RichText";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import RelatedChips from "@/components/RelatedChips";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconAlert } from "@/components/icons";
@@ -25,6 +28,13 @@ type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
+
+// Graph refs returned/accepted by the backend for finding ↔ control/risk/requirement links.
+// AuditFinding (lib/api) doesn't carry these yet, so we describe them locally.
+type Ref = { id: string; reference?: string; title?: string; name?: string };
+type FindingLinks = { controls?: Ref[]; risks?: Ref[]; requirements?: Ref[] };
+type Named = { id: string; name?: string; reference?: string; title?: string };
+const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
 
 // ------------------------------------------------------------------ enum lists
 const INHERENT_RISK = opts(["low", "medium", "high", "critical"]);
@@ -212,6 +222,9 @@ type FindingDraft = {
   action_owner: string;
   due_date: string;
   status: string;
+  control_ids: AsyncOption[];
+  risk_ids: AsyncOption[];
+  requirement_ids: AsyncOption[];
 };
 const BLANK_FINDING: FindingDraft = {
   title: "",
@@ -223,7 +236,26 @@ const BLANK_FINDING: FindingDraft = {
   action_owner: "",
   due_date: "",
   status: "open",
+  control_ids: [],
+  risk_ids: [],
+  requirement_ids: [],
 };
+function fromFinding(fi: AuditFinding & FindingLinks): FindingDraft {
+  return {
+    title: fi.title,
+    description: fi.description || "",
+    rating: fi.rating || "medium",
+    risk_implication: fi.risk_implication || "",
+    recommendation: fi.recommendation || "",
+    management_response: fi.management_response || "",
+    action_owner: fi.action_owner || "",
+    due_date: fi.due_date || "",
+    status: fi.status || "open",
+    control_ids: (fi.controls || []).map(refToOpt),
+    risk_ids: (fi.risks || []).map(refToOpt),
+    requirement_ids: (fi.requirements || []).map(refToOpt),
+  };
+}
 
 type TabId = "universe" | "engagements" | "findings";
 const TABS: { id: TabId; label: string }[] = [
@@ -279,6 +311,13 @@ function InternalAuditInner() {
   const setP = <K extends keyof ProcDraft>(k: K, v: ProcDraft[K]) => setPd((p) => ({ ...p, [k]: v }));
   const [fd, setFd] = useState<FindingDraft>(BLANK_FINDING);
   const setFD = <K extends keyof FindingDraft>(k: K, v: FindingDraft[K]) => setFd((p) => ({ ...p, [k]: v }));
+  const [editingFinding, setEditingFinding] = useState<AuditFinding | null>(null);
+
+  // Server typeahead sources for the finding's control/risk/requirement pickers.
+  const linkSearch = (path: string) => (q: string) =>
+    apiCall<PagedList<Named>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((x) => ({ value: x.id, label: x.name || x.title || x.reference || x.id, sub: x.reference })),
+    );
 
   // ---- findings follow-up ----
   const [findingFilter, setFindingFilter] = useState<FindingFilter>("all");
@@ -353,6 +392,7 @@ function InternalAuditInner() {
   function openDrawer(e: AuditEngagement) {
     setPd(BLANK_PROC);
     setFd(BLANK_FINDING);
+    setEditingFinding(null);
     setOpenId(e.id);
   }
 
@@ -397,24 +437,40 @@ function InternalAuditInner() {
   }
 
   // ------------------------------------------------------------- finding CRUD
-  async function addFinding() {
+  function openEditFinding(fi: AuditFinding) {
+    setEditingFinding(fi);
+    setFd(fromFinding(fi as AuditFinding & FindingLinks));
+    setError(null);
+  }
+  function cancelEditFinding() {
+    setEditingFinding(null);
+    setFd(BLANK_FINDING);
+  }
+  async function saveFinding() {
     if (!detail) return;
     setError(null);
+    const payload = {
+      title: fd.title,
+      description: fd.description,
+      rating: fd.rating,
+      risk_implication: fd.risk_implication,
+      recommendation: fd.recommendation,
+      management_response: fd.management_response,
+      action_owner: fd.action_owner,
+      due_date: fd.due_date || null,
+      status: fd.status,
+      control_ids: fd.control_ids.map((o) => o.value),
+      risk_ids: fd.risk_ids.map((o) => o.value),
+      requirement_ids: fd.requirement_ids.map((o) => o.value),
+    };
     try {
-      await api.addAuditFinding(detail.id, {
-        title: fd.title,
-        description: fd.description,
-        rating: fd.rating,
-        risk_implication: fd.risk_implication,
-        recommendation: fd.recommendation,
-        management_response: fd.management_response,
-        action_owner: fd.action_owner,
-        due_date: fd.due_date || null,
-        status: fd.status,
-      });
-      setFd(BLANK_FINDING); loadDetail(detail.id); reload(); toast("Finding raised");
+      if (editingFinding) await api.updateAuditFinding(editingFinding.id, payload);
+      else await api.addAuditFinding(detail.id, payload);
+      setEditingFinding(null); setFd(BLANK_FINDING);
+      loadDetail(detail.id); reload();
+      toast(editingFinding ? "Finding updated" : "Finding raised");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to add finding");
+      setError(e instanceof Error ? e.message : "Failed to save finding");
     }
   }
   // Used by both the drawer and the follow-up tracker; reloads whichever is affected.
@@ -756,7 +812,7 @@ function InternalAuditInner() {
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-head"><h3>Findings</h3><span className="sub">Issues raised by this engagement and their remediation status.</span></div>
               <div className="card-pad">
-                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); addFinding(); }}>
+                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); saveFinding(); }}>
                   <div style={{ flex: "1 1 180px" }}><label className="label">Title</label><input className="input" value={fd.title} onChange={(ev) => setFD("title", ev.target.value)} placeholder="Finding title" required /></div>
                   <div style={{ width: 130 }}><label className="label">Rating</label><select className="select" value={fd.rating} onChange={(ev) => setFD("rating", ev.target.value)}>{RATING.map((r) => (<option key={r.value} value={r.value}>{r.label}</option>))}</select></div>
                   <div style={{ flex: "1 1 200px" }}><label className="label">Description</label><input className="input" value={fd.description} onChange={(ev) => setFD("description", ev.target.value)} placeholder="What went wrong" /></div>
@@ -766,15 +822,23 @@ function InternalAuditInner() {
                   <div style={{ width: 140 }}><label className="label">Action owner</label><input className="input" value={fd.action_owner} onChange={(ev) => setFD("action_owner", ev.target.value)} placeholder="Owner" /></div>
                   <div style={{ width: 150 }}><label className="label">Due date</label><input className="input" type="date" value={fd.due_date} onChange={(ev) => setFD("due_date", ev.target.value)} /></div>
                   <div style={{ width: 140 }}><label className="label">Status</label><select className="select" value={fd.status} onChange={(ev) => setFD("status", ev.target.value)}>{FINDING_STATUS.map((s) => (<option key={s} value={s}>{cap(s)}</option>))}</select></div>
-                  <button className="btn">Add</button>
+                  <div style={{ flex: "1 1 100%" }}><label className="label">Related controls</label><AsyncMultiSelect search={linkSearch("controls")} value={fd.control_ids} onChange={(v) => setFD("control_ids", v)} placeholder="Search controls to link…" /></div>
+                  <div style={{ flex: "1 1 100%" }}><label className="label">Related risks</label><AsyncMultiSelect search={linkSearch("risks")} value={fd.risk_ids} onChange={(v) => setFD("risk_ids", v)} placeholder="Search risks to link…" /></div>
+                  <div style={{ flex: "1 1 100%" }}><label className="label">Related requirements</label><AsyncMultiSelect search={linkSearch("requirements")} value={fd.requirement_ids} onChange={(v) => setFD("requirement_ids", v)} placeholder="Search requirements to link…" /></div>
+                  <button className="btn">{editingFinding ? "Save finding" : "Add"}</button>
+                  {editingFinding && <button type="button" className="btn secondary" onClick={cancelEditFinding}>Cancel</button>}
                 </form>
 
                 <div className="table-wrap">
                   <table>
                     <thead><tr><th>Ref</th><th>Title</th><th>Rating</th><th>Action owner</th><th>Due</th><th>Status</th><th></th></tr></thead>
                     <tbody>
-                      {detail.findings.map((fi) => (
-                        <tr key={fi.id}>
+                      {detail.findings.map((fi) => {
+                        const fl = fi as AuditFinding & FindingLinks;
+                        const hasLinks = !!(fl.controls?.length || fl.risks?.length || fl.requirements?.length);
+                        return (
+                        <Fragment key={fi.id}>
+                        <tr>
                           <td className="ref">{fi.reference || "—"}</td>
                           <td className="cell-title">{fi.title}</td>
                           <td><RatingBadge value={fi.rating} /></td>
@@ -788,9 +852,27 @@ function InternalAuditInner() {
                               </select>
                             </div>
                           </td>
-                          <td><button className="btn secondary sm" onClick={() => removeFinding(fi.id)}>Remove</button></td>
+                          <td>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <button className="btn secondary sm" onClick={() => openEditFinding(fi)}>Edit</button>
+                              <button className="btn secondary sm" onClick={() => removeFinding(fi.id)}>Remove</button>
+                            </div>
+                          </td>
                         </tr>
-                      ))}
+                        {hasLinks && (
+                          <tr>
+                            <td colSpan={7} style={{ paddingTop: 0 }}>
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+                                <RelatedChips label="Controls" items={fl.controls} href="/controls" />
+                                <RelatedChips label="Risks" items={fl.risks} href="/risks" />
+                                <RelatedChips label="Requirements" items={fl.requirements} href="/compliance" />
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        </Fragment>
+                        );
+                      })}
                       {detail.findings.length === 0 && (<tr><td colSpan={7}><span className="muted">No findings raised yet.</span></td></tr>)}
                     </tbody>
                   </table>
