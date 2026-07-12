@@ -48,7 +48,7 @@ class RcsaAssessment(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowM
         SAEnum(RcsaStatus, name="rcsa_status"), default=RcsaStatus.planned, nullable=False
     )
     period: Mapped[str] = mapped_column(String(64), default="")
-    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     completed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     risks: Mapped[list["RcsaRisk"]] = relationship(

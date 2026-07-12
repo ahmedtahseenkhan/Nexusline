@@ -53,7 +53,7 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     review_frequency: Mapped[ReviewFrequency] = mapped_column(
         SAEnum(ReviewFrequency, name="review_frequency"), default=ReviewFrequency.annual, nullable=False
     )
-    next_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_review_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     last_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     published_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     expired_reviews: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

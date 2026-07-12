@@ -39,7 +39,7 @@ class AwarenessProgram(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflo
         nullable=False,
     )
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    next_due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
 
     questions: Mapped[list["AwarenessQuestion"]] = relationship(
         back_populates="program",

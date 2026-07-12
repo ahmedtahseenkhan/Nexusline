@@ -148,7 +148,7 @@ class ShariahFinding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     recommendation: Mapped[str] = mapped_column(Text, default="")
     management_response: Mapped[str] = mapped_column(Text, default="")
     action_owner: Mapped[str] = mapped_column(String(200), default="")
-    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     status: Mapped[ShariahFindingStatus] = mapped_column(
         SAEnum(ShariahFindingStatus, name="shariah_finding_status"),
         default=ShariahFindingStatus.open, nullable=False,

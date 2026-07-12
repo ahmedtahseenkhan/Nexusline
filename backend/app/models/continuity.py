@@ -52,7 +52,7 @@ class ContinuityPlan(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowM
         default=ReviewFrequency.annual,
         nullable=False,
     )
-    next_test_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_test_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     last_test_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     business_unit: Mapped["BusinessUnit | None"] = relationship(  # noqa: F821

@@ -152,7 +152,7 @@ class RegulatoryReport(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         SAEnum(RegulatoryReportType, name="regulatory_report_type"),
         default=RegulatoryReportType.initial_notification, nullable=False,
     )
-    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
+    deadline: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     status: Mapped[RegulatoryReportStatus] = mapped_column(
         SAEnum(RegulatoryReportStatus, name="regulatory_report_status"),
         default=RegulatoryReportStatus.pending, nullable=False,

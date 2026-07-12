@@ -50,7 +50,7 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     )
     owner: Mapped[str] = mapped_column(String(200), default="")
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
+    deadline: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     budget: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     tasks: Mapped[list["ProjectTask"]] = relationship(

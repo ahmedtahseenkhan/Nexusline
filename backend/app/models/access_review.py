@@ -36,7 +36,7 @@ class AccessReview(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMix
     asset_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("assets.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     frequency: Mapped[ReviewFrequency] = mapped_column(
         SAEnum(ReviewFrequency, name="review_frequency"),
         default=ReviewFrequency.quarterly,

@@ -79,7 +79,7 @@ class SuspiciousActivityReport(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin,
         SAEnum(Criticality, name="criticality"), default=Criticality.medium, nullable=False
     )
     detected_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)  # FMU filing deadline
+    deadline: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)  # FMU filing deadline
     filed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     fmu_reference: Mapped[str] = mapped_column(String(120), default="")  # FMU acknowledgement
     status: Mapped[SarStatus] = mapped_column(

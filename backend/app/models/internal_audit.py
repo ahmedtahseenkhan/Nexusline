@@ -82,7 +82,7 @@ class AuditEngagement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflow
     period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     planned_start: Mapped[date | None] = mapped_column(Date, nullable=True)
-    planned_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    planned_end: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     actual_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     actual_end: Mapped[date | None] = mapped_column(Date, nullable=True)
 
@@ -158,7 +158,7 @@ class AuditFinding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     recommendation: Mapped[str] = mapped_column(Text, default="")
     management_response: Mapped[str] = mapped_column(Text, default="")
     action_owner: Mapped[str] = mapped_column(String(200), default="")
-    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     status: Mapped[AuditFindingStatus] = mapped_column(
         SAEnum(AuditFindingStatus, name="audit_finding_status"),
         default=AuditFindingStatus.open, nullable=False,

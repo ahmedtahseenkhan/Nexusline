@@ -139,7 +139,7 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
         nullable=False,
     )
     last_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    next_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_review_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     expired_reviews: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     assets: Mapped[list["Asset"]] = relationship(  # noqa: F821

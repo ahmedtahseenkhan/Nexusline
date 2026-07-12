@@ -56,7 +56,7 @@ class Goal(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
         default=ReviewFrequency.annual,
         nullable=False,
     )
-    next_audit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_audit_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     last_audit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     audits: Mapped[list["GoalAudit"]] = relationship(

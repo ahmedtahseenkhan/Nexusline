@@ -70,7 +70,7 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     )
     audit_metric: Mapped[str] = mapped_column(Text, default="")
     audit_success_criteria: Mapped[str] = mapped_column(Text, default="")
-    next_audit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_audit_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     last_audit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Maintenance cycle (routine upkeep)
@@ -79,7 +79,7 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
         default=ReviewFrequency.quarterly,
         nullable=False,
     )
-    next_maintenance_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_maintenance_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     last_maintenance_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     audits: Mapped[list["ControlAudit"]] = relationship(

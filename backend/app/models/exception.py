@@ -65,7 +65,7 @@ class ExceptionRecord(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflow
         nullable=False,
     )
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    expires_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expires_at: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     closure_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
