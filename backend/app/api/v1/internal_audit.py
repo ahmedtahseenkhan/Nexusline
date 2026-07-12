@@ -15,7 +15,10 @@ from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.models.compliance import Requirement
+from app.models.control import Control
 from app.models.enums import AuditFindingStatus
+from app.models.risk import Risk
 from app.models.internal_audit import (
     AuditableUnit,
     AuditEngagement,
@@ -243,13 +246,23 @@ async def delete_procedure(pid: uuid.UUID, db: DbSession) -> None:
 @router.post("/audit-engagements/{eid}/findings", response_model=EngagementRead, status_code=201, dependencies=[_WRITE])
 async def add_finding(eid: uuid.UUID, body: FindingCreate, db: DbSession, user: CurrentUser) -> EngagementRead:
     await _load_engagement(db, eid)
-    finding = AuditFinding(tenant_id=user.tenant_id, engagement_id=eid, **body.model_dump())
+    data = body.model_dump(exclude={"control_ids", "risk_ids", "requirement_ids"})
+    finding = AuditFinding(tenant_id=user.tenant_id, engagement_id=eid, **data)
+    finding.controls = await _resolve(db, Control, body.control_ids)
+    finding.risks = await _resolve(db, Risk, body.risk_ids)
+    finding.requirements = await _resolve(db, Requirement, body.requirement_ids)
     finding.reference = await _next_ref(db, AuditFinding, "IAF")
     db.add(finding)
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="audit_finding",
                            entity_id=finding.id, summary=f"Raised finding {finding.reference}: {finding.title}")
     return EngagementRead.model_validate(await _load_engagement(db, eid))
+
+
+async def _resolve(db, model, ids):
+    if not ids:
+        return []
+    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
 
 
 async def _load_finding(db, fid: uuid.UUID) -> AuditFinding:
@@ -262,7 +275,7 @@ async def _load_finding(db, fid: uuid.UUID) -> AuditFinding:
 @router.patch("/audit-findings/{fid}", response_model=FindingRead, dependencies=[_WRITE])
 async def update_finding(fid: uuid.UUID, body: FindingUpdate, db: DbSession) -> FindingRead:
     obj = await _load_finding(db, fid)
-    data = body.model_dump(exclude_unset=True)
+    data = body.model_dump(exclude_unset=True, exclude={"control_ids", "risk_ids", "requirement_ids"})
     # Auto-stamp closure date when a finding is closed and none was supplied.
     if data.get("status") in (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted) and not obj.closed_date and "closed_date" not in data:
         obj.closed_date = date.today()
@@ -270,8 +283,14 @@ async def update_finding(fid: uuid.UUID, body: FindingUpdate, db: DbSession) -> 
         obj.closed_date = None
     for k, v in data.items():
         setattr(obj, k, v)
+    if body.control_ids is not None:
+        obj.controls = await _resolve(db, Control, body.control_ids)
+    if body.risk_ids is not None:
+        obj.risks = await _resolve(db, Risk, body.risk_ids)
+    if body.requirement_ids is not None:
+        obj.requirements = await _resolve(db, Requirement, body.requirement_ids)
     await db.flush()
-    return FindingRead.model_validate(obj)
+    return FindingRead.model_validate(await _load_finding(db, fid))
 
 
 @router.delete("/audit-findings/{fid}", status_code=204, dependencies=[_WRITE])

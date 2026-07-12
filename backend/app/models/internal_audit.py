@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Date, ForeignKey, String, Text, Uuid
+from sqlalchemy import Column, Date, ForeignKey, String, Table, Text, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -140,6 +140,24 @@ class AuditProcedure(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     engagement: Mapped[AuditEngagement] = relationship(back_populates="procedures")
 
 
+# Links from an audit finding into the core graph — what the finding is *against*.
+audit_finding_controls = Table(
+    "audit_finding_controls", Base.metadata,
+    Column("audit_finding_id", Uuid, ForeignKey("audit_findings.id", ondelete="CASCADE"), primary_key=True),
+    Column("control_id", Uuid, ForeignKey("controls.id", ondelete="CASCADE"), primary_key=True),
+)
+audit_finding_risks = Table(
+    "audit_finding_risks", Base.metadata,
+    Column("audit_finding_id", Uuid, ForeignKey("audit_findings.id", ondelete="CASCADE"), primary_key=True),
+    Column("risk_id", Uuid, ForeignKey("risks.id", ondelete="CASCADE"), primary_key=True),
+)
+audit_finding_requirements = Table(
+    "audit_finding_requirements", Base.metadata,
+    Column("audit_finding_id", Uuid, ForeignKey("audit_findings.id", ondelete="CASCADE"), primary_key=True),
+    Column("requirement_id", Uuid, ForeignKey("requirements.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
 class AuditFinding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     """An audit observation tracked through remediation follow-up."""
 
@@ -166,6 +184,17 @@ class AuditFinding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     closed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     engagement: Mapped[AuditEngagement] = relationship(back_populates="findings")
+
+    # What the finding is raised against (writable links into the core graph).
+    controls: Mapped[list["Control"]] = relationship(  # noqa: F821
+        "Control", secondary=audit_finding_controls, lazy="selectin",
+    )
+    risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
+        "Risk", secondary=audit_finding_risks, lazy="selectin",
+    )
+    requirements: Mapped[list["Requirement"]] = relationship(  # noqa: F821
+        "Requirement", secondary=audit_finding_requirements, lazy="selectin",
+    )
 
     @property
     def is_overdue(self) -> bool:

@@ -111,6 +111,9 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     projects: Mapped[list["Project"]] = relationship(  # noqa: F821
         "Project", secondary="project_controls", lazy="selectin", viewonly=True,
     )
+    audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
+        "AuditFinding", secondary="audit_finding_controls", lazy="selectin", viewonly=True,
+    )
 
     @staticmethod
     def _last_result(items) -> TestResult | None:

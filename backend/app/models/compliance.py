@@ -134,6 +134,9 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
         "ExceptionRecord", secondary="exception_requirements", lazy="selectin", viewonly=True,
     )
+    audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
+        "AuditFinding", secondary="audit_finding_requirements", lazy="selectin", viewonly=True,
+    )
     findings: Mapped[list["ComplianceFinding"]] = relationship(
         back_populates="requirement", cascade="all, delete-orphan", lazy="selectin",
         order_by="ComplianceFinding.created_at.desc()",

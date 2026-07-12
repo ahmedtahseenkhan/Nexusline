@@ -169,6 +169,7 @@ class RiskRead(BaseModel):
     projects: list[GraphRef] = []
     goals: list[GraphRef] = []
     processing_activities: list[GraphRef] = []
+    audit_findings: list[GraphRef] = []
 
     created_at: datetime
     updated_at: datetime

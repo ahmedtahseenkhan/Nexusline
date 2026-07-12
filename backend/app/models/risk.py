@@ -185,6 +185,9 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     processing_activities: Mapped[list["ProcessingActivity"]] = relationship(  # noqa: F821
         "ProcessingActivity", secondary="ropa_risks", lazy="selectin", viewonly=True,
     )
+    audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
+        "AuditFinding", secondary="audit_finding_risks", lazy="selectin", viewonly=True,
+    )
 
     acceptances: Mapped[list["RiskAcceptance"]] = relationship(
         back_populates="risk",

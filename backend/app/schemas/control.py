@@ -102,6 +102,7 @@ class ControlRead(ControlBase):
     incidents: list[GraphRef] = []
     exceptions: list[GraphRef] = []
     projects: list[GraphRef] = []
+    audit_findings: list[GraphRef] = []
 
 
 class ControlRef(BaseModel):

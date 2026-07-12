@@ -5,6 +5,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.common import GraphRef
+
 from app.models.base import WorkflowState
 from app.models.enums import (
     AuditEngagementStatus,
@@ -99,7 +101,9 @@ class FindingBase(BaseModel):
 
 
 class FindingCreate(FindingBase):
-    pass
+    control_ids: list[uuid.UUID] = []
+    risk_ids: list[uuid.UUID] = []
+    requirement_ids: list[uuid.UUID] = []
 
 
 class FindingUpdate(BaseModel):
@@ -113,6 +117,9 @@ class FindingUpdate(BaseModel):
     due_date: date | None = None
     status: AuditFindingStatus | None = None
     closed_date: date | None = None
+    control_ids: list[uuid.UUID] | None = None
+    risk_ids: list[uuid.UUID] | None = None
+    requirement_ids: list[uuid.UUID] | None = None
 
 
 class FindingRead(FindingBase):
@@ -122,6 +129,10 @@ class FindingRead(FindingBase):
     reference: str
     closed_date: date | None
     is_overdue: bool
+    # What the finding is raised against (into the core graph).
+    controls: list[GraphRef] = []
+    risks: list[GraphRef] = []
+    requirements: list[GraphRef] = []
     created_at: datetime
 
 
