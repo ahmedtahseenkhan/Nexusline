@@ -1050,3 +1050,22 @@ tr.active-row > td { background: var(--primary-weak); }
 @media (prefers-reduced-motion: reduce) {
   .sidebar { transition: none; }
 }
+
+/* ── Sidebar accordion groups (eramba-style) ──────────────────────────── */
+button.nav-item.nav-group {
+  width: 100%;
+  border: none;
+  background: none;
+  font: inherit;
+  font-weight: 500;
+  font-size: 13.5px;
+  text-align: left;
+  color: var(--ink-text);
+}
+button.nav-item.nav-group:hover { background: rgba(255, 255, 255, 0.055); color: #fff; }
+.nav-sub { margin: 1px 0 4px; }
+.nav-item.sub {
+  padding: 7px 12px 7px 41px;   /* indent under the group icon */
+  font-size: 13px;
+}
+.nav-item.sub.active::before { left: 17px; }

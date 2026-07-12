@@ -22,14 +22,19 @@ export default function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  // Flat list of navigable modules this installation has enabled.
+  // Flat list of navigable modules this installation has enabled — includes
+  // group-level single links (Dashboard, Shariah) and every submenu item.
   const navRows = useMemo<NavRow[]>(
     () =>
-      NAV.flatMap((s) =>
-        s.items
-          .filter((it) => !routeDisabled(it.href, disabledRoutes))
-          .map((it) => ({ kind: "nav" as const, href: it.href, label: it.label, section: s.title }))
-      ),
+      NAV.flatMap((s) => {
+        const rows: NavRow[] = [];
+        if (s.href && !routeDisabled(s.href, disabledRoutes))
+          rows.push({ kind: "nav", href: s.href, label: s.title, section: s.title });
+        for (const it of s.items)
+          if (!routeDisabled(it.href, disabledRoutes))
+            rows.push({ kind: "nav", href: it.href, label: it.label, section: s.title });
+        return rows;
+      }),
     [disabledRoutes]
   );
 
