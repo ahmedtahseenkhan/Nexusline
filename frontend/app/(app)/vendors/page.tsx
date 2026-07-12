@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips from "@/components/RelatedChips";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, Toggle, NumberInput, type Option } from "@/components/fields";
@@ -27,6 +28,8 @@ type Vendor = {
   assessment_status: string; last_assessed_at: string | null; onboarded_at: string | null; offboarded_at: string | null;
   review_frequency: string; next_review_date: string | null; type: VendorType | null; contracts: ServiceContract[];
   risks: RefItem[]; assets: RefItem[]; contract_count: number; active_contract_value: number; created_at: string;
+  // reverse graph links (read-only, from GET /vendors/{id})
+  incidents?: RefItem[]; assessments?: RefItem[]; outsourcing_arrangements?: RefItem[];
 };
 
 /* ------------------------------------------------------------------ enum options */
@@ -291,12 +294,16 @@ function VendorsInner() {
               {detail.contract_count > 0 && <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Contracts</div><div style={{ marginTop: 4 }}><strong>{detail.contract_count}</strong> · {money(detail.active_contract_value)}</div></div>}
             </div>
             {detail.shares_data && <div style={{ marginBottom: 14 }}><Badge tone="info">Handles our data</Badge></div>}
-            {(detail.risks.length > 0 || detail.assets.length > 0) && (
-              <div style={{ marginBottom: 16, fontSize: 13 }}>
-                {detail.risks.length > 0 && <div><span className="muted">Risks: </span>{detail.risks.map((r) => r.reference || r.title || r.name).join(", ")}</div>}
-                {detail.assets.length > 0 && <div><span className="muted">Assets: </span>{detail.assets.map((a) => a.name || a.title).join(", ")}</div>}
-              </div>
-            )}
+
+            <strong style={{ fontSize: 13 }}>Related records</strong>
+            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 16 }}>
+              <RelatedChips label="Risks" items={detail.risks} href="/risks" />
+              <RelatedChips label="Assets" items={detail.assets} href="/information-assets" />
+              <RelatedChips label="Incidents" items={detail.incidents} href="/incidents" />
+              <RelatedChips label="Assessments" items={detail.assessments} href="/assessments" />
+              <RelatedChips label="Outsourcing arrangements" items={detail.outsourcing_arrangements} href="/outsourcing" />
+            </div>
+
             <RecordPanels model="vendor" entityId={detail.id} />
           </>
         )}

@@ -13,10 +13,15 @@ import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/compo
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 type LinkRef = { id: string; label: string };
+// Relation refs from GET /assets/{id} arrive as {id, label}; adapt to the
+// {id, name} shape RelatedChips renders.
+const asRefs = (items?: LinkRef[]): GraphRef[] | undefined =>
+  items?.map((x) => ({ id: x.id, name: x.label }));
 type DependencyRow = {
   id: string;
   relationship_type: string;
@@ -50,6 +55,17 @@ type Asset = {
   workflow_status: string;
   dependencies: DependencyRow[];
   created_at: string;
+  // cross-module relations from GET /assets/{id} ({id,label} LinkRef shape)
+  processes?: LinkRef[];
+  legals?: LinkRef[];
+  requirements?: LinkRef[];
+  incidents?: LinkRef[];
+  exceptions?: LinkRef[];
+  risks?: LinkRef[];
+  related_assets?: LinkRef[];
+  // reverse graph links (read-only)
+  vendors?: GraphRef[];
+  access_reviews?: GraphRef[];
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
 type LabelRow = { id: string; name: string; description: string; color: string };
@@ -421,6 +437,21 @@ function InformationAssetsInner() {
                   )}
                 </tbody>
               </table>
+            </div>
+
+            <div style={{ marginTop: 20 }}>
+              <strong style={{ fontSize: 13 }}>Related records</strong>
+              <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
+                <RelatedChips label="Risks" items={asRefs(detail.risks)} href="/risks" />
+                <RelatedChips label="Processes" items={asRefs(detail.processes)} href="/processes" />
+                <RelatedChips label="Legal registers" items={asRefs(detail.legals)} href="/legal" />
+                <RelatedChips label="Compliance requirements" items={asRefs(detail.requirements)} href="/compliance" />
+                <RelatedChips label="Incidents" items={asRefs(detail.incidents)} href="/incidents" />
+                <RelatedChips label="Exceptions" items={asRefs(detail.exceptions)} href="/exceptions" />
+                <RelatedChips label="Related assets" items={asRefs(detail.related_assets)} href="/information-assets" />
+                <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
+                <RelatedChips label="Access reviews" items={detail.access_reviews} href="/access-reviews" />
+              </div>
             </div>
 
             <div style={{ marginTop: 20 }}>

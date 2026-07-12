@@ -12,6 +12,7 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips from "@/components/RelatedChips";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, ComplianceBadge } from "@/components/badges";
@@ -64,6 +65,9 @@ type Requirement = {
   risks: Ref[];
   policies: Ref[];
   legal: Ref | null;
+  // reverse graph links (read-only, from GET /requirements/{id})
+  assets?: Ref[];
+  exceptions?: Ref[];
   findings: Finding[];
   is_covered: boolean;
   open_findings: number;
@@ -882,12 +886,17 @@ function ComplianceInner() {
               {detail.open_findings > 0 && <Badge tone="high" plain>{detail.open_findings} open findings</Badge>}
             </div>
 
-            {(detail.controls.length > 0 || detail.policies.length > 0 || detail.risks.length > 0 || detail.legal) && (
+            <strong style={{ fontSize: 13 }}>Related records</strong>
+            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 16 }}>
+              <RelatedChips label="Controls" items={detail.controls} href="/controls" />
+              <RelatedChips label="Risks" items={detail.risks} href="/risks" />
+              <RelatedChips label="Policies" items={detail.policies} href="/policies" />
+              <RelatedChips label="Information assets" items={detail.assets} href="/information-assets" />
+              <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
+            </div>
+            {detail.legal && (
               <div style={{ marginBottom: 16, fontSize: 13 }}>
-                {detail.controls.length > 0 && <div><span className="muted">Controls: </span>{detail.controls.map((c) => c.reference || c.name).join(", ")}</div>}
-                {detail.policies.length > 0 && <div><span className="muted">Policies: </span>{detail.policies.map((p) => p.reference || p.title).join(", ")}</div>}
-                {detail.risks.length > 0 && <div><span className="muted">Risks: </span>{detail.risks.map((r) => r.reference || r.title).join(", ")}</div>}
-                {detail.legal && <div><span className="muted">Legal: </span>{detail.legal.name || detail.legal.reference}</div>}
+                <span className="muted">Legal: </span>{detail.legal.name || detail.legal.reference}
               </div>
             )}
 

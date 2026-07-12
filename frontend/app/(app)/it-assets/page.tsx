@@ -13,10 +13,15 @@ import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 type LinkRef = { id: string; label: string };
+// Relation refs from GET /assets/{id} arrive as {id, label}; adapt to the
+// {id, name} shape RelatedChips renders.
+const asRefs = (items?: LinkRef[]): GraphRef[] | undefined =>
+  items?.map((x) => ({ id: x.id, name: x.label }));
 type TagRow = { id: string; name: string; category: string; description?: string; color?: string };
 type DependencyRow = { id: string; relationship_type: string; notes: string; information_asset: LinkRef | null; it_asset: LinkRef | null };
 type Asset = {
@@ -26,6 +31,17 @@ type Asset = {
   manufacturer: string; model_number: string; os_version: string; discovery_source: string; external_id: string;
   cost_band: string; intrinsic_criticality: string; derived_criticality: string; effective_criticality: string;
   workflow_status: string; tags: TagRow[]; dependencies: DependencyRow[]; created_at: string;
+  // cross-module relations from GET /assets/{id} ({id,label} LinkRef shape)
+  processes?: LinkRef[];
+  legals?: LinkRef[];
+  requirements?: LinkRef[];
+  incidents?: LinkRef[];
+  exceptions?: LinkRef[];
+  risks?: LinkRef[];
+  related_assets?: LinkRef[];
+  // reverse graph links (read-only)
+  vendors?: GraphRef[];
+  access_reviews?: GraphRef[];
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
 type Summary = { total: number; production: number; total_replacement_value: number; effective_critical: number };
@@ -351,6 +367,21 @@ function ITAssetsInner() {
                 {detail.tags.map((t) => (<Badge key={t.id} tone="neutral" plain>{t.name}</Badge>))}
               </div>
             )}
+
+            <div style={{ marginTop: 20 }}>
+              <strong style={{ fontSize: 13 }}>Related records</strong>
+              <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
+                <RelatedChips label="Risks" items={asRefs(detail.risks)} href="/risks" />
+                <RelatedChips label="Processes" items={asRefs(detail.processes)} href="/processes" />
+                <RelatedChips label="Legal registers" items={asRefs(detail.legals)} href="/legal" />
+                <RelatedChips label="Compliance requirements" items={asRefs(detail.requirements)} href="/compliance" />
+                <RelatedChips label="Incidents" items={asRefs(detail.incidents)} href="/incidents" />
+                <RelatedChips label="Exceptions" items={asRefs(detail.exceptions)} href="/exceptions" />
+                <RelatedChips label="Related assets" items={asRefs(detail.related_assets)} href="/it-assets" />
+                <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
+                <RelatedChips label="Access reviews" items={detail.access_reviews} href="/access-reviews" />
+              </div>
+            </div>
 
             <div style={{ marginTop: 20 }}><RecordPanels model="asset" entityId={detail.id} /></div>
           </>

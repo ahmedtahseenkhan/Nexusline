@@ -16,7 +16,7 @@ from app.models.threat import (
     risk_threats,
     risk_vulnerabilities,
 )
-from app.schemas.common import Page
+from app.schemas.common import GraphRef, Page
 from app.schemas.threat import (
     ThreatCreate,
     ThreatRead,
@@ -34,6 +34,19 @@ async def _get(db, model, obj_id, name):
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{name} not found")
     return obj
+
+
+async def _linked_risks(db, assoc, fk_col, obj_id):
+    """The actual (non-deleted) risks referencing this catalog item, as GraphRefs."""
+    rows = (
+        await db.scalars(
+            select(Risk)
+            .join(assoc, assoc.c.risk_id == Risk.id)
+            .where(fk_col == obj_id, Risk.deleted.is_(False))
+            .order_by(Risk.reference)
+        )
+    ).all()
+    return [GraphRef.model_validate(r) for r in rows]
 
 
 async def _usage_counts(db, assoc, fk_col):
@@ -94,7 +107,9 @@ async def list_threats(
 async def get_threat(obj_id: uuid.UUID, db: DbSession) -> ThreatRead:
     obj = await _get(db, Threat, obj_id, "Threat")
     counts = await _usage_counts(db, risk_threats, risk_threats.c.threat_id)
-    return _read(ThreatRead, obj, counts)
+    data = _read(ThreatRead, obj, counts)
+    data.risks = await _linked_risks(db, risk_threats, risk_threats.c.threat_id, obj_id)
+    return data
 
 
 @router.post("/threats", response_model=ThreatRead, status_code=201, dependencies=[Depends(require("risk:write"))])
@@ -168,7 +183,9 @@ async def list_vulnerabilities(
 async def get_vulnerability(obj_id: uuid.UUID, db: DbSession) -> VulnerabilityRead:
     obj = await _get(db, Vulnerability, obj_id, "Vulnerability")
     counts = await _usage_counts(db, risk_vulnerabilities, risk_vulnerabilities.c.vulnerability_id)
-    return _read(VulnerabilityRead, obj, counts)
+    data = _read(VulnerabilityRead, obj, counts)
+    data.risks = await _linked_risks(db, risk_vulnerabilities, risk_vulnerabilities.c.vulnerability_id, obj_id)
+    return data
 
 
 @router.post(

@@ -1069,3 +1069,17 @@ button.nav-item.nav-group:hover { background: rgba(255, 255, 255, 0.055); color:
   font-size: 13px;
 }
 .nav-item.sub.active::before { left: 17px; }
+
+/* ── Related-record chips (clickable, cross-module deep-link) ──────────── */
+a.chip.chip-link {
+  text-decoration: none;
+  color: var(--primary-text);
+  background: var(--primary-weak);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+a.chip.chip-link:hover {
+  background: var(--primary-weak-2);
+  border-color: var(--primary);
+}

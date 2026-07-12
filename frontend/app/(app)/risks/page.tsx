@@ -9,6 +9,7 @@ import CustomFieldsEditor from "@/components/CustomFieldsEditor";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips from "@/components/RelatedChips";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
@@ -62,6 +63,14 @@ type RiskRow = {
   vulnerabilities: Ref[];
   policies: Ref[];
   incidents: Ref[];
+
+  // reverse graph links (read-only, from GET /risks/{id})
+  requirements?: Ref[];
+  exceptions?: Ref[];
+  vendors?: Ref[];
+  projects?: Ref[];
+  goals?: Ref[];
+  processing_activities?: Ref[];
 };
 
 type Page<T> = { items: T[] };
@@ -658,12 +667,18 @@ function RisksPage() {
 
             <strong style={{ fontSize: 13 }}>Related records</strong>
             <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
-              {field("Assets", chips(detail.assets))}
-              {field("Controls", chips(detail.controls))}
-              {field("Threats", chips(detail.threats))}
-              {field("Vulnerabilities", chips(detail.vulnerabilities))}
-              {field("Policies", chips(detail.policies))}
-              {field("Incidents", chips(detail.incidents))}
+              <RelatedChips label="Assets" items={detail.assets} href="/information-assets" />
+              <RelatedChips label="Controls" items={detail.controls} href="/controls" />
+              <RelatedChips label="Threats" items={detail.threats} href="/threat-library" />
+              <RelatedChips label="Vulnerabilities" items={detail.vulnerabilities} href="/threat-library" />
+              <RelatedChips label="Policies" items={detail.policies} href="/policies" />
+              <RelatedChips label="Incidents" items={detail.incidents} href="/incidents" />
+              <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
+              <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
+              <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
+              <RelatedChips label="Projects" items={detail.projects} href="/projects" />
+              <RelatedChips label="Goals" items={detail.goals} href="/goals" />
+              <RelatedChips label="Processing activities" items={detail.processing_activities} href="/privacy" />
             </div>
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>

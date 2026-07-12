@@ -7,6 +7,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import RelatedChips from "@/components/RelatedChips";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea } from "@/components/fields";
@@ -22,6 +23,7 @@ type CatalogRow = {
   description: string;
   category: string;
   used_by_risks_count: number;
+  risks?: { id: string; reference?: string; title?: string; name?: string }[];
 };
 
 type FormState = { name: string; description: string; category: string };
@@ -414,13 +416,15 @@ function ThreatLibraryInner() {
             </div>
 
             {detail.description ? (
-              <div>
+              <div style={{ marginBottom: 16 }}>
                 <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
                 <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.description}</div>
               </div>
             ) : (
               <p className="muted" style={{ fontSize: 13 }}>No description.</p>
             )}
+
+            <RelatedChips label="Risks referencing this" items={detail.risks} href="/risks" />
           </>
         )}
       </RecordDrawer>

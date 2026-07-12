@@ -4,6 +4,8 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.common import GraphRef
+
 
 class NamedRef(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -33,6 +35,8 @@ class ThreatRead(CatalogBase):
     # Read-only reverse relationship: how many risks reference this threat
     # (via the risk_threats association). Populated by the list/detail endpoints.
     used_by_risks_count: int = 0
+    # The actual risks (detail endpoint only).
+    risks: list[GraphRef] = []
 
 
 class VulnerabilityCreate(CatalogBase):
@@ -49,3 +53,5 @@ class VulnerabilityRead(CatalogBase):
     # Read-only reverse relationship: how many risks reference this vulnerability
     # (via the risk_vulnerabilities association). Populated by the endpoints.
     used_by_risks_count: int = 0
+    # The actual risks (detail endpoint only).
+    risks: list[GraphRef] = []

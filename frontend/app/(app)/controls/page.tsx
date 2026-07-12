@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips from "@/components/RelatedChips";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
@@ -28,6 +29,8 @@ type Control = {
   last_maintenance_date: string | null; audit_count: number; last_audit_result: string | null; is_audit_overdue: boolean;
   maintenance_count: number; last_maintenance_result: string | null; is_maintenance_overdue: boolean;
   policies: LinkRef[]; requirements: LinkRef[]; risks: LinkRef[];
+  // reverse graph links (read-only, from GET /controls/{id})
+  incidents?: LinkRef[]; exceptions?: LinkRef[]; projects?: LinkRef[];
 };
 type ControlAudit = { id: string; result: string; conducted_date: string | null; result_description: string; auditor: string };
 type ControlMaintenance = { id: string; result: string; task: string; conducted_date: string | null };
@@ -318,6 +321,16 @@ function ControlsInner() {
                   </div>
                 )) : <span className="muted">No maintenances recorded yet.</span>}
               </div>
+            </div>
+
+            <strong style={{ fontSize: 13 }}>Related records</strong>
+            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 14 }}>
+              <RelatedChips label="Policies" items={detail.policies} href="/policies" />
+              <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
+              <RelatedChips label="Risks" items={detail.risks} href="/risks" />
+              <RelatedChips label="Incidents" items={detail.incidents} href="/incidents" />
+              <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
+              <RelatedChips label="Projects" items={detail.projects} href="/projects" />
             </div>
 
             <RecordPanels model="control" entityId={detail.id} />

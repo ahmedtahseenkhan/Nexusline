@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips from "@/components/RelatedChips";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
@@ -34,6 +35,14 @@ const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const DOCTYPE = opts(["policy", "standard", "procedure", "guideline"]);
 
 const refToOpt = (x: PolicyLink): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
+
+// GET /policies/{id} also returns reverse graph links not present on the list `Policy` type.
+type PolicyDetail = Policy & {
+  exceptions?: PolicyLink[];
+  projects?: PolicyLink[];
+  goals?: PolicyLink[];
+  processing_activities?: PolicyLink[];
+};
 
 type FormState = {
   title: string;
@@ -92,7 +101,7 @@ const linkCount = (p: Policy) => p.related.length + p.controls.length + p.requir
 /* ================================================================ page ===== */
 function PoliciesInner() {
   const [openId, setOpenId] = useRecordParam("id");
-  const [detail, setDetail] = useState<Policy | null>(null);
+  const [detail, setDetail] = useState<PolicyDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -104,7 +113,7 @@ function PoliciesInner() {
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const fetchPolicies = useCallback((qs: string) => apiCall<PagedList<Policy>>("GET", `/policies?${qs}`), []);
-  const loadDetail = useCallback((id: string) => { apiCall<Policy>("GET", `/policies/${id}`).then(setDetail).catch(() => setDetail(null)); }, []);
+  const loadDetail = useCallback((id: string) => { apiCall<PolicyDetail>("GET", `/policies/${id}`).then(setDetail).catch(() => setDetail(null)); }, []);
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
 
   // server typeahead pickers
@@ -285,6 +294,19 @@ function PoliciesInner() {
               <div><div className="muted" style={{ fontSize: 12 }}>Last review</div><div style={{ marginTop: 4 }}>{detail.last_review_date || "—"}</div></div>
               <div><div className="muted" style={{ fontSize: 12 }}>Published</div><div style={{ marginTop: 4 }}>{detail.published_at || "—"}</div></div>
             </div>
+
+            <strong style={{ fontSize: 13 }}>Related records</strong>
+            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 14 }}>
+              <RelatedChips label="Controls" items={detail.controls} href="/controls" />
+              <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
+              <RelatedChips label="Risks" items={detail.risks} href="/risks" />
+              <RelatedChips label="Related policies" items={detail.related} href="/policies" />
+              <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
+              <RelatedChips label="Projects" items={detail.projects} href="/projects" />
+              <RelatedChips label="Goals" items={detail.goals} href="/goals" />
+              <RelatedChips label="Processing activities" items={detail.processing_activities} href="/privacy" />
+            </div>
+
             <RecordPanels model="policy" entityId={detail.id} />
           </>
         )}
