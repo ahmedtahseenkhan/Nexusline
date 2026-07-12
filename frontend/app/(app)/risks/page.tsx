@@ -9,6 +9,7 @@ import CustomFieldsEditor from "@/components/CustomFieldsEditor";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordIssues from "@/components/RecordIssues";
 import RelatedChips from "@/components/RelatedChips";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -681,6 +682,10 @@ function RisksPage() {
               <RelatedChips label="Goals" items={detail.goals} href="/goals" />
               <RelatedChips label="Processing activities" items={detail.processing_activities} href="/privacy" />
               <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+              <RecordIssues entityId={detail.id} entityRef={detail.reference} sourceType="risk_assessment" />
             </div>
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>

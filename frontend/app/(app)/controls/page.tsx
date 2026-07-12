@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import RecordIssues from "@/components/RecordIssues";
 import RelatedChips from "@/components/RelatedChips";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
@@ -332,6 +333,10 @@ function ControlsInner() {
               <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
               <RelatedChips label="Projects" items={detail.projects} href="/projects" />
               <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+              <RecordIssues entityId={detail.id} entityRef={detail.reference} sourceType="self_identified" />
             </div>
 
             <RecordPanels model="control" entityId={detail.id} />

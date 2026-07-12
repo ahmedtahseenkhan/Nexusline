@@ -88,6 +88,7 @@ async def list_issues(
     search: Annotated[str | None, Query()] = None,
     status_filter: Annotated[IssueStatus2 | None, Query(alias="status")] = None,
     source_type: Annotated[IssueSource | None, Query()] = None,
+    source_id: Annotated[uuid.UUID | None, Query()] = None,
     severity: Annotated[Severity | None, Query()] = None,
     overdue: Annotated[bool | None, Query()] = None,
     regulator_related: Annotated[bool | None, Query()] = None,
@@ -113,6 +114,8 @@ async def list_issues(
         stmt = stmt.where(Issue.status == status_filter)
     if source_type is not None:
         stmt = stmt.where(Issue.source_type == source_type)
+    if source_id is not None:
+        stmt = stmt.where(Issue.source_id == source_id)
     if severity is not None:
         stmt = stmt.where(Issue.severity == severity)
     if regulator_related is not None:
