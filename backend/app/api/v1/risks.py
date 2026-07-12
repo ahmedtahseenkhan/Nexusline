@@ -38,6 +38,7 @@ from app.schemas.risk import (
 )
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import dual_control
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/risks", tags=["risks"])
@@ -339,11 +340,24 @@ async def decide_acceptance(
             detail=f"Acceptance already {acceptance.status.value}",
         )
 
+    # Maker-checker: accepting a risk is a four-eyes control — the person who requested
+    # the acceptance can never approve it. Gated by the risk's exposure (ALE) so a
+    # DualControlRule threshold can scope it to material risks.
+    risk = await _load_risk(db, risk_id)
+    await dual_control.enforce_maker_checker(
+        db,
+        module="risk",
+        action="accept",
+        maker_id=acceptance.requested_by,
+        checker_id=user.id,
+        amount=float(risk.annual_loss_expectancy) if risk.annual_loss_expectancy else None,
+        subject="risk acceptance",
+    )
+
     acceptance.approver_id = user.id
     acceptance.decided_at = date.today()
     if body.approve:
         acceptance.status = AcceptanceStatus.approved
-        risk = await _load_risk(db, risk_id)
         risk.status = RiskStatus.accepted
         risk.treatment_strategy = TreatmentStrategy.accept
         action, verb = "approve_acceptance", "Approved"

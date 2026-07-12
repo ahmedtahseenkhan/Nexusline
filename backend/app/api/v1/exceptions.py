@@ -26,6 +26,7 @@ from app.schemas.exception import (
 )
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import dual_control
 
 router = APIRouter(prefix="/exceptions", tags=["exceptions"])
 
@@ -203,6 +204,15 @@ async def decide_exception(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=f"Exception already {obj.status.value}"
         )
+    # Maker-checker: the requester of an exception cannot approve their own request.
+    await dual_control.enforce_maker_checker(
+        db,
+        module="exception",
+        action="approve",
+        maker_id=obj.requested_by,
+        checker_id=user.id,
+        subject="exception",
+    )
     obj.approver_id = user.id
     obj.decided_at = date.today()
     obj.status = ExceptionStatus.approved if body.approve else ExceptionStatus.rejected
