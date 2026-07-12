@@ -1,8 +1,9 @@
 "use client";
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
@@ -86,6 +87,7 @@ function fromLegal(l: Legal): FormState {
 function LegalInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [recordId, setRecordId] = useRecordParam("id");
 
   const [editing, setEditing] = useState<Legal | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -114,6 +116,13 @@ function LegalInner() {
     setError(null);
     setShowForm(true);
   }
+
+  // Deep-link: open the record named by ?id= (e.g. from global search / ⌘K).
+  useEffect(() => {
+    if (!recordId || editing?.id === recordId) return;
+    apiCall<Legal>("GET", `/legals/${recordId}`).then(openEdit).catch(() => setRecordId(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordId]);
 
   async function save() {
     if (!f.name.trim()) {
@@ -243,7 +252,8 @@ function LegalInner() {
         columns={columns}
         fetcher={fetchLegals}
         rowKey={(l) => l.id}
-        onRowClick={(l) => openEdit(l)}
+        onRowClick={(l) => { setRecordId(l.id); openEdit(l); }}
+        activeKey={recordId ?? undefined}
         searchPlaceholder="Search obligations by name, reference or jurisdiction…"
         defaultSort={{ by: "name", dir: "asc" }}
         emptyMessage="No obligations. Register your first legal or regulatory obligation."
@@ -257,7 +267,7 @@ function LegalInner() {
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "links", label: "Links & Relations", content: linksTab },
           ]}
-          onClose={() => setShowForm(false)}
+          onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}
           saving={saving}
           error={error}

@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
@@ -80,6 +81,7 @@ function BusinessUnitsInner() {
   const [allUnits, setAllUnits] = useState<BusinessUnit[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [recordId, setRecordId] = useRecordParam("id");
 
   const [editing, setEditing] = useState<BusinessUnit | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -113,6 +115,13 @@ function BusinessUnitsInner() {
     setError(null);
     setShowForm(true);
   }
+
+  // Deep-link: open the record named by ?id= (e.g. from global search / ⌘K).
+  useEffect(() => {
+    if (!recordId || editing?.id === recordId) return;
+    apiCall<BusinessUnit>("GET", `/business-units/${recordId}`).then(openEdit).catch(() => setRecordId(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordId]);
 
   async function save() {
     if (!f.name.trim()) {
@@ -252,7 +261,8 @@ function BusinessUnitsInner() {
         columns={columns}
         fetcher={fetchUnits}
         rowKey={(u) => u.id}
-        onRowClick={(u) => openEdit(u)}
+        onRowClick={(u) => { setRecordId(u.id); openEdit(u); }}
+        activeKey={recordId ?? undefined}
         searchPlaceholder="Search units by name, manager or location…"
         defaultSort={{ by: "name", dir: "asc" }}
         emptyMessage="No business units. Create your first unit to build the organizational hierarchy."
@@ -266,7 +276,7 @@ function BusinessUnitsInner() {
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "links", label: "Links & Relations", content: linksTab },
           ]}
-          onClose={() => setShowForm(false)}
+          onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}
           saving={saving}
           error={error}

@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
@@ -106,6 +107,7 @@ function ProcessesInner() {
   const [units, setUnits] = useState<Ref[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [recordId, setRecordId] = useRecordParam("id");
 
   const [editing, setEditing] = useState<Process | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -136,6 +138,13 @@ function ProcessesInner() {
     setError(null);
     setShowForm(true);
   }
+
+  // Deep-link: open the record named by ?id= (e.g. from global search / ⌘K).
+  useEffect(() => {
+    if (!recordId || editing?.id === recordId) return;
+    apiCall<Process>("GET", `/processes/${recordId}`).then(openEdit).catch(() => setRecordId(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordId]);
 
   async function save() {
     setError(null);
@@ -260,7 +269,8 @@ function ProcessesInner() {
         columns={columns}
         fetcher={fetchProcesses}
         rowKey={(p) => p.id}
-        onRowClick={(p) => openEdit(p)}
+        onRowClick={(p) => { setRecordId(p.id); openEdit(p); }}
+        activeKey={recordId ?? undefined}
         searchPlaceholder="Search processes by name or owner…"
         defaultSort={{ by: "name", dir: "asc" }}
         emptyMessage="No processes. Add your first business process to start impact analysis."
@@ -275,7 +285,7 @@ function ProcessesInner() {
             { id: "continuity", label: "Continuity (RTO / RPO / MTD)", content: continuityTab },
             { id: "links", label: "Links & Relations", content: linksTab },
           ]}
-          onClose={() => setShowForm(false)}
+          onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}
           saving={saving}
           error={error}

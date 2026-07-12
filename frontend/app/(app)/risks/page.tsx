@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { api, apiCall, type CustomField, type RiskSetting } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
+import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import CustomFieldsEditor from "@/components/CustomFieldsEditor";
 import DataTable, { type Column } from "@/components/DataTable";
@@ -213,11 +214,12 @@ function toPayload(f: FormState): Record<string, unknown> {
 }
 
 // --------------------------------------------------------------- page
-export default function RisksPage() {
+function RisksPage() {
   const [settings, setSettings] = useState<RiskSetting | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [users, setUsers] = useState<UserRow[]>([]);
+  const [recordId, setRecordId] = useRecordParam("id");
 
   // appetite editor
   const [showSettings, setShowSettings] = useState(false);
@@ -274,6 +276,13 @@ export default function RisksPage() {
     setError(null);
     setShowForm(true);
   }
+
+  // Deep-link: open the record named by ?id= (e.g. from global search / ⌘K).
+  useEffect(() => {
+    if (!recordId || editing?.id === recordId) return;
+    apiCall<RiskRow>("GET", `/risks/${recordId}`).then(openEdit).catch(() => setRecordId(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordId]);
 
   async function save() {
     setError(null);
@@ -555,7 +564,8 @@ export default function RisksPage() {
         columns={riskColumns}
         fetcher={fetchRisks}
         rowKey={(r) => r.id}
-        onRowClick={openEdit}
+        onRowClick={(r) => { setRecordId(r.id); openEdit(r); }}
+        activeKey={recordId ?? undefined}
         searchPlaceholder="Search risks by title or reference…"
         defaultSort={{ by: "inherent_score", dir: "desc" }}
         emptyMessage="No risks yet. Create your first risk to start building the register."
@@ -586,7 +596,7 @@ export default function RisksPage() {
                 }]
               : []),
           ]}
-          onClose={() => setShowForm(false)}
+          onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}
           saving={saving}
           error={error}
@@ -594,5 +604,13 @@ export default function RisksPage() {
         />
       )}
     </>
+  );
+}
+
+export default function RisksPageWrapper() {
+  return (
+    <Suspense fallback={null}>
+      <RisksPage />
+    </Suspense>
   );
 }

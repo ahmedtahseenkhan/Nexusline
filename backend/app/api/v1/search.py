@@ -16,6 +16,7 @@ from sqlalchemy import or_, select
 from app.core.deps import CurrentUser, DbSession
 from app.models.asset import Asset
 from app.models.compliance import Requirement
+from app.models.enums import AssetClass
 from app.models.continuity import ContinuityPlan
 from app.models.control import Control
 from app.models.exception import ExceptionRecord
@@ -103,13 +104,18 @@ async def global_search(q: str, db: DbSession, user: CurrentUser, limit: int = 8
         for obj in (await db.scalars(stmt)).all():
             reference = getattr(obj, "reference", "") or ""
             title = getattr(obj, tgt.title_attr, "") or ""
+            # Deep-link straight to the record so search/⌘K opens its drawer, not just
+            # the module. Assets split by class into the IT vs Information register.
+            base = tgt.link
+            if model is Asset:
+                base = "/it-assets" if obj.asset_class == AssetClass.it_asset else "/information-assets"
             hits.append(
                 SearchHit(
                     type=tgt.type_label,
                     label=f"{tgt.type_label} · {reference}" if reference else tgt.type_label,
                     reference=reference,
                     title=str(title),
-                    link=tgt.link,
+                    link=f"{base}?id={obj.id}",
                 )
             )
 
