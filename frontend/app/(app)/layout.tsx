@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
+import CommandPalette from "@/components/CommandPalette";
 import { api, getToken, type Me, type ModuleState } from "@/lib/api";
 import { ModulesProvider, buildModulesContext, moduleForRoute, routeDisabled } from "@/lib/modules";
 import { FeedbackHost } from "@/lib/feedback";
@@ -75,6 +76,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           </main>
         </div>
       </div>
+      <CommandPalette />
       <FeedbackHost />
     </ModulesProvider>
   );

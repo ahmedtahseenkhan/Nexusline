@@ -115,8 +115,9 @@ export default function Topbar({ user }: { user: Me | null }) {
             onFocus={() => hits.length && setOpen(true)}
             placeholder="Search…"
             aria-label="Global search"
-            style={{ width: 220, height: 32 }}
+            style={{ width: 220, height: 32, paddingRight: 34 }}
           />
+          <kbd className="topbar-kbd" title="Press ⌘K / Ctrl-K for the command palette">⌘K</kbd>
           {open && (
             <div
               className="card"
