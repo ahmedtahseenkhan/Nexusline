@@ -11,12 +11,18 @@ import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconCheck } from "@/components/icons";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
+// Server typeahead result shape (any linkable register row).
+type Named = { id: string; name?: string; title?: string; reference?: string; process_name?: string };
+const refToOpt = (x: GraphRef): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
 
 type ContinuityTask = {
   id: string;
@@ -67,6 +73,11 @@ type ContinuityPlan = {
   process: Ref | null;
   tasks: ContinuityTask[];
   tests: ContinuityTest[];
+  // graph links (from GET /continuity-plans/{id})
+  bia_id: string | null;
+  bia_assessment: GraphRef | null;
+  assets: GraphRef[];
+  risks: GraphRef[];
 };
 
 // ----------------------------------------------------------------- option sets
@@ -107,6 +118,10 @@ type FormState = {
   rto_hours: number | "";
   rpo_hours: number | "";
   test_frequency: string;
+  bia_id: string;
+  bia_label: string;
+  asset_ids: AsyncOption[];
+  risk_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
@@ -114,6 +129,7 @@ const BLANK: FormState = {
   business_unit_id: "", process_id: "",
   bia: "", invocation: "", criticality: "high",
   max_tolerable_downtime_hours: "", rto_hours: "", rpo_hours: "", test_frequency: "annual",
+  bia_id: "", bia_label: "", asset_ids: [], risk_ids: [],
 };
 
 function fromPlan(p: ContinuityPlan): FormState {
@@ -132,6 +148,10 @@ function fromPlan(p: ContinuityPlan): FormState {
     rto_hours: p.rto_hours ?? "",
     rpo_hours: p.rpo_hours ?? "",
     test_frequency: p.test_frequency,
+    bia_id: p.bia_id || "",
+    bia_label: p.bia_assessment ? (p.bia_assessment.reference || p.bia_assessment.title || p.bia_assessment.name || "") : "",
+    asset_ids: (p.assets ?? []).map(refToOpt),
+    risk_ids: (p.risks ?? []).map(refToOpt),
   };
 }
 
@@ -152,6 +172,9 @@ function toPayload(f: FormState) {
     rto_hours: num(f.rto_hours),
     rpo_hours: num(f.rpo_hours),
     test_frequency: f.test_frequency,
+    bia_id: f.bia_id || null,
+    asset_ids: f.asset_ids.map((o) => o.value),
+    risk_ids: f.risk_ids.map((o) => o.value),
   };
 }
 
@@ -180,6 +203,12 @@ function ContinuityInner() {
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const fetchPlans = useCallback((qs: string) => apiCall<PagedList<ContinuityPlan>>("GET", `/continuity-plans?${qs}`), []);
+
+  // Server typeahead source for the form's link pickers (searches any register row).
+  const linkSearch = (path: string) => (q: string) =>
+    apiCall<PagedList<Named>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((x) => ({ value: x.id, label: x.name || x.process_name || x.title || x.reference || x.id, sub: x.reference })),
+    );
   const loadDetail = useCallback((id: string) => {
     apiCall<ContinuityPlan>("GET", `/continuity-plans/${id}`).then(setDetail).catch(() => setDetail(null));
   }, []);
@@ -322,6 +351,21 @@ function ContinuityInner() {
       <Field label="Business Process" help="Critical process this plan recovers.">
         <Select value={f.process_id} onChange={(v) => set("process_id", v)} options={procOpts} placeholder="— none —" />
       </Field>
+      <Field label="Business Impact Analysis" help="The BIA assessment this plan is derived from.">
+        <AsyncSelect
+          search={linkSearch("bia")}
+          value={f.bia_id || null}
+          selectedLabel={f.bia_label}
+          onChange={(v, o) => setF((p) => ({ ...p, bia_id: v || "", bia_label: o?.label || "" }))}
+          placeholder="Search BIA assessments…"
+        />
+      </Field>
+      <Field label="Assets covered" help="Assets this continuity plan protects and restores.">
+        <AsyncMultiSelect search={linkSearch("assets")} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} />
+      </Field>
+      <Field label="Risks mitigated" help="Risks this plan reduces by ensuring recovery.">
+        <AsyncMultiSelect search={linkSearch("risks")} value={f.risk_ids} onChange={(v) => set("risk_ids", v)} />
+      </Field>
     </>
   );
 
@@ -381,6 +425,12 @@ function ContinuityInner() {
               <span className="muted" style={{ fontSize: 13 }}>
                 RTO {detail.rto_hours != null ? `${detail.rto_hours}h` : "—"} · RPO {detail.rpo_hours != null ? `${detail.rpo_hours}h` : "—"}
               </span>
+            </div>
+
+            <div style={{ display: "grid", gap: 12, marginBottom: 16 }}>
+              <RelatedChips label="Business Impact Analysis" items={detail.bia_assessment ? [detail.bia_assessment] : undefined} href="/bia" />
+              <RelatedChips label="Assets covered" items={detail.assets} href="/information-assets" />
+              <RelatedChips label="Risks mitigated" items={detail.risks} href="/risks" />
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>

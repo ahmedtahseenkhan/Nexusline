@@ -12,8 +12,13 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import AsyncSelect from "@/components/AsyncSelect";
+import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 
 // ------------------------------------------------------------------ types
+// Server typeahead result shape (any linkable register row).
+type Named = { id: string; name?: string; title?: string; reference?: string; process_name?: string };
+
 type BiaDependency = {
   id: string;
   bia_id: string;
@@ -24,12 +29,19 @@ type BiaDependency = {
   rto_hours: number | null;
   single_point_of_failure: boolean;
   created_at: string;
+  // graph links to catalog records (optional, from GET /bia/{id})
+  asset_id: string | null;
+  vendor_id: string | null;
+  asset: GraphRef | null;
+  vendor: GraphRef | null;
 };
 
 type BiaAssessment = {
   id: string;
   reference: string;
   process_name: string;
+  process_id: string | null;
+  process: GraphRef | null;
   business_unit: string;
   owner: string;
   description: string;
@@ -104,6 +116,8 @@ function CritBadge({ value }: { value: string | null }) {
 // ------------------------------------------------------------------ form state
 type BiaForm = {
   process_name: string;
+  process_id: string;
+  process_label: string;
   business_unit: string;
   owner: string;
   description: string;
@@ -128,7 +142,7 @@ type BiaForm = {
   workflow_status: string;
 };
 const BLANK_BIA: BiaForm = {
-  process_name: "", business_unit: "", owner: "", description: "", criticality: "medium", status: "draft",
+  process_name: "", process_id: "", process_label: "", business_unit: "", owner: "", description: "", criticality: "medium", status: "draft",
   assessment_date: "", next_review_date: "", peak_periods: "", rto_hours: "", rpo_hours: "", mtpd_hours: "",
   financial_impact_24h: "", financial_impact_1week: "", currency: "PKR", operational_impact: "",
   reputational_impact: "", regulatory_impact: "", legal_impact: "", minimum_resources: "",
@@ -137,6 +151,8 @@ const BLANK_BIA: BiaForm = {
 function fromBia(b: BiaAssessment): BiaForm {
   return {
     process_name: b.process_name,
+    process_id: b.process_id || "",
+    process_label: b.process ? (b.process.reference || b.process.title || b.process.name || "") : "",
     business_unit: b.business_unit || "",
     owner: b.owner || "",
     description: b.description || "",
@@ -165,6 +181,7 @@ function biaPayload(f: BiaForm): Record<string, unknown> {
   const int = (v: string) => (v === "" ? null : Number(v));
   return {
     process_name: f.process_name,
+    process_id: f.process_id || null,
     business_unit: f.business_unit,
     owner: f.owner,
     description: f.description,
@@ -196,9 +213,14 @@ type DepDraft = {
   criticality: string;
   rto_hours: string;
   single_point_of_failure: boolean;
+  asset_id: string;
+  asset_label: string;
+  vendor_id: string;
+  vendor_label: string;
 };
 const BLANK_DEP: DepDraft = {
   dependency_type: "application", name: "", criticality: "medium", rto_hours: "", single_point_of_failure: false,
+  asset_id: "", asset_label: "", vendor_id: "", vendor_label: "",
 };
 
 /* ================================================================ page ===== */
@@ -227,6 +249,12 @@ function BiaInner() {
   }, []);
   const reload = useCallback(() => { setRefreshKey((k) => k + 1); loadSummary(); }, [loadSummary]);
   const fetchBias = useCallback((qs: string) => apiCall<PagedList<BiaAssessment>>("GET", `/bia?${qs}`), []);
+
+  // Server typeahead source for the form/link pickers (searches any register row).
+  const linkSearch = (path: string) => (q: string) =>
+    apiCall<PagedList<Named>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((x) => ({ value: x.id, label: x.name || x.process_name || x.title || x.reference || x.id, sub: x.reference })),
+    );
   const loadDetail = useCallback((id: string) => {
     apiCall<BiaAssessment>("GET", `/bia/${id}`).then(setDetail).catch(() => setDetail(null));
   }, []);
@@ -273,6 +301,8 @@ function BiaInner() {
         criticality: dd.criticality,
         rto_hours: dd.rto_hours === "" ? null : Number(dd.rto_hours),
         single_point_of_failure: dd.single_point_of_failure,
+        asset_id: dd.asset_id || null,
+        vendor_id: dd.vendor_id || null,
       });
       setDetail(fresh); setDd(BLANK_DEP); reload();
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to add dependency"); }
@@ -294,6 +324,15 @@ function BiaInner() {
     <>
       <Field label="Process name" required help="For example: Core banking - CBS transaction processing.">
         <TextInput value={bf.process_name} onChange={(v) => setB("process_name", v)} placeholder="Core banking - CBS" required />
+      </Field>
+      <Field label="Business process" help="Link this BIA to a process in the register (optional).">
+        <AsyncSelect
+          search={linkSearch("processes")}
+          value={bf.process_id || null}
+          selectedLabel={bf.process_label}
+          onChange={(v, o) => setBf((p) => ({ ...p, process_id: v || "", process_label: o?.label || "" }))}
+          placeholder="Search processes…"
+        />
       </Field>
       <div className="field-row">
         <Field label="Business unit" help="The unit that owns this process.">
@@ -497,6 +536,10 @@ function BiaInner() {
               </table>
             </div>
 
+            <div style={{ marginBottom: 16 }}>
+              <RelatedChips label="Business process" items={detail.process ? [detail.process] : undefined} href="/processes" />
+            </div>
+
             <strong>Dependencies</strong>
             <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
               Applications, IT &amp; information assets, vendors, people, facilities and utilities this process relies on.
@@ -526,13 +569,33 @@ function BiaInner() {
                 <input id="dep-spof" type="checkbox" checked={dd.single_point_of_failure} onChange={(ev) => setDD("single_point_of_failure", ev.target.checked)} />
                 <label htmlFor="dep-spof" className="label" style={{ margin: 0 }}>SPOF</label>
               </div>
+              <div style={{ width: 200 }}>
+                <label className="label">Asset (optional)</label>
+                <AsyncSelect
+                  search={linkSearch("assets")}
+                  value={dd.asset_id || null}
+                  selectedLabel={dd.asset_label}
+                  onChange={(v, o) => setDd((p) => ({ ...p, asset_id: v || "", asset_label: o?.label || "" }))}
+                  placeholder="Search assets…"
+                />
+              </div>
+              <div style={{ width: 200 }}>
+                <label className="label">Vendor (optional)</label>
+                <AsyncSelect
+                  search={linkSearch("vendors")}
+                  value={dd.vendor_id || null}
+                  selectedLabel={dd.vendor_label}
+                  onChange={(v, o) => setDd((p) => ({ ...p, vendor_id: v || "", vendor_label: o?.label || "" }))}
+                  placeholder="Search vendors…"
+                />
+              </div>
               <button className="btn" disabled={!dd.name.trim()}>Add</button>
             </form>
 
             <div className="table-wrap" style={{ marginBottom: 16 }}>
               <table>
                 <thead>
-                  <tr><th>Type</th><th>Name</th><th>Criticality</th><th>RTO</th><th>SPOF</th><th></th></tr>
+                  <tr><th>Type</th><th>Name</th><th>Criticality</th><th>RTO</th><th>SPOF</th><th>Asset</th><th>Vendor</th><th></th></tr>
                 </thead>
                 <tbody>
                   {detail.dependencies.map((d) => (
@@ -542,10 +605,12 @@ function BiaInner() {
                       <td><CritBadge value={d.criticality} /></td>
                       <td className="muted">{hrs(d.rto_hours)}</td>
                       <td>{d.single_point_of_failure ? <Badge tone="critical">SPOF</Badge> : <span className="muted">—</span>}</td>
+                      <td><RelatedChips label="" items={d.asset ? [d.asset] : undefined} href="/information-assets" /></td>
+                      <td><RelatedChips label="" items={d.vendor ? [d.vendor] : undefined} href="/vendors" /></td>
                       <td><button className="btn secondary sm" onClick={() => removeDependency(d.id)}>Remove</button></td>
                     </tr>
                   ))}
-                  {detail.dependencies.length === 0 && <tr><td colSpan={6}><span className="muted">No dependencies recorded yet.</span></td></tr>}
+                  {detail.dependencies.length === 0 && <tr><td colSpan={8}><span className="muted">No dependencies recorded yet.</span></td></tr>}
                 </tbody>
               </table>
             </div>
