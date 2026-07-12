@@ -1,14 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
-import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconGauge, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // ---- inline types (mirror backend GoalRead / GoalAuditRead) ----------------
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -49,8 +56,6 @@ type Goal = {
   policies: Ref[];
 };
 
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
-
 // ---- enum tones / option lists ---------------------------------------------
 const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
   achieved: "low",
@@ -73,7 +78,7 @@ const WORKFLOW_TONE: Record<string, "low" | "medium" | "neutral" | "info"> = {
 
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-const refLabel = (r: Ref) => r.title || r.name || r.reference || r.id;
+const refToOpt = (r: Ref): AsyncOption => ({ value: r.id, label: r.title || r.name || r.reference || r.id, sub: r.reference });
 
 const STATUS = opts(["not_started", "on_track", "at_risk", "off_track", "achieved"]);
 const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
@@ -92,9 +97,9 @@ type FormState = {
   next_audit_date: string;
   audit_metric: string;
   success_criteria: string;
-  risk_ids: string[];
-  project_ids: string[];
-  policy_ids: string[];
+  risk_ids: AsyncOption[];
+  project_ids: AsyncOption[];
+  policy_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
@@ -125,9 +130,9 @@ function fromGoal(g: Goal): FormState {
     next_audit_date: g.next_audit_date || "",
     audit_metric: g.audit_metric || "",
     success_criteria: g.success_criteria || "",
-    risk_ids: g.risks.map((r) => r.id),
-    project_ids: g.projects.map((r) => r.id),
-    policy_ids: g.policies.map((r) => r.id),
+    risk_ids: g.risks.map(refToOpt),
+    project_ids: g.projects.map(refToOpt),
+    policy_ids: g.policies.map(refToOpt),
   };
 }
 
@@ -143,9 +148,9 @@ function toPayload(f: FormState): Record<string, unknown> {
     next_audit_date: f.next_audit_date || null,
     audit_metric: f.audit_metric,
     success_criteria: f.success_criteria,
-    risk_ids: f.risk_ids,
-    project_ids: f.project_ids,
-    policy_ids: f.policy_ids,
+    risk_ids: f.risk_ids.map((o) => o.value),
+    project_ids: f.project_ids.map((o) => o.value),
+    policy_ids: f.policy_ids.map((o) => o.value),
   };
 }
 
@@ -166,64 +171,50 @@ const BLANK_AUDIT: AuditDraft = {
   success_criteria: "",
 };
 
-export default function GoalsPage() {
-  const [items, setItems] = useState<Goal[]>([]);
-  const [riskOpts, setRiskOpts] = useState<Option[]>([]);
-  const [projectOpts, setProjectOpts] = useState<Option[]>([]);
-  const [policyOpts, setPolicyOpts] = useState<Option[]>([]);
+const linkCount = (g: Goal) => g.risks.length + g.projects.length + g.policies.length;
+
+/* ================================================================ page ===== */
+function GoalsInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<Goal | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const [editing, setEditing] = useState<Goal | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
-  const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
-    setF((p) => ({ ...p, [k]: v }));
+  const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  // detail / audit management
-  const [open, setOpen] = useState<Goal | null>(null);
   const [ad, setAd] = useState<AuditDraft>(BLANK_AUDIT);
-  const setA = <K extends keyof AuditDraft>(k: K, v: AuditDraft[K]) =>
-    setAd((p) => ({ ...p, [k]: v }));
+  const setA = <K extends keyof AuditDraft>(k: K, v: AuditDraft[K]) => setAd((p) => ({ ...p, [k]: v }));
 
-  async function load(keepOpen?: string) {
-    try {
-      const g = await apiCall<Page<Goal>>("GET", "/goals?limit=200");
-      setItems(g.items);
-      if (keepOpen) setOpen(g.items.find((x) => x.id === keepOpen) || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchGoals = useCallback((qs: string) => apiCall<PagedList<Goal>>("GET", `/goals?${qs}`), []);
 
-  async function loadOptions() {
-    try {
-      const [rk, pr, po] = await Promise.all([
-        apiCall<Page<{ id: string; title: string; reference: string }>>("GET", "/risks?limit=200"),
-        apiCall<Page<{ id: string; title: string; reference: string }>>("GET", "/projects?limit=200"),
-        apiCall<Page<{ id: string; title: string; reference: string }>>("GET", "/policies?limit=200"),
-      ]);
-      setRiskOpts(rk.items.map((r) => ({ value: r.id, label: r.title, sub: r.reference })));
-      setProjectOpts(pr.items.map((p) => ({ value: p.id, label: p.title, sub: p.reference })));
-      setPolicyOpts(po.items.map((p) => ({ value: p.id, label: p.title, sub: p.reference })));
-    } catch {
-      /* options are best-effort; the form still works without them */
-    }
-  }
-
-  useEffect(() => {
-    load();
-    loadOptions();
+  const loadDetail = useCallback((id: string) => {
+    apiCall<Goal>("GET", `/goals/${id}`).then(setDetail).catch(() => setDetail(null));
   }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setDetail(null);
+  }, [openId, loadDetail]);
+
+  // server typeahead pickers
+  const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
+  const searchProjects = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/projects?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
+  const searchPolicies = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/policies?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
 
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    setError(null);
     setShowForm(true);
   }
   function openEdit(g: Goal) {
     setEditing(g);
     setF(fromGoal(g));
+    setError(null);
     setShowForm(true);
   }
 
@@ -235,7 +226,9 @@ export default function GoalsPage() {
       if (editing) await apiCall<Goal>("PATCH", `/goals/${editing.id}`, payload);
       else await apiCall<Goal>("POST", "/goals", payload);
       setShowForm(false);
-      await load(open?.id);
+      reload();
+      if (openId) loadDetail(openId);
+      toast(editing ? "Changes saved" : "Goal created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save goal");
     } finally {
@@ -244,27 +237,23 @@ export default function GoalsPage() {
   }
 
   async function remove(g: Goal) {
-    if (!window.confirm(`Delete goal ${g.reference || g.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete goal ${g.reference || g.name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<unknown>("DELETE", `/goals/${g.id}`);
-      if (open?.id === g.id) setOpen(null);
-      await load();
+      if (openId === g.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
 
-  function toggleRow(g: Goal) {
-    setOpen(open?.id === g.id ? null : g);
-    setAd(BLANK_AUDIT);
-  }
-
   async function recordAudit() {
-    if (!open) return;
+    if (!detail) return;
     setError(null);
     try {
-      await apiCall<Goal>("POST", `/goals/${open.id}/audits`, {
+      await apiCall<Goal>("POST", `/goals/${detail.id}/audits`, {
         result: ad.result,
         conducted_date: ad.conducted_date || null,
         auditor: ad.auditor,
@@ -273,25 +262,40 @@ export default function GoalsPage() {
         success_criteria: ad.success_criteria,
       });
       setAd(BLANK_AUDIT);
-      await load(open.id);
+      loadDetail(detail.id);
+      reload();
+      toast("Audit recorded");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to record audit");
     }
   }
 
   async function removeAudit(auditId: string) {
-    if (!open) return;
-    if (!window.confirm("Delete this audit?")) return;
+    if (!detail) return;
+    if (!(await confirmDialog({ title: "Delete this audit?", danger: true }))) return;
     setError(null);
     try {
-      await apiCall<Goal>("DELETE", `/goals/${open.id}/audits/${auditId}`);
-      await load(open.id);
+      await apiCall<Goal>("DELETE", `/goals/${detail.id}/audits/${auditId}`);
+      loadDetail(detail.id);
+      reload();
+      toast("Audit deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete audit");
     }
   }
 
-  const linkCount = (g: Goal) => g.risks.length + g.projects.length + g.policies.length;
+  const columns: Column<Goal>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (g) => <span className="ref">{g.reference || "—"}</span> },
+    { key: "name", header: "Goal", sortable: true, render: (g) => <span className="cell-title">{g.name}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (g) => <span className="muted">{g.owner || "—"}</span> },
+    { key: "status", header: "Status", sortable: true, render: (g) => <Badge tone={STATUS_TONE[g.status] || "neutral"}>{cap(g.status)}</Badge> },
+    { key: "workflow_status", header: "Workflow", render: (g) => <Badge tone={WORKFLOW_TONE[g.workflow_status] || "neutral"} plain>{cap(g.workflow_status || "draft")}</Badge> },
+    { key: "last_result", header: "Last result", render: (g) => (g.last_result ? <Badge tone={RESULT_TONE[g.last_result] || "neutral"}>{cap(g.last_result)}</Badge> : <span className="muted">—</span>) },
+    { key: "audit_count", header: "Audits", align: "center", render: (g) => <span className="muted">{g.audit_count}</span> },
+    { key: "links", header: "Links", align: "center", render: (g) => <span className="muted">{linkCount(g) || "—"}</span> },
+    { key: "next_audit_date", header: "Next audit", sortable: true, render: (g) => (g.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{g.next_audit_date || "—"}</span>) },
+    { key: "actions", header: "", render: (g) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(g)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(g)}>Delete</button></div> },
+  ];
 
   // ---- form tabs ------------------------------------------------------------
   const generalTab = (
@@ -343,13 +347,13 @@ export default function GoalsPage() {
   const linksTab = (
     <>
       <Field label="Related Risks" help="Risks this goal helps reduce or mitigate.">
-        <MultiSelect value={f.risk_ids} onChange={(v) => set("risk_ids", v)} options={riskOpts} />
+        <AsyncMultiSelect search={searchRisks} value={f.risk_ids} onChange={(v) => set("risk_ids", v)} />
       </Field>
       <Field label="Related Projects" help="Projects that deliver toward this goal.">
-        <MultiSelect value={f.project_ids} onChange={(v) => set("project_ids", v)} options={projectOpts} />
+        <AsyncMultiSelect search={searchProjects} value={f.project_ids} onChange={(v) => set("project_ids", v)} />
       </Field>
       <Field label="Related Policies" help="Policies that support or are driven by this goal.">
-        <MultiSelect value={f.policy_ids} onChange={(v) => set("policy_ids", v)} options={policyOpts} />
+        <AsyncMultiSelect search={searchPolicies} value={f.policy_ids} onChange={(v) => set("policy_ids", v)} />
       </Field>
     </>
   );
@@ -362,7 +366,7 @@ export default function GoalsPage() {
           <p>Strategic goals with a recurring pass/fail audit cycle, linked to the risks, projects and policies that support them.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <ImportExport resource="goals" label="Goals" onDone={() => load()} />
+          <ImportExport resource="goals" label="Goals" onDone={reload} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add goal
           </button>
@@ -371,123 +375,96 @@ export default function GoalsPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Goals</h3>
-          <span className="sub">{items.length} total · click a row to manage audits</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Goal</th>
-                <th>Owner</th>
-                <th>Status</th>
-                <th>Workflow</th>
-                <th>Last result</th>
-                <th>Audits</th>
-                <th>Links</th>
-                <th>Next audit</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((g) => (
-                <tr key={g.id} style={{ cursor: "pointer" }} onClick={() => openEdit(g)}>
-                  <td className="ref">{g.reference}</td>
-                  <td className="cell-title">{g.name}</td>
-                  <td className="muted">{g.owner || "—"}</td>
-                  <td><Badge tone={STATUS_TONE[g.status] || "neutral"}>{cap(g.status)}</Badge></td>
-                  <td><Badge tone={WORKFLOW_TONE[g.workflow_status] || "neutral"} plain>{cap(g.workflow_status || "draft")}</Badge></td>
-                  <td>{g.last_result ? <Badge tone={RESULT_TONE[g.last_result] || "neutral"}>{cap(g.last_result)}</Badge> : <span className="muted">—</span>}</td>
-                  <td className="muted">{g.audit_count}</td>
-                  <td className="muted">{linkCount(g) || "—"}</td>
-                  <td className="muted">
-                    {g.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : (g.next_audit_date || "—")}
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => toggleRow(g)}>
-                        {open?.id === g.id ? "Hide" : "Audits"}
-                      </button>
-                      <button className="btn secondary sm" onClick={() => remove(g)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={10}>
-                    <div className="empty">
-                      <span className="ico"><IconGauge width={24} height={24} /></span>
-                      <h3>No goals</h3>
-                      <p>Create your first strategic goal to start the audit cycle.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<Goal>
+        columns={columns}
+        fetcher={fetchGoals}
+        rowKey={(g) => g.id}
+        onRowClick={(g) => setOpenId(g.id)}
+        activeKey={openId}
+        searchPlaceholder="Search goals by name, reference or owner…"
+        defaultSort={{ by: "name", dir: "asc" }}
+        emptyMessage="No goals yet. Create your first strategic goal to start the audit cycle."
+        refreshKey={refreshKey}
+      />
 
-      {open && (
-        <>
-          <div className="card">
-            <div className="card-head">
-              <h3>Audits · {open.reference} — {open.name}</h3>
-              <span className="sub">{open.audit_metric || "no metric defined"}</span>
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference || ""} ${detail.name}`.trim() : "…"}
+        subtitle={detail ? `${cap(detail.status)} · ${detail.owner || "no owner"}` : ""}
+        width={720}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              <Badge tone={WORKFLOW_TONE[detail.workflow_status] || "neutral"} plain>{cap(detail.workflow_status || "draft")}</Badge>
+              {detail.last_result && <Badge tone={RESULT_TONE[detail.last_result] || "neutral"}>{cap(detail.last_result)}</Badge>}
+              {linkCount(detail) > 0 && <Badge tone="neutral" plain>{linkCount(detail)} links</Badge>}
             </div>
-            <div className="card-pad">
-              <form
-                style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                onSubmit={(e) => { e.preventDefault(); recordAudit(); }}
-              >
-                <div style={{ width: 140 }}>
-                  <label className="label">Result</label>
-                  <select className="select" value={ad.result} onChange={(e) => setA("result", e.target.value)}>
-                    {RESULT.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                  </select>
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Conducted</label>
-                  <input className="input" type="date" value={ad.conducted_date} onChange={(e) => setA("conducted_date", e.target.value)} />
-                </div>
-                <div style={{ width: 150 }}>
-                  <label className="label">Auditor</label>
-                  <input className="input" value={ad.auditor} onChange={(e) => setA("auditor", e.target.value)} placeholder="Name" />
-                </div>
-                <div style={{ flex: "1 1 220px" }}>
-                  <label className="label">Conclusion</label>
-                  <input className="input" value={ad.result_description} onChange={(e) => setA("result_description", e.target.value)} placeholder="Audit conclusion / findings" />
-                </div>
-                <button className="btn">Record audit</button>
-              </form>
 
-              {open.audits.length ? (
-                open.audits.map((a) => (
-                  <div key={a.id} className="activity-item">
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13 }}>{a.result_description || "Audit"}</div>
-                      <div className="when">
-                        {a.conducted_date || a.planned_date || "—"} · {a.auditor || "unassigned"}
-                      </div>
-                    </div>
-                    <Badge tone={RESULT_TONE[a.result] || "neutral"}>{cap(a.result)}</Badge>
-                    <button className="btn secondary sm" style={{ marginLeft: 8 }} onClick={() => removeAudit(a.id)}>
-                      Remove
-                    </button>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head">
+                <h3>Audits</h3>
+                <span className="sub">{detail.audit_metric || "no metric defined"}</span>
+              </div>
+              <div className="card-pad">
+                <form
+                  style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                  onSubmit={(e) => { e.preventDefault(); recordAudit(); }}
+                >
+                  <div style={{ width: 130 }}>
+                    <label className="label">Result</label>
+                    <select className="select" value={ad.result} onChange={(e) => setA("result", e.target.value)}>
+                      {RESULT.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+                    </select>
                   </div>
-                ))
-              ) : (
-                <span className="muted">No audits recorded yet.</span>
-              )}
+                  <div style={{ width: 150 }}>
+                    <label className="label">Conducted</label>
+                    <input className="input" type="date" value={ad.conducted_date} onChange={(e) => setA("conducted_date", e.target.value)} />
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label className="label">Auditor</label>
+                    <input className="input" value={ad.auditor} onChange={(e) => setA("auditor", e.target.value)} placeholder="Name" />
+                  </div>
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label">Conclusion</label>
+                    <input className="input" value={ad.result_description} onChange={(e) => setA("result_description", e.target.value)} placeholder="Audit conclusion / findings" />
+                  </div>
+                  <button className="btn">Record</button>
+                </form>
+
+                {detail.audits.length ? (
+                  detail.audits.map((a) => (
+                    <div key={a.id} className="activity-item">
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13 }}>{a.result_description || "Audit"}</div>
+                        <div className="when">
+                          {a.conducted_date || a.planned_date || "—"} · {a.auditor || "unassigned"}
+                        </div>
+                      </div>
+                      <Badge tone={RESULT_TONE[a.result] || "neutral"}>{cap(a.result)}</Badge>
+                      <button className="btn secondary sm" style={{ marginLeft: 8 }} onClick={() => removeAudit(a.id)}>
+                        Remove
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <span className="muted">No audits recorded yet.</span>
+                )}
+              </div>
             </div>
-          </div>
-          <RecordPanels model="goal" entityId={open.id} />
-        </>
-      )}
+
+            <RecordPanels model="goal" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -505,5 +482,13 @@ export default function GoalsPage() {
         />
       )}
     </>
+  );
+}
+
+export default function GoalsPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <GoalsInner />
+    </Suspense>
   );
 }

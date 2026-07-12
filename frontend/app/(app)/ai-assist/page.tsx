@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiCall, type Page } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
-import { IconActivity, IconCheck, IconPlus } from "@/components/icons";
+import { IconActivity, IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ local types
 interface AiExtraction {
@@ -111,18 +114,13 @@ export default function AiAssistPage() {
   const [inputText, setInputText] = useState("");
 
   const [result, setResult] = useState<AiExtraction | null>(null);
-  const [history, setHistory] = useState<AiExtraction[]>([]);
   const [summary, setSummary] = useState<AiSummary | null>(null);
   const [copied, setCopied] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // ------------------------------------------------------------- loaders
-  async function loadHistory() {
-    try {
-      setHistory((await apiCall<Page<AiExtraction>>("GET", "/ai-assist?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load history");
-    }
-  }
+  const reloadHistory = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchHistory = useCallback((qs: string) => apiCall<PagedList<AiExtraction>>("GET", `/ai-assist?${qs}`), []);
   async function loadSummary() {
     try {
       setSummary(await apiCall<AiSummary>("GET", "/ai-assist-summary"));
@@ -131,7 +129,6 @@ export default function AiAssistPage() {
     }
   }
   useEffect(() => {
-    loadHistory();
     loadSummary();
   }, []);
 
@@ -152,8 +149,9 @@ export default function AiAssistPage() {
         input_text: inputText,
       });
       setResult(res);
-      await loadHistory();
+      reloadHistory();
       await loadSummary();
+      toast("Extraction complete");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to run extraction");
     } finally {
@@ -182,13 +180,14 @@ export default function AiAssistPage() {
   }
 
   async function remove(item: AiExtraction) {
-    if (!window.confirm(`Delete extraction ${item.reference || item.title}?`)) return;
+    if (!(await confirmDialog({ title: `Delete extraction ${item.reference || item.title}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/ai-assist/${item.id}`);
       if (result?.id === item.id) setResult(null);
-      await loadHistory();
+      reloadHistory();
       await loadSummary();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
@@ -203,6 +202,16 @@ export default function AiAssistPage() {
   }
 
   const isHeuristic = result ? result.model_used === "heuristic" : false;
+
+  const columns: Column<AiExtraction>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (h) => <span className="ref">{h.reference || "—"}</span> },
+    { key: "title", header: "Title", sortable: true, render: (h) => <span className="cell-title">{h.title}</span> },
+    { key: "source_type", header: "Source", sortable: true, render: (h) => <span className="muted">{cap(h.source_type)}</span> },
+    { key: "extraction_type", header: "Extraction", render: (h) => <Badge tone={TYPE_TONE[h.extraction_type] || "neutral"}>{cap(h.extraction_type)}</Badge> },
+    { key: "model_used", header: "Model", render: (h) => (h.model_used === "heuristic" ? <span className="muted">Heuristic</span> : <Badge tone="low">AI · {h.model_used}</Badge>) },
+    { key: "status", header: "Status", sortable: true, render: (h) => <Badge tone={STATUS_TONE[h.status] || "neutral"}>{cap(h.status)}</Badge> },
+    { key: "actions", header: "", render: (h) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => viewItem(h)}>View</button> <button className="btn secondary sm" onClick={() => remove(h)}>Delete</button></div> },
+  ];
 
   // ------------------------------------------------------------- render
   return (
@@ -364,61 +373,22 @@ export default function AiAssistPage() {
       )}
 
       {/* ============================================= HISTORY */}
-      <div className="card">
-        <div className="card-head">
-          <h3>History</h3>
-          <span className="sub">{history.length} total · click a row to view</span>
+      <div style={{ marginTop: 16 }}>
+        <div className="card-head" style={{ marginBottom: 8, background: "none", border: "none", padding: 0 }}>
+          <h3 style={{ margin: 0 }}>History</h3>
+          <span className="sub">Click a row to load it back into the workspace</span>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Title</th>
-                <th>Source</th>
-                <th>Extraction</th>
-                <th>Model</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((h) => (
-                <tr key={h.id} style={{ cursor: "pointer" }} onClick={() => viewItem(h)}>
-                  <td className="ref">{h.reference || "—"}</td>
-                  <td className="cell-title">{h.title}</td>
-                  <td className="muted">{cap(h.source_type)}</td>
-                  <td><Badge tone={TYPE_TONE[h.extraction_type] || "neutral"}>{cap(h.extraction_type)}</Badge></td>
-                  <td>
-                    {h.model_used === "heuristic" ? (
-                      <span className="muted">Heuristic</span>
-                    ) : (
-                      <Badge tone="low">AI · {h.model_used}</Badge>
-                    )}
-                  </td>
-                  <td><Badge tone={STATUS_TONE[h.status] || "neutral"}>{cap(h.status)}</Badge></td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => viewItem(h)}>View</button>
-                      <button className="btn secondary sm" onClick={() => remove(h)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {history.length === 0 && (
-                <tr>
-                  <td colSpan={7}>
-                    <div className="empty">
-                      <span className="ico"><IconCheck width={24} height={24} /></span>
-                      <h3>No extractions yet</h3>
-                      <p>Paste an SBP circular or policy above and run your first extraction.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        <DataTable<AiExtraction>
+          columns={columns}
+          fetcher={fetchHistory}
+          rowKey={(h) => h.id}
+          onRowClick={(h) => viewItem(h)}
+          activeKey={result?.id ?? null}
+          searchPlaceholder="Search extractions by title or reference…"
+          defaultSort={{ by: "created_at", dir: "desc" }}
+          emptyMessage="No extractions yet. Paste an SBP circular or policy above and run your first extraction."
+          refreshKey={refreshKey}
+        />
       </div>
     </>
   );

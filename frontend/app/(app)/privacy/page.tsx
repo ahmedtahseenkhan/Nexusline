@@ -1,13 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { type Page as PagedList } from "@/lib/list";
+import { confirmDialog, toast } from "@/lib/feedback";
+import { useRecordParam } from "@/lib/useRecordParam";
+import DataTable, { type Column } from "@/components/DataTable";
+import RecordDrawer from "@/components/RecordDrawer";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
-import { Field, TextInput, TextArea, Select, MultiSelect, Toggle, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
-import { IconAlert, IconPlus, IconPolicy, IconShield } from "@/components/icons";
+import { IconAlert, IconPlus, IconShield } from "@/components/icons";
 
 // ---- inline types (mirror backend RopaRead — schemas/privacy.py) ----
 type Ref = { id: string; name?: string; title?: string; reference?: string };
@@ -60,15 +67,11 @@ type Ropa = {
   created_at: string;
 };
 
-type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 type BizUnit = { id: string; name: string };
-type ProcessRow = { id: string; name: string; description?: string };
-type PolicyRow = { id: string; title: string; reference?: string };
-type AssetRow = { id: string; name: string };
-type RiskRow = { id: string; reference?: string; title?: string };
 
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
+const refToOpt = (r: Ref): AsyncOption => ({ value: r.id, label: r.title || r.name || r.reference || r.id, sub: r.reference });
 
 const STATUS = opts(["draft", "active", "under_review", "retired"]);
 const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
@@ -123,10 +126,10 @@ type FormState = {
   right_to_portability: string;
   right_to_object: string;
   // links
-  process_ids: string[];
-  policy_ids: string[];
-  asset_ids: string[];
-  risk_ids: string[];
+  process_ids: AsyncOption[];
+  policy_ids: AsyncOption[];
+  asset_ids: AsyncOption[];
+  risk_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
@@ -162,54 +165,74 @@ function fromRopa(r: Ropa): FormState {
     right_to_be_informed: r.right_to_be_informed || "", right_to_access: r.right_to_access || "",
     right_to_rectification: r.right_to_rectification || "", right_to_erasure: r.right_to_erasure || "",
     right_to_portability: r.right_to_portability || "", right_to_object: r.right_to_object || "",
-    process_ids: r.processes.map((p) => p.id),
-    policy_ids: r.policies.map((p) => p.id),
-    asset_ids: r.assets.map((a) => a.id),
-    risk_ids: r.risks.map((x) => x.id),
+    process_ids: r.processes.map(refToOpt),
+    policy_ids: r.policies.map(refToOpt),
+    asset_ids: r.assets.map(refToOpt),
+    risk_ids: r.risks.map(refToOpt),
   };
 }
 
-/** Strip empty optional FKs/dates to null so the backend accepts them. */
+/** Strip empty optional FKs/dates to null and map link options to id arrays. */
 function toPayload(f: FormState): Record<string, unknown> {
   return {
     ...f,
     business_unit_id: f.business_unit_id || null,
     review_date: f.review_date || null,
+    process_ids: f.process_ids.map((o) => o.value),
+    policy_ids: f.policy_ids.map((o) => o.value),
+    asset_ids: f.asset_ids.map((o) => o.value),
+    risk_ids: f.risk_ids.map((o) => o.value),
   };
 }
 
-export default function PrivacyPage() {
-  const [items, setItems] = useState<Ropa[]>([]);
+const linkCount = (r: Ropa) => r.processes.length + r.policies.length + r.assets.length + r.risks.length;
+
+/* ================================================================ page ===== */
+function PrivacyInner() {
+  const [openId, setOpenId] = useRecordParam("id");
+  const [detail, setDetail] = useState<Ropa | null>(null);
   const [units, setUnits] = useState<BizUnit[]>([]);
-  const [processes, setProcesses] = useState<ProcessRow[]>([]);
-  const [policies, setPolicies] = useState<PolicyRow[]>([]);
-  const [assets, setAssets] = useState<AssetRow[]>([]);
-  const [risks, setRisks] = useState<RiskRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [counts, setCounts] = useState({ total: 0, gaps: 0, dpias: 0, specials: 0 });
 
   const [editing, setEditing] = useState<Ropa | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
-  const [detailId, setDetailId] = useState<string | null>(null);
-
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  async function load() {
-    try {
-      setItems((await apiCall<Page<Ropa>>("GET", "/processing-activities?limit=200")).items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    }
-  }
-  useEffect(() => {
-    load();
-    apiCall<Page<BizUnit>>("GET", "/business-units").then((r) => setUnits(r.items)).catch(() => {});
-    apiCall<Page<ProcessRow>>("GET", "/processes").then((r) => setProcesses(r.items)).catch(() => {});
-    apiCall<Page<PolicyRow>>("GET", "/policies?limit=200").then((r) => setPolicies(r.items)).catch(() => {});
-    apiCall<Page<AssetRow>>("GET", "/assets?limit=200").then((r) => setAssets(r.items)).catch(() => {});
-    apiCall<Page<RiskRow>>("GET", "/risks?limit=200").then((r) => setRisks(r.items)).catch(() => {});
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const fetchRopa = useCallback((qs: string) => apiCall<PagedList<Ropa>>("GET", `/processing-activities?${qs}`), []);
+
+  const loadDetail = useCallback((id: string) => {
+    apiCall<Ropa>("GET", `/processing-activities/${id}`).then(setDetail).catch(() => setDetail(null));
   }, []);
+  useEffect(() => {
+    if (openId) loadDetail(openId);
+    else setDetail(null);
+  }, [openId, loadDetail]);
+
+  // Server-side stat counts (real totals across the whole register, not just one page).
+  useEffect(() => {
+    const total = apiCall<PagedList<Ropa>>("GET", "/processing-activities?limit=1");
+    const gaps = apiCall<PagedList<Ropa>>("GET", "/processing-activities?transfer_gap=true&limit=1");
+    const dpias = apiCall<PagedList<Ropa>>("GET", "/processing-activities?dpia_outstanding=true&limit=1");
+    const specials = apiCall<PagedList<Ropa>>("GET", "/processing-activities?special_category=true&limit=1");
+    Promise.all([total, gaps, dpias, specials])
+      .then(([t, g, d, s]) => setCounts({ total: t.total, gaps: g.total, dpias: d.total, specials: s.total }))
+      .catch(() => {});
+  }, [refreshKey]);
+
+  useEffect(() => {
+    apiCall<PagedList<BizUnit>>("GET", "/business-units").then((r) => setUnits(r.items)).catch(() => {});
+  }, []);
+
+  // server typeahead pickers
+  const searchProcesses = (q: string) => apiCall<PagedList<{ id: string; name: string; description?: string }>>("GET", `/processes?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.description })));
+  const searchPolicies = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/policies?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
+  const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name })));
+  const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
 
   function openNew() {
     setEditing(null);
@@ -220,7 +243,7 @@ export default function PrivacyPage() {
   async function openEdit(r: Ropa) {
     setEditing(r);
     setError(null);
-    // list rows already carry every field; refetch one for freshest link arrays.
+    // Refetch one for the freshest link arrays.
     try {
       const fresh = await apiCall<Ropa>("GET", `/processing-activities/${r.id}`);
       setF(fromRopa(fresh));
@@ -237,7 +260,9 @@ export default function PrivacyPage() {
       if (editing) await apiCall<Ropa>("PATCH", `/processing-activities/${editing.id}`, toPayload(f));
       else await apiCall<Ropa>("POST", "/processing-activities", toPayload(f));
       setShowForm(false);
-      await load();
+      reload();
+      if (openId) loadDetail(openId);
+      toast(editing ? "Changes saved" : "Record created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save record");
     } finally {
@@ -246,36 +271,31 @@ export default function PrivacyPage() {
   }
 
   async function remove(r: Ropa) {
-    if (!window.confirm(`Delete RoPA ${r.reference} — ${r.name}?`)) return;
+    if (!(await confirmDialog({ title: `Delete RoPA ${r.reference} — ${r.name}?`, danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/processing-activities/${r.id}`);
-      if (detailId === r.id) setDetailId(null);
-      await load();
+      if (openId === r.id) setOpenId(null);
+      reload();
+      toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete record");
     }
   }
 
   const unitOpts: Option[] = useMemo(() => units.map((u) => ({ value: u.id, label: u.name })), [units]);
-  const processOpts: Option[] = useMemo(
-    () => processes.map((p) => ({ value: p.id, label: p.name, sub: p.description })),
-    [processes],
-  );
-  const policyOpts: Option[] = useMemo(
-    () => policies.map((p) => ({ value: p.id, label: p.title, sub: p.reference })),
-    [policies],
-  );
-  const assetOpts: Option[] = useMemo(() => assets.map((a) => ({ value: a.id, label: a.name })), [assets]);
-  const riskOpts: Option[] = useMemo(
-    () => risks.map((r) => ({ value: r.id, label: r.title || r.reference || r.id, sub: r.reference })),
-    [risks],
-  );
 
-  const gaps = items.filter((i) => i.has_transfer_gap).length;
-  const dpias = items.filter((i) => i.dpia_outstanding).length;
-  const specials = items.filter((i) => i.special_category).length;
-  const linkCount = (r: Ropa) => r.processes.length + r.policies.length + r.assets.length + r.risks.length;
+  const columns: Column<Ropa>[] = [
+    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference}</span> },
+    { key: "name", header: "Name", sortable: true, render: (r) => <span className="cell-title">{r.name}{r.special_category && <span style={{ marginLeft: 6 }}><Badge tone="high">special</Badge></span>}</span> },
+    { key: "purpose", header: "Purpose", render: (r) => <span className="muted" style={{ display: "inline-block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "bottom" }}>{r.purpose || "—"}</span> },
+    { key: "lawful_basis", header: "Lawful basis", sortable: true, render: (r) => <span className="muted">{cap(r.lawful_basis)}</span> },
+    { key: "controller", header: "Controller", render: (r) => <span className="muted">{r.controller || "—"}</span> },
+    { key: "transfer", header: "Transfer", render: (r) => (r.cross_border_transfer ? (r.has_transfer_gap ? <Badge tone="critical">gap</Badge> : <Badge tone="low">safeguarded</Badge>) : <span className="muted">none</span>) },
+    { key: "dpia", header: "DPIA", render: (r) => (r.dpia_outstanding ? <Badge tone="high">{cap(r.dpia_status)}</Badge> : (r.dpia_required ? <Badge tone="low">done</Badge> : <span className="muted">n/a</span>)) },
+    { key: "links", header: "Links", align: "center", render: (r) => <span className="muted">{linkCount(r) || "—"}</span> },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(r)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(r)}>Delete</button></div> },
+  ];
 
   // -------------------------------------------------------------- tabs
   const generalTab = (
@@ -429,16 +449,16 @@ export default function PrivacyPage() {
   const linksTab = (
     <>
       <Field label="Related processes" help="Business processes this activity supports.">
-        <MultiSelect value={f.process_ids} onChange={(v) => set("process_ids", v)} options={processOpts} />
+        <AsyncMultiSelect search={searchProcesses} value={f.process_ids} onChange={(v) => set("process_ids", v)} />
       </Field>
       <Field label="Related policies" help="Policies governing this processing.">
-        <MultiSelect value={f.policy_ids} onChange={(v) => set("policy_ids", v)} options={policyOpts} />
+        <AsyncMultiSelect search={searchPolicies} value={f.policy_ids} onChange={(v) => set("policy_ids", v)} />
       </Field>
       <Field label="Related assets" help="Systems/assets that store or process this data.">
-        <MultiSelect value={f.asset_ids} onChange={(v) => set("asset_ids", v)} options={assetOpts} />
+        <AsyncMultiSelect search={searchAssets} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} />
       </Field>
       <Field label="Related risks" help="Privacy risks associated with this activity.">
-        <MultiSelect value={f.risk_ids} onChange={(v) => set("risk_ids", v)} options={riskOpts} />
+        <AsyncMultiSelect search={searchRisks} value={f.risk_ids} onChange={(v) => set("risk_ids", v)} />
       </Field>
     </>
   );
@@ -451,7 +471,7 @@ export default function PrivacyPage() {
           <p>GDPR Article 30 records of processing — lawful basis, data categories, retention, transfers, DPIA, and data-subject rights.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <ImportExport resource="processing-activities" label="Processing Activities" onDone={load} />
+          <ImportExport resource="processing-activities" label="Processing Activities" onDone={reload} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add activity
           </button>
@@ -461,71 +481,64 @@ export default function PrivacyPage() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <div className="grid stat-grid">
-        <div className="card stat"><div className="stat-top"><span className="n">{items.length}</span></div><span className="l">Processing activities</span></div>
-        <div className="card stat danger"><div className="stat-top"><span className="n">{gaps}</span><span className="ico"><IconAlert /></span></div><span className="l">Transfer gaps</span></div>
-        <div className="card stat warn"><div className="stat-top"><span className="n">{dpias}</span></div><span className="l">DPIAs outstanding</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{specials}</span><span className="ico"><IconShield /></span></div><span className="l">Special-category</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{counts.total}</span></div><span className="l">Processing activities</span></div>
+        <div className="card stat danger"><div className="stat-top"><span className="n">{counts.gaps}</span><span className="ico"><IconAlert /></span></div><span className="l">Transfer gaps</span></div>
+        <div className="card stat warn"><div className="stat-top"><span className="n">{counts.dpias}</span></div><span className="l">DPIAs outstanding</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{counts.specials}</span><span className="ico"><IconShield /></span></div><span className="l">Special-category</span></div>
       </div>
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-head">
-          <h3>Records of processing</h3>
-          <span className="sub">{items.length} total · click a row to edit</span>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Ref</th>
-                <th>Name</th>
-                <th>Purpose</th>
-                <th>Lawful basis</th>
-                <th>Controller</th>
-                <th>Transfer</th>
-                <th>DPIA</th>
-                <th>Links</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((r) => (
-                <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => openEdit(r)}>
-                  <td className="ref">{r.reference}</td>
-                  <td className="cell-title">
-                    {r.name}
-                    {r.special_category && <span style={{ marginLeft: 6 }}><Badge tone="high">special</Badge></span>}
-                  </td>
-                  <td className="muted" style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.purpose || "—"}</td>
-                  <td className="muted">{cap(r.lawful_basis)}</td>
-                  <td className="muted">{r.controller || "—"}</td>
-                  <td>{r.cross_border_transfer ? (r.has_transfer_gap ? <Badge tone="critical">gap</Badge> : <Badge tone="low">safeguarded</Badge>) : <span className="muted">none</span>}</td>
-                  <td>{r.dpia_outstanding ? <Badge tone="high">{cap(r.dpia_status)}</Badge> : (r.dpia_required ? <Badge tone="low">done</Badge> : <span className="muted">n/a</span>)}</td>
-                  <td className="muted">{linkCount(r) || "—"}</td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="btn secondary sm" onClick={() => setDetailId(detailId === r.id ? null : r.id)}>Details</button>
-                      <button className="btn secondary sm" onClick={() => remove(r)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
-                <tr>
-                  <td colSpan={9}>
-                    <div className="empty">
-                      <span className="ico"><IconPolicy width={24} height={24} /></span>
-                      <h3>No records of processing</h3>
-                      <p>Create your first RoPA to document a processing activity.</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <DataTable<Ropa>
+        columns={columns}
+        fetcher={fetchRopa}
+        rowKey={(r) => r.id}
+        onRowClick={(r) => setOpenId(r.id)}
+        activeKey={openId}
+        searchPlaceholder="Search records by name or reference…"
+        defaultSort={{ by: "name", dir: "asc" }}
+        emptyMessage="No records of processing yet. Create your first RoPA to document a processing activity."
+        refreshKey={refreshKey}
+      />
 
-      {detailId && <RecordPanels model="processing_activity" entityId={detailId} />}
+      <RecordDrawer
+        open={!!openId && !!detail}
+        onClose={() => setOpenId(null)}
+        title={detail ? `${detail.reference} — ${detail.name}` : "…"}
+        subtitle={detail ? `${cap(detail.lawful_basis)} · ${detail.controller || "no controller"}` : ""}
+        width={720}
+        actions={detail && (
+          <>
+            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
+            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
+          </>
+        )}
+      >
+        {detail && (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              {detail.special_category && <Badge tone="high">special-category</Badge>}
+              {detail.cross_border_transfer && (detail.has_transfer_gap ? <Badge tone="critical">transfer gap</Badge> : <Badge tone="low">transfer safeguarded</Badge>)}
+              {detail.dpia_outstanding && <Badge tone="high">DPIA {cap(detail.dpia_status)}</Badge>}
+              {linkCount(detail) > 0 && <Badge tone="neutral" plain>{linkCount(detail)} links</Badge>}
+            </div>
+
+            {detail.purpose && (
+              <div style={{ marginBottom: 14 }}>
+                <div className="muted" style={{ fontSize: 12, marginBottom: 2 }}>Purpose</div>
+                <div style={{ fontSize: 13, lineHeight: 1.55 }}>{detail.purpose}</div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <div><div className="muted" style={{ fontSize: 12 }}>Retention</div><div style={{ marginTop: 4, fontSize: 13 }}>{detail.retention_period || "—"}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>DPO</div><div style={{ marginTop: 4, fontSize: 13 }}>{detail.dpo || "—"}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Next review</div><div style={{ marginTop: 4, fontSize: 13 }}>{detail.review_date || "—"}</div></div>
+            </div>
+
+            <RecordPanels model="processing_activity" entityId={detail.id} />
+          </>
+        )}
+      </RecordDrawer>
 
       {showForm && (
         <FormModal
@@ -546,5 +559,13 @@ export default function PrivacyPage() {
         />
       )}
     </>
+  );
+}
+
+export default function PrivacyPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <PrivacyInner />
+    </Suspense>
   );
 }
