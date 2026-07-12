@@ -60,6 +60,11 @@ class BiaAssessment(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMi
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     process_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    # Optional link to the real business process (process_name kept as fallback/label).
+    process_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("processes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    process: Mapped["Process | None"] = relationship("Process", lazy="selectin")  # noqa: F821
     business_unit: Mapped[str] = mapped_column(String(200), default="")
     owner: Mapped[str] = mapped_column(String(200), default="")
     description: Mapped[str] = mapped_column(Text, default="")
@@ -135,6 +140,15 @@ class BiaDependency(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         default=DependencyType.application, nullable=False,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Optional links to the real asset / vendor this dependency refers to (name = fallback).
+    asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    vendor_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("vendors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    asset: Mapped["Asset | None"] = relationship("Asset", lazy="selectin")  # noqa: F821
+    vendor: Mapped["Vendor | None"] = relationship("Vendor", lazy="selectin")  # noqa: F821
     description: Mapped[str] = mapped_column(Text, default="")
     criticality: Mapped[Criticality] = mapped_column(
         SAEnum(Criticality, name="criticality"), default=Criticality.medium, nullable=False

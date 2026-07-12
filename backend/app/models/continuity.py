@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Date, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import Column, Date, ForeignKey, Integer, String, Table, Text, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,6 +18,18 @@ from app.models.base import (
     WorkflowMixin,
 )
 from app.models.enums import ContinuityStatus, Criticality, ReviewFrequency, TestResult
+
+
+continuity_plan_assets = Table(
+    "continuity_plan_assets", Base.metadata,
+    Column("continuity_plan_id", Uuid, ForeignKey("continuity_plans.id", ondelete="CASCADE"), primary_key=True),
+    Column("asset_id", Uuid, ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True),
+)
+continuity_plan_risks = Table(
+    "continuity_plan_risks", Base.metadata,
+    Column("continuity_plan_id", Uuid, ForeignKey("continuity_plans.id", ondelete="CASCADE"), primary_key=True),
+    Column("risk_id", Uuid, ForeignKey("risks.id", ondelete="CASCADE"), primary_key=True),
+)
 
 
 class ContinuityPlan(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
@@ -39,6 +51,19 @@ class ContinuityPlan(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowM
     )
     process_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("processes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # Justified by a BIA; covers concrete assets and the risks it mitigates.
+    bia_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("bia_assessments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    bia_assessment: Mapped["BiaAssessment | None"] = relationship(  # noqa: F821
+        "BiaAssessment", lazy="selectin"
+    )
+    assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
+        "Asset", secondary=continuity_plan_assets, lazy="selectin",
+    )
+    risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
+        "Risk", secondary=continuity_plan_risks, lazy="selectin",
     )
     max_tolerable_downtime_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rto_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)

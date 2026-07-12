@@ -10,7 +10,9 @@ from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.models.asset import Asset
 from app.models.continuity import ContinuityPlan, ContinuityTask, ContinuityTest
+from app.models.risk import Risk
 from app.schemas.common import Page
 from app.schemas.continuity import (
     PlanCreate,
@@ -28,6 +30,12 @@ from app.services import audit
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/continuity-plans", tags=["continuity"])
+
+
+async def _resolve(db, model, ids):
+    if not ids:
+        return []
+    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
 
 
 async def _load(db, plan_id: uuid.UUID) -> ContinuityPlan:
@@ -108,7 +116,9 @@ async def list_plans(
 
 @router.post("", response_model=PlanRead, status_code=201, dependencies=[Depends(require("bcp:write"))])
 async def create_plan(body: PlanCreate, db: DbSession, user: CurrentUser) -> PlanRead:
-    obj = ContinuityPlan(tenant_id=user.tenant_id, **body.model_dump())
+    obj = ContinuityPlan(tenant_id=user.tenant_id, **body.model_dump(exclude={"asset_ids", "risk_ids"}))
+    obj.assets = await _resolve(db, Asset, body.asset_ids)
+    obj.risks = await _resolve(db, Risk, body.risk_ids)
     obj.reference = await _next_ref(db)
     obj.next_test_date = next_review_date(obj.test_frequency)
     db.add(obj)
@@ -128,9 +138,13 @@ async def get_plan(plan_id: uuid.UUID, db: DbSession) -> PlanRead:
 @router.patch("/{plan_id}", response_model=PlanRead, dependencies=[Depends(require("bcp:write"))])
 async def update_plan(plan_id: uuid.UUID, body: PlanUpdate, db: DbSession) -> PlanRead:
     obj = await _load(db, plan_id)
-    data = body.model_dump(exclude_unset=True)
+    data = body.model_dump(exclude_unset=True, exclude={"asset_ids", "risk_ids"})
     for f, v in data.items():
         setattr(obj, f, v)
+    if body.asset_ids is not None:
+        obj.assets = await _resolve(db, Asset, body.asset_ids)
+    if body.risk_ids is not None:
+        obj.risks = await _resolve(db, Risk, body.risk_ids)
     if "test_frequency" in data:
         obj.next_test_date = next_review_date(obj.test_frequency, obj.last_test_date)
     await db.flush()

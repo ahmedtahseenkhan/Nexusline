@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
+from app.schemas.common import GraphRef
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
@@ -14,6 +15,8 @@ from app.models.enums import Criticality
 class BiaDependencyBase(BaseModel):
     dependency_type: DependencyType = DependencyType.application
     name: str = Field(min_length=1, max_length=255)
+    asset_id: uuid.UUID | None = None
+    vendor_id: uuid.UUID | None = None
     description: str = ""
     criticality: Criticality = Criticality.medium
     rto_hours: int | None = None
@@ -27,6 +30,8 @@ class BiaDependencyCreate(BiaDependencyBase):
 class BiaDependencyUpdate(BaseModel):
     dependency_type: DependencyType | None = None
     name: str | None = None
+    asset_id: uuid.UUID | None = None
+    vendor_id: uuid.UUID | None = None
     description: str | None = None
     criticality: Criticality | None = None
     rto_hours: int | None = None
@@ -37,12 +42,15 @@ class BiaDependencyRead(BiaDependencyBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     bia_id: uuid.UUID
+    asset: GraphRef | None = None
+    vendor: GraphRef | None = None
     created_at: datetime
 
 
 # ------------------------------------------------------------- BIA assessments ---
 class BiaBase(BaseModel):
     process_name: str = Field(min_length=1, max_length=255)
+    process_id: uuid.UUID | None = None
     business_unit: str = ""
     owner: str = ""
     description: str = ""
@@ -73,6 +81,7 @@ class BiaCreate(BiaBase):
 
 class BiaUpdate(BaseModel):
     process_name: str | None = None
+    process_id: uuid.UUID | None = None
     business_unit: str | None = None
     owner: str | None = None
     description: str | None = None
@@ -101,6 +110,7 @@ class BiaRead(BiaBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
+    process: GraphRef | None = None
     dependency_count: int
     is_review_overdue: bool
     rto_band: str

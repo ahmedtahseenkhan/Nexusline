@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
+from app.schemas.common import GraphRef
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
@@ -84,6 +85,7 @@ class PlanBase(BaseModel):
     owner: str = ""
     business_unit_id: uuid.UUID | None = None
     process_id: uuid.UUID | None = None
+    bia_id: uuid.UUID | None = None
     max_tolerable_downtime_hours: int | None = Field(default=None, ge=0)
     rto_hours: int | None = Field(default=None, ge=0)
     rpo_hours: int | None = Field(default=None, ge=0)
@@ -92,7 +94,8 @@ class PlanBase(BaseModel):
 
 
 class PlanCreate(PlanBase):
-    pass
+    asset_ids: list[uuid.UUID] = []
+    risk_ids: list[uuid.UUID] = []
 
 
 class PlanUpdate(BaseModel):
@@ -105,11 +108,14 @@ class PlanUpdate(BaseModel):
     owner: str | None = None
     business_unit_id: uuid.UUID | None = None
     process_id: uuid.UUID | None = None
+    bia_id: uuid.UUID | None = None
     max_tolerable_downtime_hours: int | None = Field(default=None, ge=0)
     rto_hours: int | None = Field(default=None, ge=0)
     rpo_hours: int | None = Field(default=None, ge=0)
     criticality: Criticality | None = None
     test_frequency: ReviewFrequency | None = None
+    asset_ids: list[uuid.UUID] | None = None
+    risk_ids: list[uuid.UUID] | None = None
 
 
 class PlanRead(PlanBase):
@@ -124,6 +130,9 @@ class PlanRead(PlanBase):
     is_test_overdue: bool
     business_unit: Ref | None = None
     process: Ref | None = None
+    bia_assessment: GraphRef | None = None
+    assets: list[GraphRef] = []
+    risks: list[GraphRef] = []
     tasks: list[TaskRead] = []
     tests: list[TestRead] = []
     created_at: datetime
