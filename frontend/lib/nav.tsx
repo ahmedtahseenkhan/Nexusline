@@ -21,6 +21,27 @@ import {
 export type NavItem = { href: string; label: string; icon: ReactNode; tag?: string };
 export type NavSection = { title: string; items: NavItem[] };
 
+/** Flat href→item lookup, and the nav item that owns a given pathname (longest
+ *  matching href wins), so favorites/recents can resolve a route to its label + icon. */
+export function navItemFor(pathname: string): NavItem | null {
+  let best: NavItem | null = null;
+  for (const section of NAV) {
+    for (const it of section.items) {
+      if (pathname === it.href || pathname.startsWith(it.href + "/")) {
+        if (!best || it.href.length > best.href.length) best = it;
+      }
+    }
+  }
+  return best;
+}
+
+export function navItemByHref(href: string): NavItem | null {
+  for (const section of NAV) {
+    for (const it of section.items) if (it.href === href) return it;
+  }
+  return null;
+}
+
 /** Canonical module registry — the single source of truth for the sidebar and the
  *  command palette. Entries are filtered per installation by module licensing
  *  (see `routeDisabled` / `useModules`). */

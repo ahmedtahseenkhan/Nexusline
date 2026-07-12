@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api, clearToken, type Me, type SearchHit } from "@/lib/api";
+import { useMobileNav } from "@/lib/mobileNav";
 import { IconBell, IconLogout } from "./icons";
 
 const TITLES: Record<string, string> = {
@@ -60,6 +61,7 @@ export default function Topbar({ user }: { user: Me | null }) {
   const key = Object.keys(TITLES).find((k) => pathname.startsWith(k));
   const title = key ? TITLES[key] : "NexusLine";
   const [unseen, setUnseen] = useState(0);
+  const { toggle: toggleMobileNav } = useMobileNav();
 
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -105,7 +107,21 @@ export default function Topbar({ user }: { user: Me | null }) {
 
   return (
     <header className="topbar">
-      <div className="topbar-title">{title}</div>
+      <div className="topbar-left">
+        <button
+          type="button"
+          className="mobile-menu-btn"
+          onClick={toggleMobileNav}
+          aria-label="Open navigation menu"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        </button>
+        <div className="topbar-title">{title}</div>
+      </div>
       <div className="topbar-right">
         <div ref={searchRef} style={{ position: "relative" }}>
           <input
