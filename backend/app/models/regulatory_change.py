@@ -15,7 +15,7 @@ import enum
 import uuid
 from datetime import date
 
-from sqlalchemy import Date, ForeignKey, String, Text, Uuid
+from sqlalchemy import Column, Date, ForeignKey, String, Table, Text, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -125,6 +125,25 @@ class RegulatoryChange(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflo
                 and self.status not in (RegChangeStatus.implemented, RegChangeStatus.closed))
 
 
+# An obligation maps to the framework requirements / policies / controls that satisfy it
+# (replacing the free-text mapped_* columns with real graph edges).
+obligation_requirements = Table(
+    "obligation_requirements", Base.metadata,
+    Column("obligation_id", Uuid, ForeignKey("obligations.id", ondelete="CASCADE"), primary_key=True),
+    Column("requirement_id", Uuid, ForeignKey("requirements.id", ondelete="CASCADE"), primary_key=True),
+)
+obligation_policies = Table(
+    "obligation_policies", Base.metadata,
+    Column("obligation_id", Uuid, ForeignKey("obligations.id", ondelete="CASCADE"), primary_key=True),
+    Column("policy_id", Uuid, ForeignKey("policies.id", ondelete="CASCADE"), primary_key=True),
+)
+obligation_controls = Table(
+    "obligation_controls", Base.metadata,
+    Column("obligation_id", Uuid, ForeignKey("obligations.id", ondelete="CASCADE"), primary_key=True),
+    Column("control_id", Uuid, ForeignKey("controls.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
 # ============================================================= obligations ===
 class Obligation(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     """A discrete compliance obligation — nested under a regulatory change or standalone."""
@@ -152,6 +171,15 @@ class Obligation(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     regulatory_change: Mapped["RegulatoryChange | None"] = relationship(back_populates="obligations")
+    requirements: Mapped[list["Requirement"]] = relationship(  # noqa: F821
+        "Requirement", secondary=obligation_requirements, lazy="selectin",
+    )
+    policies: Mapped[list["Policy"]] = relationship(  # noqa: F821
+        "Policy", secondary=obligation_policies, lazy="selectin",
+    )
+    controls: Mapped[list["Control"]] = relationship(  # noqa: F821
+        "Control", secondary=obligation_controls, lazy="selectin",
+    )
 
 
 # ====================================================== regulatory returns ===

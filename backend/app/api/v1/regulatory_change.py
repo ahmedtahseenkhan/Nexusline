@@ -12,6 +12,9 @@ from sqlalchemy import Select, func, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.models.compliance import Requirement
+from app.models.control import Control
+from app.models.policy import Policy
 from app.models.regulatory_change import (
     Applicability,
     Obligation,
@@ -84,6 +87,12 @@ async def _get(db, model, obj_id, name):
     if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
+
+
+async def _resolve(db, model, ids):
+    if not ids:
+        return []
+    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
 
 
 # ================================================== regulatory changes ===
@@ -214,20 +223,30 @@ async def list_obligations(
 async def create_obligation(body: ObligationCreate, db: DbSession, user: CurrentUser) -> ObligationRead:
     if body.regulatory_change_id is not None:
         await _load_change(db, body.regulatory_change_id)
-    obj = Obligation(tenant_id=user.tenant_id, **body.model_dump())
+    data = body.model_dump(exclude={"requirement_ids", "policy_ids", "control_ids"})
+    obj = Obligation(tenant_id=user.tenant_id, **data)
+    obj.requirements = await _resolve(db, Requirement, body.requirement_ids)
+    obj.policies = await _resolve(db, Policy, body.policy_ids)
+    obj.controls = await _resolve(db, Control, body.control_ids)
     obj.reference = await _next_ref(db, Obligation, "OBL")
     db.add(obj)
     await db.flush()
-    return ObligationRead.model_validate(obj)
+    return ObligationRead.model_validate(await _get(db, Obligation, obj.id, "Obligation"))
 
 
 @router.patch("/obligations/{oid}", response_model=ObligationRead, dependencies=[_WRITE])
 async def update_obligation(oid: uuid.UUID, body: ObligationUpdate, db: DbSession) -> ObligationRead:
     obj = await _get(db, Obligation, oid, "Obligation")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    for k, v in body.model_dump(exclude_unset=True, exclude={"requirement_ids", "policy_ids", "control_ids"}).items():
         setattr(obj, k, v)
+    if body.requirement_ids is not None:
+        obj.requirements = await _resolve(db, Requirement, body.requirement_ids)
+    if body.policy_ids is not None:
+        obj.policies = await _resolve(db, Policy, body.policy_ids)
+    if body.control_ids is not None:
+        obj.controls = await _resolve(db, Control, body.control_ids)
     await db.flush()
-    return ObligationRead.model_validate(obj)
+    return ObligationRead.model_validate(await _get(db, Obligation, oid, "Obligation"))
 
 
 @router.delete("/obligations/{oid}", status_code=204, dependencies=[_WRITE])

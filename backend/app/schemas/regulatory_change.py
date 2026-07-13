@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
+from app.schemas.common import GraphRef
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
@@ -32,6 +33,9 @@ class ObligationBase(BaseModel):
 class ObligationCreate(ObligationBase):
     # Optional link to a regulatory change; omit for a standalone obligation.
     regulatory_change_id: uuid.UUID | None = None
+    requirement_ids: list[uuid.UUID] = []
+    policy_ids: list[uuid.UUID] = []
+    control_ids: list[uuid.UUID] = []
 
 
 class ObligationUpdate(BaseModel):
@@ -45,6 +49,9 @@ class ObligationUpdate(BaseModel):
     status: ObligationStatus | None = None
     due_date: date | None = None
     regulatory_change_id: uuid.UUID | None = None
+    requirement_ids: list[uuid.UUID] | None = None
+    policy_ids: list[uuid.UUID] | None = None
+    control_ids: list[uuid.UUID] | None = None
 
 
 class ObligationRead(ObligationBase):
@@ -52,6 +59,9 @@ class ObligationRead(ObligationBase):
     id: uuid.UUID
     reference: str
     regulatory_change_id: uuid.UUID | None = None
+    requirements: list[GraphRef] = []
+    policies: list[GraphRef] = []
+    controls: list[GraphRef] = []
     created_at: datetime
 
 
