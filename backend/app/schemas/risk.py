@@ -173,6 +173,9 @@ class RiskRead(BaseModel):
     kris: list[GraphRef] = []
     loss_events: list[GraphRef] = []
 
+    # Live rollup: health of the mitigating controls (none | ok | issues).
+    control_health: str = "none"
+
     created_at: datetime
     updated_at: datetime
 

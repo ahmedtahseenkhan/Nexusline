@@ -202,6 +202,26 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
         order_by="RiskAcceptance.created_at.desc()",
     )
 
+    @property
+    def control_health(self) -> str:
+        """Live rollup of the mitigating controls' health — the risk-treatment loop.
+        A control audit that fails (or an open audit finding, or an overdue audit) makes
+        this ``issues`` on the very next read, so the risk register reacts automatically.
+
+        ``none`` = unmitigated · ``ok`` = controls exist and are healthy · ``issues``.
+        """
+        from app.models.enums import AuditFindingStatus, TestResult
+
+        if not self.controls:
+            return "none"
+        _open = lambda f: f.status not in (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)  # noqa: E731
+        for c in self.controls:
+            if c.last_audit_result == TestResult.failed or c.is_audit_overdue:
+                return "issues"
+            if any(_open(f) for f in c.audit_findings):
+                return "issues"
+        return "ok"
+
 
 class RiskAcceptance(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     """A formal decision to accept a risk, with an approval step and expiry date."""

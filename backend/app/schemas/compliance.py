@@ -131,6 +131,8 @@ class RequirementRead(RequirementBase):
     exceptions: list[GraphRef] = []
     audit_findings: list[GraphRef] = []
     vendors: list[GraphRef] = []
+    # Live rollup: health of the controls evidencing this requirement.
+    control_health: str = "none"
     legal: CompRef | None = None
     findings: list[ComplianceFindingRead] = []
     is_covered: bool

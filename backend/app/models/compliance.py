@@ -140,6 +140,22 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
     vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
         "Vendor", secondary="vendor_requirements", lazy="selectin", viewonly=True,
     )
+
+    @property
+    def control_health(self) -> str:
+        """Live rollup: is the evidence (mitigating controls) behind this requirement
+        healthy? A failing/overdue control audit flips this to ``issues`` on read — so a
+        control failure automatically puts the requirement at risk (the compliance loop).
+        ``none`` = no controls mapped · ``ok`` · ``issues``."""
+        from app.models.enums import TestResult
+
+        if not self.controls:
+            return "none"
+        for c in self.controls:
+            if c.last_audit_result == TestResult.failed or c.is_audit_overdue:
+                return "issues"
+        return "ok"
+
     findings: Mapped[list["ComplianceFinding"]] = relationship(
         back_populates="requirement", cascade="all, delete-orphan", lazy="selectin",
         order_by="ComplianceFinding.created_at.desc()",
