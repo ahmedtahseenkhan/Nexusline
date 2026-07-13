@@ -69,6 +69,7 @@ type Requirement = {
   assets?: Ref[];
   exceptions?: Ref[];
   audit_findings?: Ref[];
+  vendors?: Ref[];
   findings: Finding[];
   is_covered: boolean;
   open_findings: number;
@@ -895,6 +896,7 @@ function ComplianceInner() {
               <RelatedChips label="Information assets" items={detail.assets} href="/information-assets" />
               <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
               <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
+              <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
             </div>
             {detail.legal && (
               <div style={{ marginBottom: 16, fontSize: 13 }}>

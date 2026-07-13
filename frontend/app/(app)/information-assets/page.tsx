@@ -63,9 +63,12 @@ type Asset = {
   exceptions?: LinkRef[];
   risks?: LinkRef[];
   related_assets?: LinkRef[];
-  // reverse graph links (read-only)
+  // reverse graph links (read-only) — GraphRef {id,reference?,title?,name?}
   vendors?: GraphRef[];
   access_reviews?: GraphRef[];
+  controls?: GraphRef[];
+  threats?: GraphRef[];
+  vulnerabilities?: GraphRef[];
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
 type LabelRow = { id: string; name: string; description: string; color: string };
@@ -449,6 +452,9 @@ function InformationAssetsInner() {
                 <RelatedChips label="Incidents" items={asRefs(detail.incidents)} href="/incidents" />
                 <RelatedChips label="Exceptions" items={asRefs(detail.exceptions)} href="/exceptions" />
                 <RelatedChips label="Related assets" items={asRefs(detail.related_assets)} href="/information-assets" />
+                <RelatedChips label="Controls" items={detail.controls} href="/controls" />
+                <RelatedChips label="Threats" items={detail.threats} href="/threat-library" />
+                <RelatedChips label="Vulnerabilities" items={detail.vulnerabilities} href="/threat-library" />
                 <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
                 <RelatedChips label="Access reviews" items={detail.access_reviews} href="/access-reviews" />
               </div>

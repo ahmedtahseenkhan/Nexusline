@@ -7,7 +7,9 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
-import RelatedChips from "@/components/RelatedChips";
+import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea } from "@/components/fields";
@@ -23,16 +25,24 @@ type CatalogRow = {
   description: string;
   category: string;
   used_by_risks_count: number;
-  risks?: { id: string; reference?: string; title?: string; name?: string }[];
+  risks?: GraphRef[];
+  // reverse graph link (read-only) — assets this threat/vulnerability applies to
+  assets?: GraphRef[];
 };
 
-type FormState = { name: string; description: string; category: string };
-const BLANK: FormState = { name: "", description: "", category: "" };
+type FormState = { name: string; description: string; category: string; asset_ids: AsyncOption[] };
+const BLANK: FormState = { name: "", description: "", category: "", asset_ids: [] };
+
+const refToOpt = (x: GraphRef): AsyncOption => ({
+  value: x.id,
+  label: x.reference || x.title || x.name || x.id,
+});
 
 const fromRow = (r: CatalogRow): FormState => ({
   name: r.name,
   description: r.description || "",
   category: r.category || "",
+  asset_ids: (r.assets ?? []).map(refToOpt),
 });
 
 // "kind" drives copy, endpoints and accent colour for each of the two sections.
@@ -191,6 +201,16 @@ function ThreatLibraryInner() {
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
+  // Server typeahead for the "Applies to assets" picker (both catalogs accept asset_ids).
+  const searchAssets = useCallback(
+    (q: string) =>
+      apiCall<PagedList<{ id: string; name?: string; reference?: string }>>(
+        "GET",
+        `/assets?search=${encodeURIComponent(q)}&limit=20`,
+      ).then((r) => r.items.map((a) => ({ value: a.id, label: a.name || a.reference || a.id, sub: a.reference }))),
+    [],
+  );
+
   function openNew(k: Kind) {
     setKind(k);
     setEditing(null);
@@ -228,7 +248,12 @@ function ThreatLibraryInner() {
     setSaving(true);
     const m = META[kind];
     try {
-      const payload = { name: f.name.trim(), description: f.description, category: f.category.trim() };
+      const payload = {
+        name: f.name.trim(),
+        description: f.description,
+        category: f.category.trim(),
+        asset_ids: f.asset_ids.map((o) => o.value),
+      };
       if (editing) await apiCall("PATCH", `/${m.base}/${editing.id}`, payload);
       else await apiCall("POST", `/${m.base}`, payload);
       setShowForm(false);
@@ -298,6 +323,12 @@ function ThreatLibraryInner() {
           rows={5}
           placeholder={`Describe the ${m.label.toLowerCase()} so risk owners understand when to link it.`}
         />
+      </Field>
+      <Field
+        label="Applies to assets"
+        help={`Assets exposed to this ${m.label.toLowerCase()}. Search the inventory to link information or IT assets.`}
+      >
+        <AsyncMultiSelect search={searchAssets} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} />
       </Field>
       {editing && (
         <Field
@@ -424,7 +455,10 @@ function ThreatLibraryInner() {
               <p className="muted" style={{ fontSize: 13 }}>No description.</p>
             )}
 
-            <RelatedChips label="Risks referencing this" items={detail.risks} href="/risks" />
+            <div style={{ display: "grid", gap: 12, marginTop: 8 }}>
+              <RelatedChips label="Risks referencing this" items={detail.risks} href="/risks" />
+              <RelatedChips label="Applies to assets" items={detail.assets} href="/information-assets" />
+            </div>
           </>
         )}
       </RecordDrawer>

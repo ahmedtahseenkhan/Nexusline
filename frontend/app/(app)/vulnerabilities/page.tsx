@@ -8,12 +8,17 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips from "@/components/RelatedChips";
+import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
+type Ref = { id: string; reference?: string; title?: string; name?: string };
+const refLabel = (x: Ref) => x.reference || x.title || x.name || x.id;
+
 type VulnFinding = {
   id: string;
   reference: string;
@@ -35,6 +40,8 @@ type VulnFinding = {
   is_overdue: boolean;
   workflow_status: string;
   created_at: string;
+  // additive FK to the IT-asset register (nullable)
+  asset?: Ref | null;
 };
 
 type PatchRecord = {
@@ -109,6 +116,8 @@ type FindingForm = {
   cve_id: string;
   cvss_score: string;
   severity: string;
+  asset_id: string;
+  asset_label: string;
   asset_name: string;
   asset_ip: string;
   source: string;
@@ -126,6 +135,8 @@ const BLANK_FINDING: FindingForm = {
   cve_id: "",
   cvss_score: "",
   severity: "medium",
+  asset_id: "",
+  asset_label: "",
   asset_name: "",
   asset_ip: "",
   source: "nessus",
@@ -144,6 +155,8 @@ function fromFinding(v: VulnFinding): FindingForm {
     cve_id: v.cve_id || "",
     cvss_score: v.cvss_score != null ? String(v.cvss_score) : "",
     severity: v.severity || "medium",
+    asset_id: v.asset?.id || "",
+    asset_label: v.asset ? refLabel(v.asset) : "",
     asset_name: v.asset_name || "",
     asset_ip: v.asset_ip || "",
     source: v.source || "nessus",
@@ -163,6 +176,7 @@ function findingPayload(f: FindingForm): Record<string, unknown> {
     cve_id: f.cve_id,
     cvss_score: f.cvss_score === "" ? 0 : Number(f.cvss_score),
     severity: f.severity,
+    asset_id: f.asset_id || null,
     asset_name: f.asset_name,
     asset_ip: f.asset_ip,
     source: f.source,
@@ -266,6 +280,12 @@ function VulnerabilitiesInner() {
   const [savingFinding, setSavingFinding] = useState(false);
   const [ff, setFf] = useState<FindingForm>(BLANK_FINDING);
   const setF = <K extends keyof FindingForm>(k: K, v: FindingForm[K]) => setFf((p) => ({ ...p, [k]: v }));
+
+  // server typeahead over the IT-asset register for the finding's asset FK
+  const searchAssets = (q: string) =>
+    apiCall<PagedList<Ref>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((x) => ({ value: x.id, label: refLabel(x), sub: x.reference })),
+    );
 
   // ---- patch filters ----
   const [pStatus, setPStatus] = useState("");
@@ -441,8 +461,17 @@ function VulnerabilitiesInner() {
           <Select value={ff.source} onChange={(v) => setF("source", v)} options={opts(VULN_SOURCE)} />
         </Field>
       </div>
+      <Field label="IT asset" help="Link this finding to a record in the IT-asset register.">
+        <AsyncSelect
+          search={searchAssets}
+          value={ff.asset_id || null}
+          selectedLabel={ff.asset_label || undefined}
+          onChange={(v, opt) => setFf((p) => ({ ...p, asset_id: v ?? "", asset_label: opt?.label ?? "" }))}
+          placeholder="Unlinked"
+        />
+      </Field>
       <div className="field-row">
-        <Field label="Asset name" help="Affected host / application.">
+        <Field label="Asset name" help="Affected host / application (free-text label).">
           <TextInput value={ff.asset_name} onChange={(v) => setF("asset_name", v)} placeholder="core-banking-01" />
         </Field>
         <Field label="Asset IP">
@@ -739,6 +768,9 @@ function VulnerabilitiesInner() {
                   <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
                     {detail.remediation || "No remediation recorded."}
                   </p>
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <RelatedChips label="IT asset" items={detail.asset ? [detail.asset] : []} href="/it-assets" />
                 </div>
               </div>
             </div>

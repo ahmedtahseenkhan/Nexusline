@@ -8,12 +8,16 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RelatedChips from "@/components/RelatedChips";
+import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 
 // ------------------------------------------------------------------ types
+type Ref = { id: string; reference?: string; title?: string; name?: string };
+const refLabel = (x: Ref) => x.reference || x.title || x.name || x.id;
 type Dpia = {
   id: string;
   reference: string;
@@ -72,6 +76,8 @@ type DataBreach = {
   workflow_status: string;
   notification_overdue: boolean;
   created_at: string;
+  // additive FK to the incident register (nullable)
+  incident?: Ref | null;
 };
 
 type ConsentRecord = {
@@ -292,6 +298,8 @@ type BreachForm = {
   root_cause: string;
   remediation: string;
   workflow_status: string;
+  incident_id: string;
+  incident_label: string;
 };
 const BLANK_BREACH: BreachForm = {
   title: "",
@@ -311,6 +319,8 @@ const BLANK_BREACH: BreachForm = {
   root_cause: "",
   remediation: "",
   workflow_status: "draft",
+  incident_id: "",
+  incident_label: "",
 };
 function fromBreach(b: DataBreach): BreachForm {
   return {
@@ -331,6 +341,8 @@ function fromBreach(b: DataBreach): BreachForm {
     root_cause: b.root_cause || "",
     remediation: b.remediation || "",
     workflow_status: b.workflow_status || "draft",
+    incident_id: b.incident?.id || "",
+    incident_label: b.incident ? refLabel(b.incident) : "",
   };
 }
 function breachPayload(f: BreachForm): Record<string, unknown> {
@@ -352,6 +364,7 @@ function breachPayload(f: BreachForm): Record<string, unknown> {
     root_cause: f.root_cause,
     remediation: f.remediation,
     workflow_status: f.workflow_status,
+    incident_id: f.incident_id || null,
   };
 }
 
@@ -718,6 +731,12 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
   const [bf, setBf] = useState<BreachForm>(BLANK_BREACH);
   const setB = <K extends keyof BreachForm>(k: K, v: BreachForm[K]) => setBf((p) => ({ ...p, [k]: v }));
 
+  // server typeahead over the incident register for the breach's incident FK
+  const searchIncidents = (q: string) =>
+    apiCall<PagedList<Ref>>("GET", `/incidents?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((x) => ({ value: x.id, label: refLabel(x), sub: x.reference })),
+    );
+
   const fetcher = useCallback((qs: string) => apiCall<PagedList<DataBreach>>("GET", `/data-breaches?${qs}`), []);
   const loadDetail = useCallback((id: string) => {
     apiCall<DataBreach>("GET", `/data-breaches/${id}`).then(setDetail).catch(() => setDetail(null));
@@ -827,6 +846,15 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
           <TextInput value={bf.owner} onChange={(v) => setB("owner", v)} placeholder="Response owner" />
         </Field>
       </div>
+      <Field label="Related incident" help="Link this breach to a record in the incident register.">
+        <AsyncSelect
+          search={searchIncidents}
+          value={bf.incident_id || null}
+          selectedLabel={bf.incident_label || undefined}
+          onChange={(v, opt) => setBf((p) => ({ ...p, incident_id: v ?? "", incident_label: opt?.label ?? "" }))}
+          placeholder="Unlinked"
+        />
+      </Field>
     </>
   );
   const timing = (
@@ -928,6 +956,9 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
             <div style={{ marginBottom: 16 }}>
               <div className="muted" style={{ fontSize: 12 }}>Remediation</div>
               <p style={{ margin: "2px 0 0" }}>{detail.remediation || "—"}</p>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <RelatedChips label="Related incident" items={detail.incident ? [detail.incident] : []} href="/incidents" />
             </div>
             <RecordPanels model="data_breach" entityId={detail.id} />
           </>

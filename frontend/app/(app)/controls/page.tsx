@@ -31,6 +31,7 @@ type Control = {
   maintenance_count: number; last_maintenance_result: string | null; is_maintenance_overdue: boolean;
   policies: LinkRef[]; requirements: LinkRef[]; risks: LinkRef[];
   // reverse graph links (read-only, from GET /controls/{id})
+  assets?: LinkRef[]; vendors?: LinkRef[];
   incidents?: LinkRef[]; exceptions?: LinkRef[]; projects?: LinkRef[]; audit_findings?: LinkRef[];
 };
 type ControlAudit = { id: string; result: string; conducted_date: string | null; result_description: string; auditor: string };
@@ -60,13 +61,13 @@ type FormState = {
   classification: string; documentation_url: string; status: string; effectiveness: string; workflow_status: string;
   opex: number | ""; capex: number | ""; resource_utilization: number | ""; audit_frequency: string;
   audit_metric: string; audit_success_criteria: string; next_audit_date: string; maintenance_frequency: string;
-  next_maintenance_date: string; policy_ids: AsyncOption[]; requirement_ids: AsyncOption[]; risk_ids: AsyncOption[];
+  next_maintenance_date: string; policy_ids: AsyncOption[]; requirement_ids: AsyncOption[]; risk_ids: AsyncOption[]; asset_ids: AsyncOption[];
 };
 const BLANK: FormState = {
   name: "", reference: "", objective: "", description: "", owner: "", control_type: "production", classification: "",
   documentation_url: "", status: "planned", effectiveness: "not_assessed", workflow_status: "draft", opex: "", capex: "",
   resource_utilization: "", audit_frequency: "annual", audit_metric: "", audit_success_criteria: "", next_audit_date: "",
-  maintenance_frequency: "quarterly", next_maintenance_date: "", policy_ids: [], requirement_ids: [], risk_ids: [],
+  maintenance_frequency: "quarterly", next_maintenance_date: "", policy_ids: [], requirement_ids: [], risk_ids: [], asset_ids: [],
 };
 function fromControl(c: Control): FormState {
   return {
@@ -77,6 +78,7 @@ function fromControl(c: Control): FormState {
     audit_frequency: c.audit_frequency, audit_metric: c.audit_metric || "", audit_success_criteria: c.audit_success_criteria || "",
     next_audit_date: c.next_audit_date || "", maintenance_frequency: c.maintenance_frequency, next_maintenance_date: c.next_maintenance_date || "",
     policy_ids: c.policies.map(refToOpt), requirement_ids: c.requirements.map(refToOpt), risk_ids: c.risks.map(refToOpt),
+    asset_ids: (c.assets ?? []).map(refToOpt),
   };
 }
 function toPayload(f: FormState) {
@@ -90,6 +92,7 @@ function toPayload(f: FormState) {
     next_audit_date: f.next_audit_date || null, maintenance_frequency: f.maintenance_frequency,
     next_maintenance_date: f.next_maintenance_date || null,
     policy_ids: f.policy_ids.map((o) => o.value), requirement_ids: f.requirement_ids.map((o) => o.value), risk_ids: f.risk_ids.map((o) => o.value),
+    asset_ids: f.asset_ids.map((o) => o.value),
   };
 }
 const linkCount = (c: Control) => c.policies.length + c.requirements.length + c.risks.length;
@@ -134,6 +137,7 @@ function ControlsInner() {
   const searchPolicies = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/policies?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((p) => ({ value: p.id, label: p.title, sub: p.reference })));
   const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
   const searchRequirements = (q: string) => apiCall<{ id: string; reference: string; title: string; framework: string }[]>("GET", `/requirements?search=${encodeURIComponent(q)}&limit=20`).then((rows) => rows.map((r) => ({ value: r.id, label: `${r.reference ? r.reference + " · " : ""}${r.title}`, sub: r.framework })));
+  const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((a) => ({ value: a.id, label: a.name })));
 
   function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
   function openEdit(c: Control) { setEditing(c); setF(fromControl(c)); setError(null); setShowForm(true); }
@@ -238,6 +242,7 @@ function ControlsInner() {
       <Field label="Requirements" help="Framework requirements this control satisfies (map once, comply many)."><AsyncMultiSelect search={searchRequirements} value={f.requirement_ids} onChange={(v) => set("requirement_ids", v)} /></Field>
       <Field label="Policies" help="Policies that mandate or are enforced by this control."><AsyncMultiSelect search={searchPolicies} value={f.policy_ids} onChange={(v) => set("policy_ids", v)} /></Field>
       <Field label="Risks" help="Risks this control mitigates."><AsyncMultiSelect search={searchRisks} value={f.risk_ids} onChange={(v) => set("risk_ids", v)} /></Field>
+      <Field label="Protected assets" help="Assets this control protects."><AsyncMultiSelect search={searchAssets} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} /></Field>
     </>
   );
 
@@ -329,6 +334,8 @@ function ControlsInner() {
               <RelatedChips label="Policies" items={detail.policies} href="/policies" />
               <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
               <RelatedChips label="Risks" items={detail.risks} href="/risks" />
+              <RelatedChips label="Protected assets" items={detail.assets} href="/information-assets" />
+              <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
               <RelatedChips label="Incidents" items={detail.incidents} href="/incidents" />
               <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
               <RelatedChips label="Projects" items={detail.projects} href="/projects" />

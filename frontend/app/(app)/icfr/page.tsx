@@ -8,6 +8,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect from "@/components/AsyncSelect";
+import RelatedChips from "@/components/RelatedChips";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
@@ -15,6 +16,9 @@ import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 
 /* ------------------------------------------------------------------ types */
+type Ref = { id: string; reference?: string; title?: string; name?: string };
+const refLabel = (x: Ref) => x.reference || x.title || x.name || x.id;
+
 type IcfrTest = {
   id: string;
   control_id: string;
@@ -50,6 +54,8 @@ type IcfrControl = {
   latest_result: string | null;
   created_at: string;
   tests: IcfrTest[];
+  // additive FK to the enterprise controls register (nullable)
+  control?: Ref | null;
 };
 
 type IcfrProcess = {
@@ -223,6 +229,8 @@ type ControlDraft = {
   owner: string;
   design_effectiveness: string;
   operating_effectiveness: string;
+  control_id: string;
+  control_label: string;
 };
 const BLANK_CONTROL: ControlDraft = {
   title: "",
@@ -236,6 +244,8 @@ const BLANK_CONTROL: ControlDraft = {
   owner: "",
   design_effectiveness: "not_assessed",
   operating_effectiveness: "not_assessed",
+  control_id: "",
+  control_label: "",
 };
 
 /* ------------------------------------------------------------------ test draft */
@@ -465,6 +475,7 @@ function IcfrInner() {
         owner: cd.owner,
         design_effectiveness: cd.design_effectiveness,
         operating_effectiveness: cd.operating_effectiveness,
+        control_id: cd.control_id || null,
       });
       setCd(BLANK_CONTROL);
       await refreshProcess(detail.id);
@@ -570,6 +581,11 @@ function IcfrInner() {
   const searchControls = (q: string) =>
     apiCall<PagedList<IcfrControl>>("GET", `/icfr-controls?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
       r.items.map((c) => ({ value: c.id, label: `${c.reference || "CTL"} — ${c.title}` })),
+    );
+  // enterprise controls register — the RCM line's control FK
+  const searchEnterpriseControls = (q: string) =>
+    apiCall<PagedList<Ref>>("GET", `/controls?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((c) => ({ value: c.id, label: refLabel(c), sub: c.reference })),
     );
 
   // ------------------------------------------------------------- table columns
@@ -877,6 +893,16 @@ function IcfrInner() {
                     <label className="label">Owner</label>
                     <input className="input" value={cd.owner} onChange={(ev) => setCD("owner", ev.target.value)} placeholder="Owner" />
                   </div>
+                  <div style={{ width: 200 }}>
+                    <label className="label">Enterprise control</label>
+                    <AsyncSelect
+                      search={searchEnterpriseControls}
+                      value={cd.control_id || null}
+                      selectedLabel={cd.control_label || undefined}
+                      onChange={(v, opt) => setCd((p) => ({ ...p, control_id: v ?? "", control_label: opt?.label ?? "" }))}
+                      placeholder="Link control"
+                    />
+                  </div>
                   <div style={{ width: 170 }}>
                     <label className="label">Design eff.</label>
                     <select className="select" value={cd.design_effectiveness} onChange={(ev) => setCD("design_effectiveness", ev.target.value)}>
@@ -923,7 +949,14 @@ function IcfrInner() {
                         <Fragment key={c.id}>
                           <tr style={{ cursor: "pointer" }} onClick={() => toggleControl(c.id)}>
                             <td className="ref">{c.reference || "—"}</td>
-                            <td className="cell-title">{c.title}</td>
+                            <td className="cell-title">
+                              {c.title}
+                              {c.control && (
+                                <div style={{ marginTop: 4 }} onClick={(ev) => ev.stopPropagation()}>
+                                  <RelatedChips label="Enterprise control" items={[c.control]} href="/controls" />
+                                </div>
+                              )}
+                            </td>
                             <td><Badge tone="info">{cap(c.assertion)}</Badge></td>
                             <td className="muted">{cap(c.control_type)}</td>
                             <td>{c.is_key ? <Badge tone="info">Key</Badge> : <span className="muted">—</span>}</td>

@@ -27,7 +27,7 @@ type Vendor = {
   criticality: string; status: string; workflow_status: string; risk_rating: string | null; shares_data: boolean;
   assessment_status: string; last_assessed_at: string | null; onboarded_at: string | null; offboarded_at: string | null;
   review_frequency: string; next_review_date: string | null; type: VendorType | null; contracts: ServiceContract[];
-  risks: RefItem[]; assets: RefItem[]; contract_count: number; active_contract_value: number; created_at: string;
+  risks: RefItem[]; assets: RefItem[]; requirements: RefItem[]; controls: RefItem[]; contract_count: number; active_contract_value: number; created_at: string;
   // reverse graph links (read-only, from GET /vendors/{id})
   incidents?: RefItem[]; assessments?: RefItem[]; outsourcing_arrangements?: RefItem[];
 };
@@ -52,12 +52,13 @@ type FormState = {
   contact_phone: string; website: string; location: string; criticality: string; status: string; workflow_status: string;
   shares_data: boolean; risk_rating: string; assessment_status: string; last_assessed_at: string; onboarded_at: string;
   offboarded_at: string; review_frequency: string; next_review_date: string; risk_ids: AsyncOption[]; asset_ids: AsyncOption[];
+  requirement_ids: AsyncOption[]; control_ids: AsyncOption[];
 };
 const BLANK: FormState = {
   name: "", description: "", category: "", type_id: "", contact_name: "", contact_email: "", contact_phone: "", website: "",
   location: "", criticality: "medium", status: "active", workflow_status: "draft", shares_data: false, risk_rating: "",
   assessment_status: "not_started", last_assessed_at: "", onboarded_at: "", offboarded_at: "", review_frequency: "annual",
-  next_review_date: "", risk_ids: [], asset_ids: [],
+  next_review_date: "", risk_ids: [], asset_ids: [], requirement_ids: [], control_ids: [],
 };
 function fromVendor(v: Vendor): FormState {
   return {
@@ -68,6 +69,7 @@ function fromVendor(v: Vendor): FormState {
     assessment_status: v.assessment_status, last_assessed_at: v.last_assessed_at || "", onboarded_at: v.onboarded_at || "",
     offboarded_at: v.offboarded_at || "", review_frequency: v.review_frequency, next_review_date: v.next_review_date || "",
     risk_ids: v.risks.map(refToOpt), asset_ids: v.assets.map(refToOpt),
+    requirement_ids: (v.requirements ?? []).map(refToOpt), control_ids: (v.controls ?? []).map(refToOpt),
   };
 }
 function toPayload(f: FormState): Record<string, unknown> {
@@ -78,6 +80,7 @@ function toPayload(f: FormState): Record<string, unknown> {
     risk_rating: f.risk_rating || null, assessment_status: f.assessment_status, last_assessed_at: f.last_assessed_at || null,
     onboarded_at: f.onboarded_at || null, offboarded_at: f.offboarded_at || null, review_frequency: f.review_frequency,
     next_review_date: f.next_review_date || null, risk_ids: f.risk_ids.map((o) => o.value), asset_ids: f.asset_ids.map((o) => o.value),
+    requirement_ids: f.requirement_ids.map((o) => o.value), control_ids: f.control_ids.map((o) => o.value),
   };
 }
 type ContractForm = { name: string; description: string; value: number | ""; start_date: string; end_date: string };
@@ -108,6 +111,8 @@ function VendorsInner() {
 
   const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
   const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name })));
+  const searchRequirements = (q: string) => apiCall<{ id: string; reference: string; title: string; framework: string }[]>("GET", `/requirements?search=${encodeURIComponent(q)}&limit=20`).then((rows) => rows.map((r) => ({ value: r.id, label: `${r.reference ? r.reference + " · " : ""}${r.title}`, sub: r.framework })));
+  const searchControls = (q: string) => apiCall<PagedList<{ id: string; name: string; reference: string }>>("GET", `/controls?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((c) => ({ value: c.id, label: c.name, sub: c.reference })));
 
   function openNew() { setEditing(null); setF(BLANK); setContract(BLANK_CONTRACT); setError(null); setShowForm(true); }
   function openEdit(v: Vendor) { setEditing(v); setF(fromVendor(v)); setContract(BLANK_CONTRACT); setError(null); setShowForm(true); }
@@ -247,6 +252,8 @@ function VendorsInner() {
     <>
       <Field label="Related Risks" help="Risks this vendor introduces or is associated with."><AsyncMultiSelect search={searchRisks} value={f.risk_ids} onChange={(v) => set("risk_ids", v)} /></Field>
       <Field label="Related Assets" help="Assets or data this vendor touches, hosts or has access to."><AsyncMultiSelect search={searchAssets} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} /></Field>
+      <Field label="Compliance requirements" help="Framework requirements this vendor is subject to."><AsyncMultiSelect search={searchRequirements} value={f.requirement_ids} onChange={(v) => set("requirement_ids", v)} /></Field>
+      <Field label="Mitigating controls" help="Controls that mitigate the risk this vendor introduces."><AsyncMultiSelect search={searchControls} value={f.control_ids} onChange={(v) => set("control_ids", v)} /></Field>
     </>
   );
 
@@ -299,6 +306,8 @@ function VendorsInner() {
             <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 16 }}>
               <RelatedChips label="Risks" items={detail.risks} href="/risks" />
               <RelatedChips label="Assets" items={detail.assets} href="/information-assets" />
+              <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
+              <RelatedChips label="Mitigating controls" items={detail.controls} href="/controls" />
               <RelatedChips label="Incidents" items={detail.incidents} href="/incidents" />
               <RelatedChips label="Assessments" items={detail.assessments} href="/assessments" />
               <RelatedChips label="Outsourcing arrangements" items={detail.outsourcing_arrangements} href="/outsourcing" />
