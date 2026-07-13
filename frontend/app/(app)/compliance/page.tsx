@@ -75,6 +75,7 @@ type Requirement = {
   open_findings: number;
   evidence_count: number;
   crosswalk_count: number;
+  control_health?: string;
 };
 
 type CrosswalkItem = {
@@ -135,6 +136,13 @@ const SEVERITY_TONE: Record<string, "low" | "medium" | "high" | "critical"> = {
   high: "high",
   critical: "critical",
 };
+
+// live rollup of the health of a requirement's mitigating controls
+function controlHealth(v: string | null | undefined): React.ReactNode {
+  if (v === "issues") return <Badge tone="high">Control issues</Badge>;
+  if (v === "ok") return <Badge tone="low">Controls OK</Badge>;
+  return <span className="muted">—</span>;
+}
 
 const enc = encodeURIComponent;
 const ctrlToOpt = (c: Ref): AsyncOption => ({ value: c.id, label: c.name || c.reference || c.id, sub: c.reference });
@@ -886,6 +894,7 @@ function ComplianceInner() {
               {detail.is_covered ? <Badge tone="low" plain>Covered</Badge> : <Badge tone="high" plain>Not covered</Badge>}
               {detail.domain && <Badge tone="neutral" plain>{detail.domain}</Badge>}
               {detail.open_findings > 0 && <Badge tone="high" plain>{detail.open_findings} open findings</Badge>}
+              {controlHealth(detail.control_health)}
             </div>
 
             <strong style={{ fontSize: 13 }}>Related records</strong>

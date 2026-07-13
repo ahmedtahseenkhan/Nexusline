@@ -58,6 +58,8 @@ type RiskRow = {
   workflow_status: string;
   workflow_owner: string;
 
+  control_health?: string;
+
   assets: Ref[];
   controls: Ref[];
   threats: Ref[];
@@ -117,6 +119,13 @@ function appetite(r: RiskRow, s: RiskSetting | null) {
   if (score <= s.appetite_score) return { label: "within appetite", tone: "low" as const };
   if (score <= s.tolerance_score) return { label: "elevated", tone: "medium" as const };
   return { label: "breach", tone: "critical" as const };
+}
+
+// live rollup of the health of a record's mitigating controls
+function controlHealth(v: string | null | undefined): React.ReactNode {
+  if (v === "issues") return <Badge tone="high">Control issues</Badge>;
+  if (v === "ok") return <Badge tone="low">Controls OK</Badge>;
+  return <span className="muted">—</span>;
 }
 
 // --------------------------------------------------------------- form state
@@ -540,6 +549,7 @@ function RisksPage() {
     { key: "inherent_score", header: "Inherent", sortable: true, render: (r) => <><Severity value={r.inherent_severity} /> <span className="muted">({r.inherent_score ?? "—"})</span></> },
     { key: "residual_score", header: "Residual", sortable: true, render: (r) => <><Severity value={r.residual_severity} /> <span className="muted">({r.residual_score ?? "—"})</span></> },
     { key: "appetite", header: "Appetite", render: (r) => { const a = appetite(r, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; } },
+    { key: "control_health", header: "Control health", render: (r) => controlHealth(r.control_health) },
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
     { key: "owner", header: "Owner", render: (r) => <span className="muted">{userName(r.owner_id)}</span> },
     { key: "exposure", header: "Exposure", render: (r) => <span className="muted">{money(r.annual_loss_expectancy)}</span> },
@@ -630,6 +640,7 @@ function RisksPage() {
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Inherent</div><div style={{ marginTop: 4 }}><Severity value={detail.inherent_severity} /> <span className="muted">({detail.inherent_score ?? "—"})</span></div></div>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Residual</div><div style={{ marginTop: 4 }}><Severity value={detail.residual_severity} /> <span className="muted">({detail.residual_score ?? "—"})</span></div></div>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Appetite</div><div style={{ marginTop: 4 }}>{(() => { const a = appetite(detail, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; })()}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Control health</div><div style={{ marginTop: 4 }}>{controlHealth(detail.control_health)}</div></div>
               <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Exposure (ALE)</div><div style={{ marginTop: 4 }}>{money(detail.annual_loss_expectancy)}</div></div>
             </div>
 
