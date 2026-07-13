@@ -24,6 +24,10 @@ CUSTOM_FIELD_MODELS = [
     "model_inventory", "outsourcing_arrangement", "rcsa_assessment",
     "regulatory_change", "risk_quantification", "scenario_analysis",
     "shariah_review", "vuln_finding", "whistleblowing_report",
+    # Graph-connectivity parity: the core + island records that lacked custom fields.
+    "requirement", "threat", "vulnerability", "loss_event", "audit_finding",
+    "assessment", "access_review", "awareness_program", "business_unit",
+    "process", "legal",
 ]
 
 

@@ -12,12 +12,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.asset import Asset
+from app.models.bia import BiaAssessment
 from app.models.compliance import Framework, Requirement
+from app.models.continuity import ContinuityPlan
 from app.models.control import Control
 from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
 from app.models.incident import Incident
+from app.models.internal_audit import AuditEngagement
+from app.models.issue import Issue
+from app.models.operational_risk import KeyRiskIndicator, LossEvent, RcsaAssessment
 from app.models.organization import BusinessUnit, Legal, Process
+from app.models.outsourcing import OutsourcingArrangement
+from app.models.regulatory_change import RegulatoryChange
 from app.models.policy import Policy
 from app.models.privacy import ProcessingActivity
 from app.models.project import Project
@@ -42,6 +49,16 @@ MODEL_MAP: dict[str, type] = {
     "business_unit": BusinessUnit,
     "process": Process,
     "legal": Legal,
+    # Banking modules — audit-grade change history for the records regulators scrutinise.
+    "issue": Issue,
+    "audit_engagement": AuditEngagement,
+    "rcsa_assessment": RcsaAssessment,
+    "key_risk_indicator": KeyRiskIndicator,
+    "loss_event": LossEvent,
+    "bia_assessment": BiaAssessment,
+    "continuity_plan": ContinuityPlan,
+    "outsourcing_arrangement": OutsourcingArrangement,
+    "regulatory_change": RegulatoryChange,
 }
 
 _SKIP = {"tenant_id"}

@@ -9,11 +9,15 @@ from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, String, Text
 from sqlalchemy import Enum as SAEnum
 
 from app.models.asset import Asset
+from app.models.compliance import Requirement
+from app.models.continuity import ContinuityPlan
 from app.models.control import Control
 from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
 from app.models.incident import Incident
+from app.models.operational_risk import KeyRiskIndicator, RcsaAssessment
 from app.models.policy import Policy
+from app.models.privacy import ProcessingActivity
 from app.models.project import Project
 from app.models.risk import Risk
 from app.models.vendor import Vendor
@@ -29,6 +33,11 @@ MODEL_MAP: dict[str, type] = {
     "asset": Asset,
     "goal": Goal,
     "exception": ExceptionRecord,
+    "requirement": Requirement,
+    "continuity_plan": ContinuityPlan,
+    "processing_activity": ProcessingActivity,
+    "key_risk_indicator": KeyRiskIndicator,
+    "rcsa_assessment": RcsaAssessment,
 }
 
 OPERATORS = ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "overdue", "is_true", "is_false", "not_empty"]
