@@ -130,6 +130,7 @@ class RequirementRead(RequirementBase):
     assets: list[GraphRef] = []
     exceptions: list[GraphRef] = []
     audit_findings: list[GraphRef] = []
+    vendors: list[GraphRef] = []
     legal: CompRef | None = None
     findings: list[ComplianceFindingRead] = []
     is_covered: bool

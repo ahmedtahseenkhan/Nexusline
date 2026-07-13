@@ -36,6 +36,14 @@ async def _get(db, model, obj_id, name):
     return obj
 
 
+async def _resolve_assets(db, ids):
+    if not ids:
+        return []
+    from app.models.asset import Asset
+
+    return list((await db.scalars(select(Asset).where(Asset.id.in_(ids)))).all())
+
+
 async def _linked_risks(db, assoc, fk_col, obj_id):
     """The actual (non-deleted) risks referencing this catalog item, as GraphRefs."""
     rows = (
@@ -114,22 +122,23 @@ async def get_threat(obj_id: uuid.UUID, db: DbSession) -> ThreatRead:
 
 @router.post("/threats", response_model=ThreatRead, status_code=201, dependencies=[Depends(require("risk:write"))])
 async def create_threat(body: ThreatCreate, db: DbSession, user: CurrentUser) -> ThreatRead:
-    obj = Threat(tenant_id=user.tenant_id, **body.model_dump())
+    obj = Threat(tenant_id=user.tenant_id, **body.model_dump(exclude={"asset_ids"}))
+    obj.assets = await _resolve_assets(db, body.asset_ids)
     db.add(obj)
     await db.flush()
-    await db.refresh(obj)
-    return ThreatRead.model_validate(obj)  # brand-new → used_by_risks_count defaults to 0
+    return ThreatRead.model_validate(await _get(db, Threat, obj.id, "Threat"))
 
 
 @router.patch("/threats/{obj_id}", response_model=ThreatRead, dependencies=[Depends(require("risk:write"))])
 async def update_threat(obj_id: uuid.UUID, body: ThreatUpdate, db: DbSession) -> ThreatRead:
     obj = await _get(db, Threat, obj_id, "Threat")
-    for f, v in body.model_dump(exclude_unset=True).items():
+    for f, v in body.model_dump(exclude_unset=True, exclude={"asset_ids"}).items():
         setattr(obj, f, v)
+    if body.asset_ids is not None:
+        obj.assets = await _resolve_assets(db, body.asset_ids)
     await db.flush()
-    await db.refresh(obj)
     counts = await _usage_counts(db, risk_threats, risk_threats.c.threat_id)
-    return _read(ThreatRead, obj, counts)
+    return _read(ThreatRead, await _get(db, Threat, obj_id, "Threat"), counts)
 
 
 @router.delete("/threats/{obj_id}", status_code=204, dependencies=[Depends(require("risk:write"))])
@@ -192,11 +201,11 @@ async def get_vulnerability(obj_id: uuid.UUID, db: DbSession) -> VulnerabilityRe
     "/vulnerabilities", response_model=VulnerabilityRead, status_code=201, dependencies=[Depends(require("risk:write"))]
 )
 async def create_vulnerability(body: VulnerabilityCreate, db: DbSession, user: CurrentUser) -> VulnerabilityRead:
-    obj = Vulnerability(tenant_id=user.tenant_id, **body.model_dump())
+    obj = Vulnerability(tenant_id=user.tenant_id, **body.model_dump(exclude={"asset_ids"}))
+    obj.assets = await _resolve_assets(db, body.asset_ids)
     db.add(obj)
     await db.flush()
-    await db.refresh(obj)
-    return VulnerabilityRead.model_validate(obj)  # brand-new → used_by_risks_count defaults to 0
+    return VulnerabilityRead.model_validate(await _get(db, Vulnerability, obj.id, "Vulnerability"))
 
 
 @router.patch(
@@ -204,12 +213,13 @@ async def create_vulnerability(body: VulnerabilityCreate, db: DbSession, user: C
 )
 async def update_vulnerability(obj_id: uuid.UUID, body: VulnerabilityUpdate, db: DbSession) -> VulnerabilityRead:
     obj = await _get(db, Vulnerability, obj_id, "Vulnerability")
-    for f, v in body.model_dump(exclude_unset=True).items():
+    for f, v in body.model_dump(exclude_unset=True, exclude={"asset_ids"}).items():
         setattr(obj, f, v)
+    if body.asset_ids is not None:
+        obj.assets = await _resolve_assets(db, body.asset_ids)
     await db.flush()
-    await db.refresh(obj)
     counts = await _usage_counts(db, risk_vulnerabilities, risk_vulnerabilities.c.vulnerability_id)
-    return _read(VulnerabilityRead, obj, counts)
+    return _read(VulnerabilityRead, await _get(db, Vulnerability, obj_id, "Vulnerability"), counts)
 
 
 @router.delete("/vulnerabilities/{obj_id}", status_code=204, dependencies=[Depends(require("risk:write"))])

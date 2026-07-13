@@ -73,6 +73,8 @@ class VendorBase(BaseModel):
 class VendorCreate(VendorBase):
     risk_ids: list[uuid.UUID] = []
     asset_ids: list[uuid.UUID] = []
+    requirement_ids: list[uuid.UUID] = []
+    control_ids: list[uuid.UUID] = []
 
 
 class VendorUpdate(BaseModel):
@@ -98,6 +100,8 @@ class VendorUpdate(BaseModel):
     next_review_date: date | None = None
     risk_ids: list[uuid.UUID] | None = None
     asset_ids: list[uuid.UUID] | None = None
+    requirement_ids: list[uuid.UUID] | None = None
+    control_ids: list[uuid.UUID] | None = None
 
 
 class VendorRead(VendorBase):
@@ -111,6 +115,8 @@ class VendorRead(VendorBase):
     incidents: list[GraphRef] = []
     assessments: list[GraphRef] = []
     outsourcing_arrangements: list[GraphRef] = []
+    requirements: list[GraphRef] = []
+    controls: list[GraphRef] = []
     contract_count: int = 0
     active_contract_value: float = 0.0
     created_at: datetime

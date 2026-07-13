@@ -20,13 +20,14 @@ class CatalogBase(BaseModel):
 
 
 class ThreatCreate(CatalogBase):
-    pass
+    asset_ids: list[uuid.UUID] = []
 
 
 class ThreatUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     category: str | None = None
+    asset_ids: list[uuid.UUID] | None = None
 
 
 class ThreatRead(CatalogBase):
@@ -37,10 +38,11 @@ class ThreatRead(CatalogBase):
     used_by_risks_count: int = 0
     # The actual risks (detail endpoint only).
     risks: list[GraphRef] = []
+    assets: list[GraphRef] = []
 
 
 class VulnerabilityCreate(CatalogBase):
-    pass
+    asset_ids: list[uuid.UUID] = []
 
 
 class VulnerabilityUpdate(ThreatUpdate):
@@ -55,3 +57,4 @@ class VulnerabilityRead(CatalogBase):
     used_by_risks_count: int = 0
     # The actual risks (detail endpoint only).
     risks: list[GraphRef] = []
+    assets: list[GraphRef] = []

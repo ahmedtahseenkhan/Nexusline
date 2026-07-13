@@ -13,6 +13,8 @@ from sqlalchemy.orm import selectinload
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.asset import Asset
+from app.models.compliance import Requirement
+from app.models.control import Control
 from app.models.risk import Risk
 from app.models.vendor import ServiceContract, Vendor, VendorType
 from app.schemas.common import Page
@@ -96,9 +98,13 @@ async def create_vendor(body: VendorCreate, db: DbSession, user: CurrentUser) ->
     data = body.model_dump()
     risk_ids = data.pop("risk_ids", [])
     asset_ids = data.pop("asset_ids", [])
+    requirement_ids = data.pop("requirement_ids", [])
+    control_ids = data.pop("control_ids", [])
     obj = Vendor(tenant_id=user.tenant_id, **data)
     obj.risks = await _resolve(db, Risk, risk_ids)
     obj.assets = await _resolve(db, Asset, asset_ids)
+    obj.requirements = await _resolve(db, Requirement, requirement_ids)
+    obj.controls = await _resolve(db, Control, control_ids)
     db.add(obj)
     await db.flush()
     await audit.record(
@@ -121,12 +127,18 @@ async def update_vendor(
     data = body.model_dump(exclude_unset=True)
     risk_ids = data.pop("risk_ids", None)
     asset_ids = data.pop("asset_ids", None)
+    requirement_ids = data.pop("requirement_ids", None)
+    control_ids = data.pop("control_ids", None)
     for field, value in data.items():
         setattr(obj, field, value)
     if risk_ids is not None:
         obj.risks = await _resolve(db, Risk, risk_ids)
     if asset_ids is not None:
         obj.assets = await _resolve(db, Asset, asset_ids)
+    if requirement_ids is not None:
+        obj.requirements = await _resolve(db, Requirement, requirement_ids)
+    if control_ids is not None:
+        obj.controls = await _resolve(db, Control, control_ids)
     await db.flush()
     await audit.record(
         db, actor=user, action="update", entity_type="vendor", entity_id=obj.id,

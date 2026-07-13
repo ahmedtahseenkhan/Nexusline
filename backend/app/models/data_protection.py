@@ -14,11 +14,12 @@ is the *operational* data-protection toolkit a DPO runs day to day:
 from __future__ import annotations
 
 import enum
+import uuid
 from datetime import date, timedelta
 
-from sqlalchemy import Boolean, Date, Integer, String, Text
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, Text, Uuid
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import (
     Base,
@@ -160,6 +161,11 @@ class DataBreach(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin
     breach_type: Mapped[BreachType] = mapped_column(
         SAEnum(BreachType, name="breach_type"), default=BreachType.confidentiality, nullable=False
     )
+    # A breach is a privacy-scoped incident; link it to the incident it stems from.
+    incident_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    incident: Mapped["Incident | None"] = relationship("Incident", lazy="selectin")  # noqa: F821
     discovered_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     occurred_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     records_affected: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

@@ -32,6 +32,19 @@ vendor_assets = Table(
     Column("vendor_id", Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), primary_key=True),
     Column("asset_id", Uuid, ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True),
 )
+# Third-party compliance obligations (SBP outsourcing) + the controls mitigating vendor risk.
+vendor_requirements = Table(
+    "vendor_requirements",
+    Base.metadata,
+    Column("vendor_id", Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), primary_key=True),
+    Column("requirement_id", Uuid, ForeignKey("requirements.id", ondelete="CASCADE"), primary_key=True),
+)
+vendor_controls = Table(
+    "vendor_controls",
+    Base.metadata,
+    Column("vendor_id", Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), primary_key=True),
+    Column("control_id", Uuid, ForeignKey("controls.id", ondelete="CASCADE"), primary_key=True),
+)
 
 
 class VendorType(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
@@ -106,6 +119,12 @@ class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     outsourcing_arrangements: Mapped[list["OutsourcingArrangement"]] = relationship(  # noqa: F821
         "OutsourcingArrangement", primaryjoin="OutsourcingArrangement.vendor_id == Vendor.id",
         foreign_keys="OutsourcingArrangement.vendor_id", lazy="selectin", viewonly=True,
+    )
+    requirements: Mapped[list["Requirement"]] = relationship(  # noqa: F821
+        "Requirement", secondary=vendor_requirements, lazy="selectin",
+    )
+    controls: Mapped[list["Control"]] = relationship(  # noqa: F821
+        "Control", secondary=vendor_controls, lazy="selectin",
     )
 
     @property

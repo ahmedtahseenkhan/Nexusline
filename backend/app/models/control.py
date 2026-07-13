@@ -32,6 +32,13 @@ control_policies = Table(
     Column("control_id", Uuid, ForeignKey("controls.id", ondelete="CASCADE"), primary_key=True),
     Column("policy_id", Uuid, ForeignKey("policies.id", ondelete="CASCADE"), primary_key=True),
 )
+# A control directly protects assets (eramba edge, reachable otherwise only via risks).
+control_assets = Table(
+    "control_assets",
+    Base.metadata,
+    Column("control_id", Uuid, ForeignKey("controls.id", ondelete="CASCADE"), primary_key=True),
+    Column("asset_id", Uuid, ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True),
+)
 
 
 class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
@@ -113,6 +120,12 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     )
     audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
         "AuditFinding", secondary="audit_finding_controls", lazy="selectin", viewonly=True,
+    )
+    assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
+        "Asset", secondary=control_assets, lazy="selectin",
+    )
+    vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
+        "Vendor", secondary="vendor_controls", lazy="selectin", viewonly=True,
     )
 
     @staticmethod

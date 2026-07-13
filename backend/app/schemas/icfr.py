@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
+from app.schemas.common import GraphRef
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
@@ -73,10 +74,12 @@ class IcfrControlBase(BaseModel):
 
 
 class IcfrControlCreate(IcfrControlBase):
+    control_id: uuid.UUID | None = None
     pass
 
 
 class IcfrControlUpdate(BaseModel):
+    control_id: uuid.UUID | None = None
     title: str | None = None
     control_objective: str | None = None
     risk_description: str | None = None
@@ -93,6 +96,8 @@ class IcfrControlUpdate(BaseModel):
 class IcfrControlRead(IcfrControlBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    control_id: uuid.UUID | None = None
+    control: GraphRef | None = None
     process_id: uuid.UUID
     reference: str
     test_count: int

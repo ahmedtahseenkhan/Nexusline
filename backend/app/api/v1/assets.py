@@ -56,7 +56,7 @@ from app.schemas.asset import (
     ClassificationRef,
     LinkRef,
 )
-from app.schemas.common import Page
+from app.schemas.common import GraphRef, Page
 from app.services import audit
 from app.services.risk_scoring import next_review_date
 
@@ -94,6 +94,11 @@ def _loads():
         selectinload(Asset.related_assets),
         selectinload(Asset.risks),
         selectinload(Asset.reviews),
+        selectinload(Asset.vendors),
+        selectinload(Asset.access_reviews),
+        selectinload(Asset.controls),
+        selectinload(Asset.threats),
+        selectinload(Asset.vulnerabilities),
     )
 
 
@@ -179,6 +184,11 @@ def _serialize(a: Asset) -> AssetRead:
         exceptions=[_ref(x) for x in a.exceptions],
         related_assets=[_ref(x) for x in a.related_assets],
         risks=[_ref(x) for x in a.risks],
+        vendors=[GraphRef.model_validate(x) for x in a.vendors],
+        access_reviews=[GraphRef.model_validate(x) for x in a.access_reviews],
+        controls=[GraphRef.model_validate(x) for x in a.controls],
+        threats=[GraphRef.model_validate(x) for x in a.threats],
+        vulnerabilities=[GraphRef.model_validate(x) for x in a.vulnerabilities],
         reviews=[AssetReviewRead.model_validate(r) for r in a.reviews],
         risk_count=len(a.risks),
         review_count=len(a.reviews),

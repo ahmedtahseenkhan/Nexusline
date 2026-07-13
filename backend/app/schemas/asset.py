@@ -327,6 +327,9 @@ class AssetRead(BaseModel):
     # Reverse links (read-only).
     vendors: list[GraphRef] = []
     access_reviews: list[GraphRef] = []
+    controls: list[GraphRef] = []
+    threats: list[GraphRef] = []
+    vulnerabilities: list[GraphRef] = []
     reviews: list[AssetReviewRead] = []
     risk_count: int = 0
     review_count: int = 0

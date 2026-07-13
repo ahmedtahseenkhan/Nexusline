@@ -54,6 +54,7 @@ class ControlCreate(ControlBase):
     policy_ids: list[uuid.UUID] = []
     requirement_ids: list[uuid.UUID] = []
     risk_ids: list[uuid.UUID] = []
+    asset_ids: list[uuid.UUID] = []
 
 
 class ControlUpdate(BaseModel):
@@ -80,6 +81,7 @@ class ControlUpdate(BaseModel):
     policy_ids: list[uuid.UUID] | None = None
     requirement_ids: list[uuid.UUID] | None = None
     risk_ids: list[uuid.UUID] | None = None
+    asset_ids: list[uuid.UUID] | None = None
 
 
 class ControlRead(ControlBase):
@@ -103,6 +105,8 @@ class ControlRead(ControlBase):
     exceptions: list[GraphRef] = []
     projects: list[GraphRef] = []
     audit_findings: list[GraphRef] = []
+    assets: list[GraphRef] = []
+    vendors: list[GraphRef] = []
 
 
 class ControlRef(BaseModel):

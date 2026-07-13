@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
+from app.schemas.common import GraphRef
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
@@ -121,10 +122,12 @@ class DataBreachBase(BaseModel):
 
 
 class DataBreachCreate(DataBreachBase):
+    incident_id: uuid.UUID | None = None
     pass
 
 
 class DataBreachUpdate(BaseModel):
+    incident_id: uuid.UUID | None = None
     title: str | None = None
     description: str | None = None
     breach_type: BreachType | None = None
@@ -147,6 +150,8 @@ class DataBreachUpdate(BaseModel):
 class DataBreachRead(DataBreachBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    incident_id: uuid.UUID | None = None
+    incident: GraphRef | None = None
     reference: str
     notification_overdue: bool
     created_at: datetime

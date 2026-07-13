@@ -357,6 +357,15 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         "AccessReview", primaryjoin="AccessReview.asset_id == Asset.id",
         foreign_keys="AccessReview.asset_id", lazy="selectin", viewonly=True,
     )
+    controls: Mapped[list["Control"]] = relationship(  # noqa: F821
+        "Control", secondary="control_assets", lazy="selectin", viewonly=True,
+    )
+    threats: Mapped[list["Threat"]] = relationship(  # noqa: F821
+        "Threat", secondary="asset_threats", lazy="selectin", viewonly=True,
+    )
+    vulnerabilities: Mapped[list["Vulnerability"]] = relationship(  # noqa: F821
+        "Vulnerability", secondary="asset_vulnerabilities", lazy="selectin", viewonly=True,
+    )
 
     @property
     def classification(self) -> Criticality:

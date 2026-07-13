@@ -57,6 +57,14 @@ async def _load_policies(db, ids):
     return list((await db.scalars(select(Policy).where(Policy.id.in_(ids)))).all())
 
 
+async def _resolve_assets(db, ids):
+    if not ids:
+        return []
+    from app.models.asset import Asset
+
+    return list((await db.scalars(select(Asset).where(Asset.id.in_(ids)))).all())
+
+
 async def _attach_risks(db, control: Control) -> Control:
     """`Control` has no ORM `risks` relationship (the writable side lives on `Risk.controls`,
     via the `risk_controls` join). Query the linked risks and stash them on a transient
@@ -187,11 +195,13 @@ async def list_controls(
 async def create_control(body: ControlCreate, db: DbSession, user: CurrentUser) -> ControlRead:
     data = body.model_dump()
     policy_ids = data.pop("policy_ids", [])
+    asset_ids = data.pop("asset_ids", [])
     stash = {"requirements": data.pop("requirement_ids", []), "risks": data.pop("risk_ids", [])}
     explicit_audit = data.pop("next_audit_date", None)
     explicit_maint = data.pop("next_maintenance_date", None)
     control = Control(tenant_id=user.tenant_id, **data)
     control.policies = await _load_policies(db, policy_ids)
+    control.assets = await _resolve_assets(db, asset_ids)
     # Honour an explicit schedule date, otherwise derive it from the frequency.
     control.next_audit_date = explicit_audit or next_review_date(control.audit_frequency)
     control.next_maintenance_date = explicit_maint or next_review_date(control.maintenance_frequency)
@@ -222,6 +232,7 @@ async def update_control(
     control = await _get_or_404(db, control_id)
     data = body.model_dump(exclude_unset=True)
     policy_ids = data.pop("policy_ids", None)
+    asset_ids = data.pop("asset_ids", None)
     stash = {
         "requirements": data.pop("requirement_ids", _KEEP),
         "risks": data.pop("risk_ids", _KEEP),
@@ -232,6 +243,8 @@ async def update_control(
         setattr(control, field, value)
     if policy_ids is not None:
         control.policies = await _load_policies(db, policy_ids)
+    if asset_ids is not None:
+        control.assets = await _resolve_assets(db, asset_ids)
     # Explicit schedule date wins; else recompute when the frequency changed.
     if explicit_audit is not _KEEP:
         control.next_audit_date = explicit_audit

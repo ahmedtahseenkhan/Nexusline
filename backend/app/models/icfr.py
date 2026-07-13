@@ -143,6 +143,10 @@ class IcfrControl(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     control_objective: Mapped[str] = mapped_column(Text, default="")
     risk_description: Mapped[str] = mapped_column(Text, default="")
+    # Bridge the ICFR RCM line to the enterprise control register (avoids a parallel universe).
+    control_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("controls.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     assertion: Mapped[FinancialAssertion] = mapped_column(
         SAEnum(FinancialAssertion, name="icfr_assertion"),
         default=FinancialAssertion.accuracy, nullable=False,
