@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
@@ -8,6 +8,8 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import RelatedChips from "@/components/RelatedChips";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
@@ -84,6 +86,10 @@ const WORKFLOW_TONE: Record<string, Tone> = {
 };
 
 // ------------------------------------------------------------------ types
+// Lightweight related-record shape returned by the graph link payloads.
+type Ref = { id: string; reference?: string; title?: string; name?: string };
+const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
+
 type Obligation = {
   id: string;
   regulatory_change_id: string | null;
@@ -98,6 +104,11 @@ type Obligation = {
   status: string;
   due_date: string | null;
   created_at: string;
+
+  // graph links (structured, additive to the legacy free-text mapped_* fields)
+  requirements?: Ref[];
+  policies?: Ref[];
+  controls?: Ref[];
 };
 
 type RegChange = {
@@ -240,6 +251,9 @@ type OblForm = {
   mapped_controls: string;
   status: string;
   due_date: string;
+  requirement_ids: AsyncOption[];
+  policy_ids: AsyncOption[];
+  control_ids: AsyncOption[];
 };
 const BLANK_OBL: OblForm = {
   title: "",
@@ -252,6 +266,9 @@ const BLANK_OBL: OblForm = {
   mapped_controls: "",
   status: "open",
   due_date: "",
+  requirement_ids: [],
+  policy_ids: [],
+  control_ids: [],
 };
 function fromObl(o: Obligation): OblForm {
   return {
@@ -265,6 +282,9 @@ function fromObl(o: Obligation): OblForm {
     mapped_controls: o.mapped_controls || "",
     status: o.status || "open",
     due_date: o.due_date || "",
+    requirement_ids: (o.requirements ?? []).map(refToOpt),
+    policy_ids: (o.policies ?? []).map(refToOpt),
+    control_ids: (o.controls ?? []).map(refToOpt),
   };
 }
 function oblPayload(f: OblForm): Record<string, unknown> {
@@ -279,6 +299,9 @@ function oblPayload(f: OblForm): Record<string, unknown> {
     mapped_controls: f.mapped_controls,
     status: f.status,
     due_date: f.due_date || null,
+    requirement_ids: f.requirement_ids.map((o) => o.value),
+    policy_ids: f.policy_ids.map((o) => o.value),
+    control_ids: f.control_ids.map((o) => o.value),
   };
 }
 
@@ -422,6 +445,12 @@ function RegulatoryChangeInner() {
   const fetchChanges = useCallback((qs: string) => apiCall<PagedList<RegChange>>("GET", `/regulatory-change?${qs}`), []);
   const fetchObligations = useCallback((qs: string) => apiCall<PagedList<Obligation>>("GET", `/obligations?${qs}`), []);
   const fetchReturns = useCallback((qs: string) => apiCall<PagedList<RegReturn>>("GET", `/regulatory-returns?${qs}`), []);
+
+  // server typeahead sources for the obligation link pickers (requirements/policies/controls)
+  const linkSearch = (path: string) => (q: string) =>
+    apiCall<PagedList<Ref>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      r.items.map((x) => ({ value: x.id, label: x.reference || x.title || x.name || x.id, sub: x.reference })),
+    );
 
   // server typeahead for the "linked regulatory change" picker (any record, not a capped array)
   const searchChanges = (q: string) =>
@@ -809,10 +838,19 @@ function RegulatoryChangeInner() {
   );
   const oblMapping = (
     <>
-      <Field label="Mapped policies" help="Policies that satisfy or govern this obligation.">
+      <Field label="Compliance requirements" help="Requirements this obligation satisfies — links to the compliance register.">
+        <AsyncMultiSelect search={linkSearch("requirements")} value={of.requirement_ids} onChange={(v) => setO("requirement_ids", v)} />
+      </Field>
+      <Field label="Policies" help="Policies that satisfy or govern this obligation.">
+        <AsyncMultiSelect search={linkSearch("policies")} value={of.policy_ids} onChange={(v) => setO("policy_ids", v)} />
+      </Field>
+      <Field label="Mitigating controls" help="Controls providing assurance over this obligation.">
+        <AsyncMultiSelect search={linkSearch("controls")} value={of.control_ids} onChange={(v) => setO("control_ids", v)} />
+      </Field>
+      <Field label="Mapped policies (notes)" help="Legacy free-text notes — the picker above is the structured link.">
         <TextArea value={of.mapped_policies} onChange={(v) => setO("mapped_policies", v)} rows={3} placeholder="KYC/CDD Policy, AML Policy…" />
       </Field>
-      <Field label="Mapped controls" help="Controls providing assurance over this obligation.">
+      <Field label="Mapped controls (notes)" help="Legacy free-text notes — the picker above is the structured link.">
         <TextArea value={of.mapped_controls} onChange={(v) => setO("mapped_controls", v)} rows={3} placeholder="Transaction monitoring, sanctions screening…" />
       </Field>
     </>
@@ -1082,22 +1120,39 @@ function RegulatoryChangeInner() {
                       </tr>
                     </thead>
                     <tbody>
-                      {detail.obligations.map((o) => (
-                        <tr key={o.id}>
-                          <td className="ref">{o.reference || "—"}</td>
-                          <td className="cell-title">{o.title}</td>
-                          <td><StatusBadge value={o.obligation_type} tone={OBL_TYPE_TONE} /></td>
-                          <td className="muted">{o.owner || "—"}</td>
-                          <td><StatusBadge value={o.status} tone={OBL_STATUS_TONE} /></td>
-                          <td className="muted">{o.due_date || "—"}</td>
-                          <td>
-                            <div style={{ display: "flex", gap: 6 }}>
-                              <button className="btn secondary sm" onClick={() => openEditObl(o)}>Edit</button>
-                              <button className="btn secondary sm" onClick={() => removeNestedObligation(o.id)}>Remove</button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
+                      {detail.obligations.map((o) => {
+                        const hasLinks = !!(o.requirements?.length || o.policies?.length || o.controls?.length);
+                        return (
+                          <Fragment key={o.id}>
+                            <tr>
+                              <td className="ref">{o.reference || "—"}</td>
+                              <td className="cell-title">{o.title}</td>
+                              <td><StatusBadge value={o.obligation_type} tone={OBL_TYPE_TONE} /></td>
+                              <td className="muted">{o.owner || "—"}</td>
+                              <td><StatusBadge value={o.status} tone={OBL_STATUS_TONE} /></td>
+                              <td className="muted">{o.due_date || "—"}</td>
+                              <td>
+                                <div style={{ display: "flex", gap: 6 }}>
+                                  <button className="btn secondary sm" onClick={() => openEditObl(o)}>Edit</button>
+                                  <button className="btn secondary sm" onClick={() => removeNestedObligation(o.id)}>Remove</button>
+                                </div>
+                              </td>
+                            </tr>
+                            {hasLinks && (
+                              <tr>
+                                <td></td>
+                                <td colSpan={6}>
+                                  <div style={{ display: "flex", gap: 22, flexWrap: "wrap", paddingBottom: 6 }}>
+                                    <RelatedChips label="Requirements" items={o.requirements} href="/compliance" />
+                                    <RelatedChips label="Policies" items={o.policies} href="/policies" />
+                                    <RelatedChips label="Controls" items={o.controls} href="/controls" />
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
                       {detail.obligations.length === 0 && (
                         <tr><td colSpan={7}><span className="muted">No obligations recorded yet.</span></td></tr>
                       )}
