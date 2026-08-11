@@ -40,6 +40,7 @@ from app.schemas.policy import (
 )
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import dual_control
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/policies", tags=["policies"])
@@ -227,6 +228,12 @@ async def update_policy(
 )
 async def publish_policy(policy_id: uuid.UUID, db: DbSession, user: CurrentUser) -> PolicyRead:
     obj = await _load(db, policy_id)
+    # Publishing is the policy's approval moment — it becomes binding on staff. The
+    # author cannot approve their own policy.
+    await dual_control.enforce_record_maker_checker(
+        db, module="policy", action="publish", entity_type="policy", entity_id=obj.id,
+        checker_id=user.id, subject="policy publication",
+    )
     obj.status = PolicyStatus.published
     obj.published_at = date.today()
     await db.flush()

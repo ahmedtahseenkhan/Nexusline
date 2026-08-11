@@ -14,6 +14,7 @@ import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import RecordPanels from "@/components/RecordPanels";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
+import ImportExport from "@/components/ImportExport";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -283,6 +284,8 @@ function ITAssetsInner() {
           <p>Supporting assets — hardware, software and network. Judged on cost and availability, with criticality inheriting from the information assets they host.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="it-assets" label="IT Assets"
+            onDone={() => { setRefreshKey((k) => k + 1); loadSummary(); }} />
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add IT asset</button>
         </div>
       </div>

@@ -14,6 +14,7 @@ import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import AsyncSelect from "@/components/AsyncSelect";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
+import ImportExport from "@/components/ImportExport";
 
 // ------------------------------------------------------------------ types
 // Server typeahead result shape (any linkable register row).
@@ -447,6 +448,7 @@ function BiaInner() {
           <p>Per-process criticality, recovery objectives (RTO/RPO/MTPD), disruption impacts and dependencies that drive business continuity planning.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="bia-assessments" label="BIAs" onDone={() => setRefreshKey((k) => k + 1)} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> New BIA
           </button>

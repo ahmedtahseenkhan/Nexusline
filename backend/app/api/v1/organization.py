@@ -25,6 +25,7 @@ from app.schemas.organization import (
     ProcessRead,
     ProcessUpdate,
 )
+from app.services import audit as audit_log
 
 router = APIRouter(tags=["organization"])
 
@@ -42,6 +43,16 @@ async def _get(db, model, obj_id: uuid.UUID, name: str):
 async def _soft_delete(db, obj) -> None:
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+
+
+async def _audit(db, user, action: str, entity_type: str, obj, label: str, changes=None) -> None:
+    """Record an org-register change. Business units, processes and the legal register
+    define the scoping used by every other module, so their edits belong in the trail."""
+    await audit_log.record(
+        db, actor=user, action=action, entity_type=entity_type, entity_id=obj.id,
+        summary=f"{action.capitalize()}d {label} '{getattr(obj, 'name', '')}'",
+        changes=changes or {},
+    )
 
 
 async def _load_many(db, model, ids):
@@ -107,6 +118,7 @@ async def create_business_unit(body: BusinessUnitCreate, db: DbSession, user: Cu
     obj.legals = await _load_many(db, Legal, legal_ids)  # assign while pending
     db.add(obj)
     await db.flush()
+    await _audit(db, user, "create", "business_unit", obj, "business unit")
     return _bu_read(await _get(db, BusinessUnit, obj.id, "Business unit"), await _bu_name_map(db))
 
 
@@ -117,7 +129,9 @@ async def get_business_unit(obj_id: uuid.UUID, db: DbSession) -> BusinessUnitRea
 
 
 @router.patch("/business-units/{obj_id}", response_model=BusinessUnitRead, dependencies=[Depends(require("org:write"))])
-async def update_business_unit(obj_id: uuid.UUID, body: BusinessUnitUpdate, db: DbSession) -> BusinessUnitRead:
+async def update_business_unit(
+    obj_id: uuid.UUID, body: BusinessUnitUpdate, db: DbSession, user: CurrentUser
+) -> BusinessUnitRead:
     obj = await _get(db, BusinessUnit, obj_id, "Business unit")
     data = body.model_dump(exclude_unset=True)
     legal_ids = data.pop("legal_ids", None)
@@ -142,12 +156,15 @@ async def update_business_unit(obj_id: uuid.UUID, body: BusinessUnitUpdate, db: 
     if legal_ids is not None:
         obj.legals = await _load_many(db, Legal, legal_ids)
     await db.flush()
+    await _audit(db, user, "update", "business_unit", obj, "business unit", data)
     return _bu_read(await _get(db, BusinessUnit, obj.id, "Business unit"), await _bu_name_map(db))
 
 
 @router.delete("/business-units/{obj_id}", status_code=204, dependencies=[Depends(require("org:write"))])
-async def delete_business_unit(obj_id: uuid.UUID, db: DbSession) -> None:
-    await _soft_delete(db, await _get(db, BusinessUnit, obj_id, "Business unit"))
+async def delete_business_unit(obj_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _get(db, BusinessUnit, obj_id, "Business unit")
+    await _audit(db, user, "delete", "business_unit", obj, "business unit")
+    await _soft_delete(db, obj)
 
 
 # ------------------------------------------------------------------- processes
@@ -241,6 +258,7 @@ async def create_process(body: ProcessCreate, db: DbSession, user: CurrentUser) 
     obj = Process(tenant_id=user.tenant_id, **data)
     db.add(obj)
     await db.flush()
+    await _audit(db, user, "create", "process", obj, "process")
     await _set_process_assets(db, obj.id, asset_ids)
     await db.flush()
     obj = await _get(db, Process, obj.id, "Process")
@@ -254,7 +272,9 @@ async def get_process(obj_id: uuid.UUID, db: DbSession) -> ProcessRead:
 
 
 @router.patch("/processes/{obj_id}", response_model=ProcessRead, dependencies=[Depends(require("org:write"))])
-async def update_process(obj_id: uuid.UUID, body: ProcessUpdate, db: DbSession) -> ProcessRead:
+async def update_process(
+    obj_id: uuid.UUID, body: ProcessUpdate, db: DbSession, user: CurrentUser
+) -> ProcessRead:
     obj = await _get(db, Process, obj_id, "Process")
     data = body.model_dump(exclude_unset=True)
     asset_ids = data.pop("asset_ids", None)
@@ -262,14 +282,17 @@ async def update_process(obj_id: uuid.UUID, body: ProcessUpdate, db: DbSession) 
         setattr(obj, f, v)
     await db.flush()
     await _set_process_assets(db, obj.id, asset_ids)
+    await _audit(db, user, "update", "process", obj, "process", data)
     await db.flush()
     obj = await _get(db, Process, obj.id, "Process")
     return _process_read(obj, await _process_assets_map(db, [obj.id]))
 
 
 @router.delete("/processes/{obj_id}", status_code=204, dependencies=[Depends(require("org:write"))])
-async def delete_process(obj_id: uuid.UUID, db: DbSession) -> None:
-    await _soft_delete(db, await _get(db, Process, obj_id, "Process"))
+async def delete_process(obj_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _get(db, Process, obj_id, "Process")
+    await _audit(db, user, "delete", "process", obj, "process")
+    await _soft_delete(db, obj)
 
 
 # ---------------------------------------------------------------- legal register
@@ -354,6 +377,7 @@ async def create_legal(body: LegalCreate, db: DbSession, user: CurrentUser) -> L
     db.add(obj)
     await db.flush()
     await _set_legal_assets(db, obj.id, asset_ids)
+    await _audit(db, user, "create", "legal", obj, "legal register entry")
     await db.flush()
     obj = await _get(db, Legal, obj.id, "Legal")
     return _legal_read(obj, await _legal_assets_map(db, [obj.id]))
@@ -366,7 +390,9 @@ async def get_legal(obj_id: uuid.UUID, db: DbSession) -> LegalRead:
 
 
 @router.patch("/legals/{obj_id}", response_model=LegalRead, dependencies=[Depends(require("org:write"))])
-async def update_legal(obj_id: uuid.UUID, body: LegalUpdate, db: DbSession) -> LegalRead:
+async def update_legal(
+    obj_id: uuid.UUID, body: LegalUpdate, db: DbSession, user: CurrentUser
+) -> LegalRead:
     obj = await _get(db, Legal, obj_id, "Legal")
     data = body.model_dump(exclude_unset=True)
     business_unit_ids = data.pop("business_unit_ids", None)
@@ -377,11 +403,14 @@ async def update_legal(obj_id: uuid.UUID, body: LegalUpdate, db: DbSession) -> L
         obj.business_units = await _load_many(db, BusinessUnit, business_unit_ids)
     await db.flush()
     await _set_legal_assets(db, obj.id, asset_ids)
+    await _audit(db, user, "update", "legal", obj, "legal register entry", data)
     await db.flush()
     obj = await _get(db, Legal, obj.id, "Legal")
     return _legal_read(obj, await _legal_assets_map(db, [obj.id]))
 
 
 @router.delete("/legals/{obj_id}", status_code=204, dependencies=[Depends(require("org:write"))])
-async def delete_legal(obj_id: uuid.UUID, db: DbSession) -> None:
-    await _soft_delete(db, await _get(db, Legal, obj_id, "Legal"))
+async def delete_legal(obj_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _get(db, Legal, obj_id, "Legal")
+    await _audit(db, user, "delete", "legal", obj, "legal register entry")
+    await _soft_delete(db, obj)

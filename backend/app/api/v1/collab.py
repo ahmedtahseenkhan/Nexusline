@@ -1,7 +1,15 @@
 """Collaboration API — comments, tags and attachments for any record.
 
-All endpoints are authentication-only (any member can collaborate). Comments and
-attachments may be removed by their author or an admin (``role:write``).
+Access follows the record, not the panel: reading a record's collaboration bundle needs
+the owning module's *read* permission, and every write (comment, attachment, file, tag)
+needs its *write* permission. Without that, a read-only user could annotate, tag and
+attach files to records they may only view — a segregation-of-duties break in a bank.
+The ``entity_type`` is validated against :mod:`app.services.entity_types`, so a typo or a
+crafted request can no longer create rows pointing at a record type that does not exist.
+
+Comments and attachments may additionally be removed by their author or an admin
+(``role:write``). To let read-only reviewers comment, swap ``require_write`` for
+``require_read`` in :func:`add_comment` — the one place that decision lives.
 """
 from __future__ import annotations
 
@@ -25,7 +33,7 @@ from app.schemas.collab import (
     TagCreate,
     TagRead,
 )
-from app.services import storage
+from app.services import entity_types, storage
 
 router = APIRouter(prefix="/collab", tags=["collaboration"])
 
@@ -66,6 +74,7 @@ async def create_tag(body: TagCreate, db: DbSession, user: CurrentUser) -> TagRe
 
 @router.get("/{entity_type}/{entity_id}", response_model=CollabBundle)
 async def get_bundle(entity_type: str, entity_id: uuid.UUID, db: DbSession, user: CurrentUser) -> CollabBundle:
+    entity_types.require_read(user, entity_type)
     comments = (
         await db.scalars(
             select(Comment)
@@ -114,6 +123,7 @@ async def get_bundle(entity_type: str, entity_id: uuid.UUID, db: DbSession, user
 async def add_comment(
     entity_type: str, entity_id: uuid.UUID, body: CommentCreate, db: DbSession, user: CurrentUser
 ) -> CommentRead:
+    entity_types.require_write(user, entity_type)
     c = Comment(
         tenant_id=user.tenant_id,
         entity_type=entity_type,
@@ -144,6 +154,7 @@ async def delete_comment(comment_id: uuid.UUID, db: DbSession, user: CurrentUser
 async def add_attachment(
     entity_type: str, entity_id: uuid.UUID, body: AttachmentCreate, db: DbSession, user: CurrentUser
 ) -> AttachmentRead:
+    entity_types.require_write(user, entity_type)
     a = Attachment(
         tenant_id=user.tenant_id,
         entity_type=entity_type,
@@ -177,6 +188,7 @@ async def upload_file(
     file: UploadFile = File(...),
 ) -> StoredFileRead:
     """Upload a binary file (evidence, screenshot, PDF…) and attach it to a record."""
+    entity_types.require_write(user, entity_type)
     blob = await storage.save_upload(user.tenant_id, file)
     sf = StoredFile(
         tenant_id=user.tenant_id,
@@ -229,6 +241,7 @@ async def delete_file(file_id: uuid.UUID, db: DbSession, user: CurrentUser) -> N
 async def assign_tag(
     entity_type: str, entity_id: uuid.UUID, body: TagAssign, db: DbSession, user: CurrentUser
 ) -> list[TagRead]:
+    entity_types.require_write(user, entity_type)
     tag_id = body.tag_id
     if tag_id is None:
         if not body.name:
@@ -254,8 +267,9 @@ async def assign_tag(
 
 @router.delete("/{entity_type}/{entity_id}/tags/{tag_id}", status_code=204)
 async def unassign_tag(
-    entity_type: str, entity_id: uuid.UUID, tag_id: uuid.UUID, db: DbSession, _: CurrentUser
+    entity_type: str, entity_id: uuid.UUID, tag_id: uuid.UUID, db: DbSession, user: CurrentUser
 ) -> None:
+    entity_types.require_write(user, entity_type)
     et = await db.scalar(
         select(EntityTag).where(
             EntityTag.tag_id == tag_id,

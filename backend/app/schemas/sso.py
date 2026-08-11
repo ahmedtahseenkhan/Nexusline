@@ -20,19 +20,27 @@ class SsoConfigUpdate(BaseModel):
 
 
 class SsoConfigRead(BaseModel):
+    """The tenant's SSO config as the admin screen sees it.
+
+    Every field carries the same default as its ``SsoConfig`` column. Column defaults
+    are applied by SQLAlchemy at INSERT, so an *unsaved* ``SsoConfig()`` — what the GET
+    returns before SSO has ever been configured — has ``None`` in every attribute.
+    Without these defaults that first page load fails validation and 500s.
+    """
+
     model_config = ConfigDict(from_attributes=True)
-    provider: str
-    enabled: bool
-    client_id: str
-    authorize_url: str
-    token_url: str
-    userinfo_url: str
-    scopes: str
-    email_claim: str
-    name_claim: str
-    jit_provisioning: bool
-    default_role: str
-    allowed_domains: str
+    provider: str = "oidc"
+    enabled: bool = False
+    client_id: str = ""
+    authorize_url: str = ""
+    token_url: str = ""
+    userinfo_url: str = ""
+    scopes: str = "openid email profile"
+    email_claim: str = "email"
+    name_claim: str = "name"
+    jit_provisioning: bool = True
+    default_role: str = "Viewer"
+    allowed_domains: str = ""
     client_secret_set: bool = False
 
 

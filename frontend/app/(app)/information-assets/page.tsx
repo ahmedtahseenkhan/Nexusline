@@ -14,6 +14,7 @@ import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import RecordPanels from "@/components/RecordPanels";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
+import ImportExport from "@/components/ImportExport";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -340,6 +341,8 @@ function InformationAssetsInner() {
           <p>Primary assets — data and applications. Criticality is business value, set by the business owner, with CIA classification, handling labels and owner self-assessment.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="information-assets" label="Information Assets"
+            onDone={() => { setRefreshKey((k) => k + 1); loadSummary(); }} />
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add information asset</button>
         </div>
       </div>

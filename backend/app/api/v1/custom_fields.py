@@ -18,6 +18,8 @@ from app.schemas.custom_field import (
     CustomFieldValueItem,
     CustomFieldValuesUpdate,
 )
+from app.services import audit as audit_log
+from app.services import entity_types
 
 router = APIRouter(prefix="/custom-fields", tags=["custom-fields"])
 
@@ -77,26 +79,45 @@ async def create_field(body: CustomFieldCreate, db: DbSession, user: CurrentUser
     db.add(obj)
     await db.flush()
     await db.refresh(obj)
+    await audit_log.record(
+        db, actor=user, action="create", entity_type="custom_field", entity_id=obj.id,
+        summary=f"Added custom field '{obj.label}' to {obj.model}",
+    )
     return CustomFieldRead.model_validate(obj)
 
 
 @router.patch("/{field_id}", response_model=CustomFieldRead, dependencies=[Depends(require("customfield:manage"))])
-async def update_field(field_id: uuid.UUID, body: CustomFieldUpdate, db: DbSession) -> CustomFieldRead:
+async def update_field(
+    field_id: uuid.UUID, body: CustomFieldUpdate, db: DbSession, user: CurrentUser
+) -> CustomFieldRead:
     obj = await _load(db, field_id)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    changes = body.model_dump(exclude_unset=True)
+    for k, v in changes.items():
         setattr(obj, k, v)
     await db.flush()
     await db.refresh(obj)
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="custom_field", entity_id=obj.id,
+        summary=f"Updated custom field '{obj.label}' on {obj.model}", changes=changes,
+    )
     return CustomFieldRead.model_validate(obj)
 
 
 @router.delete("/{field_id}", status_code=204, dependencies=[Depends(require("customfield:manage"))])
-async def delete_field(field_id: uuid.UUID, db: DbSession) -> None:
-    await db.delete(await _load(db, field_id))
+async def delete_field(field_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _load(db, field_id)
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="custom_field", entity_id=obj.id,
+        summary=f"Deleted custom field '{obj.label}' from {obj.model}",
+    )
+    await db.delete(obj)
 
 
 @router.get("/{model}/values/{entity_id}", response_model=list[CustomFieldValueItem])
-async def get_values(model: str, entity_id: uuid.UUID, db: DbSession, _: CurrentUser) -> list[CustomFieldValueItem]:
+async def get_values(
+    model: str, entity_id: uuid.UUID, db: DbSession, user: CurrentUser
+) -> list[CustomFieldValueItem]:
+    entity_types.require_read(user, model)
     fields = (
         await db.scalars(
             select(CustomField)
@@ -126,6 +147,9 @@ async def get_values(model: str, entity_id: uuid.UUID, db: DbSession, _: Current
 async def set_values(
     model: str, entity_id: uuid.UUID, body: CustomFieldValuesUpdate, db: DbSession, user: CurrentUser
 ) -> list[CustomFieldValueItem]:
+    # Custom-field values are record data: writing them needs the owning module's write
+    # permission, and the model name must be a real entity type.
+    entity_types.require_write(user, model)
     # Only accept values for fields that belong to this model (RLS already scopes by tenant).
     valid_ids = set(
         (await db.scalars(select(CustomField.id).where(CustomField.model == model))).all()

@@ -15,6 +15,7 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import ImportExport from "@/components/ImportExport";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -917,14 +918,20 @@ function RegulatoryChangeInner() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {section === "changes" && (
-            <button className="btn" onClick={openNewChange}>
-              <IconPlus width={16} height={16} /> New change
-            </button>
+            <>
+              <ImportExport resource="regulatory-changes" label="Changes" onDone={() => setRefreshKey((k) => k + 1)} />
+              <button className="btn" onClick={openNewChange}>
+                <IconPlus width={16} height={16} /> New change
+              </button>
+            </>
           )}
           {section === "obligations" && (
-            <button className="btn" onClick={openNewObl}>
-              <IconPlus width={16} height={16} /> New obligation
-            </button>
+            <>
+              <ImportExport resource="obligations" label="Obligations" onDone={() => setRefreshKey((k) => k + 1)} />
+              <button className="btn" onClick={openNewObl}>
+                <IconPlus width={16} height={16} /> New obligation
+              </button>
+            </>
           )}
           {section === "returns" && (
             <button className="btn" onClick={openNewReturn}>

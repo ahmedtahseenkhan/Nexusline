@@ -11,6 +11,7 @@ import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
+import ImportExport from "@/components/ImportExport";
 
 // ------------------------------------------------------------------ local types
 interface ModelValidation {
@@ -431,6 +432,7 @@ function ModelRiskInner() {
           <p>Model inventory (IFRS 9 ECL, AML scoring, credit scoring, AI/ML) with materiality tiering and independent validation cycles (SR 11-7 / ISO 42001).</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="models" label="Models" onDone={() => setRefreshKey((k) => k + 1)} />
           <button className="btn" onClick={openNewModel}>Add model</button>
         </div>
       </div>

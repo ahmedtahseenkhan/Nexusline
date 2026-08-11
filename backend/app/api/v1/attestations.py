@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.core.deps import CurrentUser, DbSession
 from app.models.attestation import Attestation
 from app.schemas.attestation import AttestationCreate, AttestationRead, AttestationStatus
-from app.services import audit
+from app.services import audit, entity_types
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/attestations", tags=["attestations"])
@@ -47,7 +47,10 @@ def _bundle(rows: list[Attestation]) -> AttestationStatus:
 
 
 @router.get("/{entity_type}/{entity_id}", response_model=AttestationStatus)
-async def get_status(entity_type: str, entity_id: uuid.UUID, db: DbSession, _: CurrentUser) -> AttestationStatus:
+async def get_status(
+    entity_type: str, entity_id: uuid.UUID, db: DbSession, user: CurrentUser
+) -> AttestationStatus:
+    entity_types.require_read(user, entity_type)
     return _bundle(await _history(db, entity_type, entity_id))
 
 
@@ -55,6 +58,9 @@ async def get_status(entity_type: str, entity_id: uuid.UUID, db: DbSession, _: C
 async def attest(
     entity_type: str, entity_id: uuid.UUID, body: AttestationCreate, db: DbSession, user: CurrentUser
 ) -> AttestationStatus:
+    # Signing off a record's review cycle is a governance act on that record: it needs
+    # the owning module's write permission, not merely a session.
+    entity_types.require_write(user, entity_type)
     today = date.today()
     row = Attestation(
         tenant_id=user.tenant_id,

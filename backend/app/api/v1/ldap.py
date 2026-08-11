@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.ldap_config import LdapConfig
 from app.schemas.auth import LdapConfigRead, LdapConfigUpdate
+from app.services import audit as audit_log
 
 router = APIRouter(prefix="/auth/ldap", tags=["auth"])
 
@@ -48,4 +49,15 @@ async def put_ldap_config(body: LdapConfigUpdate, db: DbSession, user: CurrentUs
         cfg.bind_password = body.bind_password
 
     await db.flush()
+    # Directory configuration decides who can authenticate at all — an audited change.
+    # The bind password is never written to the trail, only the fact that it changed.
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="ldap_config", entity_id=cfg.id,
+        summary=f"Updated LDAP configuration ({'enabled' if cfg.enabled else 'disabled'}, {cfg.host or 'no host'})",
+        changes={
+            "enabled": cfg.enabled, "host": cfg.host, "port": cfg.port,
+            "base_dn": cfg.base_dn, "default_role": cfg.default_role,
+            "bind_password_changed": body.bind_password is not None,
+        },
+    )
     return _read(cfg)

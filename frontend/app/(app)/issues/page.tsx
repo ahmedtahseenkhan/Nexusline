@@ -12,6 +12,7 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import ImportExport from "@/components/ImportExport";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -445,6 +446,7 @@ function IssuesInner() {
           <p>One unified register of findings and corrective/preventive actions (CAPA) aggregated from audit, compliance, RCSA, Shariah, assessments, incidents and regulatory inspections.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="issues" label="Issues" onDone={() => setRefreshKey((k) => k + 1)} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> New issue
           </button>

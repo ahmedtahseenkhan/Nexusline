@@ -42,6 +42,7 @@ from app.schemas.auth import (
     TokenResponse,
 )
 from app.schemas.user import UserRead
+from app.services import audit as audit_log
 from app.services import ldap_auth, password_policy, totp
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -96,21 +97,38 @@ async def register_org(body: RegisterOrgRequest) -> TokenResponse:
             admin_full_name=body.admin_full_name,
         )
         admin.password_changed_at = datetime.now(timezone.utc)
+        # The tenant GUC was switched to the new org inside create_organization, so this
+        # first-ever audit row lands under the right tenant.
+        await _audit_self(
+            db, admin, "org_registered",
+            f"Organization '{body.org_name}' registered with admin {body.admin_email}",
+            slug=body.slug,
+        )
         return _token_response(admin, tenant.id)
 
 
 # ---------------------------------------------------------------------- login ---
 @dataclass
 class _Outcome:
+    """Result of an auth flow, deferred so the transaction commits before we raise.
+
+    Audit rows written during a *failed* attempt would be rolled back if the handler
+    raised inside the session block, so every flow returns its error instead.
+    """
+
     error: HTTPException | None = None
     result: LoginResult | None = None
+    token: TokenResponse | None = None
 
 
-def _register_failed(user: User) -> None:
+def _register_failed(user: User) -> bool:
+    """Count the failure; return True if *this* attempt tripped the lockout."""
     user.failed_login_attempts += 1
     if user.failed_login_attempts >= settings.max_failed_logins:
         user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=settings.lockout_minutes)
         user.failed_login_attempts = 0
+        return True
+    return False
 
 
 def _reset_lockout(user: User) -> None:
@@ -145,14 +163,27 @@ async def _do_login(db, body: LoginRequest) -> _Outcome:
         select(Tenant).where(Tenant.slug == body.tenant_slug, Tenant.is_active.is_(True))
     )
     if tenant is None:
+        # No tenant scope to attribute the attempt to; nothing can be recorded under RLS.
         return _Outcome(error=_INVALID)
     await set_session_tenant(db, tenant.id)
 
     ldap_cfg = await db.scalar(select(LdapConfig).where(LdapConfig.enabled.is_(True)))
     user = await db.scalar(select(User).where(User.email == body.email))
 
+    async def _audit(action: str, summary: str, **changes) -> None:
+        await audit_log.record_auth(
+            db,
+            tenant_id=tenant.id,
+            actor_id=user.id if user is not None else None,
+            actor_email=body.email,
+            action=action,
+            summary=summary,
+            changes=changes,
+        )
+
     now = datetime.now(timezone.utc)
     if user is not None and user.locked_until is not None and user.locked_until > now:
+        await _audit("login_failed", f"Login refused for {body.email}: account locked", reason="locked")
         return _Outcome(
             error=HTTPException(
                 status_code=status.HTTP_423_LOCKED,
@@ -165,26 +196,44 @@ async def _do_login(db, body: LoginRequest) -> _Outcome:
         if verify_password(body.password, user.hashed_password):
             authed = user
         else:
-            _register_failed(user)
+            now_locked = _register_failed(user)
+            await _audit(
+                "login_failed",
+                f"Failed login for {body.email}: bad password",
+                reason="bad_password",
+                method="local",
+                locked=now_locked,
+            )
+            if now_locked:
+                await _audit(
+                    "lockout",
+                    f"{body.email} locked out after {settings.max_failed_logins} failed attempts",
+                    until=user.locked_until.isoformat(),
+                )
             return _Outcome(error=_INVALID)
     elif ldap_cfg is not None:
         try:
             profile = ldap_auth.authenticate(ldap_cfg, body.email, body.password)
         except HTTPException as exc:
+            await _audit("login_failed", f"Directory login error for {body.email}", reason="ldap_error", method="ldap")
             return _Outcome(error=exc)
         if profile is None:
             if user is not None:
                 _register_failed(user)
+            await _audit("login_failed", f"Failed directory login for {body.email}", reason="rejected", method="ldap")
             return _Outcome(error=_INVALID)
         authed = await _jit_upsert(db, tenant.id, profile, ldap_cfg.default_role, existing=user)
     else:
+        await _audit("login_failed", f"Failed login for {body.email}: unknown account", reason="unknown_account")
         return _Outcome(error=_INVALID)
 
     if not authed.is_active:
+        await _audit("login_failed", f"Login refused for {body.email}: account disabled", reason="inactive")
         return _Outcome(error=_INVALID)
     _reset_lockout(authed)
 
     if authed.auth_source == "local" and password_policy.is_expired(authed.password_changed_at):
+        await _audit("login_failed", f"Login refused for {body.email}: password expired", reason="password_expired")
         return _Outcome(
             error=HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -193,9 +242,12 @@ async def _do_login(db, body: LoginRequest) -> _Outcome:
         )
     await db.flush()
 
+    method = "ldap" if authed.auth_source == "ldap" else "local"
     if authed.mfa_enabled:
+        await _audit("login_challenged", f"{body.email} passed password, MFA required", method=method)
         challenge = create_mfa_challenge(str(authed.id), str(tenant.id))
         return _Outcome(result=LoginResult(mfa_required=True, challenge_token=challenge))
+    await _audit("login", f"{body.email} signed in", method=method, mfa=False)
     return _Outcome(result=_login_result(authed, tenant.id))
 
 
@@ -210,6 +262,31 @@ async def login(body: LoginRequest) -> LoginResult:
 
 
 # ------------------------------------------------------------------------ MFA ---
+async def _do_mfa_verify(db, data: dict, code: str) -> _Outcome:
+    user = await db.scalar(select(User).where(User.id == uuid.UUID(data["sub"])))
+    if user is None or not user.is_active or not user.mfa_enabled:
+        return _Outcome(error=_INVALID)
+
+    async def _audit(action: str, summary: str, **changes) -> None:
+        await audit_log.record_auth(
+            db,
+            tenant_id=user.tenant_id,
+            actor_id=user.id,
+            actor_email=user.email,
+            action=action,
+            summary=summary,
+            changes=changes,
+        )
+
+    if not totp.verify(user.mfa_secret, code):
+        await _audit("mfa_failed", f"Invalid MFA code for {user.email}")
+        return _Outcome(
+            error=HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid MFA code")
+        )
+    await _audit("login", f"{user.email} signed in", method=user.auth_source, mfa=True)
+    return _Outcome(token=_token_response(user, data["tid"]))
+
+
 @router.post("/mfa/verify", response_model=TokenResponse, summary="Complete MFA and get a token")
 async def mfa_verify(body: MfaVerifyRequest) -> TokenResponse:
     try:
@@ -217,12 +294,24 @@ async def mfa_verify(body: MfaVerifyRequest) -> TokenResponse:
     except jwt.PyJWTError as exc:
         raise _INVALID from exc
     async with tenant_session(data["tid"]) as db:
-        user = await db.scalar(select(User).where(User.id == uuid.UUID(data["sub"])))
-        if user is None or not user.is_active or not user.mfa_enabled:
-            raise _INVALID
-        if not totp.verify(user.mfa_secret, body.code):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid MFA code")
-        return _token_response(user, data["tid"])
+        outcome = await _do_mfa_verify(db, data, body.code)
+    # Transaction is committed here — the failure record persists before we raise.
+    if outcome.error is not None:
+        raise outcome.error
+    return outcome.token  # type: ignore[return-value]
+
+
+async def _audit_self(db, user: User, action: str, summary: str, **changes) -> None:
+    """Record a self-service security event for an already-authenticated user."""
+    await audit_log.record_auth(
+        db,
+        tenant_id=user.tenant_id,
+        actor_id=user.id,
+        actor_email=user.email,
+        action=action,
+        summary=summary,
+        changes=changes,
+    )
 
 
 @router.post("/mfa/setup", response_model=MfaSetupResponse, summary="Begin TOTP enrolment")
@@ -244,6 +333,7 @@ async def mfa_activate(body: MfaActivateRequest, db: DbSession, user: CurrentUse
     if not totp.verify(user.mfa_secret, body.code):
         raise HTTPException(status_code=400, detail="Invalid code — check your authenticator app")
     user.mfa_enabled = True
+    await _audit_self(db, user, "mfa_enabled", f"{user.email} enabled multi-factor authentication")
     await db.flush()
     return UserRead.model_validate(user)
 
@@ -254,6 +344,7 @@ async def mfa_disable(body: MfaDisableRequest, db: DbSession, user: CurrentUser)
         raise HTTPException(status_code=400, detail="A valid MFA code is required to disable MFA")
     user.mfa_enabled = False
     user.mfa_secret = ""
+    await _audit_self(db, user, "mfa_disabled", f"{user.email} disabled multi-factor authentication")
     await db.flush()
     return UserRead.model_validate(user)
 
@@ -271,6 +362,7 @@ async def change_password(body: ChangePasswordRequest, db: DbSession, user: Curr
     password_policy.validate_password(body.new_password)
     user.hashed_password = hash_password(body.new_password)
     user.password_changed_at = datetime.now(timezone.utc)
+    await _audit_self(db, user, "password_changed", f"{user.email} changed their password")
     await db.flush()
 
 

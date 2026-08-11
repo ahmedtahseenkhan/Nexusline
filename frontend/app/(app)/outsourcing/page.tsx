@@ -12,6 +12,7 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import ImportExport from "@/components/ImportExport";
 
 // ------------------------------------------------------------------ local types
 interface OutsourcingReview {
@@ -548,6 +549,7 @@ function OutsourcingInner() {
           <p>The SBP outsourcing / cloud regulatory register — materiality, cloud model and data offshoring, SBP approval (NOC) tracking, contract windows, tested exit plans and concentration risk.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ImportExport resource="outsourcing-arrangements" label="Arrangements" onDone={() => setRefreshKey((k) => k + 1)} />
           <button className="btn" onClick={openNewArr}>
             <IconPlus width={16} height={16} /> New arrangement
           </button>

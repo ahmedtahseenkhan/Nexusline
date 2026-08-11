@@ -303,6 +303,11 @@ For diagnostics without granting remote access (see `docs/support-model.md`):
 - [ ] Confirm Postgres is **not** published to the host (default in prod compose).
 - [ ] Enable banking controls as required: `MFA_REQUIRED=true`,
       `ENFORCE_SEGREGATION_OF_DUTIES=true`, `LDAP_ENABLED` per directory setup.
+- [ ] Provision at least **two** users with approval rights before go-live — with
+      segregation of duties on, eight decisions (risk acceptance, exception approval,
+      control audit, policy publication, SAR filing, charity approval and release,
+      authority-matrix amendment) refuse when the maker is also the checker. A
+      single-operator install cannot complete them.
 - [ ] If licensed: `ENFORCE_LICENSE=true` with key material in `deploy/`.
 - [ ] Schedule off-host backups and periodically test a restore.
 ```

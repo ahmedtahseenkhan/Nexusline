@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import String, Uuid
+from sqlalchemy import Index, String, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,6 +12,12 @@ from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMix
 
 class AuditLog(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     __tablename__ = "audit_logs"
+
+    # Reading the trail *by record* — the Activity Log's entity filter, and the
+    # maker lookup that runtime four-eyes performs on every sensitive decision.
+    __table_args__ = (
+        Index("ix_audit_logs_entity", "entity_type", "entity_id", "created_at"),
+    )
 
     actor_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     actor_email: Mapped[str] = mapped_column(String(255), default="")

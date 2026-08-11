@@ -18,6 +18,7 @@ from app.schemas.webhook import (
     WebhookRead,
     WebhookUpdate,
 )
+from app.services import audit as audit_log
 from app.services import webhooks as wh_service
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"], dependencies=[Depends(require("integration:manage"))])
@@ -66,22 +67,39 @@ async def create_webhook(body: WebhookCreate, db: DbSession, user: CurrentUser) 
     db.add(obj)
     await db.flush()
     await db.refresh(obj)
+    # A webhook streams record data off-platform, so its lifecycle is audited.
+    await audit_log.record(
+        db, actor=user, action="create", entity_type="webhook", entity_id=obj.id,
+        summary=f"Created webhook '{obj.name}' → {obj.url}", changes={"events": obj.events},
+    )
     return WebhookRead.model_validate(obj)
 
 
 @router.patch("/{webhook_id}", response_model=WebhookRead)
-async def update_webhook(webhook_id: uuid.UUID, body: WebhookUpdate, db: DbSession) -> WebhookRead:
+async def update_webhook(
+    webhook_id: uuid.UUID, body: WebhookUpdate, db: DbSession, user: CurrentUser
+) -> WebhookRead:
     obj = await _load(db, webhook_id)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    changes = body.model_dump(exclude_unset=True)
+    for k, v in changes.items():
         setattr(obj, k, v)
     await db.flush()
     await db.refresh(obj)
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="webhook", entity_id=obj.id,
+        summary=f"Updated webhook '{obj.name}'", changes=changes,
+    )
     return WebhookRead.model_validate(obj)
 
 
 @router.delete("/{webhook_id}", status_code=204)
-async def delete_webhook(webhook_id: uuid.UUID, db: DbSession) -> None:
-    await db.delete(await _load(db, webhook_id))
+async def delete_webhook(webhook_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _load(db, webhook_id)
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="webhook", entity_id=obj.id,
+        summary=f"Deleted webhook '{obj.name}' → {obj.url}",
+    )
+    await db.delete(obj)
 
 
 @router.get("/{webhook_id}/deliveries", response_model=list[WebhookDeliveryRead])

@@ -18,6 +18,7 @@ from app.schemas.status_rule import (
     StatusRuleRead,
     StatusRuleUpdate,
 )
+from app.services import audit as audit_log
 from app.services import status_rules as engine
 
 router = APIRouter(prefix="/status-rules", tags=["status-rules"])
@@ -95,11 +96,18 @@ async def create_rule(body: StatusRuleCreate, db: DbSession, user: CurrentUser) 
     db.add(obj)
     await db.flush()
     await db.refresh(obj)
+    # Status rules drive how records are labelled across a register — an audited change.
+    await audit_log.record(
+        db, actor=user, action="create", entity_type="status_rule", entity_id=obj.id,
+        summary=f"Added status rule '{obj.label}' on {obj.model}",
+    )
     return StatusRuleRead.model_validate(obj)
 
 
 @router.patch("/{rule_id}", response_model=StatusRuleRead, dependencies=[Depends(require("automation:manage"))])
-async def update_rule(rule_id: uuid.UUID, body: StatusRuleUpdate, db: DbSession) -> StatusRuleRead:
+async def update_rule(
+    rule_id: uuid.UUID, body: StatusRuleUpdate, db: DbSession, user: CurrentUser
+) -> StatusRuleRead:
     obj = await _load(db, rule_id)
     data = body.model_dump(exclude_unset=True)
     # Re-validate the same way create does — otherwise a PATCH can persist an invalid
@@ -112,12 +120,21 @@ async def update_rule(rule_id: uuid.UUID, body: StatusRuleUpdate, db: DbSession)
         setattr(obj, k, v)
     await db.flush()
     await db.refresh(obj)
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="status_rule", entity_id=obj.id,
+        summary=f"Updated status rule '{obj.label}' on {obj.model}", changes=data,
+    )
     return StatusRuleRead.model_validate(obj)
 
 
 @router.delete("/{rule_id}", status_code=204, dependencies=[Depends(require("automation:manage"))])
-async def delete_rule(rule_id: uuid.UUID, db: DbSession) -> None:
-    await db.delete(await _load(db, rule_id))
+async def delete_rule(rule_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _load(db, rule_id)
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="status_rule", entity_id=obj.id,
+        summary=f"Deleted status rule '{obj.label}' from {obj.model}",
+    )
+    await db.delete(obj)
 
 
 @router.get("/evaluate/{model}/{entity_id}", response_model=list[StatusLabel])

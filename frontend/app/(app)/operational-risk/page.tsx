@@ -23,6 +23,7 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import ImportExport from "@/components/ImportExport";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -820,19 +821,28 @@ function OperationalRiskInner() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {section === "rcsa" && (
-            <button className="btn" onClick={openNewRcsa}>
-              <IconPlus width={16} height={16} /> New RCSA
-            </button>
+            <>
+              <ImportExport resource="rcsa-assessments" label="RCSA" onDone={() => setRefreshKey((k) => k + 1)} />
+              <button className="btn" onClick={openNewRcsa}>
+                <IconPlus width={16} height={16} /> New RCSA
+              </button>
+            </>
           )}
           {section === "kris" && (
-            <button className="btn" onClick={openNewKri}>
-              <IconPlus width={16} height={16} /> New KRI
-            </button>
+            <>
+              <ImportExport resource="kris" label="KRIs" onDone={() => setRefreshKey((k) => k + 1)} />
+              <button className="btn" onClick={openNewKri}>
+                <IconPlus width={16} height={16} /> New KRI
+              </button>
+            </>
           )}
           {section === "losses" && (
-            <button className="btn" onClick={openNewLoss}>
-              <IconPlus width={16} height={16} /> New loss event
-            </button>
+            <>
+              <ImportExport resource="loss-events" label="Loss events" onDone={() => setRefreshKey((k) => k + 1)} />
+              <button className="btn" onClick={openNewLoss}>
+                <IconPlus width={16} height={16} /> New loss event
+              </button>
+            </>
           )}
         </div>
       </div>
