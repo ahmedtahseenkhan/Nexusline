@@ -55,6 +55,8 @@ type Requirement = {
   domain: string;
   audit_questionnaire: string;
   status: string;
+  /** Why this requirement is a gap, or "" when it is not one. */
+  gap_reason: string;
   treatment: string | null;
   owner: string;
   efficacy: number | null;
@@ -358,6 +360,15 @@ function ComplianceInner() {
     );
 
   // DataTable fetcher — paginated/searchable/sortable requirements for the selected framework
+  /* Gaps are a *view* of the requirements table, not a second table below it. Rendering
+     the same 93 requirements twice is what made this page thousands of pixels tall, and
+     an unpaginated copy cannot be searched, sorted or paged. */
+  const [view, setView] = useState<"all" | "gaps" | "addressed">("all");
+  /* Framework-level panels (attestation cadence, comments, files) belong to the
+     framework record, not to the requirements list — collapsed so they stop competing
+     with the table for the top of the page. */
+  const [showFrameworkPanels, setShowFrameworkPanels] = useState(false);
+
   const fetchRequirements = useCallback(
     (qs: string): Promise<PagedList<Requirement>> => {
       if (!selected) return Promise.resolve({ items: [], total: 0, limit: 0, offset: 0 });
@@ -730,6 +741,7 @@ function ComplianceInner() {
     { key: "domain", header: "Domain", sortable: true, render: (r) => <span className="muted">{r.domain || "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (r) => <ComplianceBadge value={r.status} /> },
     { key: "covered", header: "Covered", render: (r) => (r.is_covered ? <Badge tone="low" plain>Yes</Badge> : <Badge tone="high" plain>No</Badge>) },
+    { key: "gap_reason", header: "Why it's a gap", render: (r) => (r.gap_reason ? <span className="muted" style={{ fontSize: 12.5 }}>{r.gap_reason}</span> : <span className="muted">—</span>) },
     { key: "controls", header: "Controls", align: "center", render: (r) => <span className="muted">{r.controls.length}</span> },
     { key: "policies", header: "Policies", align: "center", render: (r) => <span className="muted">{r.policies.length}</span> },
     { key: "evidence", header: "Evidence", align: "center", render: (r) => (r.evidence_count > 0 ? <Badge tone="low" plain>{r.evidence_count}</Badge> : <span className="muted">0</span>) },
@@ -828,6 +840,20 @@ function ComplianceInner() {
           defaultSort={{ by: "reference", dir: "asc" }}
           emptyMessage="No requirements yet. Add the first requirement to this framework."
           refreshKey={refreshKey}
+          filters={view === "all" ? {} : { coverage: view }}
+          toolbarRight={
+            <div className="seg">
+              {([
+                ["all", "All"],
+                ["gaps", `Gaps${gap ? ` (${gap.gaps.length})` : ""}`],
+                ["addressed", "Addressed"],
+              ] as const).map(([key, label]) => (
+                <button key={key} className={view === key ? "on" : ""} onClick={() => setView(key)} type="button">
+                  {label}
+                </button>
+              ))}
+            </div>
+          }
         />
       ) : (
         <div className="card">
@@ -839,38 +865,27 @@ function ComplianceInner() {
         </div>
       )}
 
-      {gap && gap.gaps.length > 0 && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-head">
-            <h3>Gap analysis</h3>
-            <span className="sub">{gap.gaps.length} open</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Ref</th>
-                  <th>Requirement</th>
-                  <th>Status</th>
-                  <th>Why it&apos;s a gap</th>
-                </tr>
-              </thead>
-              <tbody>
-                {gap.gaps.map((g) => (
-                  <tr key={g.id} style={{ cursor: "pointer" }} onClick={() => setOpenId(g.id)}>
-                    <td className="ref">{g.reference}</td>
-                    <td className="cell-title">{g.title}</td>
-                    <td><ComplianceBadge value={g.status} /></td>
-                    <td className="muted">{g.reason}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      {selectedFw && (
+        <div style={{ marginTop: 16 }}>
+          <button
+            className="btn secondary sm"
+            type="button"
+            onClick={() => setShowFrameworkPanels((v) => !v)}
+          >
+            {showFrameworkPanels ? "Hide" : "Show"} framework details — review cadence, files and comments
+          </button>
+          {showFrameworkPanels && (
+            <div style={{ marginTop: 12 }}>
+              <p className="muted" style={{ fontSize: 12.5, lineHeight: 1.6, marginTop: 0 }}>
+                These apply to <b>{selectedFw.name}</b> as a whole, not to any one requirement:
+                the periodic attestation that its status is accurate, plus files, tags and
+                comments kept against the framework.
+              </p>
+              <RecordPanels model="framework" entityId={selectedFw.id} />
+            </div>
+          )}
         </div>
       )}
-
-      {selectedFw && <RecordPanels model="framework" entityId={selectedFw.id} />}
 
       {/* -------------------------------------------------- requirement detail drawer */}
       <RecordDrawer

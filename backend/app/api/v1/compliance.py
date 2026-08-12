@@ -9,9 +9,7 @@ import uuid
 from typing import Annotated, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
-
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
@@ -347,6 +345,7 @@ async def list_requirements(
     framework_id: uuid.UUID,
     db: DbSession,
     search: str | None = None,
+    coverage: Annotated[str | None, Query(pattern="^(gaps|addressed)$")] = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -359,6 +358,10 @@ async def list_requirements(
     if search:
         like = f"%{search}%"
         stmt = stmt.where(Requirement.title.ilike(like) | Requirement.reference.ilike(like))
+    if coverage == "gaps":
+        stmt = stmt.where(_gap_predicate())
+    elif coverage == "addressed":
+        stmt = stmt.where(~_gap_predicate())
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
@@ -367,8 +370,13 @@ async def list_requirements(
         stmt = stmt.order_by(Requirement.reference)
     rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
     await _attach_counts(db, rows)
+    items = []
+    for row in rows:
+        read = RequirementRead.model_validate(row)
+        read.gap_reason = _gap_reason(row)
+        items.append(read)
     return Page(
-        items=[RequirementRead.model_validate(r) for r in rows],
+        items=items,
         total=total,
         limit=limit,
         offset=offset,
@@ -567,6 +575,46 @@ def _compliant_pct(reqs: list[Requirement]) -> tuple[int, int, float]:
     return compliant, len(applicable), pct
 
 
+# ---------------------------------------------------------------------------
+# What counts as a gap
+# ---------------------------------------------------------------------------
+# A requirement is a gap when its status is not settled (compliant / not applicable)
+# OR when nothing evidences it. Both halves matter: "compliant" with no control mapped
+# is an assertion nobody can support, and a mapped control against a non-compliant
+# status is work still outstanding.
+#
+# The rule lives here once because it is applied in two places — the requirements list
+# filter and the gap-analysis roll-up — and the two disagreeing would mean the count in
+# the header never matched the rows on screen.
+_SETTLED = (ComplianceStatus.compliant, ComplianceStatus.not_applicable)
+
+
+def _gap_reason(requirement: Requirement) -> str:
+    """Why this requirement is a gap, or ``""`` when it is not one."""
+    unsettled = requirement.status not in _SETTLED
+    if not requirement.is_covered and unsettled:
+        return "No controls mapped and not compliant"
+    if not requirement.is_covered:
+        return "No controls mapped"
+    if unsettled:
+        return f"Status is {requirement.status.value.replace('_', ' ')}"
+    return ""
+
+
+def _gap_predicate():
+    """The same rule expressed in SQL, so the filter pages in the database.
+
+    ``is_covered`` is a Python property over the controls relationship, so coverage is
+    tested here with an EXISTS against the join table rather than by loading every row.
+    """
+    covered = (
+        select(requirement_controls.c.requirement_id)
+        .where(requirement_controls.c.requirement_id == Requirement.id)
+        .exists()
+    )
+    return Requirement.status.not_in(_SETTLED) | ~covered
+
+
 @router.get(
     "/frameworks/{framework_id}/gap-analysis",
     response_model=GapAnalysis,
@@ -582,14 +630,8 @@ async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
         by_status[r.status.value] = by_status.get(r.status.value, 0) + 1
         if r.is_covered:
             covered += 1
-        is_gap = r.status not in (ComplianceStatus.compliant, ComplianceStatus.not_applicable)
-        if is_gap or not r.is_covered:
-            if not r.is_covered and is_gap:
-                reason = "No controls mapped and not compliant"
-            elif not r.is_covered:
-                reason = "No controls mapped"
-            else:
-                reason = f"Status is {r.status.value}"
+        reason = _gap_reason(r)
+        if reason:
             gaps.append(
                 GapItem(
                     id=r.id, reference=r.reference, title=r.title, status=r.status,
