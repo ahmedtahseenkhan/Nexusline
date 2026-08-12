@@ -75,6 +75,8 @@ ENTITY_TYPES: dict[str, EntitySpec] = {
     "audit_engagement": _spec("Audit engagement", "internal_audit"),
     "audit_finding": _spec("Audit finding", "internal_audit"),
     "auditable_unit": _spec("Auditable unit", "internal_audit"),
+    "audit_plan": _spec("Audit plan", "internal_audit"),
+    "audit_program": _spec("Audit programme", "internal_audit"),
     "access_review": _spec("Access review", "review"),
     "declaration_campaign": _spec("Declaration campaign", "declaration"),
     "icfr_process": _spec("ICFR process", "icfr"),

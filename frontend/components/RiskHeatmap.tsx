@@ -1,23 +1,27 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { api, type RiskMatrix } from "@/lib/api";
+import { useEffect, useMemo, useState } from "react";
+import { api, type MatrixBand, type RiskMatrix } from "@/lib/api";
 
-const BANDS = [
-  { key: "critical", label: "Critical (15–25)", color: "#b42323" },
-  { key: "high", label: "High (10–14)", color: "#bd4408" },
-  { key: "medium", label: "Medium (5–9)", color: "#a96414" },
-  { key: "low", label: "Low (1–4)", color: "#157f4a" },
-] as const;
+/* The grid, its axis wording and its severity bands all come from the server, because
+   the matrix is per-organisation configurable (3x3 to 6x6, ISO 27005 / 31000 / in-house
+   scales). Nothing about the scale is hard-coded here — duplicating the thresholds in
+   the client is how a heat map ends up disagreeing with the register it summarises. */
 
-function bandColor(score: number): string {
-  if (score >= 15) return "#b42323";
-  if (score >= 10) return "#bd4408";
-  if (score >= 5) return "#a96414";
-  return "#157f4a";
+const BAND_COLOR: Record<string, string> = {
+  critical: "#b42323",
+  high: "#bd4408",
+  medium: "#a96414",
+  low: "#157f4a",
+};
+
+const BAND_ORDER = ["critical", "high", "medium", "low"] as const;
+
+function bandFor(score: number, bands: MatrixBand[]): string {
+  const hit = bands.find((b) => score >= b.min_score && score <= b.max_score);
+  return hit ? hit.severity : "low";
 }
 
-/** 5×5 risk matrix with an inherent/residual toggle and a distribution legend. */
 export default function RiskHeatmap() {
   const [matrix, setMatrix] = useState<RiskMatrix | null>(null);
   const [mode, setMode] = useState<"inherent" | "residual">("residual");
@@ -25,6 +29,19 @@ export default function RiskHeatmap() {
   useEffect(() => {
     api.riskMatrix().then(setMatrix).catch(() => {});
   }, []);
+
+  const size = matrix?.size ?? 5;
+  const bands = useMemo(() => matrix?.bands ?? [], [matrix]);
+
+  // Distribution by severity band for the active mode.
+  const dist = useMemo(() => {
+    const out: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+    for (const c of matrix?.cells ?? []) {
+      const n = mode === "inherent" ? c.inherent_count : c.residual_count;
+      if (n) out[bandFor(c.score, bands)] += n;
+    }
+    return out;
+  }, [matrix, mode, bands]);
 
   if (!matrix) return null;
 
@@ -38,20 +55,14 @@ export default function RiskHeatmap() {
     const list = c ? (mode === "inherent" ? c.inherent_refs : c.residual_refs) : [];
     return list.length ? list.join(", ") : "No risks";
   };
+  const levelName = (axis: "likelihood" | "impact", level: number) => {
+    const levels = axis === "likelihood" ? matrix.likelihood_levels : matrix.impact_levels;
+    const found = levels.find((x) => x.level === level);
+    return found?.label ? `${level} — ${found.label}` : String(level);
+  };
 
-  const impacts = [5, 4, 3, 2, 1];
-  const likelihoods = [1, 2, 3, 4, 5];
-
-  // Distribution by severity band for the active mode.
-  const dist: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
-  for (const c of matrix.cells) {
-    const n = mode === "inherent" ? c.inherent_count : c.residual_count;
-    if (!n) continue;
-    if (c.score >= 15) dist.critical += n;
-    else if (c.score >= 10) dist.high += n;
-    else if (c.score >= 5) dist.medium += n;
-    else dist.low += n;
-  }
+  const impacts = Array.from({ length: size }, (_, n) => size - n); // high impact at the top
+  const likelihoods = Array.from({ length: size }, (_, n) => n + 1);
 
   return (
     <div className="card">
@@ -67,17 +78,26 @@ export default function RiskHeatmap() {
           <div className="hm-matrix">
             <div className="hm-yaxis">Impact →</div>
             <div>
-              <div className="hm-grid">
+              <div
+                className="hm-grid"
+                /* Overrides the stylesheet's fixed 5-column default for other scales. */
+                style={{ gridTemplateColumns: `repeat(${size}, minmax(56px, 100px))` }}
+              >
                 {impacts.map((i) =>
                   likelihoods.map((l) => {
                     const n = count(l, i);
                     const c = cell(l, i);
+                    const score = c?.score ?? l * i;
                     return (
                       <div
                         key={`${l}-${i}`}
                         className={`hm-cell${n ? " filled" : ""}`}
-                        style={n ? { background: bandColor(c?.score ?? l * i) } : undefined}
-                        title={`Likelihood ${l} × Impact ${i} (score ${c?.score ?? l * i})\n${refs(l, i)}`}
+                        style={n ? { background: BAND_COLOR[bandFor(score, bands)] } : undefined}
+                        title={
+                          `Likelihood ${levelName("likelihood", l)}\n` +
+                          `Impact ${levelName("impact", i)}\n` +
+                          `Score ${score} (${bandFor(score, bands)})\n${refs(l, i)}`
+                        }
                       >
                         {n || ""}
                       </div>
@@ -90,15 +110,21 @@ export default function RiskHeatmap() {
           </div>
           <div className="hm-side">
             <div className="bt">{mode} distribution</div>
-            {BANDS.map((b) => (
-              <div className="hm-band" key={b.key}>
-                <span className="sw" style={{ background: b.color }} />
-                <span className="nm">{b.label}</span>
-                <span className="ct">{dist[b.key]}</span>
-              </div>
-            ))}
+            {BAND_ORDER.map((key) => {
+              const band = bands.find((b) => b.severity === key);
+              return (
+                <div className="hm-band" key={key}>
+                  <span className="sw" style={{ background: BAND_COLOR[key] }} />
+                  <span className="nm">
+                    {key[0].toUpperCase() + key.slice(1)}
+                    {band ? ` (${band.min_score}–${band.max_score})` : ""}
+                  </span>
+                  <span className="ct">{dist[key]}</span>
+                </div>
+              );
+            })}
             <div className="hm-note">
-              <span>{matrix.total} risk{matrix.total !== 1 ? "s" : ""} plotted</span>
+              <span>{matrix.total} risk{matrix.total !== 1 ? "s" : ""} plotted on a {size}×{size} matrix</span>
               <span>appetite {matrix.appetite_score} · tolerance {matrix.tolerance_score}</span>
             </div>
           </div>

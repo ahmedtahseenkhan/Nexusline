@@ -108,6 +108,13 @@ class Issue(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Sof
     business_unit: Mapped[str] = mapped_column(String(200), default="")
     identified_date: Mapped[date] = mapped_column(Date, default=date.today, nullable=False)
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # Turnaround-time clock, derived from the tenant's SLA policy for this severity by
+    # ``services.sla``. Distinct from any agreed ``due_date``: this is what the policy
+    # allows, that is what was promised. ``tat_breached_at`` records the first day the
+    # window lapsed.
+    tat_due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    tat_breached_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     closed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # ---- remediation narrative / flags ----

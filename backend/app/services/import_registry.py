@@ -30,7 +30,7 @@ from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
 from app.models.icfr import IcfrProcess, IcfrProcessStatus
 from app.models.incident import Incident
-from app.models.internal_audit import AuditEngagement, AuditableUnit
+from app.models.internal_audit import AuditEngagement, AuditFinding, AuditableUnit
 from app.models.issue import Issue, IssueSource, IssueStatus2
 from app.models.model_risk import ModelInventory, ModelStatus, ModelType
 from app.models.operational_risk import KeyRiskIndicator, LossEvent, RcsaAssessment
@@ -55,6 +55,7 @@ from app.models.regulatory_change import (
     RegulatoryChange,
 )
 from app.models.risk import Risk
+from app.models.risk_scenario import RiskScenarioTemplate
 from app.models.threat import Threat, Vulnerability
 from app.models.vendor import Vendor
 
@@ -66,6 +67,8 @@ from app.models.enums import (
     AssetClass,
     AssetEnvironment,
     AuditEngagementStatus,
+    AuditFindingStatus,
+    AuditType,
     AwarenessStatus,
     BaselEventType,
     ComplianceStatus,
@@ -110,7 +113,7 @@ from app.schemas.exception import ExceptionCreate
 from app.schemas.goal import GoalCreate
 from app.schemas.icfr import IcfrProcessCreate
 from app.schemas.incident import IncidentCreate
-from app.schemas.internal_audit import EngagementCreate
+from app.schemas.internal_audit import EngagementCreate, FindingCreate
 from app.schemas.issue import IssueCreate
 from app.schemas.model_risk import ModelCreate
 from app.schemas.operational_risk import KriCreate, LossEventCreate, RcsaCreate
@@ -121,6 +124,7 @@ from app.schemas.privacy import RopaCreate
 from app.schemas.project import ProjectCreate
 from app.schemas.regulatory_change import ObligationCreate, RegulatoryChangeCreate
 from app.schemas.risk import RiskCreate
+from app.schemas.risk_scenario import ScenarioCreate
 from app.schemas.threat import ThreatCreate, VulnerabilityCreate
 from app.schemas.vendor import VendorCreate
 
@@ -136,7 +140,7 @@ from app.api.v1.exceptions import create_exception
 from app.api.v1.goals import create_goal
 from app.api.v1.icfr import create_process as create_icfr_process
 from app.api.v1.incidents import create_incident
-from app.api.v1.internal_audit import create_engagement
+from app.api.v1.internal_audit import create_engagement, create_finding
 from app.api.v1.issues import create_issue
 from app.api.v1.model_risk import create_model
 from app.api.v1.operational_risk import create_kri, create_loss_event, create_rcsa
@@ -152,6 +156,7 @@ from app.api.v1.privacy import create_ropa
 from app.api.v1.projects import create_project
 from app.api.v1.regulatory_change import create_change, create_obligation
 from app.api.v1.risks import create_risk
+from app.api.v1.risk_scenarios import create_scenario
 from app.api.v1.threats import create_threat, create_vulnerability
 from app.api.v1.vendors import create_vendor
 
@@ -616,6 +621,52 @@ _register(ResourceIO(
     ],
 ))
 
+# ----- audit findings -------------------------------------------------------
+# An external firm or a regulator hands over a finding list; this loads it into the same
+# remediation pipeline internal findings already run through.
+_register(ResourceIO(
+    resource="audit-findings", label="Audit Findings", model=AuditFinding,
+    create_schema=FindingCreate, create_func=create_finding,
+    read_perm="internal_audit:read", write_perm="internal_audit:write", importable=True,
+    columns=[
+        link_col("engagement", "engagement_id", AuditEngagement, "engagement",
+                 match_field="title", multi=False,
+                 help="Reference or title of the audit this finding belongs to"),
+        text("title", required=True),
+        text("description"),
+        enum_col("rating", Severity),
+        text("risk_implication"),
+        text("recommendation"),
+        text("management_response"),
+        text("action_owner"),
+        date_col("due_date"),
+        enum_col("status", AuditFindingStatus),
+        date_col("closed_date"),
+    ],
+))
+
+# ----- risk scenario library ------------------------------------------------
+_register(ResourceIO(
+    resource="risk-scenarios", label="Risk Scenarios", model=RiskScenarioTemplate,
+    create_schema=ScenarioCreate, create_func=create_scenario,
+    read_perm="risk:read", write_perm="risk:write", importable=True,
+    columns=[
+        text("reference", help="Blank to auto-number (RS-001, RS-002, ...)"),
+        text("title", required=True, help="Use {asset} where the asset name should appear"),
+        text("description"),
+        text("category"),
+        text("asset_classes", help="information_asset and/or it_asset, comma-separated; blank = all assets"),
+        text("threat"),
+        text("vulnerability"),
+        integer("likelihood", help="1-5 base likelihood; rescaled to your matrix"),
+        text("impact_rule", help="from_criticality | from_business_value | from_cia_max | from_property | fixed"),
+        text("impact_property", help="confidentiality | integrity | availability (with impact_rule=from_property)"),
+        integer("fixed_impact", help="1-5, only with impact_rule=fixed"),
+        text("treatment_hint"),
+        boolean("enabled"),
+    ],
+))
+
 # ----- vulnerabilities -----------------------------------------------------
 _register(ResourceIO(
     resource="vulnerabilities", label="Vulnerabilities", model=Vulnerability,
@@ -989,6 +1040,10 @@ _register(ResourceIO(
         text("objectives"),
         text("lead_auditor"),
         text("audit_team"),
+        enum_col("audit_type", AuditType, help="Who performed the audit"),
+        text("auditor_firm", help="Audit firm or regulator"),
+        text("report_reference"),
+        date_col("report_date"),
         enum_col("status", AuditEngagementStatus),
         date_col("period_start"),
         date_col("period_end"),

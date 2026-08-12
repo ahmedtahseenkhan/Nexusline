@@ -109,6 +109,9 @@ class ControlEffectiveness(str, enum.Enum):
 
 class ReviewFrequency(str, enum.Enum):
     none = "none"
+    #: Two cycles a month. Banks that audit or test a critical unit fortnightly could
+    #: previously only express "monthly" and then schedule the second pass by hand.
+    fortnightly = "fortnightly"
     monthly = "monthly"
     quarterly = "quarterly"
     semiannual = "semiannual"
@@ -375,6 +378,21 @@ class AuditProcedureResult(str, enum.Enum):
     passed = "passed"
     failed = "failed"
     not_applicable = "not_applicable"
+
+
+class AuditType(str, enum.Enum):
+    """Who performed the audit.
+
+    A bank's findings pipeline is the same whoever raised them, but the *provenance*
+    drives reporting: the board asks "how many SBP inspection findings are still open?",
+    not "how many findings are open?". Keeping every audit in one register with this
+    discriminator beats a separate spreadsheet per auditor.
+    """
+
+    internal = "internal"
+    external_statutory = "external_statutory"      # statutory / financial audit firm
+    regulatory = "regulatory"                      # SBP or other regulator inspection
+    certification = "certification"                # ISO / PCI certification body
 
 
 class AuditFindingStatus(str, enum.Enum):

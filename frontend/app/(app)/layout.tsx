@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import CommandPalette from "@/components/CommandPalette";
+import TatReminder from "@/components/TatReminder";
 import { api, getToken, type Me, type ModuleState } from "@/lib/api";
 import { ModulesProvider, buildModulesContext, moduleForRoute, routeDisabled } from "@/lib/modules";
 import { FeedbackHost } from "@/lib/feedback";
@@ -77,6 +78,8 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         </div>
       </div>
       <CommandPalette />
+      {/* Surfaces breached turnaround times once per day, wherever the user lands. */}
+      <TatReminder />
       <FeedbackHost />
     </ModulesProvider>
   );

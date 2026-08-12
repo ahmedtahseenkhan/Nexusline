@@ -115,7 +115,7 @@ These are System-section services that plug into modules rather than modules in 
 
 ## 4. How the sidebar is organized
 
-The left navigation groups every module into seven sections, which this guide follows exactly: **Overview, Risk, Compliance, Governance, Organization, Operations, System**.
+The left navigation groups every module into seven sections, which this guide follows exactly: **Overview, Risk, Compliance, Governance, Organization, Operations, System**. **Policy Management sits under Governance**, alongside Board & Committees, Delegation of Authority and the Legal Register.
 
 **Not seeing a module described in this guide?** Installations are licensed per module — the sidebar only shows what your license enables (for example, conventional banks typically don't license **Shariah Governance**; Islamic banks do). Administrators can see the full module matrix — *on / hidden / unlicensed* — under **Settings → System → Modules**. Enabling an additional module is a license update from your vendor, not a reinstall: your data model already supports every module, so nothing is lost or migrated when one is switched on later. A licensed module can also be hidden by the deployment's `DISABLED_MODULES` setting; opening its URL directly shows a "module not enabled" notice, and its API rejects calls, so hiding a module genuinely turns it off rather than just removing the menu entry.
 
@@ -158,11 +158,43 @@ The left navigation groups every module into seven sections, which this guide fo
 ## 6. Risk
 
 ### Risk Register (`/risks`)
-**Purpose:** The platform's central qualitative (5×5) + quantitative (FAIR) risk log.
-**How to use it:** Create a risk → **General** tab (title, category, owner) → **Assessment** tab (inherent likelihood/impact 1–5, plus optional FAIR fields: annual loss frequency, single loss expectancy → auto-computed ALE) → **Links & Relations** tab (link Assets, Controls, Threats, Vulnerabilities, Policies, Incidents) → **Review** tab (frequency). Set your org's **Appetite/Tolerance** thresholds once from the settings panel on this page — every risk is then banded against it.
+**Purpose:** The platform's central qualitative + quantitative (FAIR) risk log.
+**How to use it:** Create a risk → **General** tab (title, category, owner) → **Assessment** tab (inherent likelihood/impact, plus optional FAIR fields: annual loss frequency, single loss expectancy → auto-computed ALE) → **Links & Relations** tab (link Assets, Controls, Threats, Vulnerabilities, Policies, Incidents) → **Review** tab (frequency). Set your org's **Appetite/Tolerance** thresholds once from the settings panel on this page — every risk is then banded against it.
 **Status flow:** `draft → assessed → treatment_planned → treatment_in_progress → accepted → closed`.
-**Key actions:** Appetite/Tolerance editor, Import/Export CSV, "Register PDF" export. A formal **Risk Acceptance** sub-workflow exists in the backend (request → approve/reject, forcing status to `accepted`) but isn't exposed as a button on this page yet.
+**Key actions:** Appetite/Tolerance editor, risk-methodology editor, Import/Export, "Register PDF" export. A formal **Risk Acceptance** sub-workflow exists in the backend (request → approve/reject, forcing status to `accepted`) but isn't exposed as a button on this page yet.
 **Connects to:** the platform's hub — Assets, Controls, Threat/Vulnerability library, Policies, Incidents, Goals, Vendors, and optionally a Risk Quantification record.
+
+#### Configuring your risk matrix
+
+The likelihood × impact matrix is **yours to define**, because ISO 27005 and ISO 31000 don't mandate a 5×5 and most banks already have a scale in their own methodology. Open the settings panel on the Risk Register and set:
+
+- **Matrix size** — 3×3, 4×4, 5×5 (the default) or 6×6. Scores run 1 to size², and the four severity bands scale with it automatically — on 5×5 they are the familiar 1–4 Low, 5–9 Medium, 10–14 High, 15–25 Critical; on 6×6 they become 1–5 / 6–12 / 13–20 / 21–36. There is no separate threshold to maintain, and the heat map, the register's severity chips and the dashboard all read the same bands, so they can never disagree.
+- **Scale definitions** — a label and a written definition for every rung of both axes ("3 = Possible — could occur once in 1–3 years", "5 = Severe — PKR 200m–1bn or regulatory censure"). This is what makes scoring repeatable between assessors, and it appears in the heat-map tooltips.
+- **Appetite and tolerance** — bounded by the matrix maximum, and appetite can't exceed tolerance.
+
+⚠ **Shrinking the matrix is refused while any risk still scores above the new maximum**, and the error names the risks. Silently clamping them would rewrite an assessor's judgement, so those risks have to be re-scored deliberately first.
+
+**Baselining on a standard:** install **ISO/IEC 27005:2022** or **ISO 31000:2018** from Compliance → framework templates, then configure the matrix to match the criteria that standard has you define. The register's risks link to the standard's clauses like any other framework, so you can show an auditor which clause each part of your methodology satisfies.
+
+#### Suggested residual risk
+
+Residual risk is **assessed, not calculated** — both ISO 27005 and ISO 31000 treat it as a judgement made after considering control effectiveness. The system will not silently compute it for you; a residual score with no owner and no reasoning behind it is a finding waiting to happen. What it does instead is *propose* one.
+
+Open any risk and the **Suggested residual** panel shows what the linked controls imply, with a line of reasoning per control:
+
+```
+Suggested residual  2 × 5 = 10      from inherent 20
+  · CTL-014 Privileged access review: −2 (effective).
+  · CTL-031 Quarterly recertification: no credit — its audit is overdue.
+  · Applied −2 to likelihood: 4x5 → 2x5.
+```
+
+You then either **Accept suggestion** — which records it and stamps who accepted it and when — or **Record a different residual**, which requires a written reason. That sentence is what an auditor reads when they ask why your residual is lower than the control evidence supports.
+
+Two behaviours worth knowing:
+
+- **A control that isn't working earns nothing.** A failed audit, an overdue test or an open audit finding drops the control out of the calculation, and the rationale says which. So if assurance lapses, the suggestion **rises back towards inherent on its own** the next time anyone opens the risk — no re-run needed.
+- **The weighting is your policy, not our formula.** In the same settings panel you set how many points each effectiveness rating earns, whether that credit reduces likelihood, impact or both, and the maximum any one risk may claim. The shipped default — effective = 2, partially effective = 1, likelihood only, capped at 3 — is deliberately conservative: controls change how often something happens more than how badly it hurts. Set the weights to zero, or switch the suggestion off entirely, and the panel simply reports that residual equals inherent.
 
 ### Operational Risk (`/operational-risk`)
 **Purpose:** Basel-style RCSA, Key Risk Indicators, and the loss-event database.
@@ -182,9 +214,37 @@ The left navigation groups every module into seven sections, which this guide fo
 **Key action:** filter by overdue validation; a summary rolls up counts by status/type and flags overdue validations.
 
 ### Threat Library (`/threat-library`)
-**Purpose:** Two reusable reference catalogs — Threats and Vulnerabilities — that you link onto risks ("a threat exploits a vulnerability to create a risk").
+**Purpose:** Two reusable reference catalogs — Threats and Vulnerabilities — that you link onto risks ("a threat exploits a vulnerability to create a risk"), plus the **risk scenario library** that turns your asset register into a starting risk register.
 **How to use it:** Add entries (name, category, description) to either catalog. The actual linking to a specific risk happens from that risk's **Links & Relations** tab in the Risk Register, not from this page. Before deleting an entry you'll see how many risks currently use it.
 **Note:** this is a static reference catalog — for a live, scanner-fed vulnerability register see Vulnerabilities ([§7](#7-compliance)) instead, which is a separate, unrelated table.
+
+#### Risk scenario library
+
+At the bottom of this page sits the library that powers **Generate risks** on the asset registers. Each scenario is one reusable statement — *this threat exploits this vulnerability against this kind of asset* — plus a rule for deriving an opening impact from the asset's own rating.
+
+**Install it once:** click **Install built-in library** to load 42 banking-relevant scenarios covering access control, data protection, cyber security, continuity, operations, third parties, physical security, compliance and financial crime. Installing also seeds the threat and vulnerability catalogs above with everything those scenarios reference, so the generated risks carry real graph links rather than free text.
+
+**Then make it yours.** Switch off any scenario that doesn't apply to your bank, and tune the base likelihood (1–5) of the ones that do. Re-running the install after a platform upgrade adds newly shipped scenarios and **leaves your edits untouched** — it never overwrites a scenario you have already retuned. You can also bulk-load your own scenarios through Import/Export (`risk-scenarios`).
+
+⚠ The register you generate is only as good as this library. Spend twenty minutes pruning and retuning it before generating a few thousand risks.
+
+#### Generating risks from your asset register
+
+On **IT Assets** and **Information Assets** there's a **Generate risks** button. It pairs every selected asset with the scenarios that apply to it and proposes a pre-filled risk for each pair.
+
+How the opening score is worked out:
+
+- **Impact comes from the asset.** Each scenario says which rating it should follow — the data's business value, the asset's overall criticality, the worst of its C/I/A ratings, or one specific property. A confidentiality scenario against a database rated *critical* for confidentiality opens at maximum impact; an availability scenario against the same database follows its availability rating instead. Ratings are mapped onto whatever matrix size you have configured.
+- **Likelihood comes from the scenario, not the asset.** How often a threat materialises is a property of the threat and the environment, not of how much the asset is worth. Deriving it from asset value would double-count criticality and push every important asset into the top-right corner of the heat map.
+
+**Nothing is written until you press Create.** The review table shows every proposal with its editable title and scores; untick what doesn't apply and adjust anything that looks wrong. What you commit becomes an ordinary risk — reference number, asset/threat/vulnerability links, treatment suggestion, audit-log entry — indistinguishable from one typed by hand. Each also arrives with its asset's existing controls already attached, so the suggested residual has evidence to work with immediately.
+
+Two behaviours worth knowing:
+
+- **Re-running is safe.** Proposals are de-duplicated against the register by title, so after adding fifty assets you get fifty assets' worth of new proposals rather than a second copy of everything. The count of skipped duplicates is shown.
+- **Identically-named assets stay distinguishable.** If two different assets share a name — a pair of servers, one app in two environments — the colliding titles gain that asset's hostname (or serial, or a short id) so the resulting risks can be told apart and the next run de-duplicates correctly.
+
+Filters let you scope a run: only assets at or above a chosen criticality, and/or only one scenario category. A very large run is capped; narrow the filter and run again for the rest.
 
 ### Risk Quantification (`/risk-quantification`)
 **Purpose:** FAIR-style Monte Carlo simulation of PKR loss exposure, layered on top of the simpler ALE estimate on the Risk Register.
@@ -286,6 +346,39 @@ The left navigation groups every module into seven sections, which this guide fo
 **How to use it:** **Audit Universe tab** — build your list of auditable units (category, inherent risk, audit frequency, next-due date). **Engagements tab** — create an engagement against a unit (lead auditor, scope, objectives, planned/actual dates) → add **Procedures** as fieldwork progresses (workpaper reference, result) → raise **Findings** (rating, recommendation, management response, due date). **Findings follow-up tab** — a cross-engagement list you can filter to open/overdue only, until every finding is closed.
 **Status flow:** engagement `planned → fieldwork → reporting → closed`; finding `open → in_progress → closed` (or `risk_accepted`).
 **Key action:** an **Audit Engagement Report** PDF export button on an open engagement.
+
+#### Every audit in one register — internal, external, SBP
+
+An engagement records **who performed it**: Internal audit, External (statutory), Regulatory inspection, or Certification body — along with the audit firm or regulator, the report reference and the report date. All four share one findings pipeline, which is what makes *"how many SBP inspection findings are still open?"* answerable without keeping a separate spreadsheet per auditor.
+
+The **Assurance coverage** table on the Findings follow-up tab breaks audits, findings, open and overdue down by provenance. The engagement list can be filtered to one audit type.
+
+**Loading an external auditor's findings:** attach their report to the engagement using the file panel at the bottom of the engagement view, then bulk-load the finding list itself through Import/Export (`audit-findings`) — name the engagement in the first column and the findings land in the same remediation tracking your internal ones use, with references, owners and due dates.
+
+⚠ The system does **not** read findings out of an uploaded PDF. Auditors have to confirm each finding anyway, so they are entered or imported rather than extracted.
+
+#### Annual Plan tab
+
+What the assurance function committed to cover this year, recorded separately from what actually happened — so *"did we do what we told the board we would do?"* is a number rather than an argument.
+
+Create a plan (year, title, budgeted hours), then **Generate from audit universe**: every auditable unit becomes a plan line, with its quarter derived from when it falls due and its rationale taken from its risk rating and audit frequency. Re-running skips units already in the plan, so it is safe after the universe grows. Lines can be removed, and each shows whether it has become a real engagement yet — that ratio is the plan-vs-actual **coverage** figure.
+
+**Submit for board approval** raises a normal approval request in the Approvals inbox, so board or audit-committee sign-off inherits maker-checker, chasing and the audit log. An empty plan cannot be submitted, and an approved plan cannot be re-submitted.
+
+#### Programmes tab (checklists)
+
+A programme is the test steps for one kind of audit, written once. The fast path is **Generate from framework**: pick a framework you have installed and you get one step per clause — for ISO 27001:2022 that is the whole Annex A list — with each step linked back to the requirement it tests, which is what makes the finished working papers defensible to a certification auditor.
+
+**Apply as working papers** instantiates the steps onto an engagement as ordinary Procedures you record results against. Applying twice tops up rather than duplicating: steps already on the engagement are skipped.
+
+#### Calendar tab
+
+Everything the assurance function has to turn up for, in one window: planned fieldwork (with its end date), finding due dates, when each auditable unit next falls due, and plan lines that have not started yet. Filter by kind, set any date range; anything already past is flagged. No new dates are entered here — it reads what the plan, engagements, findings and universe already hold.
+
+**Auditing something twice a month.** Two ways, depending on whether it recurs:
+
+- **A recurring fortnightly cycle** — set the auditable unit's audit frequency to **Fortnightly**. Its next-due date then advances 14 days at a time rather than a month, and it appears on the calendar on that cadence. The same frequency is available anywhere a review cycle is set: risk reviews, control tests, policy reviews.
+- **Two specific audits in one month** — give each plan line a **month** as well as a quarter. A line with a month lands on that month in the calendar; one without sits mid-quarter.
 
 ### Declarations (`/declarations`)
 **Purpose:** Periodic/event-driven staff attestation campaigns — COI, gifts & entertainment, personal account dealing, outside employment, code of conduct.
@@ -441,7 +534,40 @@ Fields do not appear retroactively inside other modules' Add/Edit dialogs — th
 ### Status Rules (`/status-rules`)
 **Purpose:** Auto-label records with a colored badge when a field meets a condition (e.g. "Above Tolerance" when a score exceeds a threshold).
 **How to use it:** Pick a module (risk, control, incident, vendor, project, policy, asset, goal, or exception), pick a field and operator (equals/greater-than/contains/overdue/is-true/not-empty, etc.), a comparison value, and a label + color.
-**Note:** this is a labeling engine, not a time-based escalation engine — it doesn't send alerts or reassign anything on its own.
+**Note:** this is a labeling engine, not a time-based escalation engine — for time-based chasing see Turnaround Time below.
+
+### Turnaround Time — TAT (`/sla-policies`)
+**Purpose:** Turn your remediation standard ("critical findings within 15 days, high within 30") into something the platform measures, warns about *before* it lapses, and escalates when it does. Until this clock exists, the standard lives in a policy document and nobody knows it was missed until an auditor counts.
+
+**What it covers:** Risks, Issues, Audit Findings and Incidents — a target in calendar days for each severity of each.
+
+**How to use it:** The screen shows the complete grid, already filled with sensible defaults, so the clock is running from day one rather than waiting to be switched on. Anything nobody has configured is marked *default*. For each row set:
+
+- **Target (days)** — how long a record of that severity may stay open. The clock starts when the record is raised.
+- **Warn at %** — raise an early warning once this much of the window has elapsed. At the default 80%, the owner is told with a fifth of the time still left; an alert that only arrives on the day of breach is a report, not a control.
+- **Escalate to role** — who is emailed, in addition to the normal digest, when the window is breached. Leave blank for no escalation.
+- **Clock on/off** — switching a row off means *no clock for that scope*, not a fall-back to the default. Use it where your bank deliberately doesn't chase, e.g. low-severity findings.
+
+**Where breaches show up:** the notification centre (critical for a breach, warning for one approaching), the **Needs your attention** queue on the dashboard, a **once-a-day sign-in reminder** listing what is past its window, the "Currently outside TAT" table on this page, and an escalation email to the configured role. The reminder is dismissible for the day — but if something *new* breaches later it returns rather than staying silent.
+
+⚠ **TAT is not the same as a record's due date.** The due date is what was agreed with the action owner; TAT is what the policy allows. Both are tracked, neither overwrites the other, and the gap between them is itself worth looking at.
+
+Editing a target recalculates every open record's window immediately, so a policy change is reflected the moment you save it rather than at the next background sweep. Defaults in force today: risks and issues 15/30/60/90 days by criticality, audit findings 30/60/90/120 (they usually need a project), incidents 1/3/7/14 (there the clock is response, not remediation). Changing them needs the **Set turnaround-time (TAT) targets and escalation** permission, which is held separately from module edit rights — who may lengthen a remediation deadline is itself a governance control.
+
+### Approval Workflows (`/workflows`)
+**Purpose:** Define your own multi-stage approval route per record type — *"risk acceptance goes Owner → Department Head → CRO → Risk Committee, two of three"*.
+
+**How to use it:** Create a route for a record type, add its stages in order, then switch it on. Each stage sets:
+
+- **Decided by** — anyone holding a role, a named person, the record's own owner, or the owner's line manager. The last two resolve per record, so one route serves every record of that type instead of needing a copy per department.
+- **Approvals** — how many distinct people must approve *that stage*; 2 gives six-eyes on that step alone.
+- **Deadline** and what happens if it lapses (escalate and keep waiting, approve automatically, or block).
+
+On a record with a live route, a progress strip shows which stage it is on, who it is waiting for, and what each decided stage concluded. **Send for approval** starts the route; **Cancel route** abandons it.
+
+**What this does *not* change.** A stage never approves anything itself — it raises an ordinary approval request and waits. That means maker-checker, segregation of duties (the submitter can never approve their own stage), N-eyes counting, overdue chasing and the audit trail all apply to workflow stages exactly as they do to any other approval, because they are the same code. A rejection at any stage ends the route and marks the remaining stages *skipped*, never approved. When the last stage lands, the submitter gets a notification.
+
+⚠ **Nothing changes until you switch a route on.** A record type with no enabled route keeps the standard `draft → in review → approved → retired` lifecycle it has always had. Only one route per record type can be live at a time — two would leave "which approval applied?" unanswerable. A route that records are still travelling cannot be deleted; disable it instead so those approvals can finish.
 
 ### Saved Filters (`/filters`)
 **Purpose:** Build and reuse named, multi-condition queries (e.g. "Critical open risks") over a module.
@@ -449,8 +575,18 @@ Fields do not appear retroactively inside other modules' Add/Edit dialogs — th
 ⚠ Saved filters are a **standalone query tool** — they don't appear as a "load filter" dropdown on each module's own table view.
 
 ### Import / Export (`/data-io`)
-**Purpose:** Bulk CSV import/export for 20 supported record types (Policies, Risks, Controls, Assets, Vendors, Incidents, Exceptions, Legal, Business Units, Processes, Threats, Vulnerabilities catalog, Goals, RoPA, Continuity Plans, Projects, Compliance Requirements, Evidence, Awareness Programs, Access Reviews).
-**How to use it:** For any listed resource — **Export** to CSV, **Template** to get a header row + example, or **Import** (upload a `.csv` matching the template's column headers exactly — no manual column-mapping step). Each row runs through the module's normal creation logic (so reference numbers, links to other records by name, and audit logging all happen as if you'd created it by hand); a per-row result table shows what succeeded or failed, and one bad row doesn't block the rest.
+**Purpose:** Bulk import/export for every supported register (Policies, Risks, Controls, IT & Information Assets, Vendors, Incidents, Exceptions, Legal, Business Units, Processes, Threats, Vulnerabilities catalog, Goals, RoPA, Continuity Plans, Projects, Compliance Requirements, Evidence, Awareness Programs, Access Reviews, Issues, RCSA, KRIs, Loss Events, Obligations, Regulatory Changes, Audit Engagements, ICFR Processes, Models, Outsourcing Arrangements, BIAs).
+
+**Export / Template:** **Export** downloads every record as CSV; **Template** downloads a header row plus one example row if you'd rather start from our layout.
+
+**Import — you do not have to rewrite your spreadsheet.** Upload the file your organisation already keeps, with its own column names, and the wizard matches them to our fields. It runs in four steps:
+
+1. **Upload** — choose a `.csv` or Excel `.xlsx` file. A title/banner row above the real headings is detected and skipped, and a multi-sheet workbook lets you pick the sheet. If you have imported this layout before, pick the **saved mapping** and the columns are filled in for you.
+2. **Match columns** — each of your columns is shown with a real example value from your file and the field it will import into. Matches are pre-selected and labelled **Confident**, **Check** or **Unsure** with the reason ("known alternative name for 'inherent_likelihood'"), so you know which ones deserve a second look. Anything we could not recognise starts as **Do not import** — it is never guessed at. You can point any column at a different field, at a **custom field** (for data we have no native field for), or leave it out.
+3. **Preview** — the first 20 rows are processed exactly as the real import would, **without saving anything**, so you see the values that will land and any problems first — including a reference that points at a record which doesn't exist yet. This is also where you can **save the mapping** under a name for next quarter's upload.
+4. **Import** — each row runs through the module's normal creation logic, so reference numbers, links to other records by name, custom-field values and audit logging all happen as if you'd created the record by hand. One bad row never blocks the rest: a result table lists every skipped row with its reason, and **Download errors** gives you a CSV of just those rows to fix and re-import.
+
+**Notes.** Blank cells are skipped. Link columns accept comma-separated references or names. Two of your columns can never feed the same field — the wizard blocks it, because silently letting one win would make repeat imports inconsistent. A file whose headings already match our template still imports exactly as before, with no mapping step.
 
 ### Webhooks (`/webhooks`)
 **Purpose:** Push real-time HTTP notifications to an external system (SIEM, ticketing, chat) whenever records change.

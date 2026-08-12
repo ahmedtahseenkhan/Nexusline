@@ -10,14 +10,14 @@ import uuid
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.compliance import Requirement
 from app.models.control import Control
-from app.models.enums import AuditFindingStatus
+from app.models.enums import AuditEngagementStatus, AuditFindingStatus, AuditType
 from app.models.risk import Risk
 from app.models.internal_audit import (
     AuditableUnit,
@@ -27,6 +27,8 @@ from app.models.internal_audit import (
 )
 from app.schemas.common import Page
 from app.schemas.internal_audit import (
+    AssuranceSummary,
+    AuditTypeRow,
     AuditableUnitCreate,
     AuditableUnitRead,
     AuditableUnitUpdate,
@@ -153,18 +155,22 @@ _ENGAGEMENT_SORTABLE = {
 async def list_engagements(
     db: DbSession,
     search: str | None = None,
+    audit_type: Annotated[AuditType | None, Query()] = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[EngagementRead]:
     stmt = select(AuditEngagement).where(AuditEngagement.deleted.is_(False))
+    if audit_type is not None:
+        stmt = stmt.where(AuditEngagement.audit_type == audit_type)
     if search:
         like = f"%{search}%"
         stmt = stmt.where(
             AuditEngagement.title.ilike(like)
             | AuditEngagement.reference.ilike(like)
             | AuditEngagement.lead_auditor.ilike(like)
+            | AuditEngagement.auditor_firm.ilike(like)
         )
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
@@ -246,7 +252,11 @@ async def delete_procedure(pid: uuid.UUID, db: DbSession) -> None:
 @router.post("/audit-engagements/{eid}/findings", response_model=EngagementRead, status_code=201, dependencies=[_WRITE])
 async def add_finding(eid: uuid.UUID, body: FindingCreate, db: DbSession, user: CurrentUser) -> EngagementRead:
     await _load_engagement(db, eid)
-    data = body.model_dump(exclude={"control_ids", "risk_ids", "requirement_ids"})
+    # The path id wins: a body that names a different engagement must not redirect the
+    # finding into another audit.
+    data = body.model_dump(
+        exclude={"control_ids", "risk_ids", "requirement_ids", "engagement_id"}
+    )
     finding = AuditFinding(tenant_id=user.tenant_id, engagement_id=eid, **data)
     finding.controls = await _resolve(db, Control, body.control_ids)
     finding.risks = await _resolve(db, Risk, body.risk_ids)
@@ -270,6 +280,33 @@ async def _load_finding(db, fid: uuid.UUID) -> AuditFinding:
     if obj is None:
         raise HTTPException(status_code=404, detail="Finding not found")
     return obj
+
+
+async def create_finding(body: FindingCreate, db: DbSession, user: CurrentUser) -> FindingRead:
+    """Create a finding naming its engagement in the body.
+
+    Used by the bulk importer so an external firm's or a regulator's finding list loads
+    into the same remediation pipeline internal findings run through, with references,
+    links and audit logging behaving identically.
+    """
+    if body.engagement_id is None:
+        raise HTTPException(status_code=400, detail="engagement is required")
+    await _load_engagement(db, body.engagement_id)
+    data = body.model_dump(
+        exclude={"control_ids", "risk_ids", "requirement_ids", "engagement_id"}
+    )
+    finding = AuditFinding(
+        tenant_id=user.tenant_id, engagement_id=body.engagement_id, **data
+    )
+    finding.controls = await _resolve(db, Control, body.control_ids)
+    finding.risks = await _resolve(db, Risk, body.risk_ids)
+    finding.requirements = await _resolve(db, Requirement, body.requirement_ids)
+    finding.reference = await _next_ref(db, AuditFinding, "IAF")
+    db.add(finding)
+    await db.flush()
+    await audit_log.record(db, actor=user, action="create", entity_type="audit_finding",
+                           entity_id=finding.id, summary=f"Raised finding {finding.reference}: {finding.title}")
+    return FindingRead.model_validate(finding)
 
 
 @router.patch("/audit-findings/{fid}", response_model=FindingRead, dependencies=[_WRITE])
@@ -336,6 +373,66 @@ def _findings_base():
         select(AuditFinding)
         .join(AuditEngagement, AuditEngagement.id == AuditFinding.engagement_id)
         .where(AuditEngagement.deleted.is_(False))
+    )
+
+
+_AUDIT_TYPE_LABEL = {
+    AuditType.internal: "Internal audit",
+    AuditType.external_statutory: "External (statutory)",
+    AuditType.regulatory: "Regulatory inspection",
+    AuditType.certification: "Certification body",
+}
+
+
+@router.get(
+    "/assurance-summary",
+    response_model=AssuranceSummary,
+    dependencies=[_READ],
+    summary="Engagements and open findings, split by who performed the audit",
+)
+async def assurance_summary(db: DbSession) -> AssuranceSummary:
+    """One line per audit provenance — internal, statutory, regulatory, certification.
+
+    Every audit type shares one findings pipeline, so this is what answers "how many
+    SBP inspection findings are still open?" without a separate spreadsheet per auditor.
+    Types with no engagements are still returned, so the shape of the report does not
+    change as audits are added.
+    """
+    engagements = (
+        await db.scalars(select(AuditEngagement).where(AuditEngagement.deleted.is_(False)))
+    ).all()
+    today = date.today()
+
+    rows: list[AuditTypeRow] = []
+    total_open_findings = 0
+    for audit_type in AuditType:
+        mine = [e for e in engagements if e.audit_type == audit_type]
+        findings = [f for e in mine for f in e.findings]
+        open_findings = [f for f in findings if f.status not in _OPEN_STATES]
+        overdue = [
+            f for f in open_findings if f.due_date is not None and f.due_date < today
+        ]
+        total_open_findings += len(open_findings)
+        rows.append(
+            AuditTypeRow(
+                audit_type=audit_type,
+                label=_AUDIT_TYPE_LABEL[audit_type],
+                engagements=len(mine),
+                open_engagements=sum(
+                    1
+                    for e in mine
+                    if e.status
+                    not in (AuditEngagementStatus.closed, AuditEngagementStatus.cancelled)
+                ),
+                findings=len(findings),
+                open_findings=len(open_findings),
+                overdue_findings=len(overdue),
+            )
+        )
+    return AssuranceSummary(
+        rows=rows,
+        total_engagements=len(engagements),
+        total_open_findings=total_open_findings,
     )
 
 

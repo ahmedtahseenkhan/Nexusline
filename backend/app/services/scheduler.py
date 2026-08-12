@@ -51,10 +51,51 @@ async def run_sweep() -> dict:
                     subject, html = email.render_digest(tenant_name, new)
                     if await email.send_email(recipients, subject, html):
                         emailed += 1
+                await _escalate_tat_breaches(db, tenant_name, new)
         except Exception:  # noqa: BLE001 - isolate per-tenant failures
             logger.exception("Scheduler sweep failed for tenant %s", tenant_id)
 
     return {"tenants": len(tenants), "new_alerts": total_new, "digests_sent": emailed}
+
+
+async def _escalate_tat_breaches(db, tenant_name: str, new_alerts: list) -> None:
+    """Email the escalation role when a turnaround time is newly breached.
+
+    Notifications are tenant-wide rather than addressed to individuals, so escalation is
+    delivered by email — which is also what a bank means by it: the line above the owner
+    is told, in writing, and only once per breach because the digest is built from
+    *newly created* alerts.
+    """
+    from app.models.enums import Severity
+    from app.services import sla
+
+    breaches = [n for n in new_alerts if (n.dedup_key or "").startswith("tat-breach:")]
+    if not breaches:
+        return
+
+    by_recipient: dict[str, list] = {}
+    for alert in breaches:
+        severity = _severity_in(alert.body) or Severity.medium
+        for address in await sla.escalation_recipients(db, alert.entity_type, severity):
+            by_recipient.setdefault(address, []).append(alert)
+
+    for address, alerts in by_recipient.items():
+        subject, html = email.render_digest(f"{tenant_name} — TAT escalation", alerts)
+        try:
+            await email.send_email([address], subject, html)
+        except Exception:  # noqa: BLE001 - one bad address must not stop the sweep
+            logger.exception("TAT escalation email failed for %s", address)
+
+
+def _severity_in(body: str):
+    """Recover the severity the breach body names, so the right policy row is used."""
+    from app.models.enums import Severity
+
+    lowered = (body or "").lower()
+    for severity in (Severity.critical, Severity.high, Severity.medium, Severity.low):
+        if f"{severity.value} turnaround" in lowered:
+            return severity
+    return None
 
 
 async def _loop() -> None:

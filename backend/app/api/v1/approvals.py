@@ -13,7 +13,7 @@ from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.approval import ApprovalAction, ApprovalRequest
-from app.models.enums import ApprovalStatus
+from app.models.enums import ApprovalStatus, NotificationCategory
 from app.schemas.approval import ApprovalCreate, ApprovalDecision, ApprovalRead
 from app.schemas.common import Page
 from app.services.refs import next_reference
@@ -170,6 +170,49 @@ async def decide_approval(
             )
 
     await db.flush()
+
+    # If this approval was one stage of a user-defined route, the decision moves the
+    # record on — opening the next stage, or finishing/terminating the route. Approvals
+    # that are not part of a workflow (the overwhelming majority) are untouched.
+    from app.services import notifications as notifications_service
+    from app.services import workflow_engine
+
+    instance = await workflow_engine.on_approval_decided(db, obj)
+    if instance is not None:
+        summary += (
+            f" · workflow {instance.completed_stages}/{instance.total_stages}"
+            f" ({instance.status.value})"
+        )
+        if instance.status.value in ("approved", "rejected"):
+            # The submitter asked to be told when the whole route lands, not each stage.
+            from app.models.notification import Notification
+
+            db.add(
+                Notification(
+                    tenant_id=user.tenant_id,
+                    title=(
+                        f"Approval route {instance.status.value}: {instance.entity_label}"
+                        if instance.entity_label
+                        else f"Approval route {instance.status.value}"
+                    ),
+                    body=(
+                        f"All {instance.total_stages} stage(s) decided."
+                        if instance.status.value == "approved"
+                        else f"Rejected at stage {obj.title}."
+                    ),
+                    category=(
+                        NotificationCategory.info
+                        if instance.status.value == "approved"
+                        else NotificationCategory.warning
+                    ),
+                    entity_type=instance.entity_type,
+                    entity_id=instance.entity_id,
+                    link=obj.link,
+                    dedup_key=f"{notifications_service.EVENT_PREFIX}workflow-done:{instance.id}",
+                )
+            )
+            await db.flush()
+
     await audit.record(
         db, actor=user, action="decide", entity_type="approval", entity_id=obj.id, summary=summary
     )

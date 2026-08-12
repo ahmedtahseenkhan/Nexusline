@@ -284,6 +284,153 @@ export interface Assessment extends AssessmentSummary {
 export interface RiskSetting {
   appetite_score: number;
   tolerance_score: number;
+  matrix_size: number;
+}
+
+/** One rung of the likelihood or impact scale, in the organisation's own words. */
+export interface MatrixLevel {
+  level: number;
+  label: string;
+  definition: string;
+}
+/** A severity band, derived from the matrix size rather than configured separately. */
+export interface MatrixBand {
+  severity: string;
+  min_score: number;
+  max_score: number;
+}
+export interface RiskMatrixConfig {
+  size: number;
+  max_score: number;
+  appetite_score: number;
+  tolerance_score: number;
+  likelihood_levels: MatrixLevel[];
+  impact_levels: MatrixLevel[];
+  bands: MatrixBand[];
+}
+export interface ResidualPolicy {
+  enabled: boolean;
+  weight_effective: number;
+  weight_partially_effective: number;
+  weight_ineffective: number;
+  weight_not_assessed: number;
+  applies_to: "likelihood" | "impact" | "both";
+  max_reduction: number;
+}
+/** One scope of the turnaround-time grid: how long a record of this severity may stay open. */
+export interface SlaPolicy {
+  id: string | null;
+  entity_type: string;
+  entity_label: string;
+  severity: string;
+  target_days: number;
+  warn_at_percent: number;
+  escalate_to_role: string;
+  enabled: boolean;
+  /** True when nobody has configured this scope and the shipped default is in force. */
+  is_default: boolean;
+}
+export interface TatRecord {
+  entity_type: string;
+  entity_label: string;
+  entity_id: string;
+  label: string;
+  severity: string;
+  due: string | null;
+  days_overdue: number;
+  link: string;
+}
+export interface TatSummary {
+  breached: number;
+  at_risk: number;
+  by_type: { entity_type: string; label: string; breached: number; at_risk: number }[];
+  records: TatRecord[];
+}
+
+/** One reusable "threat exploits vulnerability against this kind of asset" statement. */
+export interface RiskScenario {
+  id: string;
+  reference: string;
+  title: string;
+  description: string;
+  category: string;
+  asset_classes: string;
+  threat: string;
+  vulnerability: string;
+  likelihood: number;
+  impact_rule: string;
+  impact_property: string;
+  fixed_impact: number;
+  treatment_hint: string;
+  enabled: boolean;
+}
+export interface ScenarioInstallResult {
+  installed: number;
+  skipped: number;
+  total: number;
+}
+export interface GenerateRisksRequest {
+  asset_ids?: string[];
+  asset_class?: string;
+  min_criticality?: string;
+  scenario_ids?: string[];
+  category?: string;
+  limit?: number;
+}
+/** A pre-filled risk shown for review — nothing is written until it is committed. */
+export interface RiskProposal {
+  scenario_id: string;
+  scenario_reference: string;
+  asset_id: string;
+  asset_name: string;
+  title: string;
+  description: string;
+  category: string;
+  inherent_likelihood: number;
+  inherent_impact: number;
+  inherent_score: number;
+  threat: string;
+  vulnerability: string;
+  treatment_description: string;
+  control_ids: string[];
+  control_labels: string[];
+}
+export interface GenerateRisksResponse {
+  proposals: RiskProposal[];
+  assets_considered: number;
+  scenarios_considered: number;
+  duplicates_skipped: number;
+  truncated: boolean;
+}
+export interface GeneratedRiskCommitItem {
+  asset_id: string;
+  title: string;
+  description: string;
+  category: string;
+  inherent_likelihood: number;
+  inherent_impact: number;
+  threat: string;
+  vulnerability: string;
+  treatment_description: string;
+  control_ids: string[];
+}
+export interface GenerateRisksCommitResult {
+  created: number;
+  skipped: number;
+  references: string[];
+  errors: { title: string; message: string }[];
+}
+
+/** A proposal only — nothing is recorded until the risk owner accepts or overrides it. */
+export interface SuggestedResidual {
+  likelihood: number;
+  impact: number;
+  score: number;
+  reduction: number;
+  rationale: string[];
+  inherent_score: number;
+  current_residual_score: number | null;
+  matches_current: boolean;
 }
 
 export interface RiskAggregateRow {
@@ -676,6 +823,21 @@ export interface AuditFinding {
   is_overdue: boolean;
   created_at: string;
 }
+/** Engagements and open findings split by who performed the audit. */
+export interface AssuranceSummary {
+  rows: {
+    audit_type: string;
+    label: string;
+    engagements: number;
+    open_engagements: number;
+    findings: number;
+    open_findings: number;
+    overdue_findings: number;
+  }[];
+  total_engagements: number;
+  total_open_findings: number;
+}
+
 export interface AuditEngagement {
   id: string;
   reference: string;
@@ -685,6 +847,11 @@ export interface AuditEngagement {
   auditable_unit_id: string | null;
   lead_auditor: string;
   audit_team: string;
+  /** Provenance: internal | external_statutory | regulatory | certification. */
+  audit_type: string;
+  auditor_firm: string;
+  report_reference: string;
+  report_date: string | null;
   status: string;
   period_start: string | null;
   period_end: string | null;
@@ -956,6 +1123,13 @@ export interface RiskMatrix {
   appetite_score: number;
   tolerance_score: number;
   total: number;
+  /** The matrix the counts were plotted on — render this grid, not a fixed 5x5. */
+  size: number;
+  max_score: number;
+  likelihood_levels: MatrixLevel[];
+  impact_levels: MatrixLevel[];
+  /** Server-derived bands; colour from these so client and server never disagree. */
+  bands: MatrixBand[];
 }
 export interface CollabFile {
   id: string;
@@ -1567,6 +1741,44 @@ export const api = {
   riskAlerts: () => request<Risk[]>("/risk-alerts"),
   riskAggregate: () => request<RiskAggregate>("/risk-aggregate"),
   riskMatrix: () => request<RiskMatrix>("/risk-matrix"),
+
+  // Risk methodology: matrix scale, scale wording and the residual-suggestion policy.
+  riskMatrixConfig: () => request<RiskMatrixConfig>("/risk-matrix-config"),
+  updateRiskMatrixConfig: (payload: {
+    size: number;
+    likelihood_levels: MatrixLevel[];
+    impact_levels: MatrixLevel[];
+  }) => request<RiskMatrixConfig>("/risk-matrix-config", { method: "PUT", body: JSON.stringify(payload) }),
+  residualPolicy: () => request<ResidualPolicy>("/residual-policy"),
+  updateResidualPolicy: (payload: ResidualPolicy) =>
+    request<ResidualPolicy>("/residual-policy", { method: "PUT", body: JSON.stringify(payload) }),
+  // Turnaround-time (TAT) policy and breach reporting.
+  slaPolicies: () => request<SlaPolicy[]>("/sla-policies"),
+  updateSlaPolicies: (policies: Omit<SlaPolicy, "id" | "entity_label" | "is_default">[]) =>
+    request<SlaPolicy[]>("/sla-policies", { method: "PUT", body: JSON.stringify({ policies }) }),
+  slaBreaches: () => request<TatSummary>("/sla-breaches"),
+
+  // Risk-scenario library and asset-driven generation.
+  riskScenarios: (qs = "limit=500") => request<Page<RiskScenario>>(`/risk-scenarios?${qs}`),
+  updateRiskScenario: (id: string, payload: Partial<RiskScenario>) =>
+    request<RiskScenario>(`/risk-scenarios/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  installScenarioLibrary: () =>
+    request<ScenarioInstallResult>("/risk-scenarios/install-library", { method: "POST" }),
+  generateRisks: (payload: GenerateRisksRequest) =>
+    request<GenerateRisksResponse>("/risk-scenarios/generate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  commitGeneratedRisks: (items: GeneratedRiskCommitItem[]) =>
+    request<GenerateRisksCommitResult>("/risk-scenarios/commit", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+
+  suggestedResidual: (riskId: string) =>
+    request<SuggestedResidual>(`/risks/${riskId}/suggested-residual`),
+  acceptResidual: (riskId: string, payload: { likelihood?: number; impact?: number; override_reason?: string }) =>
+    request<Risk>(`/risks/${riskId}/accept-residual`, { method: "POST", body: JSON.stringify(payload) }),
   search: (q: string) => request<SearchResults>(`/search?q=${encodeURIComponent(q)}`),
 
   // AML/CFT
@@ -1636,6 +1848,7 @@ export const api = {
   deleteAuditUnit: (id: string) => request<void>(`/audit-universe/${id}`, { method: "DELETE" }),
 
   auditEngagements: () => request<Page<AuditEngagement>>("/audit-engagements?limit=200"),
+  assuranceSummary: () => request<AssuranceSummary>("/assurance-summary"),
   auditEngagement: (id: string) => request<AuditEngagement>(`/audit-engagements/${id}`),
   createAuditEngagement: (payload: Record<string, unknown>) =>
     request<AuditEngagement>("/audit-engagements", { method: "POST", body: JSON.stringify(payload) }),

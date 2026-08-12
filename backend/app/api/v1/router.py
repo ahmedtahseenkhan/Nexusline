@@ -59,6 +59,10 @@ from app.api.v1 import (
     regulatory_change,
     reports,
     risk_program,
+    audit_plan,
+    workflows,
+    risk_scenarios,
+    sla,
     risk_quant,
     risks,
     scenario,
@@ -88,6 +92,10 @@ api_router.include_router(ldap.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(risks.router)
 api_router.include_router(risk_program.router)
+api_router.include_router(risk_scenarios.router)
+api_router.include_router(sla.router)
+api_router.include_router(audit_plan.router)
+api_router.include_router(workflows.router)
 api_router.include_router(threats.router)
 api_router.include_router(controls.router)
 api_router.include_router(assets.router)

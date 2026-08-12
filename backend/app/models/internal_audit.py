@@ -28,6 +28,7 @@ from app.models.base import (
 )
 from app.models.enums import (
     AuditEngagementStatus,
+    AuditType,
     AuditFindingStatus,
     AuditProcedureResult,
     Criticality,
@@ -74,6 +75,18 @@ class AuditEngagement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflow
     )
     lead_auditor: Mapped[str] = mapped_column(String(200), default="")
     audit_team: Mapped[str] = mapped_column(String(400), default="")
+
+    # Provenance. Internal audit, the statutory auditors, an SBP inspection and a
+    # certification body all raise findings the bank has to close; tracking them in one
+    # register with this discriminator is what makes "open SBP findings" answerable.
+    audit_type: Mapped[AuditType] = mapped_column(
+        SAEnum(AuditType, name="audit_type"),
+        default=AuditType.internal, server_default=AuditType.internal.value,
+        nullable=False, index=True,
+    )
+    auditor_firm: Mapped[str] = mapped_column(String(200), default="")   # firm / regulator
+    report_reference: Mapped[str] = mapped_column(String(120), default="")
+    report_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     status: Mapped[AuditEngagementStatus] = mapped_column(
         SAEnum(AuditEngagementStatus, name="audit_engagement_status"),
@@ -182,6 +195,13 @@ class AuditFinding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         default=AuditFindingStatus.open, nullable=False,
     )
     closed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # Turnaround-time clock, derived from the tenant's SLA policy for this severity by
+    # ``services.sla``. Distinct from any agreed ``due_date``: this is what the policy
+    # allows, that is what was promised. ``tat_breached_at`` records the first day the
+    # window lapsed.
+    tat_due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    tat_breached_at: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     engagement: Mapped[AuditEngagement] = relationship(back_populates="findings")
 

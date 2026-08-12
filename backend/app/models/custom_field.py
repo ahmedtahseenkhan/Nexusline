@@ -27,6 +27,7 @@ CUSTOM_FIELD_MODELS = [
     # Graph-connectivity parity: the core + island records that lacked custom fields.
     "requirement", "threat", "vulnerability", "loss_event", "audit_finding",
     "assessment", "access_review", "awareness_program", "business_unit",
+    "audit_plan", "audit_program",
     "process", "legal",
 ]
 

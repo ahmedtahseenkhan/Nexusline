@@ -10,6 +10,7 @@ from app.schemas.common import GraphRef
 from app.models.base import WorkflowState
 from app.models.enums import (
     AuditEngagementStatus,
+    AuditType,
     AuditFindingStatus,
     AuditProcedureResult,
     Criticality,
@@ -101,6 +102,12 @@ class FindingBase(BaseModel):
 
 
 class FindingCreate(FindingBase):
+    # Supplied in the path by the nested endpoint; carried in the body when a finding is
+    # created standalone or bulk-imported from an external auditor's list.
+    engagement_id: uuid.UUID | None = None
+    # Historic finding lists arrive with items already closed; without this they would
+    # import as open and immediately start chasing people about resolved findings.
+    closed_date: date | None = None
     control_ids: list[uuid.UUID] = []
     risk_ids: list[uuid.UUID] = []
     requirement_ids: list[uuid.UUID] = []
@@ -144,6 +151,31 @@ class FindingSummary(BaseModel):
     overdue: int
 
 
+class AuditTypeRow(BaseModel):
+    """One provenance line of the assurance roll-up."""
+
+    audit_type: AuditType
+    label: str
+    engagements: int
+    open_engagements: int
+    findings: int
+    open_findings: int
+    overdue_findings: int
+
+
+class AssuranceSummary(BaseModel):
+    """Every audit the bank is subject to, split by who performed it.
+
+    The board's question is "how many SBP inspection findings are still open?", not
+    "how many findings are open?" — that only has an answer if internal, statutory,
+    regulatory and certification audits share one register.
+    """
+
+    rows: list[AuditTypeRow]
+    total_engagements: int
+    total_open_findings: int
+
+
 # ------------------------------------------------------------------ engagements ---
 class EngagementBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)
@@ -152,6 +184,10 @@ class EngagementBase(BaseModel):
     auditable_unit_id: uuid.UUID | None = None
     lead_auditor: str = ""
     audit_team: str = ""
+    audit_type: AuditType = AuditType.internal
+    auditor_firm: str = Field(default="", max_length=200)
+    report_reference: str = Field(default="", max_length=120)
+    report_date: date | None = None
     status: AuditEngagementStatus = AuditEngagementStatus.planned
     period_start: date | None = None
     period_end: date | None = None
@@ -175,6 +211,10 @@ class EngagementUpdate(BaseModel):
     auditable_unit_id: uuid.UUID | None = None
     lead_auditor: str | None = None
     audit_team: str | None = None
+    audit_type: AuditType | None = None
+    auditor_firm: str | None = None
+    report_reference: str | None = None
+    report_date: date | None = None
     status: AuditEngagementStatus | None = None
     period_start: date | None = None
     period_end: date | None = None

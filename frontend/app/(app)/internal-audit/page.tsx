@@ -8,12 +8,16 @@ import {
   type AuditableUnit,
   type AuditEngagement,
   type AuditFinding,
+  type AssuranceSummary,
 } from "@/lib/api";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import AuditPlanTab from "@/components/AuditPlanTab";
+import AuditProgramTab from "@/components/AuditProgramTab";
+import AuditCalendarTab from "@/components/AuditCalendarTab";
 import FormModal from "@/components/FormModal";
 import RichText from "@/components/RichText";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
@@ -42,6 +46,24 @@ const INHERENT_RISK = opts(["low", "medium", "high", "critical"]);
 const AUDIT_FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const UNIT_WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const ENG_STATUS = opts(["planned", "fieldwork", "reporting", "closed", "cancelled"]);
+/* Every audit the bank is subject to lives in this one register. Provenance is what
+   makes "how many SBP inspection findings are still open?" answerable without keeping a
+   separate spreadsheet per auditor. */
+const AUDIT_TYPE = [
+  { value: "internal", label: "Internal audit" },
+  { value: "external_statutory", label: "External (statutory)" },
+  { value: "regulatory", label: "Regulatory inspection" },
+  { value: "certification", label: "Certification body" },
+];
+const AUDIT_TYPE_LABEL: Record<string, string> = Object.fromEntries(
+  AUDIT_TYPE.map((t) => [t.value, t.label]),
+);
+const AUDIT_TYPE_TONE: Record<string, Tone> = {
+  internal: "info",
+  external_statutory: "medium",
+  regulatory: "critical",
+  certification: "low",
+};
 const RATING = opts(["low", "medium", "high", "critical"]);
 const PROC_RESULT = ["pending", "passed", "failed", "not_applicable"];
 const FINDING_STATUS = ["open", "in_progress", "closed", "risk_accepted"];
@@ -128,6 +150,10 @@ type EngForm = {
   auditable_unit_id: string;
   lead_auditor: string;
   audit_team: string;
+  audit_type: string;
+  auditor_firm: string;
+  report_reference: string;
+  report_date: string;
   status: string;
   scope: string;
   objectives: string;
@@ -145,6 +171,10 @@ const BLANK_ENG: EngForm = {
   auditable_unit_id: "",
   lead_auditor: "",
   audit_team: "",
+  audit_type: "internal",
+  auditor_firm: "",
+  report_reference: "",
+  report_date: "",
   status: "planned",
   scope: "",
   objectives: "",
@@ -163,6 +193,10 @@ function fromEng(e: AuditEngagement): EngForm {
     auditable_unit_id: e.auditable_unit_id || "",
     lead_auditor: e.lead_auditor || "",
     audit_team: e.audit_team || "",
+    audit_type: e.audit_type || "internal",
+    auditor_firm: e.auditor_firm || "",
+    report_reference: e.report_reference || "",
+    report_date: e.report_date || "",
     status: e.status,
     scope: e.scope || "",
     objectives: e.objectives || "",
@@ -182,6 +216,10 @@ function engPayload(f: EngForm): Record<string, unknown> {
     auditable_unit_id: f.auditable_unit_id || null,
     lead_auditor: f.lead_auditor,
     audit_team: f.audit_team,
+    audit_type: f.audit_type,
+    auditor_firm: f.auditor_firm,
+    report_reference: f.report_reference,
+    report_date: f.report_date || null,
     status: f.status,
     scope: f.scope,
     objectives: f.objectives,
@@ -258,11 +296,14 @@ function fromFinding(fi: AuditFinding & FindingLinks): FindingDraft {
   };
 }
 
-type TabId = "universe" | "engagements" | "findings";
+type TabId = "universe" | "plan" | "programs" | "engagements" | "findings" | "calendar";
 const TABS: { id: TabId; label: string }[] = [
   { id: "universe", label: "Audit Universe" },
+  { id: "plan", label: "Annual Plan" },
+  { id: "programs", label: "Programmes" },
   { id: "engagements", label: "Engagements" },
   { id: "findings", label: "Findings follow-up" },
+  { id: "calendar", label: "Calendar" },
 ];
 type FindingFilter = "all" | "open" | "overdue";
 type FindingSummary = { total: number; open: number; overdue: number };
@@ -272,6 +313,9 @@ function InternalAuditInner() {
   const [tab, setTab] = useState<TabId>("universe");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [assurance, setAssurance] = useState<AssuranceSummary | null>(null);
+  // Feeds the "apply programme to an audit" picker on the Programmes tab.
+  const [engagementOptions, setEngagementOptions] = useState<{ id: string; reference: string; title: string }[]>([]);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   // unit options for the engagement form dropdown (loaded once; refreshed on change)
@@ -325,6 +369,10 @@ function InternalAuditInner() {
   const [summary, setSummary] = useState<FindingSummary>({ total: 0, open: 0, overdue: 0 });
   const loadSummary = useCallback(() => {
     apiCall<FindingSummary>("GET", "/audit-findings/summary").then(setSummary).catch(() => {});
+    api.assuranceSummary().then(setAssurance).catch(() => {});
+    api.auditEngagements()
+      .then((page) => setEngagementOptions(page.items.map((e) => ({ id: e.id, reference: e.reference, title: e.title }))))
+      .catch(() => {});
   }, []);
   useEffect(() => { loadSummary(); }, [loadSummary, refreshKey]);
 
@@ -515,7 +563,8 @@ function InternalAuditInner() {
     { key: "reference", header: "Ref", sortable: true, render: (e) => <span className="ref">{e.reference || "—"}</span> },
     { key: "title", header: "Title", sortable: true, render: (e) => <span className="cell-title">{e.title}</span> },
     { key: "status", header: "Status", sortable: true, render: (e) => <Badge tone={ENG_STATUS_TONE[e.status] || "neutral"}>{cap(e.status)}</Badge> },
-    { key: "lead_auditor", header: "Lead auditor", sortable: true, render: (e) => <span className="muted">{e.lead_auditor || "—"}</span> },
+    { key: "audit_type", header: "Type", render: (e) => <Badge tone={AUDIT_TYPE_TONE[e.audit_type] || "neutral"}>{AUDIT_TYPE_LABEL[e.audit_type] || cap(e.audit_type || "internal")}</Badge> },
+    { key: "lead_auditor", header: "Auditor", sortable: true, render: (e) => <span className="muted">{e.auditor_firm || e.lead_auditor || "—"}</span> },
     { key: "planned_end", header: "Planned end", sortable: true, render: (e) => (e.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{e.planned_end || "—"}</span>) },
     { key: "findings", header: "Findings", render: (e) => <span className="muted">{e.open_finding_count}/{e.finding_count} open</span> },
     { key: "actions", header: "", render: (e) => <div onClick={(ev) => ev.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditEng(e)}>Edit</button> <button className="btn secondary sm" onClick={() => removeEng(e)}>Delete</button></div> },
@@ -603,6 +652,22 @@ function InternalAuditInner() {
           <TextInput value={ef.audit_team} onChange={(v) => setE("audit_team", v)} placeholder="Jane, Omar" />
         </Field>
       </div>
+      <div className="field-row">
+        <Field label="Audit type" help="Internal audit, statutory auditors, an SBP inspection or a certification body — all share one findings pipeline.">
+          <Select value={ef.audit_type} onChange={(v) => setE("audit_type", v)} options={AUDIT_TYPE} />
+        </Field>
+        <Field label="Audit firm / regulator" help="Who performed it, when it was not internal audit.">
+          <TextInput value={ef.auditor_firm} onChange={(v) => setE("auditor_firm", v)} placeholder="e.g. State Bank of Pakistan" />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Report reference">
+          <TextInput value={ef.report_reference} onChange={(v) => setE("report_reference", v)} placeholder="e.g. BID/2026/114" />
+        </Field>
+        <Field label="Report date">
+          <TextInput type="date" value={ef.report_date} onChange={(v) => setE("report_date", v)} />
+        </Field>
+      </div>
       <Field label="Scope">
         <TextArea value={ef.scope} onChange={(v) => setE("scope", v)} rows={3} placeholder="What is in and out of scope." />
       </Field>
@@ -683,6 +748,15 @@ function InternalAuditInner() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
+      {/* ============================================= ANNUAL PLAN */}
+      {tab === "plan" && <AuditPlanTab />}
+
+      {/* ============================================= PROGRAMMES (CHECKLISTS) */}
+      {tab === "programs" && <AuditProgramTab engagements={engagementOptions} />}
+
+      {/* ============================================= CALENDAR */}
+      {tab === "calendar" && <AuditCalendarTab />}
+
       {/* ============================================= AUDIT UNIVERSE */}
       {tab === "universe" && (
         <DataTable<AuditableUnit>
@@ -731,6 +805,54 @@ function InternalAuditInner() {
               <span className="l">Overdue findings</span>
             </div>
           </div>
+
+          {/* Provenance roll-up. The board's question is "how many SBP inspection
+              findings are still open?" — answerable only because every audit type
+              shares this register. */}
+          {assurance && (
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="card-head">
+                <h3>Assurance coverage</h3>
+                <span className="sub">
+                  {assurance.total_engagements} audit(s) · {assurance.total_open_findings} open finding(s)
+                </span>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Performed by</th>
+                      <th style={{ width: 130 }}>Audits</th>
+                      <th style={{ width: 130 }}>In progress</th>
+                      <th style={{ width: 130 }}>Findings</th>
+                      <th style={{ width: 130 }}>Open</th>
+                      <th style={{ width: 130 }}>Overdue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assurance.rows.map((r) => (
+                      <tr key={r.audit_type} style={{ opacity: r.engagements ? 1 : 0.55 }}>
+                        <td>
+                          <Badge tone={AUDIT_TYPE_TONE[r.audit_type] || "neutral"}>{r.label}</Badge>
+                        </td>
+                        <td className="muted">{r.engagements}</td>
+                        <td className="muted">{r.open_engagements}</td>
+                        <td className="muted">{r.findings}</td>
+                        <td>{r.open_findings ? <b>{r.open_findings}</b> : <span className="muted">0</span>}</td>
+                        <td>
+                          {r.overdue_findings ? (
+                            <Badge tone="critical">{r.overdue_findings}</Badge>
+                          ) : (
+                            <span className="muted">0</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           <DataTable<AuditFinding>
             columns={findingColumns}
