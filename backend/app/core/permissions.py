@@ -48,6 +48,10 @@ PERMISSION_CATALOG: dict[str, str] = {
     "report:write": "Build and manage dashboard widgets",
     "integration:manage": "Manage webhooks and integrations",
     "automation:manage": "Define dynamic status rules",
+    # Held separately from the module write permissions: who may lengthen a remediation
+    # deadline is itself a governance control, and should not follow from being able to
+    # edit a risk.
+    "sla:manage": "Set turnaround-time (TAT) targets and escalation",
     "sso:manage": "Configure single sign-on (SSO)",
     "asset:read": "View assets",
     "asset:write": "Create and edit assets",

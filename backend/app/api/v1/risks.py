@@ -28,6 +28,7 @@ from app.models.risk import Risk, RiskAcceptance
 from app.models.threat import Threat, Vulnerability
 from app.schemas.common import Page
 from app.schemas.risk import (
+    ResidualAcceptance,
     RiskAcceptanceCreate,
     RiskAcceptanceDecision,
     RiskAcceptanceRead,
@@ -35,11 +36,19 @@ from app.schemas.risk import (
     RiskCreate,
     RiskRead,
     RiskUpdate,
+    SuggestedResidual,
 )
 from app.services.refs import next_reference
 from app.services import audit
 from app.services import dual_control
+from app.services.residual_engine import ControlInput, suggest_residual
 from app.services.risk_scoring import next_review_date
+from app.services.risk_settings import (
+    get_matrix_size,
+    get_max_score,
+    get_or_create_residual_policy,
+    policy_spec,
+)
 
 router = APIRouter(prefix="/risks", tags=["risks"])
 
@@ -72,6 +81,58 @@ async def _next_reference(db) -> str:
     return await next_reference(db, Risk, "R")
 
 
+async def _check_scale(db, user: CurrentUser, values: dict[str, object]) -> None:
+    """Reject scores outside the tenant's configured matrix.
+
+    The schema only bounds scores to the widest scale any tenant may choose (1..6) and
+    the database check constraint does the same, because neither can vary per tenant.
+    This is where the tenant's own ``matrix_size`` is enforced — without it, a 4x4
+    organisation could store a 5 that its own heat map has no cell for.
+    """
+    size = await get_matrix_size(db, user.tenant_id)
+    for name in (
+        "inherent_likelihood", "inherent_impact", "residual_likelihood", "residual_impact",
+    ):
+        value = values.get(name)
+        if isinstance(value, int) and value > size:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"{name.replace('_', ' ')} {value} is outside this organisation's "
+                    f"{size}x{size} risk matrix (1-{size})"
+                ),
+            )
+
+
+def _control_inputs(risk: Risk) -> list[ControlInput]:
+    """Describe each linked control to the residual engine, including whether it can be
+    relied on today — a failed audit, an overdue test or an open finding means it cannot.
+    """
+    from app.models.enums import AuditFindingStatus, TestResult
+
+    out: list[ControlInput] = []
+    for control in risk.controls:
+        note = ""
+        if control.last_audit_result == TestResult.failed:
+            note = "its last audit failed"
+        elif control.is_audit_overdue:
+            note = "its audit is overdue"
+        elif any(
+            f.status not in (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)
+            for f in control.audit_findings
+        ):
+            note = "it has an open audit finding"
+        out.append(
+            ControlInput(
+                label=control.reference or control.name,
+                effectiveness=control.effectiveness,
+                healthy=not note,
+                health_note=note,
+            )
+        )
+    return out
+
+
 # --------------------------------------------------------------------------- CRUD
 _RISK_SORTABLE = {
     "reference": Risk.reference,
@@ -88,6 +149,7 @@ _RISK_SORTABLE = {
 @router.get("", response_model=Page[RiskRead], dependencies=[Depends(require("risk:read"))])
 async def list_risks(
     db: DbSession,
+    user: CurrentUser,
     status_filter: Annotated[RiskStatus | None, Query(alias="status")] = None,
     category: str | None = None,
     search: str | None = None,
@@ -112,8 +174,9 @@ async def list_risks(
     else:
         stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
+    context = {"max_score": await get_max_score(db, user.tenant_id)}
     return Page(
-        items=[RiskRead.model_validate(r) for r in rows],
+        items=[RiskRead.model_validate(r, context=context) for r in rows],
         total=total,
         limit=limit,
         offset=offset,
@@ -127,6 +190,7 @@ async def list_risks(
     dependencies=[Depends(require("risk:write"))],
 )
 async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> RiskRead:
+    await _check_scale(db, user, body.model_dump())
     data = body.model_dump(
         exclude={"asset_ids", "control_ids", "threat_ids", "vulnerability_ids", "policy_ids", "incident_ids"}
     )
@@ -150,12 +214,12 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
         entity_id=risk.id,
         summary=f"Created risk {risk.reference}: {risk.title}",
     )
-    return await _read(db, risk.id)
+    return await _read(db, risk.id, user)
 
 
 @router.get("/{risk_id}", response_model=RiskRead, dependencies=[Depends(require("risk:read"))])
-async def get_risk(risk_id: uuid.UUID, db: DbSession) -> RiskRead:
-    return RiskRead.model_validate(await _load_risk(db, risk_id))
+async def get_risk(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> RiskRead:
+    return await _read(db, risk_id, user)
 
 
 @router.patch(
@@ -166,6 +230,7 @@ async def update_risk(
 ) -> RiskRead:
     risk = await _load_risk(db, risk_id)
     data = body.model_dump(exclude_unset=True)
+    await _check_scale(db, user, data)
 
     asset_ids = data.pop("asset_ids", None)
     control_ids = data.pop("control_ids", None)
@@ -204,7 +269,7 @@ async def update_risk(
         summary=f"Updated risk {risk.reference}",
         changes={k: str(v) for k, v in data.items()},
     )
-    return await _read(db, risk.id)
+    return await _read(db, risk.id, user)
 
 
 @router.delete(
@@ -240,6 +305,7 @@ async def assess_risk(
     risk_id: uuid.UUID, body: RiskAssessment, db: DbSession, user: CurrentUser
 ) -> RiskRead:
     risk = await _load_risk(db, risk_id)
+    await _check_scale(db, user, body.model_dump())
     risk.residual_likelihood = body.residual_likelihood
     risk.residual_impact = body.residual_impact
     if risk.status == RiskStatus.draft:
@@ -253,7 +319,7 @@ async def assess_risk(
         entity_id=risk.id,
         summary=f"Assessed residual risk for {risk.reference}",
     )
-    return await _read(db, risk.id)
+    return await _read(db, risk.id, user)
 
 
 @router.post(
@@ -276,7 +342,118 @@ async def review_risk(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> R
         entity_id=risk.id,
         summary=f"Reviewed risk {risk.reference}",
     )
-    return await _read(db, risk.id)
+    return await _read(db, risk.id, user)
+
+
+# ------------------------------------------------------------- residual suggestion
+@router.get(
+    "/{risk_id}/suggested-residual",
+    response_model=SuggestedResidual,
+    dependencies=[Depends(require("risk:read"))],
+    summary="Residual score proposed from the linked controls' effectiveness",
+)
+async def get_suggested_residual(
+    risk_id: uuid.UUID, db: DbSession, user: CurrentUser
+) -> SuggestedResidual:
+    """Compute — but never store — a residual proposal, with its reasoning.
+
+    Read-only and always recomputed, so it reflects control effectiveness *as of now*:
+    when a mitigating control's audit fails, the proposal rises again on the next read
+    without anyone re-running anything.
+    """
+    risk = await _load_risk(db, risk_id)
+    policy = await get_or_create_residual_policy(db, user.tenant_id)
+    suggestion = suggest_residual(
+        risk.inherent_likelihood,
+        risk.inherent_impact,
+        _control_inputs(risk),
+        policy_spec(policy),
+    )
+    return SuggestedResidual(
+        likelihood=suggestion.likelihood,
+        impact=suggestion.impact,
+        score=suggestion.score,
+        reduction=suggestion.reduction,
+        rationale=suggestion.rationale,
+        inherent_score=risk.inherent_score,
+        current_residual_score=risk.residual_score,
+        matches_current=(
+            risk.residual_likelihood == suggestion.likelihood
+            and risk.residual_impact == suggestion.impact
+        ),
+    )
+
+
+@router.post(
+    "/{risk_id}/accept-residual",
+    response_model=RiskRead,
+    dependencies=[Depends(require("risk:write"))],
+    summary="Adopt the suggested residual, or record a different judgement with a reason",
+)
+async def accept_residual(
+    risk_id: uuid.UUID, body: ResidualAcceptance, db: DbSession, user: CurrentUser
+) -> RiskRead:
+    """Sign off the residual score.
+
+    Sending no scores accepts the suggestion as it stands. Sending different scores is
+    an override and **requires a reason** — that sentence is what an auditor reads when
+    they ask why the recorded residual is lower than the control evidence supports.
+    """
+    risk = await _load_risk(db, risk_id)
+    policy = await get_or_create_residual_policy(db, user.tenant_id)
+    suggestion = suggest_residual(
+        risk.inherent_likelihood,
+        risk.inherent_impact,
+        _control_inputs(risk),
+        policy_spec(policy),
+    )
+
+    likelihood = body.likelihood if body.likelihood is not None else suggestion.likelihood
+    impact = body.impact if body.impact is not None else suggestion.impact
+    await _check_scale(
+        db, user, {"residual_likelihood": likelihood, "residual_impact": impact}
+    )
+
+    is_override = (likelihood, impact) != (suggestion.likelihood, suggestion.impact)
+    if is_override and not body.override_reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Recording {likelihood}x{impact} instead of the suggested "
+                f"{suggestion.likelihood}x{suggestion.impact} needs a written reason"
+            ),
+        )
+
+    risk.residual_likelihood = likelihood
+    risk.residual_impact = impact
+    risk.suggested_residual_likelihood = suggestion.likelihood
+    risk.suggested_residual_impact = suggestion.impact
+    risk.suggested_residual_rationale = "\n".join(suggestion.rationale)
+    risk.residual_override_reason = body.override_reason.strip() if is_override else ""
+    risk.residual_accepted_by = user.id
+    risk.residual_accepted_at = date.today()
+    if risk.status == RiskStatus.draft:
+        risk.status = RiskStatus.assessed
+
+    await db.flush()
+    await audit.record(
+        db,
+        actor=user,
+        action="assess",
+        entity_type="risk",
+        entity_id=risk.id,
+        summary=(
+            f"{'Overrode' if is_override else 'Accepted'} suggested residual for "
+            f"{risk.reference}: {likelihood}x{impact}"
+        ),
+        changes={
+            "residual_likelihood": likelihood,
+            "residual_impact": impact,
+            "suggested": f"{suggestion.likelihood}x{suggestion.impact}",
+            "override_reason": risk.residual_override_reason,
+        },
+    )
+    return await _read(db, risk.id, user)
 
 
 @router.post(
@@ -379,6 +556,13 @@ async def decide_acceptance(
     return RiskAcceptanceRead.model_validate(acceptance)
 
 
-async def _read(db, risk_id: uuid.UUID) -> RiskRead:
-    """Reload a risk with relationships for serialization."""
-    return RiskRead.model_validate(await _load_risk(db, risk_id))
+async def _read(db, risk_id: uuid.UUID, user: CurrentUser) -> RiskRead:
+    """Reload a risk with relationships for serialization.
+
+    The tenant's matrix size travels as validation context so severity chips are banded
+    on the same scale the heat map uses — a 4x4 register must not be banded as 5x5.
+    """
+    max_score = await get_max_score(db, user.tenant_id)
+    return RiskRead.model_validate(
+        await _load_risk(db, risk_id), context={"max_score": max_score}
+    )

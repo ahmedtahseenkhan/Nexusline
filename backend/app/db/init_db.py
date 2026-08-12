@@ -15,7 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from app.core.config import settings
 from app.core.database import Base
 from app.db.rls import apply_rls_policies
-from app.db.schema_patches import asset_split_ddl_statements
+from app.db.schema_patches import (
+    asset_split_ddl_statements,
+    risk_methodology_ddl_statements,
+    audit_type_ddl_statements,
+    fortnightly_ddl_statements,
+    tat_ddl_statements,
+)
 
 # Importing the models package registers every table on Base.metadata.
 import app.models  # noqa: F401
@@ -77,9 +83,16 @@ async def init_models() -> None:
     await wait_for_db()
     async with admin_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # create_all can't ALTER existing tables — apply the asset-split column additions
-        # so an existing `assets` table gains asset_class/business_value/etc. on boot.
-        for statement in asset_split_ddl_statements():
+        # create_all can't ALTER existing tables — apply the column additions so an
+        # existing `assets` table gains asset_class/business_value/etc., and `risks` /
+        # `risk_settings` gain the configurable-matrix and residual-suggestion columns.
+        for statement in (
+            *asset_split_ddl_statements(),
+            *risk_methodology_ddl_statements(),
+            *tat_ddl_statements(),
+            *audit_type_ddl_statements(),
+            *fortnightly_ddl_statements(),
+        ):
             await conn.execute(text(statement))
         await apply_rls_policies(conn)
         await ensure_app_role(conn)

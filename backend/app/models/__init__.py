@@ -43,8 +43,10 @@ from app.models.continuity import ContinuityPlan, ContinuityTask, ContinuityTest
 from app.models.control import Control, ControlAudit, ControlMaintenance, control_policies
 from app.models.custom_field import CustomField, CustomFieldValue
 from app.models.risk import (
+    ResidualPolicy,
     Risk,
     RiskAcceptance,
+    RiskMatrixLevel,
     RiskSetting,
     risk_assets,
     risk_controls,
@@ -108,6 +110,21 @@ from app.models.incident import (
     incident_vendors,
 )
 from app.models.notification import Notification, NotificationView
+from app.models.import_profile import ImportProfile
+from app.models.risk_scenario import RiskScenarioTemplate
+from app.models.sla import SlaPolicy
+from app.models.workflow import (
+    WorkflowDefinition,
+    WorkflowInstance,
+    WorkflowInstanceStage,
+    WorkflowStage,
+)
+from app.models.audit_plan import (
+    AuditPlan,
+    AuditPlanItem,
+    AuditProgram,
+    AuditProgramStep,
+)
 # --- Banking-productionization modules (gap-analysis build) ---
 from app.models.issue import Issue, IssueAction, IssueUpdate
 from app.models.regulatory_change import Obligation, RegulatoryChange, RegulatoryReturn
@@ -182,6 +199,8 @@ __all__ = [
     "Risk",
     "RiskAcceptance",
     "RiskSetting",
+    "RiskMatrixLevel",
+    "ResidualPolicy",
     "risk_assets",
     "risk_controls",
     "risk_incidents",
@@ -251,6 +270,17 @@ __all__ = [
     "TrainingRecord",
     "Notification",
     "NotificationView",
+    "ImportProfile",
+    "RiskScenarioTemplate",
+    "SlaPolicy",
+    "WorkflowDefinition",
+    "WorkflowStage",
+    "WorkflowInstance",
+    "WorkflowInstanceStage",
+    "AuditPlan",
+    "AuditPlanItem",
+    "AuditProgram",
+    "AuditProgramStep",
     "ApprovalRequest",
     "ApprovalAction",
     "AuditableUnit",

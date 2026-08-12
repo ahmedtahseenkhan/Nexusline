@@ -7,6 +7,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import ScenarioLibrary from "@/components/ScenarioLibrary";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -405,6 +406,12 @@ function ThreatLibraryInner() {
           onDelete={(r) => remove("vulnerability", r)}
           onImported={reload}
         />
+      </div>
+
+      {/* The scenario library pairs these catalogs with asset kinds, which is what makes
+          "Generate risks" on the asset registers possible. */}
+      <div style={{ marginTop: 16 }}>
+        <ScenarioLibrary />
       </div>
 
       {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}

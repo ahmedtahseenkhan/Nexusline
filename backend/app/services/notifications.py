@@ -45,6 +45,10 @@ _W = NotificationCategory.warning
 _C = NotificationCategory.critical
 _I = NotificationCategory.info
 
+#: Dedup-key prefix marking a notification as a recorded event rather than a live
+#: condition. Events are never auto-resolved by :func:`refresh`.
+EVENT_PREFIX = "event:"
+
 
 async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
     today = date.today()
@@ -275,6 +279,29 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
             f"{ap.title} — awaiting {ap.approver or 'a decision'}",
             _W if overdue else _I, "approval", ap.id, "/approvals")
 
+    # Turnaround-time clock. Reconciling here means the sweep both recomputes every open
+    # record's window against the current policy and raises the resulting alerts in one
+    # pass — an early warning while there is still time to act, and a critical alert once
+    # the window has actually lapsed.
+    from app.services import sla as sla_service
+
+    for record in await sla_service.reconcile(db, tenant_id):
+        if record.days_overdue > 0:
+            add(
+                f"tat-breach:{record.entity_type}:{record.entity_id}",
+                f"TAT breached: {record.entity_label} {record.label}",
+                f"{record.days_overdue} day(s) past the {record.severity} turnaround time "
+                f"(due {record.due})",
+                _C, record.entity_type, record.entity_id, record.link,
+            )
+        else:
+            add(
+                f"tat-at-risk:{record.entity_type}:{record.entity_id}",
+                f"TAT approaching: {record.entity_label} {record.label}",
+                f"Turnaround time expires {record.due}",
+                _W, record.entity_type, record.entity_id, record.link,
+            )
+
     return alerts
 
 
@@ -304,6 +331,14 @@ async def refresh(db: AsyncSession, tenant_id) -> list[Notification]:
             db.add(n)
             created.append(n)
     for key, n in existing.items():
+        # Only reconcile what this scanner produces. Alerts describe a *condition* that
+        # is either still true or has resolved, so one that no longer appears is deleted.
+        # Event notifications (prefix `event:`) record something that *happened* — a
+        # workflow finishing, for instance — and are written directly by the module that
+        # observed it. Sweeping those away would mean the user never sees them, because
+        # this reconciler runs every time the notification list is opened.
+        if key.startswith(EVENT_PREFIX):
+            continue
         if key not in current_keys:
             await db.delete(n)
     await db.flush()

@@ -2899,6 +2899,202 @@ _SBP_BCP = {
 }
 
 
+# ---------------------------------------------------------------- ISO/IEC 27005:2022
+# The methodology standard behind the risk register itself: it defines the process a
+# bank baselines its scoring on (context → identification → analysis → evaluation →
+# treatment → acceptance → monitoring), which is why installing it and then configuring
+# the risk matrix to match is the intended pairing.
+_ISO_27005_2022 = {
+    "name": "ISO/IEC 27005:2022",
+    "version": "2022",
+    "authority": "ISO/IEC",
+    "regulator": "ISO/IEC JTC 1/SC 27",
+    "scope": (
+        "Guidance on managing information security risks. Provides the process and "
+        "criteria used to identify, analyse, evaluate and treat information security "
+        "risk in support of an ISO/IEC 27001 ISMS."
+    ),
+    "description": (
+        "Information security, cybersecurity and privacy protection — Guidance on "
+        "managing information security risks. Defines the risk management process, "
+        "risk criteria (including likelihood and consequence scales), asset/threat/"
+        "vulnerability-based identification, and the risk treatment and acceptance "
+        "cycle. Use it to baseline the risk register's methodology and scoring scales."
+    ),
+    "requirements": [
+        # --- Clause 5: Information security risk management
+        ("5.1", "5. Risk management", "Information security risk management process",
+         "Establish a defined, repeatable process for managing information security risk aligned to ISO/IEC 27001 clauses 6 and 8."),
+        ("5.2", "5. Risk management", "Risk management cycles",
+         "Perform risk assessment and treatment at planned intervals and when significant change occurs."),
+        # --- Clause 6: Context establishment
+        ("6.1", "6. Context establishment", "Organizational considerations",
+         "Determine the organizational context, objectives and constraints that frame information security risk."),
+        ("6.2", "6. Context establishment", "Identifying basic requirements of interested parties",
+         "Identify the risk-relevant requirements of interested parties, including regulators."),
+        ("6.3", "6. Context establishment", "Applying risk assessment",
+         "Define the scope and boundaries of the risk assessment and the approach to be applied."),
+        ("6.4.1", "6. Context establishment", "Risk criteria — General",
+         "Establish and maintain the criteria used to assess and evaluate information security risk."),
+        ("6.4.2", "6. Context establishment", "Risk acceptance criteria",
+         "Define the criteria (appetite and tolerance) determining when a risk may be accepted."),
+        ("6.4.3", "6. Context establishment", "Criteria for performing risk assessments",
+         "Define the consequence and likelihood scales and the level-of-risk determination used in assessments."),
+        ("6.5", "6. Context establishment", "Choosing an appropriate method",
+         "Select a qualitative, quantitative or hybrid assessment method appropriate to the context."),
+        # --- Clause 7: Risk assessment process
+        ("7.1", "7. Risk assessment", "General",
+         "Apply the risk assessment process consistently to produce comparable, repeatable results."),
+        ("7.2.1", "7. Risk assessment", "Identifying risks — General",
+         "Identify information security risks that could affect the confidentiality, integrity or availability of information."),
+        ("7.2.2", "7. Risk assessment", "Identifying risk owners",
+         "Assign an accountable owner to every identified risk."),
+        ("7.3.1", "7. Risk assessment", "Analysing risks — General",
+         "Analyse identified risks to determine their level of risk."),
+        ("7.3.2", "7. Risk assessment", "Assessing potential consequences",
+         "Assess the consequence of each risk scenario against the defined impact criteria."),
+        ("7.3.3", "7. Risk assessment", "Assessing likelihood",
+         "Assess the likelihood of each risk scenario against the defined likelihood criteria."),
+        ("7.3.4", "7. Risk assessment", "Determining the levels of risk",
+         "Combine consequence and likelihood to determine the level of risk (inherent, before treatment)."),
+        ("7.4.1", "7. Risk assessment", "Evaluating risks — Comparison with criteria",
+         "Compare determined risk levels against the risk acceptance and evaluation criteria."),
+        ("7.4.2", "7. Risk assessment", "Prioritizing risks for treatment",
+         "Prioritise analysed risks for treatment based on the evaluation outcome."),
+        # --- Clause 8: Risk treatment process
+        ("8.1", "8. Risk treatment", "General",
+         "Apply a defined treatment process to every risk requiring treatment."),
+        ("8.2", "8. Risk treatment", "Selecting appropriate risk treatment options",
+         "Select modification, retention, avoidance or sharing for each risk requiring treatment."),
+        ("8.3", "8. Risk treatment", "Determining necessary controls",
+         "Determine the controls necessary to implement the chosen treatment option."),
+        ("8.4", "8. Risk treatment", "Comparing controls with ISO/IEC 27001:2022 Annex A",
+         "Verify that no necessary control has been omitted by comparing against Annex A."),
+        ("8.5", "8. Risk treatment", "Producing a Statement of Applicability",
+         "Produce and maintain a Statement of Applicability with justification for inclusion and exclusion."),
+        ("8.6", "8. Risk treatment", "Risk treatment plan",
+         "Formulate the treatment plan, determine residual risk, and obtain risk owner approval of the residual level."),
+        # --- Clause 9: Operation
+        ("9.1", "9. Operation", "Performing information security risk assessment process",
+         "Perform and retain documented information of risk assessments at planned intervals."),
+        ("9.2", "9. Operation", "Performing information security risk treatment process",
+         "Implement the treatment plan and retain documented information of the results."),
+        # --- Clause 10: Leveraging related ISMS processes
+        ("10.1", "10. Related processes", "Context of the organization",
+         "Keep risk management aligned with the ISMS context and scope."),
+        ("10.2", "10. Related processes", "Leadership and commitment",
+         "Ensure top management supports and directs the risk management process."),
+        ("10.3", "10. Related processes", "Communication and consultation",
+         "Communicate and consult with stakeholders throughout the risk management process."),
+        ("10.4", "10. Related processes", "Documented information",
+         "Create and control the documented information the risk process produces."),
+        ("10.5", "10. Related processes", "Monitoring and review",
+         "Monitor and review risks, controls and the risk criteria themselves for continued suitability."),
+        ("10.6", "10. Related processes", "Management review",
+         "Include risk assessment and treatment results in management review."),
+        ("10.7", "10. Related processes", "Corrective action",
+         "Take corrective action where the risk process or its controls do not perform as intended."),
+        ("10.8", "10. Related processes", "Continual improvement",
+         "Continually improve the suitability, adequacy and effectiveness of risk management."),
+    ],
+}
+
+# ---------------------------------------------------------------- ISO 31000:2018
+# The enterprise-level umbrella: principles and a governance framework rather than
+# information-security specifics. Banks that run one ERM methodology across credit,
+# market, operational and IT risk baseline the register on this.
+_ISO_31000_2018 = {
+    "name": "ISO 31000:2018",
+    "version": "2018",
+    "authority": "ISO",
+    "regulator": "ISO/TC 262",
+    "scope": (
+        "Enterprise risk management — principles, framework and process. Applies to "
+        "risk of any type across the whole organization, not one discipline."
+    ),
+    "description": (
+        "Risk management — Guidelines. Provides the principles that make risk "
+        "management effective, the leadership-led framework that embeds it in "
+        "governance, and the process (scope and context, identification, analysis, "
+        "evaluation, treatment, monitoring, recording and reporting) applied at every "
+        "level. Use it to baseline an enterprise-wide risk methodology."
+    ),
+    "requirements": [
+        # --- Clause 4: Principles
+        ("4.a", "4. Principles", "Integrated",
+         "Risk management is an integral part of all organizational activities."),
+        ("4.b", "4. Principles", "Structured and comprehensive",
+         "A structured and comprehensive approach produces consistent and comparable results."),
+        ("4.c", "4. Principles", "Customized",
+         "The framework and process are customized and proportionate to the organization's context and objectives."),
+        ("4.d", "4. Principles", "Inclusive",
+         "Appropriate and timely involvement of stakeholders enables their knowledge and views to be considered."),
+        ("4.e", "4. Principles", "Dynamic",
+         "Risks emerge, change and disappear as context changes; risk management anticipates and responds."),
+        ("4.f", "4. Principles", "Best available information",
+         "Inputs are based on historical and current information and on future expectations, with limitations made clear."),
+        ("4.g", "4. Principles", "Human and cultural factors",
+         "Human behaviour and culture significantly influence risk management at all levels."),
+        ("4.h", "4. Principles", "Continual improvement",
+         "Risk management is continually improved through learning and experience."),
+        # --- Clause 5: Framework
+        ("5.1", "5. Framework", "General",
+         "Develop a framework that integrates risk management into significant activities and functions."),
+        ("5.2", "5. Framework", "Leadership and commitment",
+         "Top management and oversight bodies ensure risk management is integrated into all activities and demonstrate commitment."),
+        ("5.3", "5. Framework", "Integration",
+         "Integrate risk management into the organizational structure, governance and decision-making."),
+        ("5.4.1", "5. Framework", "Design — Understanding the organization and its context",
+         "Examine the external and internal context of the organization when designing the framework."),
+        ("5.4.2", "5. Framework", "Articulating risk management commitment",
+         "Issue a policy or statement articulating the organization's commitment to risk management."),
+        ("5.4.3", "5. Framework", "Assigning organizational roles, authorities, responsibilities and accountabilities",
+         "Assign and communicate risk management roles, authorities and accountabilities at all levels."),
+        ("5.4.4", "5. Framework", "Allocating resources",
+         "Allocate appropriate resources — people, skills, processes, information systems — to risk management."),
+        ("5.4.5", "5. Framework", "Establishing communication and consultation",
+         "Establish an approach to communication and consultation to support the framework."),
+        ("5.5", "5. Framework", "Implementation",
+         "Implement the framework through a plan covering time, resources, decision-making and modification."),
+        ("5.6", "5. Framework", "Evaluation",
+         "Periodically measure framework performance against its purpose, implementation plans and behaviours."),
+        ("5.7", "5. Framework", "Improvement",
+         "Continually monitor, adapt and improve the framework and the organization's risk maturity."),
+        # --- Clause 6: Process
+        ("6.1", "6. Process", "General",
+         "Apply the risk management process systematically as an integral part of management and decision-making."),
+        ("6.2", "6. Process", "Communication and consultation",
+         "Communicate and consult with stakeholders at all stages of the process."),
+        ("6.3.1", "6. Process", "Scope, context and criteria — General",
+         "Define the scope of risk management activities and the context in which they occur."),
+        ("6.3.2", "6. Process", "Defining the scope",
+         "Define the scope of each risk management activity, its objectives and the decisions it supports."),
+        ("6.3.3", "6. Process", "External and internal context",
+         "Establish the external and internal context relevant to the scope."),
+        ("6.3.4", "6. Process", "Defining risk criteria",
+         "Specify the amount and type of risk that may or may not be taken — appetite, tolerance and the scales used to judge them."),
+        ("6.4.1", "6. Process", "Risk assessment — General",
+         "Conduct risk assessment as the overall process of identification, analysis and evaluation."),
+        ("6.4.2", "6. Process", "Risk identification",
+         "Find, recognize and describe risks that might help or prevent achieving objectives."),
+        ("6.4.3", "6. Process", "Risk analysis",
+         "Comprehend the nature of risk and determine its level, considering likelihood, consequences and the effectiveness of existing controls."),
+        ("6.4.4", "6. Process", "Risk evaluation",
+         "Compare the results of risk analysis with the risk criteria to decide where additional action is required."),
+        ("6.5.1", "6. Process", "Risk treatment — General",
+         "Select and implement options for addressing risk, in an iterative cycle."),
+        ("6.5.2", "6. Process", "Selection of risk treatment options",
+         "Select treatment options balancing benefits against costs, effort and constraints."),
+        ("6.5.3", "6. Process", "Preparing and implementing risk treatment plans",
+         "Document treatment plans with actions, owners, resources, timing and reporting, and record the residual risk accepted."),
+        ("6.6", "6. Process", "Monitoring and review",
+         "Plan monitoring and review to assure and improve process design, implementation and outcomes."),
+        ("6.7", "6. Process", "Recording and reporting",
+         "Document and report the process and its outcomes to support decision-making and accountability."),
+    ],
+}
+
+
 def _build(meta: dict) -> dict:
     """Normalize a template's tuple requirements into dicts."""
     return {
@@ -2911,6 +3107,8 @@ def _build(meta: dict) -> dict:
 
 
 TEMPLATES: dict[str, dict] = {
+    "iso-27005-2022": _build(_ISO_27005_2022),
+    "iso-31000-2018": _build(_ISO_31000_2018),
     "iso-42001-2023": _build(_ISO_42001_2023),
     "iso-27001-2022": _build(_ISO_27001_2022),
     "soc-2-2017": _build(_SOC_2_2017),

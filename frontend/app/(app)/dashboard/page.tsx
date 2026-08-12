@@ -7,8 +7,10 @@ import {
   type AuditEntry,
   type ComplianceSummary,
   type Dashboard,
+  type MatrixBand,
   type RiskAggregate,
   type RiskMatrix,
+  type TatSummary,
 } from "@/lib/api";
 
 // Font stacks. The webfonts are loaded via a plain <link> (build-safe, no build-time
@@ -26,8 +28,14 @@ function money(n: number) {
   if (n >= 1_000) return `$${Math.round(n / 1_000)}K`;
   return `$${Math.round(n)}`;
 }
-function bandFromScore(score: number | null): keyof typeof SEV {
+/** Band a score using the server-supplied bands, which scale with the tenant's matrix.
+ *  Falls back to the 5x5 thresholds only until the matrix response has arrived. */
+function bandFromScore(score: number | null, bands?: MatrixBand[]): keyof typeof SEV {
   if (!score) return "low";
+  if (bands && bands.length) {
+    const hit = bands.find((b) => score >= b.min_score && score <= b.max_score);
+    if (hit) return hit.severity as keyof typeof SEV;
+  }
   if (score >= 15) return "critical";
   if (score >= 10) return "high";
   if (score >= 5) return "medium";
@@ -103,6 +111,7 @@ export default function DashboardPage() {
   const [c, setC] = useState<ComplianceSummary | null>(null);
   const [agg, setAgg] = useState<RiskAggregate | null>(null);
   const [matrix, setMatrix] = useState<RiskMatrix | null>(null);
+  const [tat, setTat] = useState<TatSummary | null>(null);
   const [activity, setActivity] = useState<AuditEntry[]>([]);
   const [heatMode, setHeatMode] = useState<"inherent" | "residual">("residual");
   const [range, setRange] = useState<Range>("30d");
@@ -113,6 +122,7 @@ export default function DashboardPage() {
     api.complianceSummary().then(setC).catch(() => {});
     api.riskAggregate().then(setAgg).catch(() => {});
     api.riskMatrix().then(setMatrix).catch(() => {});
+    api.slaBreaches().then(setTat).catch(() => {});
     api.audit(50).then((r) => setActivity(r.items)).catch(() => {});
   }, []);
 
@@ -138,6 +148,8 @@ export default function DashboardPage() {
   const attention = useMemo(() => {
     if (!d) return [];
     const items: { tag: string; chip: [string, string]; title: string; meta: string; action: string; href: string; danger?: boolean }[] = [];
+    if (tat && tat.breached > 0)
+      items.push({ tag: "TAT", chip: ["rgba(239,68,68,.16)", "#fca5a5"], title: `${tat.breached} record${tat.breached > 1 ? "s are" : " is"} past the turnaround time`, meta: tat.by_type.filter((t) => t.breached).map((t) => `${t.breached} ${t.label.toLowerCase()}`).join(" · "), action: "Chase", href: "/sla-policies", danger: true });
     if (d.risks_in_breach > 0)
       items.push({ tag: "BREACH", chip: ["rgba(239,68,68,.16)", "#fca5a5"], title: `${d.risks_in_breach} risk${d.risks_in_breach > 1 ? "s" : ""} exceed tolerance (residual ≥ ${d.tolerance_score})`, meta: "Escalation to risk owner required", action: "Escalate", href: "/risks", danger: true });
     if (critical > 0)
@@ -150,23 +162,26 @@ export default function DashboardPage() {
     if (d.pending_acceptances > 0)
       items.push({ tag: "APPROVE", chip: ["rgba(52,211,153,.16)", "#6ee7b7"], title: `${d.pending_acceptances} risk acceptance${d.pending_acceptances > 1 ? "s" : ""} awaiting sign-off`, meta: "Pending approver decision", action: "Approve", href: "/approvals" });
     return items.slice(0, 3);
-  }, [d, c, critical]);
+  }, [d, c, critical, tat]);
 
   // ---- risk matrix cells + bubbles ----
-  const pos: Record<number, number> = { 1: 10, 2: 30, 3: 50, 4: 70, 5: 90 };
+  // The matrix is per-organisation configurable (3x3 to 6x6), so cell centres are
+  // derived from its size rather than a fixed five-point lookup.
+  const matrixSize = matrix?.size ?? 5;
+  const centre = (n: number) => ((n - 0.5) / matrixSize) * 100;
   const bubbles = useMemo(() => {
     if (!matrix) return [];
     return matrix.cells
       .map((cell) => {
         const count = heatMode === "residual" ? cell.residual_count : cell.inherent_count;
         if (!count) return null;
-        const band = bandFromScore(cell.score);
+        const band = bandFromScore(cell.score, matrix.bands);
         const size = 24 + Math.min(count, 5) * 5;
         return {
           key: `${cell.likelihood}-${cell.impact}`,
           count,
-          left: `${pos[cell.likelihood] ?? cell.likelihood * 20 - 10}%`,
-          top: `${100 - (pos[cell.impact] ?? cell.impact * 20 - 10)}%`,
+          left: `${((cell.likelihood - 0.5) / matrix.size) * 100}%`,
+          top: `${100 - ((cell.impact - 0.5) / matrix.size) * 100}%`,
           size,
           color: SEV[band],
           title: `Likelihood ${cell.likelihood} × Impact ${cell.impact} · ${count} risk${count > 1 ? "s" : ""} · ${band}`,
@@ -310,11 +325,11 @@ export default function DashboardPage() {
             </div>
             <div>
               <div style={{ position: "relative", width: "100%", aspectRatio: "1.35 / 1" }}>
-                <div style={{ position: "absolute", inset: 0, display: "grid", gridTemplateColumns: "repeat(5,1fr)", gridTemplateRows: "repeat(5,1fr)", gap: 5 }}>
-                  {Array.from({ length: 25 }).map((_, idx) => {
-                    const row = Math.floor(idx / 5), col = idx % 5;
-                    const impact = 5 - row, likelihood = col + 1;
-                    const band = bandFromScore(impact * likelihood);
+                <div style={{ position: "absolute", inset: 0, display: "grid", gridTemplateColumns: `repeat(${matrixSize},1fr)`, gridTemplateRows: `repeat(${matrixSize},1fr)`, gap: 5 }}>
+                  {Array.from({ length: matrixSize * matrixSize }).map((_, idx) => {
+                    const row = Math.floor(idx / matrixSize), col = idx % matrixSize;
+                    const impact = matrixSize - row, likelihood = col + 1;
+                    const band = bandFromScore(impact * likelihood, matrix?.bands);
                     return <div key={idx} style={{ borderRadius: 9, background: SEV[band] + "22", border: `1px solid ${SEV[band]}2e` }} />;
                   })}
                 </div>
@@ -383,7 +398,7 @@ export default function DashboardPage() {
             </thead>
             <tbody>
               {(agg?.rows ?? []).map((r) => {
-                const band = bandFromScore(r.max_residual_score);
+                const band = bandFromScore(r.max_residual_score, matrix?.bands);
                 return (
                   <tr key={r.category} style={{ borderTop: "1px solid #f1f4f7", fontSize: 13.5 }}>
                     <td style={{ padding: "14px 12px 14px 0", fontWeight: 600 }}>{r.category}</td>

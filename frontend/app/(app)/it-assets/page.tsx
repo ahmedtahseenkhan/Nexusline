@@ -15,6 +15,7 @@ import { IconPlus } from "@/components/icons";
 import RecordPanels from "@/components/RecordPanels";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import ImportExport from "@/components/ImportExport";
+import GenerateRisks from "@/components/GenerateRisks";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -286,6 +287,7 @@ function ITAssetsInner() {
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <ImportExport resource="it-assets" label="IT Assets"
             onDone={() => { setRefreshKey((k) => k + 1); loadSummary(); }} />
+          <GenerateRisks assetClass="it_asset" label="IT assets" />
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add IT asset</button>
         </div>
       </div>

@@ -11,6 +11,9 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordIssues from "@/components/RecordIssues";
 import RelatedChips from "@/components/RelatedChips";
+import ResidualSuggestion from "@/components/ResidualSuggestion";
+import WorkflowStrip from "@/components/WorkflowStrip";
+import RiskMethodology from "@/components/RiskMethodology";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
@@ -89,7 +92,9 @@ const STATUS = opts(["draft", "assessed", "treatment_planned", "treatment_in_pro
 const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const STRATEGY = opts(["mitigate", "accept", "transfer", "avoid"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
-const SCALE: Option[] = [1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: String(n) }));
+/** Score options for the tenant's matrix — a 4x4 register must not offer a 5. */
+const scaleOptions = (size: number): Option[] =>
+  Array.from({ length: size }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }));
 
 const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
   closed: "low",
@@ -262,6 +267,11 @@ function RisksPage() {
   const [cfValues, setCfValues] = useState<Record<string, string>>({});
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  // The matrix is per-organisation configurable, so every score input and threshold
+  // bound is derived from it rather than assuming 5x5.
+  const matrixSize = settings?.matrix_size ?? 5;
+  const maxScore = matrixSize * matrixSize;
+  const SCALE = scaleOptions(matrixSize);
   const fetchRisks = useCallback((qs: string) => apiCall<PagedList<RiskRow>>("GET", `/risks?${qs}`), []);
 
   // Server typeahead sources for the form's link pickers (replaces 6 capped preloads).
@@ -593,17 +603,23 @@ function RisksPage() {
             </span>
           </div>
           {showSettings && (
-            <form onSubmit={saveSettings} style={{ display: "flex", gap: 14, alignItems: "flex-end", marginTop: 14 }}>
-              <div style={{ width: 160 }}>
-                <label className="label">Appetite (1–25)</label>
-                <input className="input" type="number" min={1} max={25} value={appetiteScore} onChange={(e) => setAppetiteScore(Number(e.target.value))} />
+            <>
+              <form onSubmit={saveSettings} style={{ display: "flex", gap: 14, alignItems: "flex-end", marginTop: 14 }}>
+                <div style={{ width: 190 }}>
+                  <label className="label">Appetite (1–{maxScore})</label>
+                  <input className="input" type="number" min={1} max={maxScore} value={appetiteScore} onChange={(e) => setAppetiteScore(Number(e.target.value))} />
+                </div>
+                <div style={{ width: 190 }}>
+                  <label className="label">Tolerance (1–{maxScore})</label>
+                  <input className="input" type="number" min={1} max={maxScore} value={toleranceScore} onChange={(e) => setToleranceScore(Number(e.target.value))} />
+                </div>
+                <button className="btn">Save thresholds</button>
+              </form>
+
+              <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+                <RiskMethodology onSaved={() => { reload(); api.riskSettings().then(setSettings).catch(() => {}); }} />
               </div>
-              <div style={{ width: 160 }}>
-                <label className="label">Tolerance (1–25)</label>
-                <input className="input" type="number" min={1} max={25} value={toleranceScore} onChange={(e) => setToleranceScore(Number(e.target.value))} />
-              </div>
-              <button className="btn">Save thresholds</button>
-            </form>
+            </>
           )}
         </div>
       )}
@@ -643,6 +659,20 @@ function RisksPage() {
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Control health</div><div style={{ marginTop: 4 }}>{controlHealth(detail.control_health)}</div></div>
               <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Exposure (ALE)</div><div style={{ marginTop: 4 }}>{money(detail.annual_loss_expectancy)}</div></div>
             </div>
+
+            <WorkflowStrip
+              entityType="risk"
+              entityId={detail.id}
+              entityLabel={`${detail.reference} — ${detail.title}`}
+              link="/risks"
+              ownerEmail={userName(detail.owner_id)}
+              onChange={() => { reload(); loadDetail(detail.id); }}
+            />
+
+            <ResidualSuggestion
+              riskId={detail.id}
+              onAccepted={() => { reload(); loadDetail(detail.id); }}
+            />
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Owner", userName(detail.owner_id))}

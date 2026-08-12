@@ -41,13 +41,18 @@ export const NAV: NavSection[] = [
     ],
   },
   {
-    title: "Organization",
+    // Renamed from "Organization" so Policy Management sits visibly under governance,
+    // as the client asked. The group already held Board & Committees, Delegation of
+    // Authority and the Legal Register — the governance structures that decide who owns
+    // what and who may approve what — so the label now matches the contents.
+    title: "Governance",
     icon: <IconUsers />,
     items: [
       { href: "/business-units", label: "Business Units", icon: <IconLayers /> },
       { href: "/processes", label: "Processes", icon: <IconActivity /> },
       { href: "/legal", label: "Legal Register", icon: <IconPolicy /> },
       { href: "/governance", label: "Board & Committees", icon: <IconUsers /> },
+      { href: "/policies", label: "Policy Management", icon: <IconPolicy /> },
       { href: "/delegation-of-authority", label: "Delegation of Authority", icon: <IconUsers /> },
       { href: "/organization", label: "Users & Roles", icon: <IconUsers /> },
     ],
@@ -91,7 +96,6 @@ export const NAV: NavSection[] = [
     items: [
       { href: "/controls", label: "Control Catalog", icon: <IconControl /> },
       { href: "/evidence", label: "Evidence", icon: <IconEvidence /> },
-      { href: "/policies", label: "Policy Management", icon: <IconPolicy /> },
       { href: "/awareness", label: "Awareness Training", icon: <IconUsers /> },
       { href: "/internal-audit", label: "Internal Audit", icon: <IconCheck /> },
     ],
@@ -138,6 +142,8 @@ export const NAV: NavSection[] = [
       { href: "/integrations", label: "Integrations & CCM", icon: <IconActivity /> },
       { href: "/custom-fields", label: "Custom Fields", icon: <IconLayers /> },
       { href: "/status-rules", label: "Status Rules", icon: <IconGauge /> },
+      { href: "/sla-policies", label: "Turnaround Time (TAT)", icon: <IconAlert /> },
+      { href: "/workflows", label: "Approval Workflows", icon: <IconCheck /> },
       { href: "/filters", label: "Saved Filters", icon: <IconCompliance /> },
       { href: "/data-io", label: "Import / Export", icon: <IconActivity /> },
       { href: "/webhooks", label: "Webhooks", icon: <IconActivity /> },

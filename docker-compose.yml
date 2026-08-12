@@ -39,8 +39,10 @@ services:
       redis:
         condition: service_started
     ports:
-      # Host 8080 -> container 8000 (8000 is commonly occupied locally)
-      - "8080:8000"
+      # Host 8080 -> container 8000 (8000 is commonly occupied locally). Override
+      # API_PORT in .env when 8080 is taken too — shared dev servers usually have
+      # something on it already.
+      - "${API_PORT:-8080}:8000"
 
   web:
     build:
@@ -53,7 +55,7 @@ services:
     depends_on:
       - api
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
 
 volumes:
   pgdata:

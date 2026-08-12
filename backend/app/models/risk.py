@@ -11,6 +11,7 @@ import uuid
 from datetime import date
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     Computed,
@@ -72,7 +73,10 @@ risk_incidents = Table(
     Column("incident_id", Uuid, ForeignKey("incidents.id", ondelete="CASCADE"), primary_key=True),
 )
 
-_SCALE = "BETWEEN 1 AND 5"
+# The database can only enforce the widest scale any tenant may configure (6x6); the
+# tenant's own ``RiskSetting.matrix_size`` is enforced in the API layer, because a check
+# constraint cannot vary per row-level-security tenant.
+_SCALE = "BETWEEN 1 AND 6"
 
 
 class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
@@ -116,6 +120,19 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
         Integer, Computed("residual_likelihood * residual_impact", persisted=True)
     )
 
+    # Suggested residual, derived from the linked controls' effectiveness by
+    # ``services.residual_engine``. Held separately from the assessed residual above so
+    # the tool's proposal and the owner's decision are never confused for one another:
+    # nothing here affects reporting until someone accepts it.
+    suggested_residual_likelihood: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    suggested_residual_impact: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    suggested_residual_rationale: Mapped[str] = mapped_column(Text, default="")
+    # Who signed off the residual, and why it differs from the suggestion if it does —
+    # the trail an auditor asks for when the number is questioned.
+    residual_accepted_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    residual_accepted_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    residual_override_reason: Mapped[str] = mapped_column(Text, default="")
+
     # Quantitative (FAIR-style) — optional. ALE = loss event frequency x single loss expectancy.
     annual_loss_frequency: Mapped[float | None] = mapped_column(Float, nullable=True)
     single_loss_expectancy: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -131,6 +148,14 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     treatment_owner: Mapped[str] = mapped_column(String(200), default="")
     treatment_deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
     treatment_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+    # Turnaround-time clock, derived from the tenant's SLA policy for this severity by
+    # ``services.sla``. Distinct from any agreed ``due_date``: this is what the policy
+    # allows, that is what was promised. ``tat_breached_at`` records the first day the
+    # window lapsed.
+    tat_due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    tat_breached_at: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Review scheduling
     review_frequency: Mapped[ReviewFrequency] = mapped_column(
@@ -246,10 +271,62 @@ class RiskAcceptance(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
 
 
 class RiskSetting(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
-    """Per-tenant risk appetite and tolerance thresholds (single row per org)."""
+    """Per-tenant risk appetite, tolerance and matrix size (single row per org)."""
 
     __tablename__ = "risk_settings"
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_risk_settings_tenant"),)
 
     appetite_score: Mapped[int] = mapped_column(Integer, default=6, nullable=False)
     tolerance_score: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
+    # Size of the likelihood x impact matrix (3..6). Severity bands scale with it, so a
+    # bank can baseline the register on whichever scale its methodology (ISO 27005,
+    # ISO 31000, its own ERM framework) prescribes.
+    matrix_size: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+
+
+class RiskMatrixLevel(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """One rung of the likelihood or impact scale, in the bank's own words.
+
+    This is the part of a methodology that makes scoring repeatable between assessors:
+    "3 = Possible — could occur once in 1-3 years" rather than a bare number. Absent
+    rows fall back to generic labels, so the matrix works before anyone configures it.
+    """
+
+    __tablename__ = "risk_matrix_levels"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "axis", "level", name="uq_risk_matrix_level"),
+        CheckConstraint("axis IN ('likelihood', 'impact')", name="ck_risk_matrix_axis"),
+        CheckConstraint("level BETWEEN 1 AND 6", name="ck_risk_matrix_level"),
+    )
+
+    axis: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(String(60), default="")
+    definition: Mapped[str] = mapped_column(Text, default="")
+
+
+class ResidualPolicy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """How much residual credit a control earns, per effectiveness rating.
+
+    Configuration for :mod:`app.services.residual_engine`. One row per org. The
+    defaults reduce likelihood only and cap total credit, which is the conservative
+    reading of ISO 27005; a bank with its own weighting changes these values rather
+    than the code. See the module docstring there for why the output is a suggestion
+    and never an automatic write.
+    """
+
+    __tablename__ = "residual_policies"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_residual_policy_tenant"),
+        CheckConstraint(
+            "applies_to IN ('likelihood', 'impact', 'both')", name="ck_residual_applies_to"
+        ),
+    )
+
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    weight_effective: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    weight_partially_effective: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    weight_ineffective: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    weight_not_assessed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    applies_to: Mapped[str] = mapped_column(String(16), default="likelihood", nullable=False)
+    max_reduction: Mapped[int] = mapped_column(Integer, default=3, nullable=False)

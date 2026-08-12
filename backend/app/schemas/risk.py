@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from app.models.base import WorkflowState
 from app.schemas.common import GraphRef
@@ -17,9 +17,17 @@ from app.models.enums import (
 from app.schemas.asset import AssetRef
 from app.schemas.control import ControlRef
 from app.schemas.threat import NamedRef
-from app.services.risk_scoring import severity_for_score
+from app.services.risk_scoring import (
+    DEFAULT_MAX_SCORE,
+    MAX_MATRIX_SIZE,
+    MIN_MATRIX_SIZE,
+    severity_for_score,
+)
 
-_Scale = Field(ge=1, le=5)
+# The widest scale any tenant may configure. The tenant's actual ``matrix_size`` is a
+# narrower check applied in the API layer, which is the only place that knows it.
+_Scale = Field(ge=1, le=MAX_MATRIX_SIZE)
+_OptionalScale = Field(default=None, ge=1, le=MAX_MATRIX_SIZE)
 
 
 class RiskLinkRef(BaseModel):
@@ -37,8 +45,8 @@ class RiskBase(BaseModel):
     inherent_likelihood: int = _Scale
     inherent_impact: int = _Scale
     # Residual scoring (after controls) — optional on create, set on assessment too
-    residual_likelihood: int | None = Field(default=None, ge=1, le=5)
-    residual_impact: int | None = Field(default=None, ge=1, le=5)
+    residual_likelihood: int | None = _OptionalScale
+    residual_impact: int | None = _OptionalScale
     treatment_strategy: TreatmentStrategy | None = None
     treatment_description: str = ""
     treatment_owner: str = ""
@@ -67,10 +75,10 @@ class RiskUpdate(BaseModel):
     description: str | None = None
     category: str | None = None
     status: RiskStatus | None = None
-    inherent_likelihood: int | None = Field(default=None, ge=1, le=5)
-    inherent_impact: int | None = Field(default=None, ge=1, le=5)
-    residual_likelihood: int | None = Field(default=None, ge=1, le=5)
-    residual_impact: int | None = Field(default=None, ge=1, le=5)
+    inherent_likelihood: int | None = _OptionalScale
+    inherent_impact: int | None = _OptionalScale
+    residual_likelihood: int | None = _OptionalScale
+    residual_impact: int | None = _OptionalScale
     treatment_strategy: TreatmentStrategy | None = None
     treatment_description: str | None = None
     treatment_owner: str | None = None
@@ -176,29 +184,130 @@ class RiskRead(BaseModel):
     # Live rollup: health of the mitigating controls (none | ok | issues).
     control_health: str = "none"
 
+    # Residual suggested by the control-effectiveness engine, and the sign-off trail.
+    # A suggestion is never the assessed residual until someone accepts it.
+    suggested_residual_likelihood: int | None = None
+    suggested_residual_impact: int | None = None
+    residual_accepted_at: date | None = None
+    residual_override_reason: str = ""
+
     created_at: datetime
     updated_at: datetime
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def inherent_severity(self) -> Severity | None:
-        return severity_for_score(self.inherent_score)
+    # Banded against the tenant's matrix. Populated by the validator below rather than
+    # a computed property, because banding depends on the tenant's matrix size — which
+    # only the caller knows. Callers pass it as validation context:
+    # ``RiskRead.model_validate(risk, context={"max_score": n})``. Without context the
+    # default 5x5 bands apply, so every pre-existing call site is unchanged.
+    inherent_severity: Severity | None = None
+    residual_severity: Severity | None = None
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def residual_severity(self) -> Severity | None:
-        return severity_for_score(self.residual_score)
+    @model_validator(mode="after")
+    def _band_severities(self, info: ValidationInfo) -> "RiskRead":
+        """Band the scores, but never re-band an already-banded value.
+
+        FastAPI validates a handler's return value a second time against
+        ``response_model``, and that pass carries no context — recomputing there would
+        silently reset a 6x6 tenant's severities to the default 5x5 bands. Only the
+        first pass (straight off the ORM row, where these fields are still None) does
+        the work.
+        """
+        max_score = (info.context or {}).get("max_score", DEFAULT_MAX_SCORE)
+        if self.inherent_severity is None:
+            self.inherent_severity = severity_for_score(self.inherent_score, max_score)
+        if self.residual_severity is None:
+            self.residual_severity = severity_for_score(self.residual_score, max_score)
+        return self
 
 
 class RiskSettingRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     appetite_score: int
     tolerance_score: int
+    matrix_size: int = 5
 
 
 class RiskSettingUpdate(BaseModel):
-    appetite_score: int = Field(ge=1, le=25)
-    tolerance_score: int = Field(ge=1, le=25)
+    # Upper bound is the largest score a 6x6 matrix can produce. A value above the
+    # tenant's own matrix maximum is rejected in the API, where the size is known.
+    appetite_score: int = Field(ge=1, le=MAX_MATRIX_SIZE * MAX_MATRIX_SIZE)
+    tolerance_score: int = Field(ge=1, le=MAX_MATRIX_SIZE * MAX_MATRIX_SIZE)
+
+
+# ----------------------------------------------------------- matrix config ---
+class MatrixLevel(BaseModel):
+    """One rung of a scale, in the bank's own words."""
+
+    level: int = Field(ge=1, le=MAX_MATRIX_SIZE)
+    label: str = Field(default="", max_length=60)
+    definition: str = ""
+
+
+class MatrixBand(BaseModel):
+    """A severity band, derived from the matrix size rather than configured."""
+
+    severity: Severity
+    min_score: int
+    max_score: int
+
+
+class RiskMatrixConfig(BaseModel):
+    size: int
+    max_score: int
+    appetite_score: int
+    tolerance_score: int
+    likelihood_levels: list[MatrixLevel]
+    impact_levels: list[MatrixLevel]
+    bands: list[MatrixBand]
+
+
+class RiskMatrixConfigUpdate(BaseModel):
+    size: int = Field(ge=MIN_MATRIX_SIZE, le=MAX_MATRIX_SIZE)
+    likelihood_levels: list[MatrixLevel] = Field(default_factory=list)
+    impact_levels: list[MatrixLevel] = Field(default_factory=list)
+
+
+# -------------------------------------------------------- residual engine ---
+class ResidualPolicyRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    enabled: bool
+    weight_effective: int
+    weight_partially_effective: int
+    weight_ineffective: int
+    weight_not_assessed: int
+    applies_to: str
+    max_reduction: int
+
+
+class ResidualPolicyUpdate(BaseModel):
+    enabled: bool = True
+    weight_effective: int = Field(ge=0, le=5)
+    weight_partially_effective: int = Field(ge=0, le=5)
+    weight_ineffective: int = Field(ge=0, le=5)
+    weight_not_assessed: int = Field(ge=0, le=5)
+    applies_to: str = Field(pattern="^(likelihood|impact|both)$")
+    max_reduction: int = Field(ge=0, le=5)
+
+
+class SuggestedResidual(BaseModel):
+    """A proposal the risk owner may accept or override — never applied on its own."""
+
+    likelihood: int
+    impact: int
+    score: int
+    reduction: int
+    rationale: list[str]
+    inherent_score: int
+    current_residual_score: int | None
+    matches_current: bool
+
+
+class ResidualAcceptance(BaseModel):
+    """Accept the suggestion as-is, or record a different judgement with a reason."""
+
+    likelihood: int | None = _OptionalScale
+    impact: int | None = _OptionalScale
+    override_reason: str = ""
 
 
 class RiskAggregateRow(BaseModel):

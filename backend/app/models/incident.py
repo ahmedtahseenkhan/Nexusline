@@ -53,6 +53,13 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, 
     severity: Mapped[Severity] = mapped_column(
         SAEnum(Severity, name="severity"), default=Severity.medium, nullable=False
     )
+    # Turnaround-time clock, derived from the tenant's SLA policy for this severity by
+    # ``services.sla``. Distinct from any agreed ``due_date``: this is what the policy
+    # allows, that is what was promised. ``tat_breached_at`` records the first day the
+    # window lapsed.
+    tat_due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    tat_breached_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+
     status: Mapped[IncidentStatus] = mapped_column(
         SAEnum(IncidentStatus, name="incident_status"),
         default=IncidentStatus.open,
