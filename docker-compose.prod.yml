@@ -59,7 +59,17 @@ services:
           memory: 512M
 
   api:
-    build: ./backend
+    build:
+      context: ./backend
+      # Client builds enforce the license (the default) and need a vendor key
+      # embedded via `python -m app.tools.license keygen`. Set
+      # PRODUCTION_BUILD=false in .env for instances WE host ourselves, which
+      # want the prod hardening but have no license to check.
+      #
+      # This is not a client-side bypass: the offline bundle ships prebuilt
+      # images and no ./backend source, so there is nothing there to rebuild.
+      args:
+        PRODUCTION_BUILD: ${PRODUCTION_BUILD:-true}
     image: ${API_IMAGE:-nexusline-api:latest}
     restart: unless-stopped
     env_file: .env
