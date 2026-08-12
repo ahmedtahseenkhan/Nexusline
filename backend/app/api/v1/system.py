@@ -28,7 +28,7 @@ def _feature_flags() -> dict:
         "ldap_enabled": settings.ldap_enabled,
         "mfa_required": settings.mfa_required,
         "enforce_segregation_of_duties": settings.enforce_segregation_of_duties,
-        "enforce_license": settings.enforce_license,
+        "enforce_license": lic.enforcement_enabled(),
         "smtp_configured": bool(settings.smtp_host),
     }
 
@@ -81,8 +81,12 @@ async def system_health(db: DbSession) -> dict:
         checks["file_storage"] = {"ok": False, "detail": str(exc)[:200]}
 
     lic_info = lic.load_current()
-    checks["license"] = {"ok": lic_info.valid or lic_info.status in ("unlicensed", "unconfigured"),
-                         "status": lic_info.status}
+    # Unlicensed is a healthy state only in a dev build; a release image must hold
+    # a valid license, so report anything else as degraded.
+    lic_ok = lic_info.valid or (
+        not lic.enforcement_enabled() and lic_info.status in ("unlicensed", "unconfigured")
+    )
+    checks["license"] = {"ok": lic_ok, "status": lic_info.status}
     checks["scheduler"] = {"ok": True, "enabled": settings.scheduler_enabled}
     checks["email"] = {"ok": True, "configured": bool(settings.smtp_host)}
 

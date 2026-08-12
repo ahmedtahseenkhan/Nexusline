@@ -1,8 +1,17 @@
-__pycache__/
-*.pyc
+# Docker only matches these against the full path from the context root, so the
+# `**/` prefix is load-bearing: plain `__pycache__/` misses app/tools/__pycache__
+# and would ship a compiled copy of the license signer (see below) as bytecode,
+# which is every bit as usable as the source.
+**/__pycache__/
+**/*.pyc
 .venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 *.egg-info/
 tests/
+
+# Vendor-only: the keypair generator and license signer must never reach a
+# client image, and neither must the private signing key.
+app/tools/license.py
+**/license_signing_key.pem

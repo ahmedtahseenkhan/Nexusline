@@ -5,10 +5,12 @@ from datetime import date, timedelta
 import pytest
 from fastapi import HTTPException
 
+from app.core import build
 from app.core.config import settings
 from app.core.modules import ALL_MODULE_KEYS, EDITIONS, MODULES, expand_modules
 from app.services import license as lic
 from app.services import modules as mod
+from app.tools import license as lic_cli
 
 
 # ----------------------------------------------------------------- registry ---
@@ -43,10 +45,8 @@ def test_expand_modules():
 def signed_license(tmp_path, monkeypatch):
     """Real Ed25519 keypair; returns a factory that installs a license payload
     as the deployment's current license."""
-    private_pem, public_pem = lic.generate_keypair()
-    pub = tmp_path / "pubkey.pem"
-    pub.write_bytes(public_pem)
-    monkeypatch.setattr(settings, "license_public_key_path", str(pub))
+    private_pem, public_pem = lic_cli.generate_keypair()
+    monkeypatch.setattr(build, "VENDOR_PUBLIC_KEY_PEM", public_pem.decode("ascii"))
     monkeypatch.setattr(settings, "disabled_modules", "")
 
     def install(**payload) -> lic.LicenseInfo:
@@ -59,7 +59,7 @@ def signed_license(tmp_path, monkeypatch):
             "deployment": "on-prem",
         }
         base.update(payload)
-        token = lic.sign_payload(base, private_pem)
+        token = lic_cli.sign_payload(base, private_pem)
         path = tmp_path / "license.key"
         path.write_text(token)
         monkeypatch.setattr(settings, "license_file", str(path))
@@ -118,6 +118,77 @@ def test_module_states_shape(signed_license):
     assert set(states) == set(ALL_MODULE_KEYS)
     assert states["shariah"]["enabled"] and states["shariah"]["licensed"]
     assert not states["aml"]["enabled"] and not states["aml"]["licensed"]
+
+
+# ------------------------------------------------- tamper resistance (Layer 1) ---
+@pytest.fixture
+def release_build(monkeypatch):
+    """Pretend this process is a stamped release image."""
+    monkeypatch.setattr(build, "PRODUCTION_BUILD", True)
+    yield
+    lic._cached = None
+
+
+def test_enforcement_is_not_environment_configurable():
+    # ENFORCE_LICENSE used to be a settings field, i.e. a one-line bypass in .env.
+    assert not hasattr(settings, "enforce_license")
+    assert not hasattr(settings, "license_public_key_path")
+
+
+def test_a_foreign_key_cannot_mint_a_license(signed_license, tmp_path, monkeypatch):
+    """The client generating their own keypair must not yield a valid license."""
+    signed_license()  # installs the real vendor key for this test
+    attacker_priv, _attacker_pub = lic_cli.generate_keypair()
+    forged = tmp_path / "forged.key"
+    forged.write_text(lic_cli.sign_payload(
+        {"licensed_to": "Self", "plan": "free", "seats": 9999,
+         "issued": date.today().isoformat(),
+         "expires": (date.today() + timedelta(days=36500)).isoformat()},
+        attacker_priv,
+    ))
+    monkeypatch.setattr(settings, "license_file", str(forged))
+    info = lic.load_current(refresh=True)
+    assert not info.valid and info.status == "invalid"
+
+
+def test_release_build_grants_nothing_when_unlicensed(release_build, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "license_file", str(tmp_path / "missing.key"))
+    monkeypatch.setattr(settings, "disabled_modules", "")
+    lic.load_current(refresh=True)
+    assert mod.enabled_modules() == set()
+
+
+def test_release_build_refuses_to_start_without_a_license(release_build, tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "VENDOR_PUBLIC_KEY_PEM", "-----BEGIN PUBLIC KEY-----\nx\n")
+    monkeypatch.setattr(settings, "license_file", str(tmp_path / "missing.key"))
+    with pytest.raises(RuntimeError, match="unlicensed"):
+        lic.enforce_on_startup()
+
+
+def test_release_build_without_an_embedded_key_is_a_build_error(release_build, monkeypatch):
+    monkeypatch.setattr(build, "VENDOR_PUBLIC_KEY_PEM", "")
+    with pytest.raises(RuntimeError, match="without an embedded vendor public key"):
+        lic.enforce_on_startup()
+
+
+def test_dev_build_starts_unlicensed(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "PRODUCTION_BUILD", False)
+    monkeypatch.setattr(settings, "license_file", str(tmp_path / "missing.key"))
+    try:
+        lic.enforce_on_startup()  # must not raise
+    finally:
+        lic._cached = None
+
+
+def test_keygen_embeds_the_public_key(tmp_path):
+    stub = tmp_path / "build.py"
+    stub.write_text('VENDOR_PUBLIC_KEY_PEM = ""\n\nPRODUCTION_BUILD = False\n')
+    _priv, pub = lic_cli.generate_keypair()
+    lic_cli.embed_public_key(pub, target=stub)
+    ns: dict = {}
+    exec(compile(stub.read_text(), str(stub), "exec"), ns)  # noqa: S102 - test fixture
+    assert ns["VENDOR_PUBLIC_KEY_PEM"].strip() == pub.decode("ascii").strip()
+    assert ns["PRODUCTION_BUILD"] is False  # stamping the key must not touch the flag
 
 
 # ------------------------------------------------------------------- gating ---

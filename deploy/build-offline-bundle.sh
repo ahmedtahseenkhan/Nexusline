@@ -79,8 +79,17 @@ echo "==> Staging compose file, env template, and deploy/"
 cp "${COMPOSE_FILE}"        "${STAGE_DIR}/"
 cp ".env.example"           "${STAGE_DIR}/"
 cp -R "deploy"              "${STAGE_DIR}/deploy"
-# Do not ship any real key material or leftover archives.
-rm -f "${STAGE_DIR}/deploy/license.key" "${STAGE_DIR}/deploy/license_pubkey.pem" 2>/dev/null || true
+# Do not ship any real key material or leftover archives. The signing key is the
+# critical one: whoever holds it can mint themselves a perpetual license. It now
+# defaults to ../vendor-keys/, but strip it here too in case an older layout or a
+# manual --key-out put a copy in deploy/.
+rm -f "${STAGE_DIR}/deploy/license.key" \
+      "${STAGE_DIR}/deploy/license_pubkey.pem" \
+      "${STAGE_DIR}/deploy/license_signing_key.pem" 2>/dev/null || true
+if find "${STAGE_DIR}" -name '*signing_key*' -print -quit | grep -q .; then
+  echo "ERROR: a signing key is still staged in the bundle — refusing to ship." >&2
+  exit 1
+fi
 echo "${VERSION}" > "${STAGE_DIR}/VERSION"
 
 # --- 5. compress the whole thing --------------------------------------------

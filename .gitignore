@@ -12,6 +12,11 @@ venv/
 .env
 *.local
 
+# Vendor licensing private key. Losing it means no client can ever be issued a
+# new license; leaking it means anyone can mint one. Back it up out of band.
+vendor-keys/
+*license_signing_key.pem
+
 # Node / Next
 node_modules/
 .next/
