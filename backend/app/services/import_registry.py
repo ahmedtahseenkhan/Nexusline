@@ -20,6 +20,7 @@ from typing import Any
 
 from app.models.access_review import AccessReview
 from app.models.asset import Asset
+from app.models.bia import BiaAssessment, BiaStatus
 from app.models.awareness import AwarenessProgram
 from app.models.compliance import Framework, Requirement
 from app.models.continuity import ContinuityPlan
@@ -27,11 +28,32 @@ from app.models.control import Control
 from app.models.evidence import Evidence
 from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
+from app.models.icfr import IcfrProcess, IcfrProcessStatus
 from app.models.incident import Incident
+from app.models.internal_audit import AuditEngagement, AuditableUnit
+from app.models.issue import Issue, IssueSource, IssueStatus2
+from app.models.model_risk import ModelInventory, ModelStatus, ModelType
+from app.models.operational_risk import KeyRiskIndicator, LossEvent, RcsaAssessment
 from app.models.organization import BusinessUnit, Legal, Process
+from app.models.outsourcing import (
+    CloudModel,
+    OutsourcingArrangement,
+    OutsourcingCategory,
+    OutsourcingMateriality,
+    OutsourcingStatus,
+    SbpApprovalStatus,
+)
 from app.models.policy import Policy
 from app.models.privacy import ProcessingActivity
 from app.models.project import Project
+from app.models.regulatory_change import (
+    Applicability,
+    Obligation,
+    ObligationStatus,
+    ObligationType,
+    RegChangeStatus,
+    RegulatoryChange,
+)
 from app.models.risk import Risk
 from app.models.threat import Threat, Vulnerability
 from app.models.vendor import Vendor
@@ -41,7 +63,11 @@ from app.models.base import WorkflowState
 from app.models.enums import (
     AccessReviewStatus,
     AssessmentStatus,
+    AssetClass,
+    AssetEnvironment,
+    AuditEngagementStatus,
     AwarenessStatus,
+    BaselEventType,
     ComplianceStatus,
     ComplianceTreatment,
     ContinuityStatus,
@@ -55,10 +81,13 @@ from app.models.enums import (
     ExceptionType,
     GoalStatus,
     IncidentStatus,
+    KriDirection,
     LawfulBasis,
+    LossEventStatus,
     PolicyDocType,
     PolicyStatus,
     ProjectStatus,
+    RcsaStatus,
     ReviewFrequency,
     RiskStatus,
     RopaStatus,
@@ -72,17 +101,25 @@ from app.models.enums import (
 from app.schemas.access_review import ReviewCreate
 from app.schemas.asset import AssetCreate
 from app.schemas.awareness import ProgramCreate
+from app.schemas.bia import BiaCreate
 from app.schemas.compliance import RequirementCreate
 from app.schemas.continuity import PlanCreate
 from app.schemas.control import ControlCreate
 from app.schemas.evidence import EvidenceCreate
 from app.schemas.exception import ExceptionCreate
 from app.schemas.goal import GoalCreate
+from app.schemas.icfr import IcfrProcessCreate
 from app.schemas.incident import IncidentCreate
+from app.schemas.internal_audit import EngagementCreate
+from app.schemas.issue import IssueCreate
+from app.schemas.model_risk import ModelCreate
+from app.schemas.operational_risk import KriCreate, LossEventCreate, RcsaCreate
 from app.schemas.organization import BusinessUnitCreate, LegalCreate, ProcessCreate
+from app.schemas.outsourcing import OutsourcingArrangementCreate
 from app.schemas.policy import PolicyCreate
 from app.schemas.privacy import RopaCreate
 from app.schemas.project import ProjectCreate
+from app.schemas.regulatory_change import ObligationCreate, RegulatoryChangeCreate
 from app.schemas.risk import RiskCreate
 from app.schemas.threat import ThreatCreate, VulnerabilityCreate
 from app.schemas.vendor import VendorCreate
@@ -90,13 +127,20 @@ from app.schemas.vendor import VendorCreate
 # --- existing module create functions --------------------------------------
 from app.api.v1.access_reviews import create_review
 from app.api.v1.awareness import create_program
+from app.api.v1.bia import create_bia
 from app.api.v1.compliance import create_requirement
 from app.api.v1.continuity import create_plan
 from app.api.v1.controls import create_control
 from app.api.v1.evidence import create_evidence
 from app.api.v1.exceptions import create_exception
 from app.api.v1.goals import create_goal
+from app.api.v1.icfr import create_process as create_icfr_process
 from app.api.v1.incidents import create_incident
+from app.api.v1.internal_audit import create_engagement
+from app.api.v1.issues import create_issue
+from app.api.v1.model_risk import create_model
+from app.api.v1.operational_risk import create_kri, create_loss_event, create_rcsa
+from app.api.v1.outsourcing import create_arrangement
 from app.api.v1.assets import create_asset
 from app.api.v1.organization import (
     create_business_unit,
@@ -106,6 +150,7 @@ from app.api.v1.organization import (
 from app.api.v1.policies import create_policy
 from app.api.v1.privacy import create_ropa
 from app.api.v1.projects import create_project
+from app.api.v1.regulatory_change import create_change, create_obligation
 from app.api.v1.risks import create_risk
 from app.api.v1.threats import create_threat, create_vulnerability
 from app.api.v1.vendors import create_vendor
@@ -153,6 +198,16 @@ class Column:
 
 @dataclass(frozen=True)
 class ResourceIO:
+    """One CSV-addressable register.
+
+    ``fixed`` stamps discriminator fields onto every imported row and filters the
+    export to matching rows. It exists for registers that share one table behind a
+    discriminator column — IT vs Information assets — so each resource round-trips
+    only its own records and an import can never land rows in the wrong register.
+    Fixed fields are deliberately *not* CSV columns: they are the identity of the
+    resource, not per-row data.
+    """
+
     resource: str
     label: str
     model: type
@@ -162,6 +217,7 @@ class ResourceIO:
     write_perm: str
     importable: bool
     columns: list[Column] = field(default_factory=list)
+    fixed: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -328,28 +384,75 @@ _register(ResourceIO(
 ))
 
 # ----- assets --------------------------------------------------------------
+# The single asset table backs two registers (ISO 27005 primary/supporting split),
+# discriminated by `asset_class`. Each gets its own resource so the CSV headers match
+# the register the user is loading, and so `fixed` stamps the class on every imported
+# row — otherwise every import silently lands as information_asset (the column default).
+_ASSET_SHARED_COLUMNS = [
+    text("name", required=True),
+    text("description"),
+    enum_col("confidentiality", Criticality),
+    enum_col("integrity", Criticality),
+    enum_col("availability", Criticality),
+    enum_col("criticality", Criticality),
+    text("potential_liabilities"),
+    text("location"),
+    integer("rto_hours", help="Recovery time objective, hours"),
+    integer("rpo_hours", help="Recovery point objective, hours"),
+    enum_col("review_frequency", ReviewFrequency),
+    date_col("next_review_date"),
+    enum_col("workflow_status", WorkflowStatus),
+]
+
+_ASSET_SHARED_LINKS = [
+    link_col("processes", "process_ids", Process, "processes", match_field="name"),
+    link_col("legals", "legal_ids", Legal, "legals", match_field="name"),
+    link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
+    link_col("incidents", "incident_ids", Incident, "incidents", match_field="title"),
+    link_col("exceptions", "exception_ids", ExceptionRecord, "exceptions", match_field="title"),
+    link_col("related_assets", "related_ids", Asset, "related_assets", match_field="name"),
+    link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+]
+
 _register(ResourceIO(
-    resource="assets", label="Assets", model=Asset,
+    resource="information-assets", label="Information Assets", model=Asset,
     create_schema=AssetCreate, create_func=create_asset,
     read_perm="asset:read", write_perm="asset:write", importable=True,
+    fixed={"asset_class": AssetClass.information_asset},
     columns=[
-        text("name", required=True),
-        text("description"),
-        enum_col("confidentiality", Criticality),
-        enum_col("integrity", Criticality),
-        enum_col("availability", Criticality),
-        enum_col("criticality", Criticality),
-        text("potential_liabilities"),
-        enum_col("review_frequency", ReviewFrequency),
-        date_col("next_review_date"),
-        enum_col("workflow_status", WorkflowStatus),
-        link_col("processes", "process_ids", Process, "processes", match_field="name"),
-        link_col("legals", "legal_ids", Legal, "legals", match_field="name"),
-        link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
-        link_col("incidents", "incident_ids", Incident, "incidents", match_field="title"),
-        link_col("exceptions", "exception_ids", ExceptionRecord, "exceptions", match_field="title"),
-        link_col("related_assets", "related_ids", Asset, "related_assets", match_field="name"),
-        link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+        *_ASSET_SHARED_COLUMNS,
+        # Primary-asset attributes: what the data is worth and who owns it.
+        enum_col("business_value", Criticality),
+        text("information_owner"),
+        text("data_categories"),
+        text("records_volume"),
+        boolean("self_assessed"),
+        text("assessed_by"),
+        date_col("assessed_date"),
+        *_ASSET_SHARED_LINKS,
+    ],
+))
+
+_register(ResourceIO(
+    resource="it-assets", label="IT Assets", model=Asset,
+    create_schema=AssetCreate, create_func=create_asset,
+    read_perm="asset:read", write_perm="asset:write", importable=True,
+    fixed={"asset_class": AssetClass.it_asset},
+    columns=[
+        *_ASSET_SHARED_COLUMNS,
+        # Supporting-asset attributes: the physical/technical inventory fields a bank
+        # loads from its CMDB or discovery tool.
+        enum_col("environment", AssetEnvironment),
+        text("hostname"),
+        text("ip_address"),
+        text("serial_number"),
+        text("manufacturer"),
+        text("model_number"),
+        text("os_version"),
+        number("replacement_cost"),
+        text("currency"),
+        text("external_id", help="Identifier in the source CMDB / discovery tool"),
+        *_ASSET_SHARED_LINKS,
     ],
 ))
 
@@ -725,5 +828,286 @@ _register(ResourceIO(
         enum_col("frequency", ReviewFrequency),
         link_col("asset", "asset_id", Asset, "asset", match_field="name", multi=False,
                  help="Asset the reviewed system maps to (single value)"),
+    ],
+))
+
+
+# ===========================================================================
+# Banking modules
+#
+# A bank arrives with these registers already populated in spreadsheets, so bulk
+# load is what makes onboarding a day rather than a month. Link columns resolve by
+# the target's human reference/title, exactly as the core registers do — an RCSA
+# line can name the enterprise risk it belongs to, a finding can name the controls
+# it failed.
+# ===========================================================================
+
+# ----- issues & actions (CAPA) ---------------------------------------------
+_register(ResourceIO(
+    resource="issues", label="Issues & Actions", model=Issue,
+    create_schema=IssueCreate, create_func=create_issue,
+    read_perm="issue:read", write_perm="issue:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("description"),
+        enum_col("source_type", IssueSource),
+        text("source_reference", help="Reference of the finding/audit that raised this"),
+        text("category"),
+        enum_col("severity", Severity),
+        enum_col("status", IssueStatus2),
+        text("owner"),
+        text("business_unit"),
+        date_col("identified_date"),
+        date_col("due_date"),
+        date_col("closed_date"),
+        text("root_cause"),
+        text("management_response"),
+        boolean("repeat_finding"),
+        boolean("regulator_related"),
+        enum_col("workflow_status", WorkflowState),
+    ],
+))
+
+# ----- operational risk: RCSA ----------------------------------------------
+_register(ResourceIO(
+    resource="rcsa-assessments", label="RCSA Assessments", model=RcsaAssessment,
+    create_schema=RcsaCreate, create_func=create_rcsa,
+    read_perm="oprisk:read", write_perm="oprisk:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("business_unit"),
+        text("process"),
+        text("assessor"),
+        enum_col("status", RcsaStatus),
+        text("period", help="e.g. FY2026-Q1"),
+        date_col("due_date"),
+        date_col("completed_date"),
+        enum_col("workflow_status", WorkflowState),
+    ],
+))
+
+# ----- operational risk: KRIs ----------------------------------------------
+_register(ResourceIO(
+    resource="kris", label="Key Risk Indicators", model=KeyRiskIndicator,
+    create_schema=KriCreate, create_func=create_kri,
+    read_perm="oprisk:read", write_perm="oprisk:write", importable=True,
+    columns=[
+        text("name", required=True),
+        text("description"),
+        text("category"),
+        text("business_area"),
+        text("owner"),
+        text("unit", help="Unit of measure, e.g. %, count, PKR"),
+        enum_col("frequency", ReviewFrequency),
+        enum_col("direction", KriDirection),
+        number("warning_threshold"),
+        number("limit_threshold"),
+        number("current_value"),
+        date_col("last_measured_date"),
+        enum_col("workflow_status", WorkflowState),
+        link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+    ],
+))
+
+# ----- operational risk: Basel loss events ---------------------------------
+_register(ResourceIO(
+    resource="loss-events", label="Loss Events", model=LossEvent,
+    create_schema=LossEventCreate, create_func=create_loss_event,
+    read_perm="oprisk:read", write_perm="oprisk:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("description"),
+        enum_col("basel_event_type", BaselEventType),
+        text("business_line"),
+        number("gross_loss"),
+        number("recovery"),
+        text("currency"),
+        enum_col("status", LossEventStatus),
+        date_col("occurrence_date"),
+        date_col("discovery_date"),
+        date_col("accounting_date"),
+        text("root_cause"),
+        text("action_owner"),
+        enum_col("workflow_status", WorkflowState),
+        link_col("incident", "incident_id", Incident, "incident", match_field="title", multi=False),
+        link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+    ],
+))
+
+# ----- regulatory change ----------------------------------------------------
+_register(ResourceIO(
+    resource="regulatory-changes", label="Regulatory Changes", model=RegulatoryChange,
+    create_schema=RegulatoryChangeCreate, create_func=create_change,
+    read_perm="regchange:read", write_perm="regchange:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("regulator", help="e.g. SBP, SECP"),
+        text("circular_ref", help="e.g. BPRD Circular No. 03 of 2026"),
+        text("source_url"),
+        date_col("issued_date"),
+        date_col("effective_date"),
+        text("summary"),
+        enum_col("applicability", Applicability),
+        text("impact_assessment"),
+        enum_col("status", RegChangeStatus),
+        text("owner"),
+        enum_col("priority", Criticality),
+        text("department"),
+        enum_col("workflow_status", WorkflowState),
+    ],
+))
+
+# ----- obligations ----------------------------------------------------------
+_register(ResourceIO(
+    resource="obligations", label="Obligations", model=Obligation,
+    create_schema=ObligationCreate, create_func=create_obligation,
+    read_perm="regchange:read", write_perm="regchange:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("description"),
+        enum_col("obligation_type", ObligationType),
+        text("owner"),
+        text("business_unit"),
+        enum_col("status", ObligationStatus),
+        date_col("due_date"),
+        link_col("regulatory_change", "regulatory_change_id", RegulatoryChange,
+                 "regulatory_change", match_field="title", multi=False),
+        link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
+        link_col("policies", "policy_ids", Policy, "policies", match_field="title"),
+        link_col("controls", "control_ids", Control, "controls", match_field="name"),
+    ],
+))
+
+# ----- internal audit: engagements ------------------------------------------
+_register(ResourceIO(
+    resource="audit-engagements", label="Audit Engagements", model=AuditEngagement,
+    create_schema=EngagementCreate, create_func=create_engagement,
+    read_perm="internal_audit:read", write_perm="internal_audit:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("scope"),
+        text("objectives"),
+        text("lead_auditor"),
+        text("audit_team"),
+        enum_col("status", AuditEngagementStatus),
+        date_col("period_start"),
+        date_col("period_end"),
+        date_col("planned_start"),
+        date_col("planned_end"),
+        date_col("actual_start"),
+        date_col("actual_end"),
+        text("conclusion"),
+        enum_col("rating", Severity),
+        enum_col("workflow_status", WorkflowState),
+        link_col("auditable_unit", "auditable_unit_id", AuditableUnit, "auditable_unit",
+                 match_field="name", multi=False),
+    ],
+))
+
+# ----- ICFR processes -------------------------------------------------------
+_register(ResourceIO(
+    resource="icfr-processes", label="ICFR Processes", model=IcfrProcess,
+    create_schema=IcfrProcessCreate, create_func=create_icfr_process,
+    read_perm="icfr:read", write_perm="icfr:write", importable=True,
+    columns=[
+        text("name", required=True),
+        text("cycle", help="e.g. Revenue, Procure-to-Pay, Treasury"),
+        text("business_unit"),
+        text("owner"),
+        text("description"),
+        boolean("key_process"),
+        enum_col("status", IcfrProcessStatus),
+        enum_col("workflow_status", WorkflowState),
+    ],
+))
+
+# ----- model risk -----------------------------------------------------------
+_register(ResourceIO(
+    resource="models", label="Model Inventory", model=ModelInventory,
+    create_schema=ModelCreate, create_func=create_model,
+    read_perm="modelrisk:read", write_perm="modelrisk:write", importable=True,
+    columns=[
+        text("name", required=True),
+        text("purpose"),
+        enum_col("model_type", ModelType),
+        text("owner"),
+        text("developer"),
+        text("vendor"),
+        enum_col("materiality", Criticality),
+        enum_col("status", ModelStatus),
+        boolean("regulatory_relevant"),
+        boolean("ai_ml"),
+        text("methodology"),
+        date_col("last_validation_date"),
+        date_col("next_validation_date"),
+        enum_col("workflow_status", WorkflowState),
+    ],
+))
+
+# ----- outsourcing ----------------------------------------------------------
+_register(ResourceIO(
+    resource="outsourcing-arrangements", label="Outsourcing Arrangements",
+    model=OutsourcingArrangement,
+    create_schema=OutsourcingArrangementCreate, create_func=create_arrangement,
+    read_perm="outsourcing:read", write_perm="outsourcing:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("service_provider"),
+        text("service_description"),
+        enum_col("category", OutsourcingCategory),
+        enum_col("materiality", OutsourcingMateriality),
+        text("materiality_assessment"),
+        boolean("is_cloud"),
+        enum_col("cloud_model", CloudModel),
+        boolean("data_offshored"),
+        text("country"),
+        boolean("sbp_approval_required"),
+        enum_col("sbp_approval_status", SbpApprovalStatus),
+        text("sbp_approval_ref"),
+        date_col("contract_start"),
+        date_col("contract_end"),
+        text("exit_plan"),
+        boolean("exit_plan_tested"),
+        text("concentration_note"),
+        enum_col("status", OutsourcingStatus),
+        text("owner"),
+        enum_col("workflow_status", WorkflowState),
+        # OutsourcingArrangement holds vendor_id but exposes no ORM relationship, so the
+        # column imports the link and stays blank on export (round-trip symmetry).
+        link_col("vendor", "vendor_id", Vendor, "vendor", match_field="name", multi=False,
+                 exportable=False),
+    ],
+))
+
+# ----- business impact analysis ---------------------------------------------
+_register(ResourceIO(
+    resource="bia-assessments", label="Business Impact Analyses", model=BiaAssessment,
+    create_schema=BiaCreate, create_func=create_bia,
+    read_perm="bia:read", write_perm="bia:write", importable=True,
+    columns=[
+        text("process_name", required=True),
+        text("business_unit"),
+        text("owner"),
+        text("description"),
+        enum_col("criticality", Criticality),
+        integer("rto_hours"),
+        integer("rpo_hours"),
+        integer("mtpd_hours"),
+        text("peak_periods"),
+        number("financial_impact_24h"),
+        number("financial_impact_1week"),
+        text("currency"),
+        text("operational_impact"),
+        text("reputational_impact"),
+        text("regulatory_impact"),
+        text("legal_impact"),
+        text("minimum_resources"),
+        text("recovery_strategy"),
+        text("workaround"),
+        enum_col("status", BiaStatus),
+        date_col("assessment_date"),
+        date_col("next_review_date"),
+        enum_col("workflow_status", WorkflowState),
+        link_col("process", "process_id", Process, "process", match_field="name", multi=False),
     ],
 ))

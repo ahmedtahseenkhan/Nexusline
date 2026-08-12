@@ -22,6 +22,7 @@ import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconAlert } from "@/components/icons";
+import ImportExport from "@/components/ImportExport";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -664,7 +665,10 @@ function InternalAuditInner() {
             <button className="btn" onClick={openNewUnit}><IconPlus width={16} height={16} /> New auditable unit</button>
           )}
           {tab === "engagements" && (
-            <button className="btn" onClick={openNewEng}><IconPlus width={16} height={16} /> New engagement</button>
+            <>
+              <ImportExport resource="audit-engagements" label="Engagements" onDone={() => setRefreshKey((k) => k + 1)} />
+              <button className="btn" onClick={openNewEng}><IconPlus width={16} height={16} /> New engagement</button>
+            </>
           )}
         </div>
       </div>

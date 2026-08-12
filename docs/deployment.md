@@ -62,10 +62,13 @@ python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
 > The production compose passes through the on-prem env vars with sane defaults:
-> `FILE_STORAGE_DIR`, `BACKUP_DIR`, `ENFORCE_LICENSE`, `LICENSE_FILE`,
-> `LICENSE_PUBLIC_KEY_PATH`, `DEPLOYMENT_MODE`, `SMTP_*`, `LDAP_ENABLED`,
-> `MFA_REQUIRED`, `ENFORCE_SEGREGATION_OF_DUTIES`, `SCHEDULER_ENABLED`.
-> Override any of them in `.env`.
+> `FILE_STORAGE_DIR`, `BACKUP_DIR`, `LICENSE_FILE`, `DEPLOYMENT_MODE`, `SMTP_*`,
+> `LDAP_ENABLED`, `MFA_REQUIRED`, `ENFORCE_SEGREGATION_OF_DUTIES`,
+> `SCHEDULER_ENABLED`. Override any of them in `.env`.
+>
+> Licensing is deliberately **not** in that list beyond the file location:
+> whether the license is enforced, and which key validates it, are compiled into
+> the image (see §8) and cannot be changed from `.env`.
 
 ### 2.3 TLS certificates
 
@@ -216,16 +219,59 @@ nginx, api, web) is loaded from the bundle.
 
 ## 8. Licensing
 
-NexusLine uses **offline** licensing (Ed25519 signatures, no phone-home):
+NexusLine uses **offline** licensing (Ed25519 signatures, no phone-home), so it
+works in an air-gapped bank.
+
+### 8.0 Client-side install
 
 1. Place the signed license file at `deploy/license.key`.
-2. Place the license public key at `deploy/license_pubkey.pem`.
-3. Set `ENFORCE_LICENSE=true` in `.env`.
 
-The `./deploy/` directory is mounted read-only into the api container, so the
-default paths (`/app/deploy/license.key`, `/app/deploy/license_pubkey.pem`)
-resolve automatically. With `ENFORCE_LICENSE=true`, the API refuses to start on
-an absent, invalid, or expired license. Keep `ENFORCE_LICENSE=false` for dev.
+That is the whole client-side procedure. `./deploy/` is mounted read-only into
+the api container, so the default path (`/app/deploy/license.key`) resolves
+automatically.
+
+A release image refuses to start on an absent, invalid, or expired license.
+There is no environment variable to relax that, and the trusted public key is
+compiled into the image rather than read from disk, so replacing a key file or
+editing `.env` does not bypass the gate. Locally built dev images
+(`docker compose build`, which passes `PRODUCTION_BUILD=false`) run unlicensed.
+
+### 8.0.1 Vendor-side key ceremony (once, ever)
+
+```bash
+cd backend
+python -m app.tools.license keygen        # run exactly once for the product
+```
+
+This writes `vendor-keys/license_signing_key.pem` and embeds the matching public
+key into `app/core/build.py`, which must then be committed — every image built
+afterwards trusts that key.
+
+- **Back up the private key out of band.** It cannot be recovered.
+- **Never let it reach `deploy/`**, which is bind-mounted into client containers.
+  Both `vendor-keys/` and `*license_signing_key.pem` are gitignored.
+- Regenerating the keypair invalidates every license already issued to every
+  client, which is why `keygen` refuses to overwrite without `--force`.
+
+Issue a one-year license per client:
+
+```bash
+python -m app.tools.license sign --key vendor-keys/license_signing_key.pem \
+  --to "Habib Bank Ltd" --plan enterprise --seats 250 --days 365 \
+  --modules financial_crime,enterprise_risk --out deploy/license.key
+python -m app.tools.license verify deploy/license.key
+```
+
+Release images are built with the enforcement flag stamped in (the default):
+
+```bash
+docker build -t nexusline-api:1.0.0 ./backend      # PRODUCTION_BUILD=true
+```
+
+The build fails if no vendor key is embedded, so a misbuilt image cannot ship
+with the licensing gate silently disabled. `app/tools/license.py` — the keypair
+generator and token signer — is excluded from the image by `.dockerignore` and
+must never be shipped.
 
 ### 8.1 Module packaging (per-client entitlements)
 
@@ -233,17 +279,14 @@ Every client runs the **same build**; which modules are active is decided by the
 license. When minting a license, list editions and/or individual module keys:
 
 ```bash
-# Vendor side — one-time keypair (private key NEVER ships):
-python -m app.tools.license keygen --out deploy
-
 # Conventional bank (no Shariah module):
-python -m app.tools.license sign --key deploy/license_signing_key.pem \
+python -m app.tools.license sign --key vendor-keys/license_signing_key.pem \
   --to "Conventional Bank Ltd" --plan enterprise --seats 200 --days 365 \
   --modules financial_crime,enterprise_risk,resilience,audit,governance \
   --out license-conventional.key
 
 # Islamic bank (adds Shariah governance):
-python -m app.tools.license sign --key deploy/license_signing_key.pem \
+python -m app.tools.license sign --key vendor-keys/license_signing_key.pem \
   --to "Islamic Bank Ltd" --plan enterprise --seats 200 --days 365 \
   --modules islamic_banking,financial_crime,enterprise_risk,audit \
   --out license-islamic.key
@@ -303,6 +346,12 @@ For diagnostics without granting remote access (see `docs/support-model.md`):
 - [ ] Confirm Postgres is **not** published to the host (default in prod compose).
 - [ ] Enable banking controls as required: `MFA_REQUIRED=true`,
       `ENFORCE_SEGREGATION_OF_DUTIES=true`, `LDAP_ENABLED` per directory setup.
-- [ ] If licensed: `ENFORCE_LICENSE=true` with key material in `deploy/`.
+- [ ] Provision at least **two** users with approval rights before go-live — with
+      segregation of duties on, eight decisions (risk acceptance, exception approval,
+      control audit, policy publication, SAR filing, charity approval and release,
+      authority-matrix amendment) refuse when the maker is also the checker. A
+      single-operator install cannot complete them.
+- [ ] Deploying a release image (not a `PRODUCTION_BUILD=false` dev build) with a
+      current `deploy/license.key`; renewal date diarised before expiry.
 - [ ] Schedule off-host backups and periodically test a restore.
 ```

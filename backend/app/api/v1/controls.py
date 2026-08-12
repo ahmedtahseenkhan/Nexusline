@@ -25,6 +25,7 @@ from app.schemas.control import (
     ControlUpdate,
 )
 from app.services import audit as audit_log
+from app.services import dual_control
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/controls", tags=["controls"])
@@ -308,6 +309,12 @@ async def record_control_audit(
     control_id: uuid.UUID, body: ControlAuditCreate, db: DbSession, user: CurrentUser
 ) -> ControlRead:
     control = await _get_or_404(db, control_id)
+    # An audit result is assurance evidence: the person who created the control cannot
+    # also sign off its audit. Independence is the whole point of the test.
+    await dual_control.enforce_record_maker_checker(
+        db, module="control", action="audit", entity_type="control", entity_id=control.id,
+        checker_id=user.id, subject="control audit",
+    )
     conducted = body.conducted_date or date.today()
     db.add(ControlAudit(tenant_id=user.tenant_id, control_id=control_id,
                         **{**body.model_dump(), "conducted_date": conducted}))

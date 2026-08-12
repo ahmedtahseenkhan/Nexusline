@@ -1,14 +1,20 @@
 """Offline license verification (Ed25519, no phone-home).
 
 A license is a signed token: ``base64url(payload_json).base64url(signature)``.
-The vendor holds the Ed25519 private key and signs licenses; the deployment ships
-only the public key (``license_public_key_path``) and the signed license file
-(``license_file``). Verification is fully local, so it works in air-gapped banks.
+The vendor holds the Ed25519 private key and signs licenses; the deployment
+verifies them against :data:`app.core.build.VENDOR_PUBLIC_KEY_PEM`, which is
+compiled into the image. Verification is fully local, so it works in air-gapped
+banks.
 
-The ``cryptography`` import is lazy: if the package is missing the app still boots
-and simply reports an *unconfigured/unlicensed* state instead of crashing. When
-``settings.enforce_license`` is true, an invalid/expired/absent license fails
-startup (fail-closed) — banks turn this on; dev leaves it off.
+This module can *verify* but not *sign*: ``generate_keypair``/``sign_payload``
+live in ``app/tools/license.py``, which is excluded from release images. Shipping
+the signing helpers alongside the verifier handed every client the machinery to
+mint their own licenses.
+
+The ``cryptography`` import is lazy: in a dev build a missing package leaves the
+app *unconfigured/unlicensed* instead of crashing. In a release build
+(``build.PRODUCTION_BUILD``) enforcement is unconditional — an invalid, expired
+or absent license fails startup, and no environment variable can turn that off.
 """
 from __future__ import annotations
 
@@ -19,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+from app.core import build
 from app.core.config import settings
 
 logger = logging.getLogger("nexusline.license")
@@ -66,47 +73,26 @@ def _b64u_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + pad)
 
 
-def _canonical(payload: dict) -> bytes:
+def canonical(payload: dict) -> bytes:
+    """Byte form that gets signed. Shared with the vendor signing CLI, so any
+    change here must change both sides or every existing license breaks."""
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-# ------------------------------------------------------------------ keys / signing ---
-def generate_keypair() -> tuple[bytes, bytes]:
-    """Return (private_pem, public_pem). Vendor-side, run once via the CLI."""
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    key = Ed25519PrivateKey.generate()
-    private_pem = key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-    public_pem = key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return private_pem, public_pem
-
-
-def sign_payload(payload: dict, private_pem: bytes) -> str:
-    """Vendor-side: sign a license payload dict, returning the license token string."""
-    from cryptography.hazmat.primitives import serialization
-
-    key = serialization.load_pem_private_key(private_pem, password=None)
-    message = _canonical(payload)
-    signature = key.sign(message)
-    return f"{_b64u_encode(message)}.{_b64u_encode(signature)}"
+# ---------------------------------------------------------------------- enforcement ---
+def enforcement_enabled() -> bool:
+    """True in a release image. Compiled in at build time, not configurable."""
+    return build.PRODUCTION_BUILD
 
 
 # ---------------------------------------------------------------------- verification ---
 def _load_public_key():
     from cryptography.hazmat.primitives import serialization
 
-    path = Path(settings.license_public_key_path)
-    if not path.is_file():
+    pem = build.VENDOR_PUBLIC_KEY_PEM.strip()
+    if not pem:
         return None
-    return serialization.load_pem_public_key(path.read_bytes())
+    return serialization.load_pem_public_key(pem.encode("ascii"))
 
 
 def verify_token(token: str) -> LicenseInfo:
@@ -119,9 +105,9 @@ def verify_token(token: str) -> LicenseInfo:
     try:
         pub = _load_public_key()
     except Exception as exc:  # noqa: BLE001
-        return LicenseInfo(status="unconfigured", message=f"public key unreadable: {exc}")
+        return LicenseInfo(status="unconfigured", message=f"embedded vendor key unreadable: {exc}")
     if pub is None:
-        return LicenseInfo(status="unconfigured", message="no license public key configured")
+        return LicenseInfo(status="unconfigured", message="no vendor public key embedded in this build")
 
     try:
         message_b64, sig_b64 = token.strip().split(".", 1)
@@ -188,15 +174,22 @@ def load_current(refresh: bool = False) -> LicenseInfo:
 
 
 def enforce_on_startup() -> None:
-    """Fail startup on an invalid license when enforcement is on (banking mode)."""
-    if not settings.enforce_license:
+    """Fail startup on an invalid license in a release build (banking mode)."""
+    if not enforcement_enabled():
         info = load_current()
-        logger.info("License status: %s (%s) — enforcement off", info.status, info.message)
+        logger.info("License status: %s (%s) — dev build, enforcement off", info.status, info.message)
         return
+    # A release image with no embedded key can never validate anything: that is a
+    # broken build on our side, not a licensing decision, so say so plainly.
+    if not build.VENDOR_PUBLIC_KEY_PEM.strip():
+        raise RuntimeError(
+            "This release image was built without an embedded vendor public key. "
+            "Run `python -m app.tools.license keygen` before building."
+        )
     info = load_current(refresh=True)
     if not info.valid:
         raise RuntimeError(
-            f"License enforcement is on but the license is {info.status}: {info.message}. "
+            f"License is {info.status}: {info.message}. "
             f"Install a valid license at {settings.license_file}."
         )
     logger.info("License valid — licensed to %s (%s), expires %s", info.licensed_to, info.plan, info.expires)
@@ -204,7 +197,7 @@ def enforce_on_startup() -> None:
 
 def has_feature(feature: str) -> bool:
     info = load_current()
-    # When unlicensed/unconfigured (dev/self-host), don't gate features.
-    if info.status in ("unlicensed", "unconfigured"):
+    # Without enforcement (dev/self-host), don't gate features.
+    if not enforcement_enabled() and info.status in ("unlicensed", "unconfigured"):
         return True
     return info.valid and feature in info.features

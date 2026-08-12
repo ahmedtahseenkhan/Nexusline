@@ -40,6 +40,7 @@ from app.schemas.authority import (
 from app.schemas.common import Page
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import dual_control
 
 router = APIRouter(tags=["delegation of authority"])
 
@@ -123,11 +124,24 @@ async def get_authority_matrix(aid: uuid.UUID, db: DbSession) -> AuthorityMatrix
 
 
 @router.patch("/authority-matrix/{aid}", response_model=AuthorityMatrixRead, dependencies=[_WRITE])
-async def update_authority_matrix(aid: uuid.UUID, body: AuthorityMatrixUpdate, db: DbSession) -> AuthorityMatrixRead:
+async def update_authority_matrix(
+    aid: uuid.UUID, body: AuthorityMatrixUpdate, db: DbSession, user: CurrentUser
+) -> AuthorityMatrixRead:
     obj = await _get(db, AuthorityMatrix, aid, "Authority line")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    # The authority matrix defines who may approve what and up to which limit. Letting
+    # one person both write and revise a line would let them raise their own limit.
+    await dual_control.enforce_record_maker_checker(
+        db, module="authority", action="update", entity_type="authority_matrix",
+        entity_id=obj.id, checker_id=user.id, subject="authority-matrix change",
+    )
+    data = body.model_dump(exclude_unset=True)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="authority_matrix", entity_id=obj.id,
+        summary=f"Updated authority line {obj.reference}: {obj.activity}", changes=data,
+    )
     return AuthorityMatrixRead.model_validate(obj)
 
 

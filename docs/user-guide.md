@@ -527,7 +527,7 @@ When the platform is upgraded with new modules (and therefore new permission cod
 
 Documented here so you plan your bank's process around what's actually enforced, not what's merely configured. (These are also tracked as deliberate follow-up work — see `GAP-ANALYSIS.md`.)
 
-- **Delegation of Authority / dual-control rules are a registry, not an enforcement engine.** Defining an approval limit or a maker-checker rule there does not gate any write anywhere else in the system yet.
+- **Delegation of Authority gates eight decisions, not every write.** Four-eyes is genuinely enforced on: accepting a risk, approving a risk exception, recording a control audit, publishing a policy, filing an STR/SAR, approving and releasing a charity disbursement, and amending an authority-matrix line. On those, the person who created the record cannot be the one who signs it off. Approval *limits* elsewhere in the matrix are still a registry — they document the rule, they don't gate other modules' writes.
 - **Approvals is not auto-triggered by other modules.** You must go create the request yourself and reference the source record manually; the four-eyes logic *inside* Approvals (once a request exists) is genuinely enforced.
 - **Issues & Actions is entirely manually populated.** No other module has a "raise an Issue" button — you decide what's worth tracking there and create it yourself.
 - **Business Units are not a security boundary.** Only whole-organization (tenant) isolation is enforced at the database level; anyone with a module's read permission sees every business unit's records in it.
@@ -539,3 +539,12 @@ Documented here so you plan your bank's process around what's actually enforced,
 - **Reporting is on-demand, not scheduled.** Four PDF exports exist (Risk Register, Executive Summary, Audit Engagement Report, Shariah Review Report) — there's no "email me this every Monday."
 - **Record-level immutability** for loss events, SAR, and breach records (a regulator expectation) is not yet built.
 - **New organization/tenant self-service creation** has no frontend page — it's an operator-run backend step today.
+- **Twelve modules are not yet wired into the cross-module graph.** AML/CFT, Fraud Risk, Shariah Governance, Integrations/CCM, Model Risk, Scenario & Capital, ESG, Declarations, Whistleblowing, Board & Committees, Awareness, and DPIA/DSAR/Consent record their links as free text rather than as references to the risk, control or RoPA register. They work standalone; they just don't appear on a linked record's "related" panel.
+
+### What changed on 11 Aug 2026
+
+- **Every sign-in is now in the Activity Log.** Successful logins, failed attempts and the reason, lockouts, MFA changes, password changes and SSO/LDAP configuration edits all appear under the `auth` entity type. Webhook, custom-field, status-rule, business-unit, process, legal-register and bulk-import changes are logged too.
+- **Read-only users can no longer write through the side panels.** Adding a comment, tag, attachment or file, signing off a review, or filling a custom field now needs that module's *write* permission — previously any signed-in user could do it on any record they could see.
+- **Bulk import covers 32 registers, up from 20** — including Issues, RCSA, KRIs, Loss Events, Obligations, Regulatory Changes, Audit Engagements, ICFR Processes, Models, Outsourcing Arrangements and BIAs. IT Assets and Information Assets now import separately, each with its own columns.
+- **Global search reaches every module**, not just the core registers.
+- **Four-eyes now applies to eight decisions** (see the Delegation of Authority note above). On a single-user evaluation install, set `ENFORCE_SEGREGATION_OF_DUTIES=false` or add a second user — otherwise you cannot approve your own records.

@@ -1,14 +1,27 @@
-"""Vendor CLI for offline licensing.
+"""Vendor CLI for offline licensing — NOT shipped to clients.
 
-  python -m app.tools.license keygen  --out deploy
-  python -m app.tools.license sign    --key deploy/license_signing_key.pem \
+``backend/.dockerignore`` keeps this file out of release images: it holds the
+keypair generator and the token signer, which together are everything needed to
+mint a perpetual license. Run it from a source checkout on a vendor machine.
+
+  python -m app.tools.license keygen
+  python -m app.tools.license sign    --key vendor-keys/license_signing_key.pem \
         --to "Habib Bank Ltd" --plan enterprise --seats 250 --days 365 \
         --modules financial_crime,enterprise_risk,islamic_banking --out deploy/license.key
   python -m app.tools.license verify  deploy/license.key
   python -m app.tools.license modules   # list module keys and edition bundles
 
-`keygen` produces the vendor private key (KEEP SECRET) and the public key that ships
-with the deployment. `sign` mints a signed license token. `verify` checks one locally.
+`keygen` writes the private signing key (KEEP SECRET, back it up — it cannot be
+recovered) and stamps the matching public key into ``app/core/build.py`` so it
+compiles into every image built afterwards. Run it once, ever: regenerating the
+keypair invalidates every license already issued to every client.
+
+The private key defaults to ``vendor-keys/`` deliberately, never ``deploy/``:
+``docker-compose.prod.yml`` bind-mounts ``./deploy`` into the client's container,
+so a signing key parked there would ship straight to the client.
+
+`sign` mints a signed license token to hand to one client. `verify` checks a
+token against the currently embedded public key.
 
 `--modules` takes edition names and/or individual module keys (see the `modules`
 command), or "all". Omitting it unlocks every module — use "core" to license the
@@ -19,6 +32,7 @@ base platform only. Example packagings:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -26,18 +40,73 @@ from pathlib import Path
 from app.core.modules import EDITIONS, MODULES, expand_modules
 from app.services import license as lic
 
+VENDOR_MODULE = Path(__file__).resolve().parents[1] / "core" / "build.py"
 
+
+# --------------------------------------------------------------- vendor-side crypto ---
+def generate_keypair() -> tuple[bytes, bytes]:
+    """Return (private_pem, public_pem)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    key = Ed25519PrivateKey.generate()
+    private_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_pem = key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return private_pem, public_pem
+
+
+def sign_payload(payload: dict, private_pem: bytes) -> str:
+    """Sign a license payload dict, returning the license token string."""
+    from cryptography.hazmat.primitives import serialization
+
+    key = serialization.load_pem_private_key(private_pem, password=None)
+    message = lic.canonical(payload)
+    signature = key.sign(message)
+    return f"{lic._b64u_encode(message)}.{lic._b64u_encode(signature)}"
+
+
+def embed_public_key(public_pem: bytes, target: Path = VENDOR_MODULE) -> None:
+    """Rewrite VENDOR_PUBLIC_KEY_PEM in app/core/build.py with this key."""
+    source = target.read_text()
+    literal = 'VENDOR_PUBLIC_KEY_PEM = """\\\n' + public_pem.decode("ascii") + '"""'
+    updated, count = re.subn(
+        r'^VENDOR_PUBLIC_KEY_PEM = (""".*?"""|"")',
+        lambda _m: literal,
+        source,
+        count=1,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if count != 1:
+        raise RuntimeError(f"could not find VENDOR_PUBLIC_KEY_PEM assignment in {target}")
+    target.write_text(updated)
+
+
+# ------------------------------------------------------------------------ commands ---
 def _keygen(args: argparse.Namespace) -> int:
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    private_pem, public_pem = lic.generate_keypair()
-    priv_path = out / "license_signing_key.pem"
-    pub_path = out / "license_pubkey.pem"
+    priv_path = Path(args.key_out)
+    if priv_path.exists() and not args.force:
+        print(f"{priv_path} already exists. Regenerating invalidates every license "
+              f"already issued to every client — pass --force only if you mean it.",
+              file=sys.stderr)
+        return 2
+    priv_path.parent.mkdir(parents=True, exist_ok=True)
+    pub_path = Path(args.out) / "license_pubkey.pem"
+    pub_path.parent.mkdir(parents=True, exist_ok=True)
+    private_pem, public_pem = generate_keypair()
     priv_path.write_bytes(private_pem)
-    pub_path.write_bytes(public_pem)
     priv_path.chmod(0o600)
-    print(f"Wrote private signing key -> {priv_path}  (KEEP SECRET; do not ship)")
-    print(f"Wrote public key         -> {pub_path}   (ship with the deployment)")
+    pub_path.write_bytes(public_pem)
+    embed_public_key(public_pem)
+    print(f"Wrote private signing key -> {priv_path}  (KEEP SECRET; back it up; never ship)")
+    print(f"Wrote public key copy     -> {pub_path}   (reference only)")
+    print(f"Embedded public key into  -> {VENDOR_MODULE}  (commit this; it compiles into every image)")
     return 0
 
 
@@ -60,7 +129,7 @@ def _sign(args: argparse.Namespace) -> int:
             print("Run `python -m app.tools.license modules` for the catalog.", file=sys.stderr)
             return 2
         payload["modules"] = entries
-    token = lic.sign_payload(payload, Path(args.key).read_bytes())
+    token = sign_payload(payload, Path(args.key).read_bytes())
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(token)
     print(f"Signed license for '{args.to}' ({args.plan}, {args.seats} seats), "
@@ -96,8 +165,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="app.tools.license", description="Offline license CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    kg = sub.add_parser("keygen", help="Generate a vendor Ed25519 keypair")
-    kg.add_argument("--out", default="deploy")
+    kg = sub.add_parser("keygen", help="Generate the vendor Ed25519 keypair (run once)")
+    kg.add_argument("--key-out", default="vendor-keys/license_signing_key.pem",
+                    help="Private signing key path — keep it out of ./deploy, which is "
+                         "bind-mounted into client containers")
+    kg.add_argument("--out", default="deploy", help="Directory for the public key reference copy")
+    kg.add_argument("--force", action="store_true",
+                    help="Overwrite an existing signing key, invalidating all issued licenses")
     kg.set_defaults(fn=_keygen)
 
     sg = sub.add_parser("sign", help="Sign a license token")
@@ -117,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     md = sub.add_parser("modules", help="List licensable modules and edition bundles")
     md.set_defaults(fn=_modules)
 
-    vf = sub.add_parser("verify", help="Verify a license token file")
+    vf = sub.add_parser("verify", help="Verify a license token against the embedded key")
     vf.add_argument("file")
     vf.set_defaults(fn=_verify)
 

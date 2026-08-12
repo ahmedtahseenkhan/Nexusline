@@ -72,9 +72,9 @@ services:
       FILE_STORAGE_DIR: ${FILE_STORAGE_DIR:-/data/uploads}
       BACKUP_DIR: ${BACKUP_DIR:-/data/backups}
       # --- offline licensing (Ed25519, no phone-home) ---
-      ENFORCE_LICENSE: ${ENFORCE_LICENSE:-false}
+      # Only the license file location is configurable: enforcement and the
+      # trusted key are compiled into the image (backend/app/core/build.py).
       LICENSE_FILE: ${LICENSE_FILE:-/app/deploy/license.key}
-      LICENSE_PUBLIC_KEY_PATH: ${LICENSE_PUBLIC_KEY_PATH:-/app/deploy/license_pubkey.pem}
       DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-on-prem}
       # --- outbound email ---
       SMTP_HOST: ${SMTP_HOST:-}

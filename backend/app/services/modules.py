@@ -28,7 +28,9 @@ def licensed_modules() -> set[str]:
     unconfigured (dev, self-host) or when the license predates packaging."""
     info = lic.load_current()
     if info.status in ("unlicensed", "unconfigured"):
-        return set(ALL_MODULE_KEYS)
+        # A release build has no unlicensed mode — startup already refuses one, so
+        # reaching here means the gate was tampered with. Grant nothing.
+        return set() if lic.enforcement_enabled() else set(ALL_MODULE_KEYS)
     if not info.valid:
         # Expired/invalid license with enforcement off: platform stays up but
         # optional modules lock until a valid license is installed.

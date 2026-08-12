@@ -14,6 +14,7 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import ImportExport from "@/components/ImportExport";
 
 /* ------------------------------------------------------------------ types */
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -749,9 +750,12 @@ function IcfrInner() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {section === "processes" && (
-            <button className="btn" onClick={openNewProcess}>
-              <IconPlus width={16} height={16} /> New process
-            </button>
+            <>
+              <ImportExport resource="icfr-processes" label="ICFR processes" onDone={() => setRefreshKey((k) => k + 1)} />
+              <button className="btn" onClick={openNewProcess}>
+                <IconPlus width={16} height={16} /> New process
+              </button>
+            </>
           )}
           {section === "deficiencies" && (
             <button className="btn" onClick={openNewDef}>

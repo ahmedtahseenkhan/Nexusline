@@ -29,6 +29,7 @@ from app.schemas.aml import (
 from app.schemas.common import Page
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import dual_control
 
 router = APIRouter(tags=["aml/cft"])
 
@@ -200,15 +201,26 @@ async def get_sar(sid: uuid.UUID, db: DbSession) -> SarRead:
 
 
 @router.patch("/aml/sars/{sid}", response_model=SarRead, dependencies=[_WRITE])
-async def update_sar(sid: uuid.UUID, body: SarUpdate, db: DbSession) -> SarRead:
+async def update_sar(sid: uuid.UUID, body: SarUpdate, db: DbSession, user: CurrentUser) -> SarRead:
     obj = await _get(db, SuspiciousActivityReport, sid, "SAR")
     data = body.model_dump(exclude_unset=True)
     # Stamp the filing date when marked filed and none supplied.
     if data.get("status") == SarStatus.filed and not obj.filed_date and "filed_date" not in data:
+        # Filing an STR/SAR with the FMU is a regulator-facing act: whoever prepared the
+        # report cannot also be the one who files it.
+        await dual_control.enforce_record_maker_checker(
+            db, module="aml", action="file_sar", entity_type="sar", entity_id=obj.id,
+            checker_id=user.id, subject="STR/SAR filing",
+        )
         obj.filed_date = date.today()
     for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if data.get("status") is not None:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="sar", entity_id=obj.id,
+            summary=f"STR/SAR {obj.reference} moved to {obj.status.value}", changes=data,
+        )
     return SarRead.model_validate(obj)
 
 

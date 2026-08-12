@@ -39,6 +39,7 @@ from app.schemas.shariah import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import dual_control
 
 router = APIRouter(tags=["shariah governance"])
 
@@ -400,11 +401,30 @@ async def create_charity(body: CharityCreate, db: DbSession, user: CurrentUser) 
 
 
 @router.patch("/charity-ledger/{cid}", response_model=CharityRead, dependencies=[_WRITE])
-async def update_charity(cid: uuid.UUID, body: CharityUpdate, db: DbSession) -> CharityRead:
+async def update_charity(
+    cid: uuid.UUID, body: CharityUpdate, db: DbSession, user: CurrentUser
+) -> CharityRead:
     obj = await _get(db, CharityDisbursement, cid, "Disbursement")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    new_status = data.get("status")
+    if new_status in (CharityStatus.approved, CharityStatus.disbursed) and obj.status != new_status:
+        # Purification money leaves the bank: whoever recorded the disbursement cannot
+        # also approve or release it. The amount is passed so a configured threshold
+        # rule can exempt small sums.
+        await dual_control.enforce_record_maker_checker(
+            db, module="shariah", action=f"charity_{new_status.value}",
+            entity_type="charity_disbursement", entity_id=obj.id,
+            checker_id=user.id, amount=float(obj.amount or 0),
+            subject="charity disbursement",
+        )
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if new_status is not None:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="charity_disbursement", entity_id=obj.id,
+            summary=f"Purification {obj.reference} moved to {obj.status.value}", changes=data,
+        )
     return CharityRead.model_validate(obj)
 
 

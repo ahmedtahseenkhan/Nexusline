@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import set_session_tenant, system_session
-from app.core.deps import DbSession, require
+from app.core.deps import CurrentUser, DbSession, require
 from app.core.security import create_access_token, decode_state_token
 from app.models.sso import SsoConfig
 from app.models.tenant import Tenant
@@ -20,6 +20,7 @@ from app.schemas.sso import (
     SsoStatus,
 )
 from app.schemas.user import UserRead
+from app.services import audit as audit_log
 from app.services import sso as sso_service
 
 router = APIRouter(prefix="/auth/sso", tags=["sso"])
@@ -36,12 +37,15 @@ def _read(cfg: SsoConfig) -> SsoConfigRead:
 async def get_config(db: DbSession) -> SsoConfigRead:
     cfg = await sso_service.get_config(db)
     if cfg is None:
-        cfg = SsoConfig()  # unsaved defaults
+        # Never configured. Return the schema's own defaults rather than validating an
+        # unsaved SsoConfig(), whose column defaults do not exist until INSERT — reading
+        # that transient row yields None for every field and fails validation.
+        return SsoConfigRead()
     return _read(cfg)
 
 
 @router.put("/config", response_model=SsoConfigRead, dependencies=[Depends(require("sso:manage"))])
-async def update_config(body: SsoConfigUpdate, db: DbSession) -> SsoConfigRead:
+async def update_config(body: SsoConfigUpdate, db: DbSession, user: CurrentUser) -> SsoConfigRead:
     cfg = await sso_service.get_config(db)
     data = body.model_dump()
     secret = data.pop("client_secret")
@@ -58,6 +62,13 @@ async def update_config(body: SsoConfigUpdate, db: DbSession) -> SsoConfigRead:
         cfg.client_secret = secret
     await db.flush()
     await db.refresh(cfg)
+    # Identity-provider configuration is a privileged security change: log it, minus
+    # the client secret.
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="sso_config", entity_id=cfg.id,
+        summary=f"Updated SSO configuration ({cfg.provider}, {'enabled' if cfg.enabled else 'disabled'})",
+        changes={k: v for k, v in data.items()} | {"client_secret_changed": secret is not None},
+    )
     return _read(cfg)
 
 
@@ -108,6 +119,15 @@ async def sso_callback(slug: str, body: SsoCallbackRequest) -> TokenResponse:
             raise HTTPException(status_code=400, detail="SSO is not enabled for this organization")
 
         user = await sso_service.resolve_user(db, cfg, tenant.id, body.code, body.redirect_uri)
+        await audit_log.record_auth(
+            db,
+            tenant_id=tenant.id,
+            actor_id=user.id,
+            actor_email=user.email,
+            action="login",
+            summary=f"{user.email} signed in via SSO",
+            changes={"method": "sso", "provider": cfg.provider},
+        )
         token = create_access_token(
             subject=str(user.id),
             tenant_id=str(tenant.id),

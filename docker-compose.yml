@@ -21,7 +21,12 @@ services:
     restart: unless-stopped
 
   api:
-    build: ./backend
+    build:
+      context: ./backend
+      # Dev images skip license enforcement. Release images get the default
+      # (true) and refuse to start without a valid license.
+      args:
+        PRODUCTION_BUILD: "false"
     restart: unless-stopped
     env_file: .env
     environment:

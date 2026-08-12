@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession
+from app.services import audit as audit_log
 from app.services import csv_io
 from app.services.import_registry import REGISTRY, Column, LinkSpec, ResourceIO
 
@@ -198,6 +199,9 @@ async def export_resource(resource: str, db: DbSession, user: CurrentUser) -> di
     stmt = select(model)
     if hasattr(model, "deleted"):
         stmt = stmt.where(model.deleted.is_(False))
+    # Discriminator-backed resources export only their own register's rows.
+    for attr, value in res.fixed.items():
+        stmt = stmt.where(getattr(model, attr) == value)
     # Eager-load every exportable link relationship so rendering avoids lazy IO.
     options = []
     for col in res.columns:
@@ -282,6 +286,9 @@ async def import_resource(
         total += 1
         try:
             payload = _row_to_payload(raw_row, header_by_field, link_indexes)
+            # Discriminators are the resource's identity, not per-row data: stamp them
+            # last so a stray CSV column can never route rows into the wrong register.
+            payload.update(res.fixed)
             obj = res.create_schema(**payload)
             async with db.begin_nested():
                 await res.create_func(body=obj, db=db, user=user)
@@ -290,6 +297,13 @@ async def import_resource(
             errors.append(ImportError(row=row_no, message=_clean_message(exc)))
 
     await db.flush()
+    # A bulk load is the largest single write a user can make; record it as one event so
+    # the trail explains a sudden burst of created records.
+    await audit_log.record(
+        db, actor=user, action="import", entity_type=res.resource, entity_id=None,
+        summary=f"Imported {created} of {total} {res.label} row(s) from CSV",
+        changes={"total": total, "created": created, "failed": len(errors)},
+    )
     return ImportResult(
         total=total, created=created, skipped=total - created, errors=errors
     )

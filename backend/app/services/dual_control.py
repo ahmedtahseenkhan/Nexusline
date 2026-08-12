@@ -13,9 +13,25 @@ Resolution order for "does four-eyes apply to this action?":
 2. With no rule configured, fall back to the global ``enforce_segregation_of_duties``
    switch. Banks keep it on, so sensitive decisions are **fail-closed** by default.
 
-Canonical (module, action) keys used by callers today: ("risk", "accept") and
-("exception", "approve"). Configure a matching DualControlRule to tune threshold/roles;
-otherwise the global switch governs.
+Canonical (module, action) keys enforced today — configure a matching DualControlRule to
+tune threshold/roles, or to switch one off; otherwise the global switch governs:
+
+===================  ==================  ==============================================
+module               action              decision that is gated
+===================  ==================  ==============================================
+risk                 accept              accepting a risk
+exception            approve             approving a risk exception
+control              audit               recording a control-audit result
+policy               publish             publishing (approving) a policy
+aml                  file_sar            marking an STR/SAR as filed with the FMU
+shariah              charity_approved    approving a purification disbursement
+shariah              charity_disbursed   releasing a purification disbursement
+authority            update              amending an authority-matrix line
+===================  ==================  ==============================================
+
+With the global switch on and no rule configured, each of these refuses when the maker
+and the checker are the same person. Single-operator installs (demos, evaluations)
+should either add a second user or set ``ENFORCE_SEGREGATION_OF_DUTIES=false``.
 """
 from __future__ import annotations
 
@@ -62,6 +78,60 @@ async def dual_control_required(
         return True, rule
     # No active rule governs this action → global fail-closed switch decides.
     return settings.enforce_segregation_of_duties, None
+
+
+async def maker_of(db: AsyncSession, entity_type: str, entity_id: uuid.UUID) -> uuid.UUID | None:
+    """Who created this record — the "maker" for four-eyes purposes.
+
+    The registers under dual control (SARs, charity disbursements, policies, control
+    audits, authority-matrix rows) store an owner *name*, not a user id, so the trail is
+    the authoritative record of who actually entered it: the earliest ``create`` audit
+    entry for the record. Returns None when the record predates the audit trail or was
+    seeded, in which case the caller's four-eyes check is a no-op rather than a false
+    block.
+    """
+    from app.models.audit import AuditLog
+
+    return await db.scalar(
+        select(AuditLog.actor_id)
+        .where(
+            AuditLog.entity_type == entity_type,
+            AuditLog.entity_id == entity_id,
+            AuditLog.action == "create",
+        )
+        .order_by(AuditLog.created_at.asc())
+        .limit(1)
+    )
+
+
+async def enforce_record_maker_checker(
+    db: AsyncSession,
+    *,
+    module: str,
+    action: str,
+    entity_type: str,
+    entity_id: uuid.UUID,
+    checker_id: uuid.UUID | None,
+    amount: float | None = None,
+    subject: str = "request",
+) -> DualControlRule | None:
+    """Four-eyes for a decision taken *on an existing record*.
+
+    Resolves the maker from the record's creation entry in the audit trail, then applies
+    the same rule as :func:`enforce_maker_checker`. Use this for sign-offs where the
+    maker is "whoever entered the record" — filing a SAR, approving a policy, releasing
+    a charity disbursement.
+    """
+    maker_id = await maker_of(db, entity_type, entity_id)
+    return await enforce_maker_checker(
+        db,
+        module=module,
+        action=action,
+        maker_id=maker_id,
+        checker_id=checker_id,
+        amount=amount,
+        subject=subject,
+    )
 
 
 async def enforce_maker_checker(

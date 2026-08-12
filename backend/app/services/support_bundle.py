@@ -58,7 +58,7 @@ def build_bundle(extra: dict | None = None) -> tuple[str, bytes]:
             "ldap_enabled": settings.ldap_enabled,
             "mfa_required": settings.mfa_required,
             "enforce_segregation_of_duties": settings.enforce_segregation_of_duties,
-            "enforce_license": settings.enforce_license,
+            "enforce_license": lic.enforcement_enabled(),
             "smtp_configured": bool(settings.smtp_host),
         },
     }

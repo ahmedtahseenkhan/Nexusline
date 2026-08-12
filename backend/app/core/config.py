@@ -76,11 +76,10 @@ class Settings(BaseSettings):
     # --- On-prem productionization ---
     app_version: str = "1.0.0"
     deployment_mode: str = "on-prem"  # on-prem | saas
-    # Offline licensing (Ed25519, no phone-home). enforce_license fails startup on an
-    # invalid/expired/absent license when true; keep false for dev/self-host.
-    enforce_license: bool = False
+    # Offline licensing (Ed25519, no phone-home). Only *where the license lives* is
+    # configurable — whether it is enforced and which key validates it are compiled
+    # into the image (see app/core/build.py), so the client cannot switch them off.
     license_file: str = "./deploy/license.key"
-    license_public_key_path: str = "./deploy/license_pubkey.pem"
     # Comma-separated module keys to hide on this installation even when
     # licensed (see app/core/modules.py), e.g. "shariah" for a conventional
     # bank or "esg,ai_assist". The license remains the entitlement ceiling.
