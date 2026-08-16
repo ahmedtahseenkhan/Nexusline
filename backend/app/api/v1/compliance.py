@@ -280,47 +280,14 @@ async def list_framework_templates() -> list[dict]:
     dependencies=[Depends(require("compliance:write"))],
 )
 async def load_framework_template(key: str, db: DbSession, user: CurrentUser) -> FrameworkRead:
-    """Create a framework and all its requirements from a built-in template."""
-    from app.services.framework_library import TEMPLATES
+    """Create a framework and all its requirements from a built-in template.
 
-    tpl = TEMPLATES.get(key)
-    if tpl is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown framework template")
-    existing = await db.scalar(
-        select(Framework).where(Framework.name == tpl["name"], Framework.deleted.is_(False))
-    )
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"{tpl['name']} is already loaded.",
-        )
-    fw = Framework(
-        tenant_id=user.tenant_id,
-        name=tpl["name"],
-        version=tpl["version"],
-        authority=tpl["authority"],
-        regulator=tpl.get("regulator", ""),
-        scope=tpl.get("scope", ""),
-        description=tpl.get("description", ""),
-    )
-    db.add(fw)
-    await db.flush()
-    for r in tpl["requirements"]:
-        db.add(
-            Requirement(
-                tenant_id=user.tenant_id,
-                framework_id=fw.id,
-                reference=r["reference"],
-                title=r["title"],
-                domain=r.get("domain", ""),
-                description=r.get("description", ""),
-            )
-        )
-    await db.flush()
-    await audit.record(
-        db, actor=user, action="create", entity_type="framework", entity_id=fw.id,
-        summary=f"Loaded framework {fw.name} ({len(tpl['requirements'])} requirements) from library",
-    )
+    Same install path as the Framework Library page (``/content-library``), so both
+    surfaces agree on what is installed and a standard cannot exist twice.
+    """
+    from app.services.framework_library import install_template
+
+    fw = await install_template(db, user, key)
     await db.refresh(fw)
     return FrameworkRead.model_validate(fw)
 

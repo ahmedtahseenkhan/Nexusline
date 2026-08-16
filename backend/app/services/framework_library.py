@@ -3095,6 +3095,87 @@ _ISO_31000_2018 = {
 }
 
 
+# ------------------------------------- Basel II operational risk (event types + PSMOR)
+_BASEL_OPRISK_FW = {
+    "name": "Basel Operational Risk",
+    "version": "2011",
+    "authority": "Basel Committee on Banking Supervision",
+    "regulator": "",
+    "scope": "Operational risk loss event taxonomy and sound-management principles for banks.",
+    "description": (
+        "The 7 Basel II loss event-type categories plus the 11 Principles for the "
+        "Sound Management of Operational Risk."
+    ),
+    "requirements": [
+        # Basel II Level-1 loss event-type categories (7)
+        ("ET1", "Loss Event Types", "Internal Fraud",
+         "Losses due to acts intended to defraud, misappropriate property or circumvent the law, involving at least one internal party."),
+        ("ET2", "Loss Event Types", "External Fraud",
+         "Losses due to acts intended to defraud, misappropriate property or circumvent the law, by a third party."),
+        ("ET3", "Loss Event Types", "Employment Practices and Workplace Safety",
+         "Losses from acts inconsistent with employment, health or safety laws or agreements."),
+        ("ET4", "Loss Event Types", "Clients, Products & Business Practices",
+         "Losses from an unintentional or negligent failure to meet a professional obligation to clients, or from the nature or design of a product."),
+        ("ET5", "Loss Event Types", "Damage to Physical Assets",
+         "Losses from loss or damage to physical assets from natural disaster or other events."),
+        ("ET6", "Loss Event Types", "Business Disruption and System Failures",
+         "Losses from disruption of business or system failures."),
+        ("ET7", "Loss Event Types", "Execution, Delivery & Process Management",
+         "Losses from failed transaction processing or process management, and relations with trade counterparties and vendors."),
+        # Principles for the Sound Management of Operational Risk (PSMOR) — 11 principles
+        ("P1", "Sound Management Principles", "Operational risk culture",
+         "The board and senior management establish a strong risk management culture across the bank."),
+        ("P2", "Sound Management Principles", "Operational risk management framework",
+         "The bank develops, implements and maintains a framework fully integrated into overall risk management."),
+        ("P3", "Sound Management Principles", "Board establishes and reviews the framework",
+         "The board establishes, approves and periodically reviews the operational risk management framework."),
+        ("P4", "Sound Management Principles", "Operational risk appetite and tolerance",
+         "The board approves and reviews a risk appetite and tolerance statement for operational risk."),
+        ("P5", "Sound Management Principles", "Governance structure",
+         "Senior management develops a clear, effective and robust governance structure with well-defined lines of responsibility."),
+        ("P6", "Sound Management Principles", "Identification and assessment",
+         "Senior management ensures identification and assessment of the operational risk inherent in all material products, activities, processes and systems."),
+        ("P7", "Sound Management Principles", "Change management",
+         "Senior management ensures a change management process to assess operational risk in new products, activities, processes and systems."),
+        ("P8", "Sound Management Principles", "Monitoring and reporting",
+         "Senior management implements a process to regularly monitor operational risk profiles and material exposures."),
+        ("P9", "Sound Management Principles", "Control and mitigation",
+         "The bank maintains a strong control environment using policies, processes, systems and appropriate internal controls and risk mitigation."),
+        ("P10", "Sound Management Principles", "Business resiliency and continuity",
+         "The bank establishes business resiliency and continuity plans to operate on an ongoing basis and limit losses in a disruption."),
+        ("P11", "Sound Management Principles", "Disclosure",
+         "The bank makes sufficient public disclosure to allow stakeholders to assess its operational risk management approach."),
+    ],
+}
+
+# --------------------------------------------- SBP / AAOIFI Shariah governance
+_SHARIAH_GOVERNANCE_FW = {
+    "name": "SBP/AAOIFI Shariah Governance",
+    "version": "2018",
+    "authority": "State Bank of Pakistan / AAOIFI",
+    "regulator": "State Bank of Pakistan",
+    "scope": "Shariah governance for Islamic banking institutions and Islamic banking windows.",
+    "description": (
+        "Shariah Board, Shariah compliance, internal/external Shariah audit, product "
+        "approval and purification/charity."
+    ),
+    "requirements": [
+        ("SG-1", "Governance & Oversight", "Board of Directors' oversight of Shariah governance", ""),
+        ("SG-2", "Shariah Board", "Shariah Board — appointment, composition and independence", ""),
+        ("SG-3", "Shariah Board", "Shariah Board — roles, responsibilities, fatawa and rulings", ""),
+        ("SG-4", "Shariah Compliance", "Shariah Compliance Department / function", ""),
+        ("SG-5", "Shariah Compliance", "Shariah compliance review", ""),
+        ("SG-6", "Shariah Audit", "Internal Shariah audit", ""),
+        ("SG-7", "Shariah Audit", "External Shariah audit", ""),
+        ("SG-8", "Product Approval", "Product development and Shariah approval", ""),
+        ("SG-9", "Shariah Risk", "Shariah non-compliance risk management", ""),
+        ("SG-10", "Purification & Charity", "Purification of non-Shariah-compliant income and charity disbursement", ""),
+        ("SG-11", "Profit Distribution", "Profit and loss distribution and pool management", ""),
+        ("SG-12", "Capacity Building", "Shariah training and awareness", ""),
+    ],
+}
+
+
 def _build(meta: dict) -> dict:
     """Normalize a template's tuple requirements into dicts."""
     return {
@@ -3122,4 +3203,97 @@ TEMPLATES: dict[str, dict] = {
     "sbp-cybersecurity": _build(_SBP_CYBERSECURITY),
     "sbp-outsourcing": _build(_SBP_OUTSOURCING),
     "sbp-bcp": _build(_SBP_BCP),
+    "basel-operational-risk": _build(_BASEL_OPRISK_FW),
+    "shariah-governance": _build(_SHARIAH_GOVERNANCE_FW),
 }
+
+#: Names the retired shallow content-library packs used for the SAME standard. A tenant
+#: that installed one of those keeps it as an ordinary framework; while it exists, the
+#: full template is reported as installed and cannot be double-installed — delete the
+#: legacy framework first to load the deeper one.
+LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
+    "iso-27001-2022": ("ISO/IEC 27001:2022 Annex A",),
+    "nist-csf-2.0": ("NIST CSF 2.0",),
+    "sbp-etgrm": ("SBP ETGRM Framework",),
+}
+
+
+def template_names(key: str) -> tuple[str, ...]:
+    """The template's canonical framework name plus any legacy pack aliases."""
+    tpl = TEMPLATES[key]
+    return (tpl["name"], *LEGACY_ALIASES.get(key, ()))
+
+
+async def installed_template_keys(db) -> set[str]:
+    """Template keys already present in this tenant (RLS-scoped), aliases included."""
+    from sqlalchemy import select
+
+    from app.models.compliance import Framework
+
+    names = set(
+        (await db.scalars(select(Framework.name).where(Framework.deleted.is_(False)))).all()
+    )
+    return {key for key in TEMPLATES if any(n in names for n in template_names(key))}
+
+
+async def install_template(db, user, key: str):
+    """Create a Framework + all its Requirements from a template, for this tenant.
+
+    Single install path shared by ``/content-library`` and ``/framework-templates`` so
+    the same standard can never be installed twice under two different names. Raises
+    404 for an unknown key and 409 when the framework (or a legacy alias of it) exists.
+    Returns the new Framework.
+    """
+    from fastapi import HTTPException, status
+    from sqlalchemy import select
+
+    from app.models.compliance import Framework, Requirement
+    from app.services import audit
+
+    tpl = TEMPLATES.get(key)
+    if tpl is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown framework template")
+
+    names = template_names(key)
+    existing = await db.scalar(
+        select(Framework).where(Framework.name.in_(names), Framework.deleted.is_(False))
+    )
+    if existing is not None:
+        detail = (
+            f"{tpl['name']} is already installed."
+            if existing.name == tpl["name"]
+            else (
+                f"An earlier edition of this standard is installed as '{existing.name}'. "
+                "Delete that framework first to load the full version."
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+    fw = Framework(
+        tenant_id=user.tenant_id,
+        name=tpl["name"],
+        version=tpl.get("version", ""),
+        authority=tpl.get("authority", ""),
+        regulator=tpl.get("regulator", ""),
+        scope=tpl.get("scope", ""),
+        description=tpl.get("description", ""),
+    )
+    db.add(fw)
+    await db.flush()
+    for r in tpl["requirements"]:
+        db.add(
+            Requirement(
+                tenant_id=user.tenant_id,
+                framework_id=fw.id,
+                reference=r["reference"],
+                title=r["title"],
+                domain=r.get("domain", ""),
+                description=r.get("description", ""),
+            )
+        )
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="create", entity_type="framework", entity_id=fw.id,
+        summary=f"Installed framework {fw.name} ({len(tpl['requirements'])} requirements) from the library",
+    )
+    return fw
