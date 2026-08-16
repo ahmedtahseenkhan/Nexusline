@@ -76,43 +76,23 @@ from app.services.risk_scoring import next_review_date
 async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
     today = date.today()
 
-    # Asset media types (eramba's 8 built-in kinds)
-    media_types: dict[str, AssetMediaType] = {}
-    for mt in ["Data Asset", "Facilities", "People", "Hardware", "Software", "IT Service", "Network", "Financial"]:
-        m = AssetMediaType(tenant_id=tenant_id, name=mt, editable=False)
-        db.add(m)
-        media_types[mt] = m
-    await db.flush()
+    # Baseline lookups (media types, vendor types, labels) were already inserted by
+    # create_organization -> ensure_reference_data; index them by name for the sample
+    # records below.
+    media_types: dict[str, AssetMediaType] = {
+        m.name: m for m in (await db.scalars(select(AssetMediaType))).all()
+    }
 
-    # CIA classification scheme: three axes, each with graded values
-    classif: dict[str, AssetClassification] = {}  # "Confidentiality:Restricted" -> value
-    for axis in ["Confidentiality", "Integrity", "Availability"]:
-        ct = AssetClassificationType(tenant_id=tenant_id, name=axis, description=f"{axis} rating scale")
-        db.add(ct)
-        await db.flush()
-        for vname, val, crit in [
-            ("Public", 1.0, "Publicly shareable, no harm if disclosed"),
-            ("Internal", 2.0, "Internal use only"),
-            ("Confidential", 3.0, "Limited distribution, business impact if disclosed"),
-            ("Restricted", 4.0, "Strictly need-to-know, severe impact if disclosed"),
-        ]:
-            c = AssetClassification(tenant_id=tenant_id, type_id=ct.id, name=vname, value=val, criteria=crit)
-            db.add(c)
-            classif[f"{axis}:{vname}"] = c
-    await db.flush()
+    # CIA classification scheme — seeded by ensure_reference_data; index "Axis:Value".
+    classif: dict[str, AssetClassification] = {}
+    for ct in (await db.scalars(select(AssetClassificationType))).all():
+        for c in ct.classifications:
+            classif[f"{ct.name}:{c.name}"] = c
 
-    # Handling / data-classification labels
-    labels: dict[str, AssetLabel] = {}
-    for lname, color in [
-        ("Public", "#15803d"),
-        ("Internal", "#2563eb"),
-        ("Confidential", "#b45309"),
-        ("Restricted", "#b91c1c"),
-    ]:
-        lab = AssetLabel(tenant_id=tenant_id, name=lname, color=color)
-        db.add(lab)
-        labels[lname] = lab
-    await db.flush()
+    # Handling / data-classification labels — seeded by ensure_reference_data.
+    labels: dict[str, AssetLabel] = {
+        l.name: l for l in (await db.scalars(select(AssetLabel))).all()
+    }
 
     C = Criticality
     db_objs: dict[str, Asset] = {}
@@ -492,13 +472,12 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
         ]
     )
 
-    # --- Vendor types + vendors / third parties ---
+    # --- Vendors / third parties (types come from ensure_reference_data) ---
     from app.models.vendor import ServiceContract, VendorType
 
-    vt_cloud = VendorType(tenant_id=tenant_id, name="Cloud Provider", description="Infrastructure / SaaS provider")
-    vt_proc = VendorType(tenant_id=tenant_id, name="Data Processor", description="Processes personal data on our behalf")
-    db.add_all([vt_cloud, vt_proc])
-    await db.flush()
+    vendor_types = {v.name: v for v in (await db.scalars(select(VendorType))).all()}
+    vt_cloud = vendor_types["Cloud Provider"]
+    vt_proc = vendor_types["Data Processor"]
 
     aws = Vendor(
         tenant_id=tenant_id,

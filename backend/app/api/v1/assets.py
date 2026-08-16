@@ -39,19 +39,24 @@ from app.schemas.asset import (
     AssetClassificationRead,
     AssetClassificationTypeCreate,
     AssetClassificationTypeRead,
+    AssetClassificationTypeUpdate,
+    AssetClassificationUpdate,
     AssetCreate,
     AssetDependencyCreate,
     AssetDependencyRead,
     AssetLabelCreate,
     AssetLabelRead,
+    AssetLabelUpdate,
     AssetMediaTypeCreate,
     AssetMediaTypeRead,
+    AssetMediaTypeUpdate,
     AssetRead,
     AssetReviewComplete,
     AssetReviewCreate,
     AssetReviewRead,
     AssetTagCreate,
     AssetTagRead,
+    AssetTagUpdate,
     AssetUpdate,
     ClassificationRef,
     LinkRef,
@@ -492,6 +497,18 @@ async def create_asset_label(body: AssetLabelCreate, db: DbSession, user: Curren
     return AssetLabelRead.model_validate(obj)
 
 
+@labels_router.patch("/{label_id}", response_model=AssetLabelRead, dependencies=[Depends(require("asset:write"))])
+async def update_asset_label(label_id: uuid.UUID, body: AssetLabelUpdate, db: DbSession) -> AssetLabelRead:
+    obj = await db.get(AssetLabel, label_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Label not found")
+    for name, value in body.model_dump(exclude_unset=True).items():
+        setattr(obj, name, value)
+    await db.flush()
+    await db.refresh(obj)
+    return AssetLabelRead.model_validate(obj)
+
+
 @labels_router.delete("/{label_id}", status_code=204, dependencies=[Depends(require("asset:write"))])
 async def delete_asset_label(label_id: uuid.UUID, db: DbSession) -> None:
     obj = await db.get(AssetLabel, label_id)
@@ -514,6 +531,23 @@ async def list_media_types(db: DbSession) -> list[AssetMediaTypeRead]:
 async def create_media_type(body: AssetMediaTypeCreate, db: DbSession, user: CurrentUser) -> AssetMediaTypeRead:
     obj = AssetMediaType(tenant_id=user.tenant_id, editable=True, **body.model_dump())
     db.add(obj)
+    await db.flush()
+    await db.refresh(obj)
+    return AssetMediaTypeRead.model_validate(obj)
+
+
+@media_types_router.patch("/{type_id}", response_model=AssetMediaTypeRead, dependencies=[Depends(require("asset:write"))])
+async def update_media_type(type_id: uuid.UUID, body: AssetMediaTypeUpdate, db: DbSession) -> AssetMediaTypeRead:
+    obj = await db.get(AssetMediaType, type_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Media type not found")
+    data = body.model_dump(exclude_unset=True)
+    # Built-ins are the fixed taxonomy assets reference — renaming one would silently
+    # reclassify every asset, so only the description may be clarified.
+    if not obj.editable and "name" in data and data["name"] != obj.name:
+        raise HTTPException(status_code=409, detail="Built-in media type cannot be renamed")
+    for name, value in data.items():
+        setattr(obj, name, value)
     await db.flush()
     await db.refresh(obj)
     return AssetMediaTypeRead.model_validate(obj)
@@ -549,6 +583,40 @@ async def create_classification_type(body: AssetClassificationTypeCreate, db: Db
     ))
 
 
+@class_router.patch("/{type_id}", response_model=AssetClassificationTypeRead, dependencies=[Depends(require("asset:write"))])
+async def update_classification_type(type_id: uuid.UUID, body: AssetClassificationTypeUpdate, db: DbSession) -> AssetClassificationTypeRead:
+    obj = await db.get(AssetClassificationType, type_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Classification type not found")
+    for name, value in body.model_dump(exclude_unset=True).items():
+        setattr(obj, name, value)
+    await db.flush()
+    return AssetClassificationTypeRead.model_validate(await db.scalar(
+        select(AssetClassificationType).where(AssetClassificationType.id == type_id).execution_options(populate_existing=True)
+    ))
+
+
+@class_router.delete("/{type_id}", status_code=204, dependencies=[Depends(require("asset:write"))])
+async def delete_classification_type(type_id: uuid.UUID, db: DbSession) -> None:
+    """Deletes the axis and its values; assets keep working — their links cascade away."""
+    obj = await db.get(AssetClassificationType, type_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Classification type not found")
+    await db.delete(obj)
+
+
+@class_router.patch("/classifications/{classification_id}", response_model=AssetClassificationRead, dependencies=[Depends(require("asset:write"))])
+async def update_classification(classification_id: uuid.UUID, body: AssetClassificationUpdate, db: DbSession) -> AssetClassificationRead:
+    obj = await db.get(AssetClassification, classification_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Classification not found")
+    for name, value in body.model_dump(exclude_unset=True).items():
+        setattr(obj, name, value)
+    await db.flush()
+    await db.refresh(obj)
+    return AssetClassificationRead.model_validate(obj)
+
+
 @class_router.post("/{type_id}/classifications", response_model=AssetClassificationRead, status_code=201, dependencies=[Depends(require("asset:write"))])
 async def add_classification(type_id: uuid.UUID, body: AssetClassificationCreate, db: DbSession, user: CurrentUser) -> AssetClassificationRead:
     if await db.get(AssetClassificationType, type_id) is None:
@@ -582,6 +650,18 @@ async def list_asset_tags(db: DbSession) -> list[AssetTagRead]:
 async def create_asset_tag(body: AssetTagCreate, db: DbSession, user: CurrentUser) -> AssetTagRead:
     obj = AssetTag(tenant_id=user.tenant_id, **body.model_dump())
     db.add(obj)
+    await db.flush()
+    await db.refresh(obj)
+    return AssetTagRead.model_validate(obj)
+
+
+@tags_router.patch("/{tag_id}", response_model=AssetTagRead, dependencies=[Depends(require("asset:write"))])
+async def update_asset_tag(tag_id: uuid.UUID, body: AssetTagUpdate, db: DbSession) -> AssetTagRead:
+    obj = await db.get(AssetTag, tag_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    for name, value in body.model_dump(exclude_unset=True).items():
+        setattr(obj, name, value)
     await db.flush()
     await db.refresh(obj)
     return AssetTagRead.model_validate(obj)

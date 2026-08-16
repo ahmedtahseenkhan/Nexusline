@@ -16,6 +16,7 @@ import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, Toggle, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { InlineLookupCreate } from "@/components/LookupManager";
 
 /* ---------------------------------------------------------------- inline types */
 type RefItem = { id: string; reference?: string; title?: string; name?: string };
@@ -175,7 +176,13 @@ function VendorsInner() {
       <Field label="Description"><TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="What this vendor provides and how it is used." /></Field>
       <div className="field-row">
         <Field label="Category"><TextInput value={f.category} onChange={(v) => set("category", v)} placeholder="Payments" /></Field>
-        <Field label="Type" help="Third-party taxonomy (managed under vendor types)."><Select value={f.type_id} onChange={(v) => set("type_id", v)} options={typeOpts} placeholder="Choose a type…" /></Field>
+        <Field label="Type" help="Third-party taxonomy (managed in Settings → Lookups).">
+          <Select value={f.type_id} onChange={(v) => set("type_id", v)} options={typeOpts} placeholder="Choose a type…" />
+          <InlineLookupCreate
+            endpoint="/vendor-types"
+            onCreated={(r) => { setTypes((p) => [...p, r as VendorType]); set("type_id", r.id); }}
+          />
+        </Field>
       </div>
       <div className="field-row">
         <Field label="Contact Name"><TextInput value={f.contact_name} onChange={(v) => set("contact_name", v)} placeholder="Account manager" /></Field>

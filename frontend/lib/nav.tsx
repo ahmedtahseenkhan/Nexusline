@@ -141,6 +141,7 @@ export const NAV: NavSection[] = [
       { href: "/settings", label: "General Settings", icon: <IconSettings /> },
       { href: "/integrations", label: "Integrations & CCM", icon: <IconActivity /> },
       { href: "/custom-fields", label: "Custom Fields", icon: <IconLayers /> },
+      { href: "/lookups", label: "Lookups & Dropdowns", icon: <IconLayers /> },
       { href: "/status-rules", label: "Status Rules", icon: <IconGauge /> },
       { href: "/sla-policies", label: "Turnaround Time (TAT)", icon: <IconAlert /> },
       { href: "/workflows", label: "Approval Workflows", icon: <IconCheck /> },

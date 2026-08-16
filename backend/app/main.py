@@ -36,6 +36,13 @@ async def lifespan(app: FastAPI):
         granted = await reconcile_permissions()
         if granted:
             logger.info("Reconciled permissions: added %s role grants", granted)
+        # Backfill baseline lookups (media types, vendor types, labels) for tenants
+        # created before reference data moved out of the demo seeder.
+        from app.db.reference_data import reconcile_reference_data
+
+        lookups = await reconcile_reference_data()
+        if lookups:
+            logger.info("Reconciled reference data: added %s lookup rows", lookups)
     except Exception:  # noqa: BLE001
         logger.exception("Startup DB initialization failed")
         raise

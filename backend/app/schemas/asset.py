@@ -41,6 +41,11 @@ class AssetMediaTypeCreate(AssetMediaTypeBase):
     pass
 
 
+class AssetMediaTypeUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+
+
 class AssetMediaTypeRead(AssetMediaTypeBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -63,9 +68,20 @@ class AssetClassificationRead(AssetClassificationBase):
     type_id: uuid.UUID
 
 
+class AssetClassificationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    criteria: str | None = None
+    value: float | None = None
+
+
 class AssetClassificationTypeCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
+
+
+class AssetClassificationTypeUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
 
 
 class AssetClassificationTypeRead(BaseModel):
@@ -86,6 +102,12 @@ class AssetLabelCreate(AssetLabelBase):
     pass
 
 
+class AssetLabelUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    color: str | None = None
+
+
 class AssetLabelRead(AssetLabelBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -101,6 +123,13 @@ class AssetTagBase(BaseModel):
 
 class AssetTagCreate(AssetTagBase):
     pass
+
+
+class AssetTagUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    category: str | None = None
+    description: str | None = None
+    color: str | None = None
 
 
 class AssetTagRead(AssetTagBase):

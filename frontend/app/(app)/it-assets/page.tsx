@@ -16,6 +16,7 @@ import RecordPanels from "@/components/RecordPanels";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import ImportExport from "@/components/ImportExport";
 import GenerateRisks from "@/components/GenerateRisks";
+import { InlineLookupCreate } from "@/components/LookupManager";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -222,6 +223,10 @@ function ITAssetsInner() {
       <Field label="Description"><TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="What this supporting asset is and where it runs." /></Field>
       <Field label="Media type" help="The IT asset taxonomy (Hardware, Software, Network device…).">
         <Select value={f.media_type_id} onChange={(v) => set("media_type_id", v)} options={mediaTypeOpts} placeholder="— none —" />
+        <InlineLookupCreate
+          endpoint="/asset-media-types"
+          onCreated={(r) => { setMediaTypes((p) => [...p, r as MediaType]); set("media_type_id", r.id); }}
+        />
       </Field>
     </>
   );

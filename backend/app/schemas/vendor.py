@@ -25,6 +25,11 @@ class VendorTypeCreate(BaseModel):
     description: str = ""
 
 
+class VendorTypeUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+
+
 class VendorTypeRead(VendorTypeCreate):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
