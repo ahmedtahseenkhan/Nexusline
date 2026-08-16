@@ -1760,6 +1760,10 @@ export const api = {
 
   // Risk-scenario library and asset-driven generation.
   riskScenarios: (qs = "limit=500") => request<Page<RiskScenario>>(`/risk-scenarios?${qs}`),
+  createRiskScenario: (payload: Record<string, unknown>) =>
+    request<RiskScenario>("/risk-scenarios", { method: "POST", body: JSON.stringify(payload) }),
+  deleteRiskScenario: (id: string) =>
+    request<void>(`/risk-scenarios/${id}`, { method: "DELETE" }),
   updateRiskScenario: (id: string, payload: Partial<RiskScenario>) =>
     request<RiskScenario>(`/risk-scenarios/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   installScenarioLibrary: () =>

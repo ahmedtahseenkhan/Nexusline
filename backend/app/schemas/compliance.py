@@ -136,6 +136,10 @@ class RequirementRead(RequirementBase):
     legal: CompRef | None = None
     findings: list[ComplianceFindingRead] = []
     is_covered: bool
+    #: Why this requirement counts as a gap, or "" when it does not. Carried on the row
+    #: so the requirements table can explain a gap in place, rather than the page having
+    #: to render a second list of the same requirements underneath it.
+    gap_reason: str = ""
     open_findings: int = 0
     evidence_count: int = 0
     crosswalk_count: int = 0

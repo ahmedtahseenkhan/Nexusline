@@ -25,6 +25,7 @@ from app.schemas.vendor import (
     VendorRead,
     VendorTypeCreate,
     VendorTypeRead,
+    VendorTypeUpdate,
     VendorUpdate,
 )
 from app.services import audit
@@ -196,3 +197,24 @@ async def create_vendor_type(body: VendorTypeCreate, db: DbSession, user: Curren
     await db.flush()
     await db.refresh(obj)
     return VendorTypeRead.model_validate(obj)
+
+
+@types_router.patch("/{type_id}", response_model=VendorTypeRead, dependencies=[Depends(require("vendor:write"))])
+async def update_vendor_type(type_id: uuid.UUID, body: VendorTypeUpdate, db: DbSession) -> VendorTypeRead:
+    obj = await db.get(VendorType, type_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Vendor type not found")
+    for name, value in body.model_dump(exclude_unset=True).items():
+        setattr(obj, name, value)
+    await db.flush()
+    await db.refresh(obj)
+    return VendorTypeRead.model_validate(obj)
+
+
+@types_router.delete("/{type_id}", status_code=204, dependencies=[Depends(require("vendor:write"))])
+async def delete_vendor_type(type_id: uuid.UUID, db: DbSession) -> None:
+    """Vendors referencing the type keep working — the FK sets their type to NULL."""
+    obj = await db.get(VendorType, type_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Vendor type not found")
+    await db.delete(obj)

@@ -9,13 +9,14 @@ import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
-import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea, Select, Toggle, MultiSelect, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import RecordPanels from "@/components/RecordPanels";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import ImportExport from "@/components/ImportExport";
 import GenerateRisks from "@/components/GenerateRisks";
+import { InlineLookupCreate } from "@/components/LookupManager";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -51,6 +52,7 @@ type Asset = {
   self_assessed: boolean;
   assessed_by: string;
   assessed_date: string | null;
+  classifications?: ClassificationRef[];
   effective_criticality: string;
   review_frequency: string;
   next_review_date: string | null;
@@ -74,6 +76,11 @@ type Asset = {
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
 type LabelRow = { id: string; name: string; description: string; color: string };
+type ClassificationRef = { id: string; name: string; value: number; type_name: string };
+type ClassificationType = {
+  id: string; name: string; description: string;
+  classifications: { id: string; name: string; value: number; criteria: string }[];
+};
 type BusinessUnit = { id: string; name: string };
 type Summary = { total: number; high_or_critical_value: number; self_assessed_pct: number; with_pii: number };
 
@@ -103,13 +110,14 @@ type FormState = {
   business_value: string; confidentiality: string; integrity: string; availability: string;
   label_id: string; data_categories: string; records_volume: string; self_assessed: boolean;
   assessed_by: string; assessed_date: string; owner_id: string; guardian_id: string; user_id: string;
-  review_frequency: string; workflow_status: string;
+  review_frequency: string; workflow_status: string; classification_ids: string[];
 };
 const BLANK: FormState = {
   name: "", description: "", media_type_id: "", information_owner: "", business_value: "medium",
   confidentiality: "medium", integrity: "medium", availability: "medium", label_id: "",
   data_categories: "", records_volume: "", self_assessed: false, assessed_by: "", assessed_date: "",
   owner_id: "", guardian_id: "", user_id: "", review_frequency: "annual", workflow_status: "draft",
+  classification_ids: [],
 };
 function fromAsset(a: Asset): FormState {
   return {
@@ -121,6 +129,7 @@ function fromAsset(a: Asset): FormState {
     self_assessed: !!a.self_assessed, assessed_by: a.assessed_by || "", assessed_date: a.assessed_date || "",
     owner_id: a.owner?.id || "", guardian_id: a.guardian?.id || "", user_id: a.user?.id || "",
     review_frequency: a.review_frequency || "annual", workflow_status: a.workflow_status || "draft",
+    classification_ids: (a.classifications || []).map((c) => c.id),
   };
 }
 function toPayload(f: FormState): Record<string, unknown> {
@@ -132,6 +141,7 @@ function toPayload(f: FormState): Record<string, unknown> {
     records_volume: f.records_volume, self_assessed: f.self_assessed, assessed_by: f.assessed_by,
     assessed_date: f.assessed_date || null, owner_id: f.owner_id || null, guardian_id: f.guardian_id || null,
     user_id: f.user_id || null, review_frequency: f.review_frequency, workflow_status: f.workflow_status,
+    classification_ids: f.classification_ids,
   };
 }
 
@@ -145,6 +155,7 @@ function InformationAssetsInner() {
   // small lookup tables (bounded) for the form Selects
   const [mediaTypes, setMediaTypes] = useState<MediaType[]>([]);
   const [labels, setLabels] = useState<LabelRow[]>([]);
+  const [classTypes, setClassTypes] = useState<ClassificationType[]>([]);
   const [units, setUnits] = useState<BusinessUnit[]>([]);
 
   // form
@@ -168,6 +179,7 @@ function InformationAssetsInner() {
     const ignore = () => {};
     apiCall<MediaType[]>("GET", "/asset-media-types").then(setMediaTypes).catch(ignore);
     apiCall<LabelRow[]>("GET", "/asset-labels").then(setLabels).catch(ignore);
+    apiCall<ClassificationType[]>("GET", "/asset-classification-types").then(setClassTypes).catch(ignore);
     apiCall<Page<BusinessUnit>>("GET", "/business-units").then((r) => setUnits(r.items)).catch(ignore);
     loadSummary();
   }, [loadSummary]);
@@ -255,6 +267,17 @@ function InformationAssetsInner() {
 
   const mediaTypeOpts: Option[] = useMemo(() => mediaTypes.map((m) => ({ value: m.id, label: m.name })), [mediaTypes]);
   const labelOpts: Option[] = useMemo(() => labels.map((l) => ({ value: l.id, label: l.name })), [labels]);
+  const classOpts: Option[] = useMemo(
+    () =>
+      classTypes.flatMap((t) =>
+        t.classifications.map((c) => ({
+          value: c.id,
+          label: `${t.name}: ${c.name}`,
+          sub: c.criteria || undefined,
+        })),
+      ),
+    [classTypes],
+  );
   const unitOpts: Option[] = useMemo(() => units.map((u) => ({ value: u.id, label: u.name })), [units]);
 
   const columns: Column<Asset>[] = [
@@ -278,6 +301,10 @@ function InformationAssetsInner() {
       <div className="field-row">
         <Field label="Media type" help="The information asset taxonomy (Data asset, Application…).">
           <Select value={f.media_type_id} onChange={(v) => set("media_type_id", v)} options={mediaTypeOpts} placeholder="— none —" />
+          <InlineLookupCreate
+            endpoint="/asset-media-types"
+            onCreated={(r) => { setMediaTypes((p) => [...p, r as MediaType]); set("media_type_id", r.id); }}
+          />
         </Field>
         <Field label="Business owner (identifies value)" help="The business owner accountable for this data and its value.">
           <TextInput value={f.information_owner} onChange={(v) => set("information_owner", v)} placeholder="Head of Retail Banking" />
@@ -295,9 +322,27 @@ function InformationAssetsInner() {
         <Field label="Integrity"><Select value={f.integrity} onChange={(v) => set("integrity", v)} options={CRIT} /></Field>
         <Field label="Availability"><Select value={f.availability} onChange={(v) => set("availability", v)} options={CRIT} /></Field>
       </div>
+      {classOpts.length > 0 && (
+        <Field
+          label="Scheme classification"
+          help="Formal classification against your organisation's scheme (managed in Settings → Lookups)."
+        >
+          <MultiSelect
+            value={f.classification_ids}
+            onChange={(v) => set("classification_ids", v)}
+            options={classOpts}
+            placeholder="Classify against each axis…"
+          />
+        </Field>
+      )}
       <div className="field-row">
         <Field label="Handling label" help="Reusable handling / sensitivity label (Public, Confidential, PII…).">
           <Select value={f.label_id} onChange={(v) => set("label_id", v)} options={labelOpts} placeholder="— none —" />
+          <InlineLookupCreate
+            endpoint="/asset-labels"
+            extra={{ color: "" }}
+            onCreated={(r) => { setLabels((p) => [...p, r as LabelRow]); set("label_id", r.id); }}
+          />
         </Field>
         <Field label="Records volume" help="Approximate number of records held.">
           <TextInput value={f.records_volume} onChange={(v) => set("records_volume", v)} placeholder="~4.2M customers" />
@@ -398,6 +443,15 @@ function InformationAssetsInner() {
               <span>{detail.data_categories || "—"}</span>
               {hasPii(detail) && <span style={{ marginLeft: 8 }}><Badge tone="high">Contains PII</Badge></span>}
             </div>
+
+            {(detail.classifications?.length ?? 0) > 0 && (
+              <div style={{ marginBottom: 16, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span className="muted" style={{ fontSize: 13 }}>Classification: </span>
+                {detail.classifications!.map((c) => (
+                  <Badge key={c.id} tone="info" plain>{c.type_name}: {c.name}</Badge>
+                ))}
+              </div>
+            )}
 
             <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
               <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>

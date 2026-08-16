@@ -32,6 +32,7 @@ from app.schemas.collab import (
     TagAssign,
     TagCreate,
     TagRead,
+    TagUpdate,
 )
 from app.services import entity_types, storage
 
@@ -70,6 +71,27 @@ async def create_tag(body: TagCreate, db: DbSession, user: CurrentUser) -> TagRe
     await db.flush()
     await db.refresh(tag)
     return TagRead.model_validate(tag)
+
+
+@router.patch("/tags/{tag_id}", response_model=TagRead)
+async def update_tag(tag_id: uuid.UUID, body: TagUpdate, db: DbSession, _: CurrentUser) -> TagRead:
+    tag = await db.get(Tag, tag_id)
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    for name, value in body.model_dump(exclude_unset=True).items():
+        setattr(tag, name, value)
+    await db.flush()
+    await db.refresh(tag)
+    return TagRead.model_validate(tag)
+
+
+@router.delete("/tags/{tag_id}", status_code=204)
+async def delete_tag(tag_id: uuid.UUID, db: DbSession, _: CurrentUser) -> None:
+    """Removes the tag everywhere — its record assignments cascade with it."""
+    tag = await db.get(Tag, tag_id)
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    await db.delete(tag)
 
 
 @router.get("/{entity_type}/{entity_id}", response_model=CollabBundle)

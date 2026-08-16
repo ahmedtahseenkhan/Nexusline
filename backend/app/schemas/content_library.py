@@ -1,7 +1,7 @@
 """Schemas for the Framework Content Library — preloaded, installable framework packs.
 
-A "pack" is a curated standard (e.g. ISO/IEC 27001:2022 Annex A) defined as static Python
-data in ``app.api.v1.content_library``. Installing a pack materialises a real
+A "pack" is a curated standard from ``app.services.framework_library.TEMPLATES`` — the
+same registry behind ``/framework-templates``. Installing one materialises a real
 ``Framework`` + ``Requirement`` rows for the tenant via the existing compliance models.
 """
 from __future__ import annotations

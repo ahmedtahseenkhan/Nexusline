@@ -31,6 +31,11 @@ class TagCreate(BaseModel):
     color: str = "#2563eb"
 
 
+class TagUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    color: str | None = None
+
+
 class TagAssign(BaseModel):
     tag_id: uuid.UUID | None = None
     name: str | None = None  # create-and-assign if no id

@@ -18,6 +18,7 @@ const ADMIN_LINKS: { href: string; label: string; desc: string }[] = [
   { href: "/sso-settings", label: "Single Sign-On", desc: "OIDC / OAuth2 identity provider configuration" },
   { href: "/webhooks", label: "Webhooks", desc: "Outbound HMAC-signed event delivery" },
   { href: "/custom-fields", label: "Custom Fields", desc: "Tenant-defined fields per module" },
+  { href: "/lookups", label: "Lookups & Dropdowns", desc: "Media types, vendor types, labels and tags" },
   { href: "/status-rules", label: "Status Rules", desc: "Dynamic colored status labels" },
   { href: "/filters", label: "Saved Filters", desc: "Reusable advanced query definitions" },
   { href: "/data-io", label: "Import / Export", desc: "CSV bulk data movement for every module" },

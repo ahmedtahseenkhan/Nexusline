@@ -115,4 +115,12 @@ async def create_organization(
         admin.roles = [admin_role]
     db.add(admin)
     await db.flush()
+
+    # Baseline lookup vocabulary (media types, vendor types, labels) — without this a
+    # new org's forms render dropdowns with nothing in them. Local import: the module
+    # imports models that import this one's neighbours, so keep the cycle out of import
+    # time the same way seed.py does.
+    from app.db.reference_data import ensure_reference_data
+
+    await ensure_reference_data(db, tenant.id)
     return tenant, admin
