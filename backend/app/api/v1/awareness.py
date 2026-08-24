@@ -46,9 +46,14 @@ async def _load(db, program_id: uuid.UUID) -> AwarenessProgram:
 
 
 async def _fresh(db, program_id: uuid.UUID) -> AwarenessProgram:
-    return await db.scalar(
-        select(AwarenessProgram).where(AwarenessProgram.id == program_id).execution_options(populate_existing=True)
+    obj = await db.scalar(
+        select(AwarenessProgram)
+        .where(AwarenessProgram.id == program_id, AwarenessProgram.deleted.is_(False))
+        .execution_options(populate_existing=True)
     )
+    if obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Program not found")
+    return obj
 
 
 async def _next_ref(db) -> str:

@@ -55,7 +55,13 @@ async def _load_policies(db, ids):
         return []
     from app.models.policy import Policy
 
-    return list((await db.scalars(select(Policy).where(Policy.id.in_(ids)))).all())
+    return list(
+        (
+            await db.scalars(
+                select(Policy).where(Policy.id.in_(ids), Policy.deleted.is_(False))
+            )
+        ).all()
+    )
 
 
 async def _resolve_assets(db, ids):
@@ -125,9 +131,11 @@ async def _flush_assoc(db, control_id, stash: dict) -> None:
 
 async def _fresh(db, control_id: uuid.UUID) -> Control:
     control = await db.scalar(
-        select(Control).where(Control.id == control_id)
+        select(Control).where(Control.id == control_id, Control.deleted.is_(False))
         .options(*_loads()).execution_options(populate_existing=True)
     )
+    if control is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Control not found")
     return await _attach_risks(db, control)
 
 

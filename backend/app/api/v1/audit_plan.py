@@ -508,7 +508,9 @@ async def program_from_framework(
     if framework is None:
         raise HTTPException(status_code=404, detail="Framework not found")
 
-    stmt = select(Requirement).where(Requirement.framework_id == framework_id)
+    stmt = select(Requirement).where(
+        Requirement.framework_id == framework_id, Requirement.deleted.is_(False)
+    )
     if body.domain:
         stmt = stmt.where(Requirement.domain == body.domain)
     requirements = (await db.scalars(stmt.order_by(Requirement.reference))).all()

@@ -99,7 +99,11 @@ async def _load_requirement(db, requirement_id: uuid.UUID) -> Requirement:
 async def _resolve_controls(db, ids: Sequence[uuid.UUID]) -> list[Control]:
     if not ids:
         return []
-    rows = (await db.scalars(select(Control).where(Control.id.in_(ids)))).all()
+    rows = (
+        await db.scalars(
+            select(Control).where(Control.id.in_(ids), Control.deleted.is_(False))
+        )
+    ).all()
     missing = set(ids) - {r.id for r in rows}
     if missing:
         raise HTTPException(
@@ -112,7 +116,10 @@ async def _resolve_controls(db, ids: Sequence[uuid.UUID]) -> list[Control]:
 async def _resolve_any(db, model, ids):
     if not ids:
         return []
-    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
+    stmt = select(model).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    return list((await db.scalars(stmt)).all())
 
 
 async def _attach_counts(db, reqs: list[Requirement]) -> None:
@@ -459,7 +466,11 @@ async def set_crosswalks(
     targets = [rid for rid in body.related_requirement_ids if rid != requirement_id]
     if targets:
         found = (
-            await db.scalars(select(Requirement.id).where(Requirement.id.in_(targets)))
+            await db.scalars(
+                select(Requirement.id).where(
+                    Requirement.id.in_(targets), Requirement.deleted.is_(False)
+                )
+            )
         ).all()
         missing = set(targets) - set(found)
         if missing:
@@ -518,7 +529,7 @@ async def _crosswalks_for(db, requirement_id: uuid.UUID) -> list[CrosswalkItem]:
         await db.scalars(
             select(Requirement)
             .options(selectinload(Requirement.framework))
-            .where(Requirement.id.in_(related_ids))
+            .where(Requirement.id.in_(related_ids), Requirement.deleted.is_(False))
         )
     ).all()
     return [
@@ -692,7 +703,11 @@ async def add_finding(
     dependencies=[Depends(require("compliance:write"))],
 )
 async def close_finding(finding_id: uuid.UUID, db: DbSession) -> ComplianceFindingRead:
-    finding = await db.scalar(select(ComplianceFinding).where(ComplianceFinding.id == finding_id))
+    finding = await db.scalar(
+        select(ComplianceFinding).where(
+            ComplianceFinding.id == finding_id, ComplianceFinding.deleted.is_(False)
+        )
+    )
     if finding is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
     finding.status = FindingStatus.closed

@@ -421,6 +421,25 @@ export interface GenerateRisksCommitResult {
   errors: { title: string; message: string }[];
 }
 
+/** A live risk whose every linked asset has since been deleted. */
+export interface OrphanedRisk {
+  id: string;
+  reference: string;
+  title: string;
+  category: string;
+  status: string;
+  inherent_score: number | null;
+  deleted_asset_names: string[];
+}
+export interface OrphanedRiskPage {
+  items: OrphanedRisk[];
+  total: number;
+}
+export interface OrphanPurgeResult {
+  archived: number;
+  references: string[];
+}
+
 /** A proposal only — nothing is recorded until the risk owner accepts or overrides it. */
 export interface SuggestedResidual {
   likelihood: number;
@@ -1592,6 +1611,12 @@ export const api = {
   createBackup: () => request<BackupItem>("/system/backups", { method: "POST" }),
   downloadSupportBundle: () => downloadBlob("/system/support-bundle", "nexusline-support-bundle.zip"),
   risks: () => request<Page<Risk>>("/risks?limit=200"),
+  orphanedRisks: () => request<OrphanedRiskPage>("/risks/orphaned"),
+  purgeOrphanedRisks: (riskIds: string[]) =>
+    request<OrphanPurgeResult>("/risks/orphaned/purge", {
+      method: "POST",
+      body: JSON.stringify({ risk_ids: riskIds }),
+    }),
   dashboard: () => request<Dashboard>("/dashboard"),
   createRisk: (payload: Record<string, unknown>) =>
     request<Risk>("/risks", { method: "POST", body: JSON.stringify(payload) }),

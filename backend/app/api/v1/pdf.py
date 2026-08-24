@@ -37,7 +37,11 @@ def _pdf(data: bytes, filename: str) -> Response:
 
 @router.get("/audit-engagement/{eid}", dependencies=[Depends(require("internal_audit:read"))])
 async def audit_engagement_report(eid: uuid.UUID, db: DbSession, user: CurrentUser) -> Response:
-    eng = await db.scalar(select(AuditEngagement).where(AuditEngagement.id == eid))
+    eng = await db.scalar(
+        select(AuditEngagement).where(
+            AuditEngagement.id == eid, AuditEngagement.deleted.is_(False)
+        )
+    )
     if eng is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Engagement not found")
     data = pdf_report.audit_engagement_pdf(eng, await _org_name(db, user))

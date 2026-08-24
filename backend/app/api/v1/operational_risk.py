@@ -59,12 +59,22 @@ async def _get(db, model, obj_id, name):
 async def _resolve(db, model, ids):
     if not ids:
         return []
-    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
+    return list(
+        (
+            await db.scalars(
+                select(model).where(model.id.in_(ids), model.deleted.is_(False))
+            )
+        ).all()
+    )
 
 
 # ==================================================================== RCSA ===
 async def _load_rcsa(db, rid) -> RcsaAssessment:
-    obj = await db.scalar(select(RcsaAssessment).where(RcsaAssessment.id == rid).execution_options(populate_existing=True))
+    obj = await db.scalar(
+        select(RcsaAssessment)
+        .where(RcsaAssessment.id == rid, RcsaAssessment.deleted.is_(False))
+        .execution_options(populate_existing=True)
+    )
     if obj is None:
         raise HTTPException(status_code=404, detail="RCSA not found")
     return obj
@@ -161,7 +171,11 @@ async def delete_rcsa_risk(line_id: uuid.UUID, db: DbSession) -> None:
 
 # ===================================================================== KRIs ===
 async def _load_kri(db, kid) -> KeyRiskIndicator:
-    obj = await db.scalar(select(KeyRiskIndicator).where(KeyRiskIndicator.id == kid).execution_options(populate_existing=True))
+    obj = await db.scalar(
+        select(KeyRiskIndicator)
+        .where(KeyRiskIndicator.id == kid, KeyRiskIndicator.deleted.is_(False))
+        .execution_options(populate_existing=True)
+    )
     if obj is None:
         raise HTTPException(status_code=404, detail="KRI not found")
     return obj

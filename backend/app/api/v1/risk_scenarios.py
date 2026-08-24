@@ -392,7 +392,7 @@ def _disambiguate(proposals: list[RiskProposal], assets: dict[uuid.UUID, Asset])
 
 
 async def _select_assets(db: DbSession, body: GenerateRequest) -> list[Asset]:
-    stmt = select(Asset)
+    stmt = select(Asset).where(Asset.deleted.is_(False))
     if body.asset_ids:
         stmt = stmt.where(Asset.id.in_(body.asset_ids))
     if body.asset_class:

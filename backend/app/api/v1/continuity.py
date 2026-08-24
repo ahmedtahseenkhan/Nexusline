@@ -35,7 +35,10 @@ router = APIRouter(prefix="/continuity-plans", tags=["continuity"])
 async def _resolve(db, model, ids):
     if not ids:
         return []
-    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
+    stmt = select(model).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    return list((await db.scalars(stmt)).all())
 
 
 async def _load(db, plan_id: uuid.UUID) -> ContinuityPlan:
@@ -48,11 +51,14 @@ async def _load(db, plan_id: uuid.UUID) -> ContinuityPlan:
 
 
 async def _fresh(db, plan_id: uuid.UUID) -> ContinuityPlan:
-    return await db.scalar(
+    obj = await db.scalar(
         select(ContinuityPlan)
-        .where(ContinuityPlan.id == plan_id)
+        .where(ContinuityPlan.id == plan_id, ContinuityPlan.deleted.is_(False))
         .execution_options(populate_existing=True)
     )
+    if obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+    return obj
 
 
 async def _next_ref(db) -> str:
