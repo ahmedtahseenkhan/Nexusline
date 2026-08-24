@@ -38,9 +38,14 @@ async def _load(db, review_id: uuid.UUID) -> AccessReview:
 
 
 async def _fresh(db, review_id: uuid.UUID) -> AccessReview:
-    return await db.scalar(
-        select(AccessReview).where(AccessReview.id == review_id).execution_options(populate_existing=True)
+    obj = await db.scalar(
+        select(AccessReview)
+        .where(AccessReview.id == review_id, AccessReview.deleted.is_(False))
+        .execution_options(populate_existing=True)
     )
+    if obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
+    return obj
 
 
 async def _item_or_404(db, review_id, item_id) -> AccessReviewItem:

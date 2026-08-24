@@ -272,7 +272,10 @@ async def add_finding(eid: uuid.UUID, body: FindingCreate, db: DbSession, user: 
 async def _resolve(db, model, ids):
     if not ids:
         return []
-    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
+    stmt = select(model).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    return list((await db.scalars(stmt)).all())
 
 
 async def _load_finding(db, fid: uuid.UUID) -> AuditFinding:

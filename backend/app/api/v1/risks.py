@@ -24,10 +24,14 @@ from app.models.enums import (
     RiskStatus,
     TreatmentStrategy,
 )
-from app.models.risk import Risk, RiskAcceptance
+from app.models.risk import Risk, RiskAcceptance, risk_assets
 from app.models.threat import Threat, Vulnerability
 from app.schemas.common import Page
 from app.schemas.risk import (
+    OrphanedRisk,
+    OrphanedRiskPage,
+    OrphanPurgeRequest,
+    OrphanPurgeResult,
     ResidualAcceptance,
     RiskAcceptanceCreate,
     RiskAcceptanceDecision,
@@ -67,7 +71,10 @@ async def _load_risk(db, risk_id: uuid.UUID) -> Risk:
 async def _resolve(db, model, ids: Sequence[uuid.UUID]) -> list:
     if not ids:
         return []
-    rows = (await db.scalars(select(model).where(model.id.in_(ids)))).all()
+    stmt = select(model).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    rows = (await db.scalars(stmt)).all()
     missing = set(ids) - {r.id for r in rows}
     if missing:
         raise HTTPException(
@@ -215,6 +222,115 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
         summary=f"Created risk {risk.reference}: {risk.title}",
     )
     return await _read(db, risk.id, user)
+
+
+# ------------------------------------------------------------------ orphan cleanup
+async def _orphaned_risk_ids(db) -> list[uuid.UUID]:
+    """Live risks that are linked only to deleted assets.
+
+    A risk with no asset links at all is left alone — a hand-made register entry
+    is not required to name an asset. Orphaned means: link rows exist in
+    ``risk_assets``, but none of them reaches a live asset any more (assets are
+    soft-deleted, so the link rows survive).
+    """
+    has_links = select(risk_assets.c.risk_id)
+    has_live_asset = (
+        select(risk_assets.c.risk_id)
+        .join(Asset, Asset.id == risk_assets.c.asset_id)
+        .where(Asset.deleted.is_(False))
+    )
+    return list(
+        (
+            await db.scalars(
+                select(Risk.id).where(
+                    Risk.deleted.is_(False),
+                    Risk.id.in_(has_links),
+                    Risk.id.notin_(has_live_asset),
+                )
+            )
+        ).all()
+    )
+
+
+@router.get(
+    "/orphaned",
+    response_model=OrphanedRiskPage,
+    dependencies=[Depends(require("risk:read"))],
+    summary="Risks whose every linked asset has been deleted — candidates for cleanup",
+)
+async def list_orphaned_risks(db: DbSession) -> OrphanedRiskPage:
+    ids = await _orphaned_risk_ids(db)
+    if not ids:
+        return OrphanedRiskPage(items=[], total=0)
+
+    rows = (
+        await db.scalars(
+            select(Risk).where(Risk.id.in_(ids)).order_by(Risk.reference)
+        )
+    ).all()
+    # Which deleted assets each risk pointed at, so the reviewer can see why it
+    # is on this list before archiving anything.
+    names: dict[uuid.UUID, list[str]] = {}
+    for rid, name in (
+        await db.execute(
+            select(risk_assets.c.risk_id, Asset.name)
+            .join(Asset, Asset.id == risk_assets.c.asset_id)
+            .where(risk_assets.c.risk_id.in_(ids), Asset.deleted.is_(True))
+        )
+    ).all():
+        names.setdefault(rid, []).append(name)
+    return OrphanedRiskPage(
+        items=[
+            OrphanedRisk(
+                id=r.id,
+                reference=r.reference,
+                title=r.title,
+                category=r.category,
+                status=r.status.value,
+                inherent_score=r.inherent_score,
+                deleted_asset_names=sorted(names.get(r.id, [])),
+            )
+            for r in rows
+        ],
+        total=len(rows),
+    )
+
+
+@router.post(
+    "/orphaned/purge",
+    response_model=OrphanPurgeResult,
+    dependencies=[Depends(require("risk:delete"))],
+    summary="Archive orphaned risks (soft delete, audit-logged)",
+)
+async def purge_orphaned_risks(
+    body: OrphanPurgeRequest, db: DbSession, user: CurrentUser
+) -> OrphanPurgeResult:
+    from datetime import datetime, timezone
+
+    orphaned = set(await _orphaned_risk_ids(db))
+    targets = orphaned & set(body.risk_ids) if body.risk_ids else orphaned
+    if not targets:
+        return OrphanPurgeResult(archived=0, references=[])
+
+    rows = (await db.scalars(select(Risk).where(Risk.id.in_(targets)))).all()
+    now = datetime.now(timezone.utc)
+    for risk in rows:
+        risk.deleted = True
+        risk.deleted_date = now
+    refs = sorted(r.reference for r in rows)
+    await db.flush()
+    await audit.record(
+        db,
+        actor=user,
+        action="delete",
+        entity_type="risk",
+        entity_id=None,
+        summary=(
+            f"Archived {len(rows)} orphaned risk(s) whose linked assets were deleted"
+        ),
+        changes={"references": ", ".join(refs[:50]) + (" …" if len(refs) > 50 else "")},
+    )
+    return OrphanPurgeResult(archived=len(rows), references=refs)
 
 
 @router.get("/{risk_id}", response_model=RiskRead, dependencies=[Depends(require("risk:read"))])

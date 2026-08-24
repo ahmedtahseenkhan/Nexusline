@@ -70,14 +70,18 @@ async def _next_ref(db, model, prefix: str) -> str:
 
 async def _get(db, model, obj_id, name):
     obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None:
+    if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
 
 
 # ================================================================ connectors ===
 async def _load_connector(db, cid) -> Connector:
-    obj = await db.scalar(select(Connector).where(Connector.id == cid).execution_options(populate_existing=True))
+    obj = await db.scalar(
+        select(Connector)
+        .where(Connector.id == cid, Connector.deleted.is_(False))
+        .execution_options(populate_existing=True)
+    )
     if obj is None:
         raise HTTPException(status_code=404, detail="Connector not found")
     return obj
@@ -147,7 +151,9 @@ async def delete_connector(cid: uuid.UUID, db: DbSession) -> None:
 # ================================================= automated control tests (CCM) ===
 async def _load_test(db, tid) -> AutomatedControlTest:
     obj = await db.scalar(
-        select(AutomatedControlTest).where(AutomatedControlTest.id == tid).execution_options(populate_existing=True)
+        select(AutomatedControlTest)
+        .where(AutomatedControlTest.id == tid, AutomatedControlTest.deleted.is_(False))
+        .execution_options(populate_existing=True)
     )
     if obj is None:
         raise HTTPException(status_code=404, detail="Automated control test not found")

@@ -140,7 +140,11 @@ async def evidence_for_control(control_id: uuid.UUID, db: DbSession) -> list[Evi
     summary="Evidence demonstrating a requirement (via its mapped controls)",
 )
 async def evidence_for_requirement(requirement_id: uuid.UUID, db: DbSession) -> list[EvidenceRead]:
-    req = await db.scalar(select(Requirement).where(Requirement.id == requirement_id))
+    req = await db.scalar(
+        select(Requirement).where(
+            Requirement.id == requirement_id, Requirement.deleted.is_(False)
+        )
+    )
     if req is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Requirement not found")
     control_ids = [c.id for c in req.controls]

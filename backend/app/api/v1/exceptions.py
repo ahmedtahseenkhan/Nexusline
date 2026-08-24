@@ -44,7 +44,10 @@ async def _load(db, exc_id: uuid.UUID) -> ExceptionRecord:
 async def _resolve(db, model, ids: Sequence[uuid.UUID]) -> list:
     if not ids:
         return []
-    rows = (await db.scalars(select(model).where(model.id.in_(ids)))).all()
+    stmt = select(model).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    rows = (await db.scalars(stmt)).all()
     missing = set(ids) - {r.id for r in rows}
     if missing:
         raise HTTPException(

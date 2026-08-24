@@ -324,3 +324,36 @@ class RiskAggregate(BaseModel):
     total_exposure: float
     appetite_score: int
     tolerance_score: int
+
+
+class OrphanedRisk(BaseModel):
+    """A live risk whose every linked asset has since been deleted."""
+
+    id: uuid.UUID
+    reference: str
+    title: str
+    category: str
+    status: str
+    inherent_score: int | None
+    deleted_asset_names: list[str]
+
+
+class OrphanedRiskPage(BaseModel):
+    items: list[OrphanedRisk]
+    total: int
+
+
+class OrphanPurgeRequest(BaseModel):
+    """Archive these orphaned risks; omit ``risk_ids`` to archive every orphan.
+
+    Ids that are not actually orphaned are ignored, never archived — the server
+    re-derives the orphan set at purge time so a stale preview cannot delete a
+    risk that meanwhile gained a live asset.
+    """
+
+    risk_ids: list[uuid.UUID] = []
+
+
+class OrphanPurgeResult(BaseModel):
+    archived: int
+    references: list[str]

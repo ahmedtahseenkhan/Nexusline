@@ -56,7 +56,10 @@ async def _load(db, incident_id: uuid.UUID) -> Incident:
 async def _resolve(db, model, ids):
     if not ids:
         return []
-    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
+    stmt = select(model).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    return list((await db.scalars(stmt)).all())
 
 
 async def _set_assoc(db, table, self_col: str, other_col: str, self_id, other_ids) -> None:
@@ -97,10 +100,15 @@ async def _flush_assoc(db, incident_id, asset_ids, risk_ids) -> None:
 
 
 async def _fresh(db, incident_id: uuid.UUID) -> Incident:
-    return await db.scalar(
-        select(Incident).where(Incident.id == incident_id).options(*_loads())
+    obj = await db.scalar(
+        select(Incident)
+        .where(Incident.id == incident_id, Incident.deleted.is_(False))
+        .options(*_loads())
         .execution_options(populate_existing=True)
     )
+    if obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+    return obj
 
 
 async def _stage_or_404(db, incident_id, stage_id) -> IncidentStage:

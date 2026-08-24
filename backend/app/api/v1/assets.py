@@ -219,7 +219,10 @@ async def _fresh(db, asset_id: uuid.UUID) -> Asset:
 async def _load_many(db, model, ids):
     if not ids:
         return []
-    return list((await db.scalars(select(model).where(model.id.in_(ids)))).all())
+    stmt = select(model).where(model.id.in_(ids))
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    return list((await db.scalars(stmt)).all())
 
 
 async def _set_risk_links(db, asset_id, risk_ids) -> None:

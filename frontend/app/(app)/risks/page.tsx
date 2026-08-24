@@ -18,6 +18,7 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
+import OrphanCleanup from "@/components/OrphanCleanup";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
@@ -581,6 +582,7 @@ function RisksPage() {
             Appetite
           </button>
           <ImportExport resource="risks" label="Risks" onDone={reload} />
+          <OrphanCleanup onDone={reload} />
           <button className="btn secondary" onClick={() => api.pdfRiskRegister().catch(() => {})}>
             Register PDF
           </button>
