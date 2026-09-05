@@ -33,13 +33,35 @@ if ! grep -q "$MARKER" "frontend/app/(app)/dashboard/page.tsx"; then
 fi
 echo "OK: the new dashboard source is present."
 
-say "3/6  Building images (no cache)"
+say "3/6  Checking disk space"
+# A full disk makes `build` fail deep inside the daemon with "no space left on
+# device", which reads like a build error and is not one. Catch it up front.
+avail_mb=$(df -Pm . | awk 'NR==2 {print $4}')
+echo "Free space here: ${avail_mb} MB ($(df -Ph . | awk 'NR==2 {print $5}') used)"
+if [ "${avail_mb:-0}" -lt 6000 ]; then
+  echo
+  echo "FAIL: under 6 GB free. Rebuilding both images needs more than that, and a"
+  echo "      short build will fail halfway with 'no space left on device'."
+  echo
+  echo "      Reclaim space — none of this touches your database:"
+  echo "        docker image prune -af        # images no container is using"
+  echo "        docker builder prune -af      # build cache"
+  echo "        sudo rm -rf /var/tmp/libpod_builder*   # abandoned build contexts"
+  echo "        sudo journalctl --vacuum-size=200M     # old system logs"
+  echo
+  echo "      NEVER add --volumes to a prune. That deletes the postgres volume."
+  echo
+  echo "      Then re-run this script."
+  exit 1
+fi
+
+say "4/7  Building images (no cache)"
 $COMPOSE build --no-cache api web || { echo "build failed — read the error above."; exit 1; }
 
-say "4/6  Replacing containers"
+say "5/7  Replacing containers"
 $COMPOSE up -d --force-recreate api web || { echo "up failed — read the error above."; exit 1; }
 
-say "5/6  Waiting for the API to become healthy"
+say "6/7  Waiting for the API to become healthy"
 for i in $(seq 1 40); do
   state=$($COMPOSE ps api 2>/dev/null | tail -n +2)
   case "$state" in
@@ -50,7 +72,7 @@ for i in $(seq 1 40); do
 done
 $COMPOSE restart nginx
 
-say "6/6  Verifying what is actually served"
+say "7/7  Verifying what is actually served"
 in_container=$($COMPOSE exec -T web sh -c "wget -qO- http://127.0.0.1:3000/dashboard 2>/dev/null" | grep -c "$MARKER")
 echo "new dashboard inside the web container : $in_container"
 
