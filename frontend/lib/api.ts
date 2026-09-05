@@ -106,10 +106,22 @@ export async function uploadMultipart<T>(path: string, file: File): Promise<T> {
 export type RiskExportScope = {
   business_unit_id?: string;
   process_id?: string;
+  asset_id?: string;
   status?: string;
   category?: string;
   search?: string;
 };
+
+/** Filesystem-safe fragment of a record's name, for download filenames. */
+export function slugForFile(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "export"
+  );
+}
 
 /** "?a=1&b=2" from the defined entries, or "" when there are none. */
 export function queryString(params?: Record<string, string | undefined>): string {
@@ -1941,9 +1953,13 @@ export const api = {
 
   // PDF reports (board / audit-committee / Shariah-board packs)
   /** Exports exactly the scope the register is showing, so the PDF and the screen can
-   *  never disagree. Undefined entries are dropped. */
-  pdfRiskRegister: (scope?: RiskExportScope) =>
-    downloadBlob(`/reports/pdf/risk-register${queryString(scope)}`, "risk-register.pdf"),
+   *  never disagree. Undefined entries are dropped. `name` distinguishes the file on
+   *  disk — pulling a report for ten assets should not produce ten "risk-register.pdf". */
+  pdfRiskRegister: (scope?: RiskExportScope, name?: string) =>
+    downloadBlob(
+      `/reports/pdf/risk-register${queryString(scope)}`,
+      name ? `risk-report-${slugForFile(name)}.pdf` : "risk-report.pdf",
+    ),
   pdfExecutiveSummary: () => downloadBlob("/reports/pdf/executive-summary", "executive-summary.pdf"),
   pdfAuditEngagement: (id: string, ref: string) =>
     downloadBlob(`/reports/pdf/audit-engagement/${id}`, `audit-${ref}.pdf`),
