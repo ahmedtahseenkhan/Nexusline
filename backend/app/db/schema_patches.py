@@ -122,6 +122,17 @@ def risk_scale_constraint_statements() -> list[str]:
     return out
 
 
+# --- scenario -> control mapping ---------------------------------------------
+def scenario_control_references_ddl_statements() -> list[str]:
+    """The control-references column on the scenario library, for installs whose
+    ``risk_scenario_templates`` predates it. Empty by default; the library re-install
+    backfills it from the shipped mapping."""
+    return [
+        "ALTER TABLE risk_scenario_templates ADD COLUMN IF NOT EXISTS control_references "
+        "TEXT DEFAULT '' NOT NULL",
+    ]
+
+
 # --- platform administration --------------------------------------------------
 def platform_admin_ddl_statements() -> list[str]:
     """The deployment-operator flag on the pre-existing ``users`` table.

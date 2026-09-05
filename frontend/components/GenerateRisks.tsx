@@ -307,8 +307,18 @@ function GenerateModal({
                             />
                             <div className="muted" style={{ fontSize: 11.5, marginTop: 3 }}>
                               {row.scenario_reference} · {row.category}
-                              {row.control_labels.length > 0 && ` · controls: ${row.control_labels.slice(0, 3).join(", ")}`}
+                              {row.control_labels.length > 0 && (
+                                <> · controls: {row.control_labels.slice(0, 4).join(", ")}{row.control_labels.length > 4 ? ` +${row.control_labels.length - 4}` : ""}</>
+                              )}
                             </div>
+                            {row.unmapped_references.length > 0 && (
+                              /* The scenario names controls this catalogue lacks — the
+                                 framework is not installed, or the reference differs.
+                                 Said out loud rather than dropped, so the gap is visible. */
+                              <div style={{ fontSize: 11.5, marginTop: 2, color: "var(--amber)" }} title="Install the framework from the Framework Library to link these">
+                                not in your catalogue: {row.unmapped_references.slice(0, 5).join(", ")}{row.unmapped_references.length > 5 ? ` +${row.unmapped_references.length - 5}` : ""}
+                              </div>
+                            )}
                           </td>
                           <td className="muted" style={{ fontSize: 12.5 }}>{row.asset_name}</td>
                           <td>

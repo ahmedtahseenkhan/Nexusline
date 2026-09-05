@@ -6,6 +6,10 @@ a new standard without reseeding.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from app.services import control_mapping
+
 import uuid
 
 # ---------------------------------------------------------------- ISO/IEC 42001:2023
@@ -3254,13 +3258,32 @@ async def installed_template_keys(db) -> set[str]:
     return set(await installed_template_frameworks(db))
 
 
-async def install_template(db, user, key: str):
-    """Create a Framework + all its Requirements from a template, for this tenant.
+@dataclass
+class InstallOutcome:
+    """What installing a template produced. ``framework`` is the new row; the control
+    counts are zero for management-system frameworks (ISO 31000, GDPR, ...) which have
+    clauses but no controls."""
+
+    framework: object
+    requirements: int = 0
+    controls_created: int = 0
+    controls_linked: int = 0
+
+
+async def install_template(db, user, key: str, *, create_controls: bool | None = None) -> InstallOutcome:
+    """Create a Framework + all its Requirements from a template, for this tenant —
+    and, for a control framework, the Control Catalogue entries behind them.
 
     Single install path shared by ``/content-library`` and ``/framework-templates`` so
     the same standard can never be installed twice under two different names. Raises
     404 for an unknown key and 409 when the framework (or a legacy alias of it) exists.
-    Returns the new Framework.
+
+    ``create_controls`` defaults to on for control frameworks (ISO 27001 Annex A, CIS,
+    NIST 800-53, PCI DSS, SBP Cybersecurity): a clause like "A.8.5 Secure
+    authentication" *is* a control, and a framework installed without its controls is
+    a checklist with nothing behind it. Duplicate protection makes the default safe: a
+    control whose reference already exists in the catalogue is linked, not recreated,
+    so an organisation with its own catalogue keeps it.
     """
     from fastapi import HTTPException, status
     from sqlalchemy import select
@@ -3310,8 +3333,111 @@ async def install_template(db, user, key: str):
             )
         )
     await db.flush()
+
+    outcome = InstallOutcome(framework=fw, requirements=len(tpl["requirements"]))
+    if create_controls is None:
+        create_controls = control_mapping.is_control_framework(key)
+    if create_controls and control_mapping.is_control_framework(key):
+        outcome.controls_created, outcome.controls_linked = await install_controls_pack(db, user, fw, key)
+
+    summary = f"Installed framework {fw.name} ({outcome.requirements} requirements"
+    if outcome.controls_created or outcome.controls_linked:
+        summary += f", {outcome.controls_created} controls created, {outcome.controls_linked} linked"
     await audit.record(
         db, actor=user, action="create", entity_type="framework", entity_id=fw.id,
-        summary=f"Installed framework {fw.name} ({len(tpl['requirements'])} requirements) from the library",
+        summary=summary + ") from the library",
     )
-    return fw
+    return outcome
+
+
+async def installed_framework_for(db, key: str):
+    """The live Framework this template is installed as, or None."""
+    from sqlalchemy import select
+
+    from app.models.compliance import Framework
+
+    return await db.scalar(
+        select(Framework).where(Framework.name.in_(template_names(key)), Framework.deleted.is_(False))
+    )
+
+
+async def controls_present(db, fw, key: str) -> tuple[int, int]:
+    """(clauses with a control behind them, clauses that are controls) for *this*
+    organisation's copy of the framework.
+
+    The denominator is the framework as installed, not the library template: an
+    organisation that hand-built a partial ISO 27001 with twenty clauses should be
+    told "20 of 20", not nagged towards a 93 it never loaded.
+    """
+    from sqlalchemy import func, select
+
+    from app.models.compliance import Requirement, requirement_controls
+
+    rows = (await db.scalars(select(Requirement).where(Requirement.framework_id == fw.id))).all()
+    control_rows = [r for r in rows if control_mapping.is_control_requirement(key, r.reference)]
+    if not control_rows:
+        return 0, 0
+    present = await db.scalar(
+        select(func.count(func.distinct(requirement_controls.c.requirement_id)))
+        .select_from(requirement_controls)
+        .where(requirement_controls.c.requirement_id.in_([r.id for r in control_rows]))
+    ) or 0
+    return present, len(control_rows)
+
+
+async def install_controls_pack(db, user, fw, key: str) -> tuple[int, int]:
+    """One Control per control-type requirement, linked to it — or linked to the
+    existing control with that reference. Returns (created, linked-to-existing).
+
+    Every new control starts ``not_assessed`` / ``planned``: a freshly installed
+    catalogue must grant no residual credit until somebody has tested something.
+    ``classification`` records the framework, so the catalogue can be grouped by where
+    its controls came from.
+    """
+    from sqlalchemy import select
+
+    from app.models.compliance import Requirement
+    from app.models.control import Control
+    from app.models.enums import ControlEffectiveness, ControlStatus, ControlType
+
+    tpl = TEMPLATES[key]
+    wanted = control_mapping.control_requirements(tpl, key)
+    if not wanted:
+        return 0, 0
+
+    existing = {
+        (c.reference or "").strip().lower(): c
+        for c in (await db.scalars(select(Control).where(Control.deleted.is_(False)))).all()
+        if c.reference
+    }
+    requirements = {
+        r.reference: r
+        for r in (await db.scalars(select(Requirement).where(Requirement.framework_id == fw.id))).all()
+    }
+
+    created = linked = 0
+    for r in wanted:
+        ref = control_mapping.catalogue_reference(key, r["reference"])
+        control = existing.get(ref.lower())
+        if control is None:
+            control = Control(
+                tenant_id=user.tenant_id,
+                reference=ref,
+                name=r["title"],
+                description=r.get("description", ""),
+                objective=r.get("description", ""),
+                classification=tpl["name"],
+                control_type=ControlType.production,
+                status=ControlStatus.planned,
+                effectiveness=ControlEffectiveness.not_assessed,
+            )
+            db.add(control)
+            existing[ref.lower()] = control
+            created += 1
+        else:
+            linked += 1
+        requirement = requirements.get(r["reference"])
+        if requirement is not None and control not in requirement.controls:
+            requirement.controls.append(control)
+    await db.flush()
+    return created, linked

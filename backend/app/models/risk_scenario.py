@@ -49,4 +49,7 @@ class RiskScenarioTemplate(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Bas
     fixed_impact: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     treatment_hint: Mapped[str] = mapped_column(Text, default="")
+    #: Comma-separated control references (``A.8.5, CIS 6.3, CS-3.3``) that address the
+    #: scenario. Editable per tenant like every other column here.
+    control_references: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)

@@ -294,7 +294,7 @@ async def load_framework_template(key: str, db: DbSession, user: CurrentUser) ->
     """
     from app.services.framework_library import install_template
 
-    fw = await install_template(db, user, key)
+    fw = (await install_template(db, user, key)).framework
     await db.refresh(fw)
     return FrameworkRead.model_validate(fw)
 

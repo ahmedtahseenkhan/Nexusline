@@ -202,6 +202,16 @@ Both links are many-to-many on purpose. "MFA is not enforced" genuinely belongs 
 
 > **Importing an existing register?** Your spreadsheet almost certainly already has a *Department*, *Division*, *Segment* or *Business Process* column. The importer recognises all of those and links the segment as it loads, so a segment-scoped assessment works on day one rather than after someone re-tags several hundred rows by hand. Deliberately ambiguous headings — "Branch Manager Signature", "Unit Price" — are reported unmapped rather than guessed, because a wrong silent mapping is worse than none.
 
+#### From framework to controls to risks — the loop
+
+Install a **control framework** — ISO 27001 (Annex A), CIS Controls v8, NIST 800-53, PCI DSS, SBP Cybersecurity — from the Framework Library and, by default, its clauses arrive in the **Control Catalogue** as controls, each linked to the clause it came from: *A.8.5 Secure authentication* is a control, not just a line in a checklist. Every one starts *Not assessed* / *Planned*, because a freshly installed catalogue must not grant residual credit until somebody has actually tested something. If a control with that reference already exists it is linked, not duplicated, so an organisation that built its own catalogue keeps it. Untick *Also create its controls* on the card to install the clauses alone. Management-system frameworks (ISO 31000, GDPR, Basel) have clauses but no controls and never create any.
+
+Every scenario in the risk library knows which controls address it — *credential compromise* → `A.8.5, A.5.17, A.5.16` in ISO terms, `CIS 6.3, 6.4` in CIS terms, `CS-3.3, CS-3.2` in SBP terms. When **Generate risks** proposes a risk, it resolves those references against *your* catalogue and pre-links whatever it finds, together with any control already recorded as protecting that asset. What it cannot find is shown in amber on the proposal — *not in your catalogue: CIS 6.3* — rather than dropped, so the gap is visible: install that framework and the next run links them. Nothing is written until you press Create.
+
+The result is the loop the client asked for: install a framework → controls appear → generate risks → each arrives with its mitigating controls → the **suggested residual** reads their effectiveness → the compliance **gap analysis** shows which clauses have no working control behind them. The system maps; a person judges. Until a control is assessed, the residual proposal says *no credit — rated not assessed* and residual equals inherent, which is exactly what an auditor would insist on.
+
+> Installed the scenario library before this existed? Run **Install library** again under Threat Library → Scenarios. It adds the control mapping to scenarios that have none and leaves any you edited alone.
+
 #### One risk per asset, not one rating stretched across four
 
 A common request is for a single risk tagged to several assets to carry a *different* severity per asset — "MFA missing" is worse on Internet Banking than on an internal reporting server. The register does not work that way, and deliberately: a risk carries one inherent and one residual rating, and the assets on it are references.

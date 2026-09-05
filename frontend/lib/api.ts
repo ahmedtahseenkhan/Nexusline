@@ -463,6 +463,8 @@ export interface RiskProposal {
   treatment_description: string;
   control_ids: string[];
   control_labels: string[];
+  /** Controls the scenario calls for that this catalogue does not have (by reference). */
+  unmapped_references: string[];
 }
 export interface GenerateRisksResponse {
   proposals: RiskProposal[];

@@ -23,7 +23,11 @@ from app.schemas.content_library import (
     InstallResult,
     InstalledPack,
 )
+from app.services import control_mapping
 from app.services.framework_library import (
+    controls_present,
+    install_controls_pack,
+    installed_framework_for,
     TEMPLATES,
     install_template,
     installed_template_frameworks,
@@ -54,7 +58,7 @@ _DOMAINS: dict[str, str] = {
 }
 
 
-def _summary(key: str, installed: dict[str, uuid.UUID]) -> ContentPackSummary:
+def _summary(key: str, installed: dict[str, uuid.UUID], present: dict[str, tuple[int, int]] | None = None) -> ContentPackSummary:
     tpl = TEMPLATES[key]
     return ContentPackSummary(
         id=key,
@@ -65,6 +69,10 @@ def _summary(key: str, installed: dict[str, uuid.UUID]) -> ContentPackSummary:
         requirement_count=len(tpl["requirements"]),
         installed=key in installed,
         framework_id=installed.get(key),
+        is_control_framework=control_mapping.is_control_framework(key),
+        control_count=len(control_mapping.control_requirements(tpl, key)),
+        controls_present=(present or {}).get(key, (0, 0))[0],
+        controls_total=(present or {}).get(key, (0, 0))[1],
     )
 
 
@@ -76,7 +84,15 @@ def _summary(key: str, installed: dict[str, uuid.UUID]) -> ContentPackSummary:
 async def list_packs(db: DbSession) -> list[ContentPackSummary]:
     """List every installable framework, flagging which are already installed."""
     installed = await installed_template_frameworks(db)
-    return [_summary(key, installed) for key in TEMPLATES]
+    # For installed control frameworks, whether the controls pack is there yet — an
+    # install that predates the pack shows "Create controls" instead of "done".
+    present: dict[str, tuple[int, int]] = {}
+    for key in TEMPLATES:
+        if key in installed and control_mapping.is_control_framework(key):
+            fw = await installed_framework_for(db, key)
+            if fw is not None:
+                present[key] = await controls_present(db, fw, key)
+    return [_summary(key, installed, present) for key in TEMPLATES]
 
 
 @router.get(
@@ -96,11 +112,51 @@ async def list_installed(db: DbSession) -> list[InstalledPack]:
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require("compliance:write"))],
 )
-async def install_pack(pack_id: str, db: DbSession, user: CurrentUser) -> InstallResult:
-    """Create a Framework and all of its Requirements for this tenant."""
-    fw = await install_template(db, user, pack_id)
+async def install_pack(
+    pack_id: str, db: DbSession, user: CurrentUser,
+    create_controls: bool | None = None,
+) -> InstallResult:
+    """Create a Framework and all of its Requirements for this tenant — and, for a
+    control framework, its Control Catalogue entries (``create_controls=false`` to skip)."""
+    outcome = await install_template(db, user, pack_id, create_controls=create_controls)
+    fw = outcome.framework
     return InstallResult(
         framework_id=fw.id,
         name=fw.name,
-        requirement_count=len(TEMPLATES[pack_id]["requirements"]),
+        requirement_count=outcome.requirements,
+        controls_created=outcome.controls_created,
+        controls_linked=outcome.controls_linked,
+    )
+
+
+@router.post(
+    "/content-library/{pack_id}/install-controls",
+    response_model=InstallResult,
+    dependencies=[Depends(require("compliance:write"))],
+)
+async def install_controls(pack_id: str, db: DbSession, user: CurrentUser) -> InstallResult:
+    """Create the Control Catalogue entries for a framework that is *already* installed.
+
+    The upgrade path: a framework installed before the controls pack existed has its
+    clauses but nothing behind them. Idempotent — controls that already exist by
+    reference are linked, not recreated, so it is safe to run twice.
+    """
+    from fastapi import HTTPException
+
+    if pack_id not in TEMPLATES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown framework template")
+    if not control_mapping.is_control_framework(pack_id):
+        raise HTTPException(status_code=422, detail="This framework has management clauses, not controls")
+    fw = await installed_framework_for(db, pack_id)
+    if fw is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Install the framework first")
+    created, linked = await install_controls_pack(db, user, fw, pack_id)
+    from app.services import audit
+    await audit.record(
+        db, actor=user, action="update", entity_type="framework", entity_id=fw.id,
+        summary=f"Created controls pack for {fw.name}: {created} controls created, {linked} linked to existing",
+    )
+    return InstallResult(
+        framework_id=fw.id, name=fw.name, requirement_count=len(TEMPLATES[pack_id]["requirements"]),
+        controls_created=created, controls_linked=linked,
     )

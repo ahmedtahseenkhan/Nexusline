@@ -17,12 +17,20 @@ type ContentPack = {
   requirement_count: number;
   installed: boolean;
   framework_id: string | null;
+  /** A catalogue of controls (ISO 27001 Annex A, CIS, SBP Cybersecurity, …) rather
+   *  than management clauses — installing it also populates the Control Catalogue. */
+  is_control_framework: boolean;
+  control_count: number;
+  controls_present: number;
+  controls_total: number;
 };
 
 type InstallResult = {
   framework_id: string;
   name: string;
   requirement_count: number;
+  controls_created: number;
+  controls_linked: number;
 };
 
 export default function ContentLibraryPage() {
@@ -46,12 +54,39 @@ export default function ContentLibraryPage() {
     loadPacks();
   }, []);
 
+  // Per pack: whether installing also creates its controls. On by default for control
+  // frameworks — a clause like "A.8.5 Secure authentication" is a control, and a
+  // framework installed without its controls is a checklist with nothing behind it.
+  // Duplicate protection makes the default safe: an existing control with that
+  // reference is linked, not recreated.
+  const [withControls, setWithControls] = useState<Record<string, boolean>>({});
+  const createControls = (pack: ContentPack) => withControls[pack.id] ?? true;
+
+  /** The upgrade path: a framework installed before the controls pack existed. */
+  async function installControls(pack: ContentPack) {
+    setError(null);
+    setInstallingId(pack.id);
+    try {
+      const res = await apiCall<InstallResult>("POST", `/content-library/${pack.id}/install-controls`);
+      toast(`${res.name}: ${res.controls_created} controls created${res.controls_linked ? `, ${res.controls_linked} linked to existing` : ""}. They are in the Control Catalogue, linked to their clauses.`);
+      await loadPacks();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create the controls");
+    } finally {
+      setInstallingId(null);
+    }
+  }
+
   async function install(pack: ContentPack) {
     setError(null);
     setInstallingId(pack.id);
     try {
-      const res = await apiCall<InstallResult>("POST", `/content-library/${pack.id}/install`);
-      toast(`Installed ${res.name} — ${res.requirement_count} requirements added. It now appears in Compliance.`);
+      const flag = pack.is_control_framework ? `?create_controls=${createControls(pack)}` : "";
+      const res = await apiCall<InstallResult>("POST", `/content-library/${pack.id}/install${flag}`);
+      const controls = res.controls_created || res.controls_linked
+        ? ` ${res.controls_created} controls created${res.controls_linked ? `, ${res.controls_linked} linked to existing` : ""}.`
+        : "";
+      toast(`Installed ${res.name} — ${res.requirement_count} requirements added.${controls} It now appears in Compliance.`);
       await loadPacks();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to install framework pack");
@@ -137,7 +172,34 @@ export default function ContentLibraryPage() {
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 <Badge tone="info">{p.domain}</Badge>
                 <Badge tone="neutral" plain>{p.requirement_count} requirements</Badge>
+                {p.is_control_framework && <Badge tone="low" plain>{p.control_count} controls</Badge>}
               </div>
+
+              {p.is_control_framework && !p.installed && (
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={createControls(p)}
+                    onChange={(e) => setWithControls((m) => ({ ...m, [p.id]: e.target.checked }))}
+                    style={{ marginTop: 3 }}
+                  />
+                  <span>
+                    Also create its {p.control_count} controls in the Control Catalogue, linked to their clauses.
+                    <span className="muted"> Generated risks link to them automatically. An existing control with the same reference is linked, not duplicated.</span>
+                  </span>
+                </label>
+              )}
+
+              {p.installed && p.is_control_framework && p.controls_present < p.controls_total && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, padding: "8px 10px", borderRadius: 8, background: "var(--amber-bg)", color: "var(--amber)" }}>
+                  <span style={{ flex: 1 }}>
+                    Installed without its controls — {p.controls_present} of {p.controls_total} clauses have a control behind them.
+                  </span>
+                  <button className="btn secondary sm" disabled={installingId === p.id} onClick={() => installControls(p)}>
+                    {installingId === p.id ? "Creating…" : `Create ${p.controls_total - p.controls_present} controls`}
+                  </button>
+                </div>
+              )}
 
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
                 {p.installed ? (
