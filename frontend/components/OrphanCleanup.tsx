@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import { api, type OrphanedRisk } from "@/lib/api";
 import { Badge } from "@/components/badges";
 
@@ -14,10 +14,17 @@ import { Badge } from "@/components/badges";
 
 type Props = { onDone?: () => void };
 
-export default function OrphanCleanup({ onDone }: Props) {
+export type OrphanCleanupHandle = { open: () => void };
+
+const OrphanCleanup = forwardRef<OrphanCleanupHandle, Props & { hideButton?: boolean }>(function OrphanCleanup(
+  { onDone, hideButton }, ref,
+) {
   const [open, setOpen] = useState(false);
+  useImperativeHandle(ref, () => ({ open: () => setOpen(true) }));
+
   return (
     <>
+      {!hideButton && (
       <button
         className="btn secondary"
         onClick={() => setOpen(true)}
@@ -25,10 +32,13 @@ export default function OrphanCleanup({ onDone }: Props) {
       >
         Clean up orphans
       </button>
+      )}
       {open && <CleanupModal onClose={() => setOpen(false)} onDone={onDone} />}
     </>
   );
-}
+});
+
+export default OrphanCleanup;
 
 function CleanupModal({ onClose, onDone }: Props & { onClose: () => void }) {
   const [rows, setRows] = useState<(OrphanedRisk & { include: boolean })[]>([]);
