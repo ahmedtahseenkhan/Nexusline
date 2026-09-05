@@ -24,6 +24,15 @@ class ContentPackSummary(BaseModel):
     #: The tenant's Framework this pack was installed as — lets the library link straight
     #: to it in Compliance. None until installed.
     framework_id: uuid.UUID | None = None
+    #: A catalogue of controls (ISO 27001 Annex A, CIS, ...) rather than management
+    #: clauses — installing it also populates the Control Catalogue.
+    is_control_framework: bool = False
+    control_count: int = 0
+    #: For an installed control framework: how many of *its own* control-type clauses
+    #: have a control behind them, out of how many it has. Present below total means
+    #: the controls pack has not been created for it.
+    controls_present: int = 0
+    controls_total: int = 0
 
 
 class InstallResult(BaseModel):
@@ -32,6 +41,8 @@ class InstallResult(BaseModel):
     framework_id: uuid.UUID
     name: str
     requirement_count: int
+    controls_created: int = 0
+    controls_linked: int = 0
 
 
 class InstalledPack(BaseModel):

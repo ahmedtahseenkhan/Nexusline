@@ -27,6 +27,7 @@ from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.asset import Asset
+from app.models.control import Control
 from app.models.enums import Criticality
 from app.models.risk import Risk
 from app.models.risk_scenario import RiskScenarioTemplate
@@ -56,6 +57,7 @@ from app.services.risk_scenarios import (
     likelihood_for,
     title_for,
 )
+from app.services import control_mapping
 from app.services.risk_settings import get_matrix_size
 
 router = APIRouter(tags=["risk scenarios"])
@@ -99,7 +101,12 @@ def _spec(row: RiskScenarioTemplate) -> ScenarioSpec:
         impact_property=row.impact_property,
         fixed_impact=row.fixed_impact,
         treatment_hint=row.treatment_hint,
+        control_references=_split_refs(row.control_references),
     )
+
+
+def _split_refs(value: str | None) -> tuple[str, ...]:
+    return tuple(r.strip() for r in (value or "").split(",") if r.strip())
 
 
 async def _load(db: DbSession, scenario_id: uuid.UUID) -> RiskScenarioTemplate:
@@ -210,10 +217,18 @@ async def install_library(db: DbSession, user: CurrentUser) -> LibraryInstallRes
     retuning. It also seeds the Threat Library with each scenario's threat and
     vulnerability, which is what lets a generated risk carry real graph links.
     """
-    existing = set((await db.scalars(select(RiskScenarioTemplate.reference))).all())
-    installed = 0
+    rows = {r.reference: r for r in (await db.scalars(select(RiskScenarioTemplate))).all()}
+    existing = set(rows)
+    installed = backfilled = 0
     for spec in CATALOGUE:
         if spec.reference in existing:
+            # A row that predates the control mapping has an empty field, not a
+            # decision. Filling it is not overwriting local retuning; a tenant that
+            # cleared or edited the references keeps exactly what it wrote.
+            row = rows[spec.reference]
+            if not (row.control_references or "").strip() and control_mapping.references_for(spec.reference):
+                row.control_references = ", ".join(control_mapping.references_for(spec.reference))
+                backfilled += 1
             continue
         db.add(
             RiskScenarioTemplate(
@@ -230,6 +245,7 @@ async def install_library(db: DbSession, user: CurrentUser) -> LibraryInstallRes
                 impact_property=spec.impact_property,
                 fixed_impact=spec.fixed_impact,
                 treatment_hint=spec.treatment_hint,
+                control_references=", ".join(control_mapping.references_for(spec.reference)),
             )
         )
         installed += 1
@@ -238,8 +254,9 @@ async def install_library(db: DbSession, user: CurrentUser) -> LibraryInstallRes
     await db.flush()
     await audit_log.record(
         db, actor=user, action="create", entity_type="risk_scenario", entity_id=None,
-        summary=f"Installed {installed} risk scenario(s) from the built-in library",
-        changes={"installed": installed, "total": len(CATALOGUE)},
+        summary=f"Installed {installed} risk scenario(s) from the built-in library"
+        + (f"; control mapping added to {backfilled} existing" if backfilled else ""),
+        changes={"installed": installed, "backfilled": backfilled, "total": len(CATALOGUE)},
     )
     return LibraryInstallResult(
         installed=installed, skipped=len(CATALOGUE) - installed, total=len(CATALOGUE)
@@ -309,12 +326,18 @@ async def generate(body: GenerateRequest, db: DbSession, user: CurrentUser) -> G
     duplicates = 0
     truncated = False
 
+    # The organisation's catalogue by reference, once. A scenario names the controls
+    # that address it ("A.8.5", "CIS 6.3"); what resolves depends on which frameworks
+    # this organisation has installed, and what does not is reported on the proposal.
+    catalogue_rows = (await db.scalars(select(Control).where(Control.deleted.is_(False)))).all()
+    catalogue = {(c.reference or "").strip().lower(): c.id for c in catalogue_rows if c.reference}
+    labels = {c.id: (c.reference or c.name) for c in catalogue_rows}
+
     for asset in assets:
         facts = _facts(asset)
         # Controls already protecting this asset travel with the proposal, so the
         # residual suggestion has evidence to work with as soon as the risk exists.
         control_ids = [c.id for c in asset.controls]
-        control_labels = [c.reference or c.name for c in asset.controls]
         for row in scenarios:
             spec = _spec(row)
             if not applies_to_asset(spec, facts):
@@ -328,6 +351,8 @@ async def generate(body: GenerateRequest, db: DbSession, user: CurrentUser) -> G
                 break
             likelihood = likelihood_for(spec, facts, matrix_size)
             impact = impact_for(spec, facts, matrix_size)
+            mapped_ids, unmapped = control_mapping.resolve_controls(spec.control_references, catalogue)
+            all_ids = control_mapping.merge_controls(control_ids, mapped_ids)
             proposals.append(
                 RiskProposal(
                     scenario_id=row.id,
@@ -343,8 +368,9 @@ async def generate(body: GenerateRequest, db: DbSession, user: CurrentUser) -> G
                     threat=spec.threat,
                     vulnerability=spec.vulnerability,
                     treatment_description=spec.treatment_hint,
-                    control_ids=control_ids,
-                    control_labels=control_labels,
+                    control_ids=all_ids,
+                    control_labels=[labels.get(i, str(i)) for i in all_ids],
+                    unmapped_references=unmapped,
                 )
             )
         if truncated:

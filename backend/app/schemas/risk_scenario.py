@@ -25,6 +25,7 @@ class ScenarioBase(BaseModel):
     impact_property: str = Field(default="", pattern="^(|confidentiality|integrity|availability)$")
     fixed_impact: int = Field(default=0, ge=0, le=5)
     treatment_hint: str = ""
+    control_references: str = ""
     enabled: bool = True
 
 
@@ -43,6 +44,7 @@ class ScenarioUpdate(BaseModel):
     impact_rule: str | None = Field(default=None, pattern=_RULE_PATTERN)
     impact_property: str | None = Field(default=None, pattern="^(|confidentiality|integrity|availability)$")
     fixed_impact: int | None = Field(default=None, ge=0, le=5)
+    control_references: str | None = None
     treatment_hint: str | None = None
     enabled: bool | None = None
 
@@ -96,6 +98,10 @@ class RiskProposal(BaseModel):
     #: has something to work with the moment the risk exists.
     control_ids: list[uuid.UUID] = []
     control_labels: list[str] = []
+    #: Controls the scenario calls for that this organisation's catalogue does not have
+    #: (by reference) — usually because the framework is not installed. Shown, not
+    #: silently dropped, so the gap is visible in the proposal.
+    unmapped_references: list[str] = []
 
 
 class GenerateResponse(BaseModel):

@@ -74,6 +74,10 @@ class ScenarioSpec:
     impact_property: str = ""  # confidentiality | integrity | availability
     fixed_impact: int = 0  # 1-5 scale, only for RULE_FIXED
     treatment_hint: str = ""
+    #: Catalogue-spelled references of the controls that address this scenario, from
+    #: ``services.control_mapping``. Resolved against the organisation's own catalogue
+    #: at generation time; unresolved ones are reported, never invented.
+    control_references: tuple[str, ...] = ()
 
 
 _INFO = (AssetClass.information_asset.value,)
