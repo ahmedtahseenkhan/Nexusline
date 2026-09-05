@@ -74,3 +74,22 @@ def test_kri_rag_when_lower_is_worse():
 def test_kri_with_only_a_limit_threshold():
     assert gh.kri_status(4, None, 10, "above") == "green"
     assert gh.kri_status(11, None, 10, "above") == "red"
+
+
+# ------------------------------------------------------- an empty organisation ---
+def test_an_empty_tenant_has_no_score_at_all():
+    """A wiped system once read 70/100: no risks scored full marks for tolerance and
+    for "nothing critical", and the empty catalogue was simply not asked about. There
+    is nothing to judge here, and the page must say so rather than print a number."""
+    empty = _parts(risks_total=0, risks_within_tolerance=0, controls_total=0, controls_assured=0,
+                   clauses_applicable=0, clauses_assured=0, deadlines_total=0, deadlines_overdue=0)
+    assert gh.has_data(empty) is False
+    assert gh.band(gh.score(empty), data=False) == gh.NO_DATA
+
+
+def test_one_populated_component_is_enough_to_score():
+    """Import a control catalogue and nothing else: that is a real, judgeable state."""
+    seeded = _parts(risks_total=0, risks_within_tolerance=0, clauses_applicable=0, clauses_assured=0,
+                    deadlines_total=0, deadlines_overdue=0, controls_total=93, controls_assured=0)
+    assert gh.has_data(seeded) is True
+    assert gh.band(gh.score(seeded), data=True) == "critical"

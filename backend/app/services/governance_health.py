@@ -85,8 +85,24 @@ def score(parts: list[Component]) -> int:
     return int(round(sum(c.value * c.weight for c in parts) / total_weight))
 
 
-def band(value: int) -> str:
+#: Band for an organisation with nothing to score yet — no risks, no controls, no
+#: clauses, no deadlines. A number here would be arithmetic on an empty set.
+NO_DATA = "no_data"
+
+
+def has_data(parts: list[Component]) -> bool:
+    """Whether any component has a population behind it.
+
+    An empty tenant is not healthy and it is not critical — there is nothing to
+    judge. Scoring one anyway is how a freshly wiped system reported 70/100.
+    """
+    return any(not c.detail.startswith("0 of 0") for c in parts)
+
+
+def band(value: int, *, data: bool = True) -> str:
     """Healthy / Elevated / Critical, on the same thresholds the gauge colours."""
+    if not data:
+        return NO_DATA
     if value >= 80:
         return "healthy"
     if value >= 60:

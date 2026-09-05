@@ -448,10 +448,11 @@ async def get_overview(
         deadlines_total=deadlines_total, deadlines_overdue=deadlines_overdue,
     )
     score = governance_health.score(parts)
+    scoreable = governance_health.has_data(parts)
 
     return DashboardOverview(
         as_of=today, period_days=days,
-        health=Health(score=score, band=governance_health.band(score),
+        health=Health(score=score, band=governance_health.band(score, data=scoreable),
                       components=[HealthComponent(**c.__dict__) for c in parts]),
         posture=Posture(
             total_risks=total_risks, appetite_score=settings.appetite_score, tolerance_score=settings.tolerance_score,
