@@ -299,6 +299,7 @@ function BusinessUnitsInner() {
 
       {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="business_unit" entityId={detail.id} /> : null}
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? detail.name : "…"}
@@ -339,7 +340,6 @@ function BusinessUnitsInner() {
             </div>
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-              <RecordPanels model="business_unit" entityId={detail.id} />
             </div>
           </>
         )}

@@ -343,6 +343,7 @@ function ExceptionsInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="exception" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -388,7 +389,6 @@ function ExceptionsInner() {
               <div style={{ marginBottom: 16 }}><span className="muted" style={{ fontSize: 12 }}>Compensating controls</span><div style={{ fontSize: 13 }}>{detail.compensating_controls}</div></div>
             )}
 
-            <RecordPanels model="exception" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

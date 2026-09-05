@@ -619,6 +619,7 @@ function ScenarioAnalysisInner() {
 
       {/* ============================================= SCENARIO DRAWER */}
       <RecordDrawer
+        aside={scenarioDetail ? <RecordPanels model="scenario_analysis" entityId={scenarioDetail.id} /> : null}
         open={section === "scenarios" && !!openId && !!scenarioDetail}
         onClose={() => setOpenId(null)}
         title={scenarioDetail ? `${scenarioDetail.reference || ""} ${scenarioDetail.title}`.trim() : "…"}
@@ -677,7 +678,6 @@ function ScenarioAnalysisInner() {
               </div>
             </div>
 
-            <RecordPanels model="scenario_analysis" entityId={scenarioDetail.id} />
           </>
         )}
       </RecordDrawer>

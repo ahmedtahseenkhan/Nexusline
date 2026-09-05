@@ -665,6 +665,7 @@ function GovernanceInner() {
 
       {/* ============================================= COMMITTEE DRAWER */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="committee" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""}${detail.reference ? " — " : ""}${detail.name}` : "…"}
@@ -755,7 +756,6 @@ function GovernanceInner() {
               </div>
             </div>
 
-            <RecordPanels model="committee" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

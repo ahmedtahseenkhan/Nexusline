@@ -931,6 +931,7 @@ function OperationalRiskInner() {
 
       {/* ============================================= RCSA DRAWER */}
       <RecordDrawer
+        aside={rcsaDetail ? <RecordPanels model="rcsa_assessment" entityId={rcsaDetail.id} /> : null}
         open={section === "rcsa" && !!openId && !!rcsaDetail}
         onClose={() => setOpenId(null)}
         title={rcsaDetail ? `${rcsaDetail.reference || ""} ${rcsaDetail.title}`.trim() : "…"}
@@ -1066,13 +1067,13 @@ function OperationalRiskInner() {
               </div>
             </div>
 
-            <RecordPanels model="rcsa_assessment" entityId={rcsaDetail.id} />
           </>
         )}
       </RecordDrawer>
 
       {/* ============================================= KRI DRAWER */}
       <RecordDrawer
+        aside={kriDetail ? <RecordPanels model="key_risk_indicator" entityId={kriDetail.id} /> : null}
         open={section === "kris" && !!openId && !!kriDetail}
         onClose={() => setOpenId(null)}
         title={kriDetail ? `${kriDetail.reference || ""} ${kriDetail.name}`.trim() : "…"}
@@ -1152,7 +1153,6 @@ function OperationalRiskInner() {
               </div>
             </div>
 
-            <RecordPanels model="key_risk_indicator" entityId={kriDetail.id} />
           </>
         )}
       </RecordDrawer>

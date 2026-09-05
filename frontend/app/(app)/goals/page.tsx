@@ -388,6 +388,7 @@ function GoalsInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="goal" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.name}`.trim() : "…"}
@@ -461,7 +462,6 @@ function GoalsInner() {
               </div>
             </div>
 
-            <RecordPanels model="goal" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

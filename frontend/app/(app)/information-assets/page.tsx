@@ -463,6 +463,7 @@ function InformationAssetsInner() {
 
       {/* Deep-linkable detail drawer (?id=) */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="asset" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail?.name || "…"}
@@ -572,7 +573,6 @@ function InformationAssetsInner() {
             </div>
 
             <div style={{ marginTop: 20 }}>
-              <RecordPanels model="asset" entityId={detail.id} />
             </div>
           </>
         )}

@@ -996,6 +996,7 @@ function ShariahInner() {
 
       {/* ============================================= REVIEW DRAWER (SNC findings) */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="shariah_review" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -1139,7 +1140,6 @@ function ShariahInner() {
               </div>
             </div>
 
-            <RecordPanels model="shariah_review" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

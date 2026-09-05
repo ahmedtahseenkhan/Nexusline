@@ -592,6 +592,7 @@ function DeclarationsInner() {
 
       {/* ============================================= CAMPAIGN DRAWER */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="declaration_campaign" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.title}`.trim() : "…"}
@@ -696,7 +697,6 @@ function DeclarationsInner() {
               </div>
             </div>
 
-            <RecordPanels model="declaration_campaign" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

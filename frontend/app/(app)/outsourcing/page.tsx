@@ -597,6 +597,7 @@ function OutsourcingInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="outsourcing_arrangement" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -725,7 +726,6 @@ function OutsourcingInner() {
               </div>
             </div>
 
-            <RecordPanels model="outsourcing_arrangement" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

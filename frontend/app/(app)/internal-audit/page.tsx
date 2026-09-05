@@ -878,6 +878,7 @@ function InternalAuditInner() {
 
       {/* ============================================= ENGAGEMENT DRAWER */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="audit_engagement" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -1006,7 +1007,6 @@ function InternalAuditInner() {
               </div>
             </div>
 
-            <RecordPanels model="audit_engagement" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

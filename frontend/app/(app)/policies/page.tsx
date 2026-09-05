@@ -266,6 +266,7 @@ function PoliciesInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="policy" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference || detail.title : "…"}
@@ -307,7 +308,6 @@ function PoliciesInner() {
               <RelatedChips label="Processing activities" items={detail.processing_activities} href="/privacy" />
             </div>
 
-            <RecordPanels model="policy" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

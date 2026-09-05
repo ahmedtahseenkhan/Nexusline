@@ -26,10 +26,12 @@ const ACTION_WORDS: Record<string, string> = {
   accept_residual: "accepted residual",
 };
 
-export default function ActivityPanel({ entityType, entityId }: { entityType: string; entityId: string }) {
+export default function ActivityPanel({
+  entityType, entityId, defaultOpen = false,
+}: { entityType: string; entityId: string; defaultOpen?: boolean }) {
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [total, setTotal] = useState(0);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
 
   useEffect(() => {
     setEntries(null);
@@ -39,38 +41,38 @@ export default function ActivityPanel({ entityType, entityId }: { entityType: st
   }, [entityType, entityId]);
 
   return (
-    <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-      <button
-        type="button"
-        className="linklike"
-        onClick={() => setOpen((v) => !v)}
-        style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600, fontSize: 13 }}
-      >
-        <span style={{ display: "inline-block", transform: open ? "rotate(90deg)" : "none", transition: "transform .12s" }}>▸</span>
-        Activity
-        <span className="muted" style={{ fontWeight: 400 }}>
-          {entries === null ? "…" : total === 0 ? "· nothing recorded" : `· ${total} entr${total === 1 ? "y" : "ies"}`}
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-head" style={{ cursor: "pointer" }} onClick={() => setOpen((v) => !v)}>
+        <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ display: "inline-block", transform: open ? "rotate(90deg)" : "none", transition: "transform .12s" }}>▸</span>
+          Activity
+        </h3>
+        <span className="sub">
+          {entries === null ? "…" : total === 0 ? "nothing recorded" : `${total} entr${total === 1 ? "y" : "ies"}`}
         </span>
-      </button>
+      </div>
 
       {open && entries && (
-        <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+        <div className="card-pad" style={{ paddingTop: 6 }}>
           {entries.length === 0 && <div className="muted" style={{ fontSize: 12.5 }}>No activity recorded for this record yet.</div>}
-          {entries.map((e) => (
-            <div key={e.id} style={{ display: "grid", gridTemplateColumns: "150px 1fr", gap: 10, fontSize: 12.5 }}>
-              <div className="muted" title={e.created_at}>
-                {e.created_at.slice(0, 16).replace("T", " ")}
+          <div className="activity-list">
+            {entries.map((e) => (
+              <div key={e.id} className="activity-item">
+                <span className="activity-dot" aria-hidden />
+                <div style={{ fontSize: 12.5, minWidth: 0 }}>
+                  <div className="activity-when" title={e.created_at}>{e.created_at.slice(0, 16).replace("T", " ")}</div>
+                  <div>
+                    <b>{e.actor_email || "system"}</b>{" "}
+                    <span className="muted">{ACTION_WORDS[e.action] ?? e.action.replace(/_/g, " ")}</span>
+                  </div>
+                  {e.summary && <div style={{ marginTop: 2, overflowWrap: "anywhere" }}>{e.summary}</div>}
+                </div>
               </div>
-              <div>
-                <b>{e.actor_email || "system"}</b>{" "}
-                <span className="muted">{ACTION_WORDS[e.action] ?? e.action.replace(/_/g, " ")}</span>
-                {e.summary && <div style={{ marginTop: 2 }}>{e.summary}</div>}
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
           {total > entries.length && (
-            <div className="muted" style={{ fontSize: 12 }}>
-              Showing the latest {entries.length} of {total}. The full trail is under Settings → Activity Log.
+            <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+              Latest {entries.length} of {total}. The full trail is under Settings → Activity Log.
             </div>
           )}
         </div>

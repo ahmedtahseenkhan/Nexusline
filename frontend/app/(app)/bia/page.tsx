@@ -502,6 +502,7 @@ function BiaInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="bia_assessment" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || "BIA"} — ${detail.process_name}` : "…"}
@@ -617,7 +618,6 @@ function BiaInner() {
               </table>
             </div>
 
-            <RecordPanels model="bia_assessment" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

@@ -496,6 +496,7 @@ function ModelRiskInner() {
 
       {/* ============================================= MODEL DRAWER */}
       <RecordDrawer
+        aside={modelDetail ? <RecordPanels model="model_inventory" entityId={modelDetail.id} /> : null}
         open={!!openId && !!modelDetail}
         onClose={() => setOpenId(null)}
         title={modelDetail ? `${modelDetail.reference || ""} ${modelDetail.name}`.trim() : "…"}
@@ -607,7 +608,6 @@ function ModelRiskInner() {
               </div>
             </div>
 
-            <RecordPanels model="model_inventory" entityId={modelDetail.id} />
           </>
         )}
       </RecordDrawer>

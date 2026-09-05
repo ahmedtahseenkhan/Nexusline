@@ -435,6 +435,7 @@ function DelegationOfAuthorityInner() {
       )}
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="authority_matrix" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.activity}`.trim() : "…"}
@@ -456,7 +457,6 @@ function DelegationOfAuthorityInner() {
             </div>
             {detail.description && <p style={{ margin: "0 0 10px" }}>{detail.description}</p>}
             {detail.conditions && <p className="muted" style={{ margin: "0 0 14px", fontSize: 13 }}><strong>Conditions:</strong> {detail.conditions}</p>}
-            <RecordPanels model="authority_matrix" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

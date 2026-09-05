@@ -317,6 +317,7 @@ function ProjectsInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="project" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference : "…"}
@@ -399,7 +400,6 @@ function ProjectsInner() {
               </div>
             )}
 
-            <RecordPanels model="project" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

@@ -1130,3 +1130,45 @@ table.compact tbody td { padding: 6px 12px; font-size: 13px; }
 /* Inline relation chips inside table cells: wrap, never overflow the row. */
 td .chips { display: flex; flex-wrap: wrap; gap: 4px; max-width: 320px; }
 td .chips .chip { padding: 1px 7px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+
+/* ------------------------------------------------- Full-page record drawer */
+/* A record is not a form. Two columns, each scrolling on its own: the item on the
+   left, what has happened to it on the right, both visible at once. */
+.drawer-overlay.full { justify-content: stretch; }
+.drawer.full { width: 100%; max-width: 100%; animation: drawer-fade 0.12s ease-out; }
+.drawer.full .drawer-head { padding: 14px 24px; align-items: center; }
+.drawer-back { flex-shrink: 0; }
+.drawer-columns { display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; }
+.drawer-columns.has-aside { grid-template-columns: minmax(0, 1fr) 460px; }
+.drawer-main { overflow-y: auto; padding: 22px 28px 40px; min-width: 0; }
+.drawer-main-inner { max-width: 1180px; }
+.drawer-columns:not(.has-aside) .drawer-main-inner { margin: 0 auto; }
+.drawer-aside {
+  overflow-y: auto; padding: 18px 20px 40px; min-width: 0;
+  border-left: 1px solid var(--border); background: var(--surface-2);
+}
+.drawer-aside-title {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--muted); font-weight: 650; margin-bottom: 4px;
+}
+.drawer-aside .card { box-shadow: none; }
+@media (max-width: 1100px) {
+  .drawer-columns { overflow-y: auto; }
+  .drawer-columns.has-aside { grid-template-columns: 1fr; }
+  .drawer-main, .drawer-aside { overflow: visible; }
+  .drawer-aside { border-left: none; border-top: 1px solid var(--border); }
+}
+
+/* Activity timeline in the aside */
+.activity-list { display: grid; gap: 0; margin-top: 8px; }
+.activity-item { display: grid; grid-template-columns: 14px 1fr; gap: 10px; padding: 6px 0; position: relative; }
+.activity-item::before {
+  content: ""; position: absolute; left: 5px; top: 0; bottom: 0; width: 2px; background: var(--border);
+}
+.activity-item:first-child::before { top: 12px; }
+.activity-item:last-child::before { bottom: calc(100% - 12px); }
+.activity-dot {
+  width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; position: relative; z-index: 1;
+  background: var(--primary-weak); border: 2px solid var(--primary);
+}
+.activity-when { font-size: 11.5px; color: var(--muted); }

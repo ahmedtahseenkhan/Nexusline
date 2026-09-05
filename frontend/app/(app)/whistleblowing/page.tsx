@@ -406,6 +406,7 @@ function WhistleblowingInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="whistleblowing_report" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -482,7 +483,6 @@ function WhistleblowingInner() {
               </div>
             </div>
 
-            <RecordPanels model="whistleblowing_report" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

@@ -381,6 +381,7 @@ function EsgInner() {
       )}
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="esg_assessment" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.title}`.trim() : "…"}
@@ -405,7 +406,6 @@ function EsgInner() {
               <p className="muted" style={{ fontSize: 13, margin: "0 0 8px" }}>SBP Green Banking ref: <strong>{detail.sbp_green_banking_ref}</strong></p>
             )}
             {detail.description && <p style={{ fontSize: 13, margin: "0 0 14px" }}>{detail.description}</p>}
-            <RecordPanels model="esg_assessment" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

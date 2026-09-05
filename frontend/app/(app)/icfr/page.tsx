@@ -831,6 +831,7 @@ function IcfrInner() {
 
       {/* ============================================= PROCESS / RCM DRAWER */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="icfr_process" entityId={detail.id} /> : null}
         open={section === "processes" && !!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || "PRC"} — ${detail.name}` : "…"}
@@ -1088,7 +1089,6 @@ function IcfrInner() {
               </div>
             </div>
 
-            <RecordPanels model="icfr_process" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

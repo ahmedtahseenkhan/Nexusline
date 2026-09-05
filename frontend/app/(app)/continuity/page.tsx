@@ -405,6 +405,7 @@ function ContinuityInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="continuity_plan" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference : "…"}
@@ -506,7 +507,6 @@ function ContinuityInner() {
               </div>
             </div>
 
-            <RecordPanels model="continuity_plan" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>
