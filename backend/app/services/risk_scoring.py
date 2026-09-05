@@ -3,27 +3,34 @@
 Kept dependency-free so they are trivial to unit-test and later reuse from an
 AI-assisted scoring service.
 
-**Matrix size.** The likelihood x impact matrix is per-tenant configurable (3x3 to 6x6)
-because banks baseline their register on different methodologies — ISO 27005 and ISO
-31000 do not mandate a 5x5. Severity bands therefore cannot be fixed integers; they are
-expressed as fractions of the maximum possible score and resolved against whatever
-``max_score`` the tenant's matrix produces. At the default 5x5 (max 25) the fractions
-reproduce the original hard-coded bands exactly — 1-4 low, 5-9 medium, 10-14 high,
-15-25 critical — so an installation that never touches the setting sees no change.
+**Matrix size.** The likelihood x impact matrix is per-tenant configurable (3x3 to
+10x10) because banks baseline their register on different methodologies — ISO 27005 and
+ISO 31000 do not mandate a 5x5, and a bank whose board-approved ERM matrix runs 1-10
+must be able to say so rather than re-score its whole register to fit us. Severity bands
+therefore cannot be fixed integers; they are expressed as fractions of the maximum
+possible score and resolved against whatever ``max_score`` the tenant's matrix produces.
+At the default 5x5 (max 25) the fractions reproduce the original hard-coded bands
+exactly — 1-4 low, 5-9 medium, 10-14 high, 15-25 critical — so an installation that
+never touches the setting sees no change.
 """
 from __future__ import annotations
 
 from datetime import date, timedelta
 
+from app.core.risk_scale import DEFAULT_MATRIX_SIZE, MAX_MATRIX_SIZE, MIN_MATRIX_SIZE
 from app.models.enums import ReviewFrequency, Severity
+
+__all__ = [
+    "DEFAULT_MATRIX_SIZE", "DEFAULT_MAX_SCORE", "MAX_MATRIX_SIZE", "MIN_MATRIX_SIZE",
+    "add_months", "appetite_status", "band_ranges", "effective_score", "max_score_for",
+    "next_review_date", "score", "severity_for_score",
+]
 
 _ONE_DAY = timedelta(days=1)
 
-#: Matrix sizes a tenant may configure. Below 3 the bands collapse; above 6 the scale
-#: stops being a usable qualitative judgement.
-MIN_MATRIX_SIZE = 3
-MAX_MATRIX_SIZE = 6
-DEFAULT_MATRIX_SIZE = 5
+# The matrix bounds live in ``app.core.risk_scale`` and are re-exported here, because
+# the ORM constraints and the DDL patches need them too and neither can import a service
+# without closing an import cycle through the models package.
 DEFAULT_MAX_SCORE = DEFAULT_MATRIX_SIZE * DEFAULT_MATRIX_SIZE  # 25
 
 # Upper bound of each band as a fraction of the maximum score. Derived from the original

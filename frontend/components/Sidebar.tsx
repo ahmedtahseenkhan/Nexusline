@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
 import { routeDisabled, useModules } from "@/lib/modules";
 import { useMobileNav } from "@/lib/mobileNav";
 import { NAV, navItemByHref, navItemFor, type NavItem, type NavSection } from "@/lib/nav";
@@ -28,6 +29,14 @@ export default function Sidebar() {
   const { favorites, recents, isFavorite, toggleFavorite, recordVisit } = useNavPrefs();
   const { open, setOpen } = useMobileNav();
 
+  // Operator-only links are hidden from everyone else. This is presentation, not
+  // security: the endpoints behind them are guarded server-side regardless.
+  const [platformAdmin, setPlatformAdmin] = useState(false);
+  useEffect(() => {
+    api.me().then((m) => setPlatformAdmin(!!m.is_platform_admin)).catch(() => setPlatformAdmin(false));
+  }, []);
+
+  const visible = (it: NavItem) => !it.platformAdminOnly || platformAdmin;
   const enabled = (href: string) => !routeDisabled(href, disabledRoutes);
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
 
@@ -48,14 +57,17 @@ export default function Sidebar() {
   }, [pathname, recordVisit, setOpen]);
 
   // Licensing: drop disabled links; groups that empty out disappear entirely.
-  const nav = NAV.map((s) => ({ ...s, items: s.items.filter((it) => enabled(it.href)) })).filter(
-    (s) => (s.href ? enabled(s.href) : s.items.length > 0),
-  );
+  const nav = NAV.map((s) => ({
+    ...s,
+    items: s.items.filter((it) => enabled(it.href) && visible(it)),
+  })).filter((s) => (s.href ? enabled(s.href) : s.items.length > 0));
 
-  const favItems = favorites.map(navItemByHref).filter((it): it is NavItem => !!it && enabled(it.href));
+  const favItems = favorites
+    .map(navItemByHref)
+    .filter((it): it is NavItem => !!it && enabled(it.href) && visible(it));
   const recentItems = recents
     .map(navItemByHref)
-    .filter((it): it is NavItem => !!it && enabled(it.href) && !isFavorite(it.href))
+    .filter((it): it is NavItem => !!it && enabled(it.href) && visible(it) && !isFavorite(it.href))
     .slice(0, 4);
 
   function leaf(it: NavItem, sub = false) {

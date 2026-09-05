@@ -18,7 +18,17 @@ import {
   IconVendor,
 } from "@/components/icons";
 
-export type NavItem = { href: string; label: string; icon: ReactNode; tag?: string };
+export type NavItem = {
+  href: string;
+  label: string;
+  icon: ReactNode;
+  tag?: string;
+  /** Shown only to deployment operators (`is_platform_admin`). Module licensing gates
+   *  what an installation *bought*; this gates what an installation's *operator* runs,
+   *  which is a different axis and cannot be expressed as a permission code — those are
+   *  tenant-scoped rows an org admin can grant themselves. */
+  platformAdminOnly?: boolean;
+};
 /** A top-level nav group (eramba-style): either a single link (`href` set, no items)
  *  or a collapsible group whose `items` expand on click. */
 export type NavSection = { title: string; icon: ReactNode; href?: string; items: NavItem[] };
@@ -150,6 +160,12 @@ export const NAV: NavSection[] = [
       { href: "/webhooks", label: "Webhooks", icon: <IconActivity /> },
       { href: "/sso-settings", label: "Single Sign-On", icon: <IconShield /> },
       { href: "/audit", label: "Activity Log", icon: <IconActivity /> },
+      {
+        href: "/organizations",
+        label: "Organisations",
+        icon: <IconShield />,
+        platformAdminOnly: true,
+      },
     ],
   },
 ];

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { apiCall } from "@/lib/api";
 import { toast } from "@/lib/feedback";
 import { Badge } from "@/components/badges";
@@ -15,6 +16,7 @@ type ContentPack = {
   domain: string;
   requirement_count: number;
   installed: boolean;
+  framework_id: string | null;
 };
 
 type InstallResult = {
@@ -139,7 +141,17 @@ export default function ContentLibraryPage() {
 
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
                 {p.installed ? (
-                  <button className="btn secondary" disabled>Installed</button>
+                  p.framework_id ? (
+                    <Link
+                      className="btn secondary"
+                      href={`/compliance?framework=${p.framework_id}`}
+                      title="Open this framework's requirements in the Compliance module"
+                    >
+                      Open in Compliance
+                    </Link>
+                  ) : (
+                    <button className="btn secondary" disabled>Installed</button>
+                  )
                 ) : (
                   <button
                     className="btn"

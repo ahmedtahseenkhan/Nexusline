@@ -7,6 +7,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.risk_scenarios import IMPACT_RULES
+from app.services.risk_scoring import MAX_MATRIX_SIZE
 
 _RULE_PATTERN = "^(" + "|".join(IMPACT_RULES) + ")$"
 
@@ -112,8 +113,8 @@ class CommitItem(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     description: str = ""
     category: str = ""
-    inherent_likelihood: int = Field(ge=1, le=6)
-    inherent_impact: int = Field(ge=1, le=6)
+    inherent_likelihood: int = Field(ge=1, le=MAX_MATRIX_SIZE)
+    inherent_impact: int = Field(ge=1, le=MAX_MATRIX_SIZE)
     threat: str = ""
     vulnerability: str = ""
     treatment_description: str = ""

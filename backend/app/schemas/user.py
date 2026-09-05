@@ -41,6 +41,9 @@ class UserRead(BaseModel):
     created_at: datetime
     mfa_enabled: bool = False
     auth_source: str = "local"
+    # Operator of the deployment, not of this organisation. Exposed so the UI can show
+    # the organisations console to the people who can actually use it.
+    is_platform_admin: bool = False
     # ``User`` ORM exposes ``permission_codes`` and ``role_names`` as properties.
     permission_codes: list[str] = []
     roles: list[RoleSummary] = []

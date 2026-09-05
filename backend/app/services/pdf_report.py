@@ -6,14 +6,21 @@ the app boots without it; PDF endpoints then return a clear 501.
 
 Public generators take already-loaded (RLS-scoped) data from the API layer and return
 PDF bytes: board packs, audit-committee reports, Shariah-board reports and the risk
-register.
+report. Nothing here queries — the caller loads and scopes, this renders, which is what
+keeps a filtered export and the screen it came from in agreement.
 """
 from __future__ import annotations
 
 import io
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
+
+#: Usable width between the page margins (A4 less 2 x 18mm), in points. Column widths
+#: are budgeted against this: overshoot it and ReportLab silently squeezes columns until
+#: words like "CRITICAL" break mid-syllable.
+CONTENT_WIDTH = 493
 
 PRIMARY = "#1d4fd7"
 INK = "#111827"
@@ -229,28 +236,300 @@ def shariah_review_pdf(rev, org_name: str) -> bytes:
     return _render(story, org_name)
 
 
-def risk_register_pdf(risks, appetite: int, tolerance: int, org_name: str) -> bytes:
-    """Full risk register report (board risk pack)."""
-    _require_reportlab()
+@dataclass
+class RiskReportContext:
+    """Everything the register report needs that is not on a ``Risk`` row.
+
+    Gathered by the API layer (which alone knows the tenant's matrix and can resolve
+    owner names) and passed in, so this module stays a pure renderer over loaded data.
+    """
+
+    org_name: str
+    appetite: int
+    tolerance: int
+    max_score: int
+    matrix_size: int
+    #: Human description of the filter the register was exporting under, e.g.
+    #: "Digital Banking · Assessed". Printed on the cover so a PDF circulating on its
+    #: own can never be mistaken for the whole register.
+    scope: str = "Whole register"
+    #: Risk owner id -> display name. Absent ids render as "Unassigned".
+    owner_names: dict = field(default_factory=dict)
+    #: Per-risk detail pages. Off for a quick table-only export.
+    include_details: bool = True
+
+
+def _severity_of(score, max_score: int) -> str:
     from app.services.risk_scoring import severity_for_score
 
-    def sev(score):
-        s = severity_for_score(score)
-        return s.value if s is not None else ""
+    band = severity_for_score(score, max_score)
+    return band.value if band is not None else ""
+
+
+def _appetite_label(score, appetite: int, tolerance: int) -> tuple[str, str]:
+    """(label, colour) for a score against the org's thresholds."""
+    from app.services.risk_scoring import appetite_status
+
+    status = appetite_status(score, appetite, tolerance)
+    return {
+        "within_appetite": ("Within appetite", _SEV_COLOR["low"]),
+        "elevated": ("Elevated", _SEV_COLOR["medium"]),
+        "breach": ("BREACH", _SEV_COLOR["critical"]),
+    }.get(status or "", ("—", MUTED))
+
+
+def _effective(risk):
+    """Current exposure: the residual once assessed, otherwise the inherent score."""
+    return risk.residual_score if risk.residual_score is not None else risk.inherent_score
+
+
+def _names(items, attr: str = "name") -> str:
+    return ", ".join(getattr(i, attr, "") or "" for i in items) or "—"
+
+
+def _asset_line(asset) -> str:
+    """Asset name followed by the classification a reader needs to judge the rating.
+
+    A bare asset name tells a board nothing; "Core Banking — Information asset,
+    Confidential, criticality Critical" is what makes the score defensible.
+    """
+    bits = []
+    asset_class = getattr(asset, "asset_class", None)
+    if asset_class is not None:
+        # .title() would render "it_asset" as "It Asset", which reads as a typo in a
+        # board pack. The two values are known, so spell them.
+        bits.append({"it_asset": "IT asset", "information_asset": "Information asset"}
+                    .get(asset_class.value, asset_class.value.replace("_", " ").title()))
+    label = getattr(asset, "label", None)
+    if label is not None and getattr(label, "name", ""):
+        bits.append(label.name)
+    for classification in getattr(asset, "classifications", None) or []:
+        axis = getattr(classification, "type", None)
+        axis_name = getattr(axis, "name", "") if axis is not None else ""
+        bits.append(f"{axis_name}: {classification.name}" if axis_name else classification.name)
+    criticality = getattr(asset, "criticality", None)
+    if criticality is not None:
+        bits.append(f"criticality {criticality.value.title()}")
+    return f"{asset.name} — {', '.join(bits)}" if bits else asset.name
+
+
+def _heat_map(ss, risks, matrix_size: int, max_score: int):
+    """Likelihood x impact grid with a count per cell, coloured by severity band.
+
+    Impact ascends up the page and likelihood across it, which is the orientation every
+    bank's methodology document draws, so the picture in the pack matches the picture in
+    the policy. Counts use each risk's *effective* score position — residual where it has
+    been assessed, inherent where it has not — because that is the exposure the board is
+    being asked about.
+    """
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table, TableStyle
+
+    counts: dict[tuple[int, int], int] = {}
+    for risk in risks:
+        likelihood = risk.residual_likelihood if risk.residual_score is not None else risk.inherent_likelihood
+        impact = risk.residual_impact if risk.residual_score is not None else risk.inherent_impact
+        if likelihood and impact:
+            counts[(likelihood, impact)] = counts.get((likelihood, impact), 0) + 1
+
+    header = [Paragraph("<font size=7 color='%s'><b>I \\ L</b></font>" % MUTED, ss["NxCell"])]
+    header += [Paragraph(f"<font size=7 color='{MUTED}'>{n}</font>", ss["NxCell"])
+               for n in range(1, matrix_size + 1)]
+    data = [header]
+    style = [
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.white),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    for row_index, impact in enumerate(range(matrix_size, 0, -1), start=1):
+        row = [Paragraph(f"<font size=7 color='{MUTED}'>{impact}</font>", ss["NxCell"])]
+        for col_index, likelihood in enumerate(range(1, matrix_size + 1), start=1):
+            count = counts.get((likelihood, impact), 0)
+            colour = _SEV_COLOR.get(_severity_of(likelihood * impact, max_score), MUTED)
+            style.append(("BACKGROUND", (col_index, row_index), (col_index, row_index),
+                          colors.HexColor(colour)))
+            row.append(Paragraph(
+                f"<font color='white' size=9><b>{count or ''}</b></font>", ss["NxCell"]
+            ))
+        data.append(row)
+
+    # The row-label column only ever holds one or two digits; everything else goes to
+    # the grid, which is the part being read.
+    label_width = 26
+    cell = (CONTENT_WIDTH - label_width) / matrix_size
+    table = Table(
+        data,
+        colWidths=[label_width] + [cell] * matrix_size,
+        rowHeights=[14] + [18] * matrix_size,
+    )
+    table.setStyle(TableStyle(style))
+    return table
+
+
+def _band_legend(ss, max_score: int) -> str:
+    from app.services.risk_scoring import band_ranges
+
+    return " · ".join(
+        f"{severity.value.title()} {low}–{high}" for low, high, severity in band_ranges(max_score)
+    )
+
+
+def risk_register_pdf(risks, context: RiskReportContext) -> bytes:
+    """The risk report a board or a regulator actually asks for.
+
+    Three parts, in the order they get read: a cover that says what this is and what it
+    covers, a one-line-per-risk register, and — for anything above appetite — a detail
+    page carrying the controls, the assets with their classification, both ratings and
+    the treatment plan. The scope line is printed on the cover because a filtered export
+    circulating without it is indistinguishable from the whole register.
+    """
+    _require_reportlab()
+    from reportlab.platypus import PageBreak, Spacer
 
     ss = _styles()
-    story = _title_block(ss, "Risk Register", f"{len(risks)} risks · appetite ≤ {appetite} · tolerance ≤ {tolerance}", org_name)
+    max_score = context.max_score
+    ordered = sorted(risks, key=lambda r: (_effective(r) or 0), reverse=True)
+
+    breaches = [r for r in ordered if (_effective(r) or 0) > context.tolerance]
+    elevated = [r for r in ordered
+                if context.appetite < (_effective(r) or 0) <= context.tolerance]
+
+    # ---------------------------------------------------------------- cover
+    story = _title_block(
+        ss, "Risk Report",
+        f"{context.scope} · {len(ordered)} risk(s) · "
+        f"{context.matrix_size}x{context.matrix_size} matrix, scores 1–{max_score}",
+        context.org_name,
+    )
+    story += [_kpis(ss, [
+        ("Risks in report", str(len(ordered))),
+        ("Above tolerance", str(len(breaches))),
+        ("Elevated", str(len(elevated))),
+        ("Within appetite", str(len(ordered) - len(breaches) - len(elevated))),
+    ]), Spacer(1, 6)]
+
+    story += [_h2(ss, "Methodology"), _kv(ss, [
+        ("Scale", f"Likelihood 1–{context.matrix_size} x impact 1–{context.matrix_size}, "
+                  f"score 1–{max_score}"),
+        ("Severity bands", _band_legend(ss, max_score)),
+        ("Risk appetite", f"score ≤ {context.appetite}"),
+        ("Risk tolerance", f"score ≤ {context.tolerance} (above this is a breach)"),
+        ("Exposure shown", "Residual where assessed, otherwise inherent"),
+    ])]
+
+    story += [_h2(ss, "Heat map"), _heat_map(ss, ordered, context.matrix_size, max_score)]
+
+    # ------------------------------------------------------------- register
+    story += [_h2(ss, "Risk register")]
     rows = []
-    for r in risks:
+    for risk in ordered:
+        label, colour = _appetite_label(_effective(risk), context.appetite, context.tolerance)
         rows.append([
-            r.reference, r.title, r.category or "—",
-            _sev_chip(ss, sev(r.inherent_score)),
-            _sev_chip(ss, sev(r.residual_score)),
-            r.status.value.replace("_", " ").title(), _d(r.next_review_date),
+            risk.reference,
+            risk.title,
+            _names(risk.business_units) if risk.business_units else "—",
+            _sev_chip(ss, _severity_of(risk.inherent_score, max_score)),
+            _sev_chip(ss, _severity_of(risk.residual_score, max_score)),
+            _chip(ss, label, colour),
+            context.owner_names.get(risk.owner_id) or "Unassigned",
+            str(len(risk.controls)),
         ])
-    story += [_table(ss, ["Ref", "Risk", "Category", "Inherent", "Residual", "Status", "Review"], rows,
-                     col_widths=[48, 150, 70, 55, 55, 62, 62])]
-    return _render(story, org_name)
+    story += [_table(
+        ss,
+        ["Ref", "Risk", "Segment", "Inherent", "Residual", "Appetite", "Owner", "Ctrls"],
+        rows,
+        # Sums to 488 of the 493 available. Sized so the two things a reader scans for
+        # never wrap: the severity words ("CRITICAL") and the column headings.
+        col_widths=[40, 104, 66, 56, 56, 62, 64, 40],
+    )]
+
+    # -------------------------------------------------------- detail pages
+    if context.include_details and ordered:
+        story += [PageBreak(), _h2(ss, "Risk detail")]
+        for index, risk in enumerate(ordered):
+            if index:
+                story += [PageBreak()]
+            story += _risk_detail(ss, risk, context)
+
+    return _render(story, context.org_name)
+
+
+def _chip(ss, text: str, colour: str):
+    from reportlab.platypus import Paragraph
+    return Paragraph(f"<font color='{colour}'><b>{text}</b></font>", ss["NxCell"])
+
+
+def _risk_detail(ss, risk, context: RiskReportContext) -> list:
+    """One risk, in the detail a reviewer needs to challenge the rating."""
+    from reportlab.platypus import Paragraph
+
+    max_score = context.max_score
+    label, colour = _appetite_label(_effective(risk), context.appetite, context.tolerance)
+
+    flow = [
+        Paragraph(f"{risk.reference} — {risk.title}", ss["NxH2"]),
+        _kv(ss, [
+            ("Category", risk.category),
+            ("Status", risk.status.value.replace("_", " ").title()),
+            ("Owner", context.owner_names.get(risk.owner_id) or "Unassigned"),
+            ("Business units", _names(risk.business_units)),
+            ("Processes", _names(risk.processes)),
+            ("Inherent",
+             f"L{risk.inherent_likelihood} x I{risk.inherent_impact} = {risk.inherent_score} "
+             f"({_severity_of(risk.inherent_score, max_score).title()})"),
+            ("Residual",
+             f"L{risk.residual_likelihood} x I{risk.residual_impact} = {risk.residual_score} "
+             f"({_severity_of(risk.residual_score, max_score).title()})"
+             if risk.residual_score is not None else "Not yet assessed"),
+            ("Against appetite", label),
+            ("Annual loss exposure",
+             f"{risk.annual_loss_expectancy:,.2f}" if risk.annual_loss_expectancy else "—"),
+            ("Next review", _d(risk.next_review_date)),
+        ]),
+    ]
+    if risk.description:
+        flow += [_h2(ss, "Description"), _body(ss, risk.description)]
+
+    if risk.assets:
+        flow += [_h2(ss, "Assets at risk")]
+        flow += [_table(ss, ["Asset and classification"],
+                        [[_asset_line(a)] for a in risk.assets], col_widths=[None])]
+
+    if risk.controls:
+        flow += [_h2(ss, "Mitigating controls")]
+        rows = [[
+            control.reference or "—",
+            control.name,
+            control.effectiveness.value.replace("_", " ").title() if control.effectiveness else "—",
+            control.status.value.replace("_", " ").title() if control.status else "—",
+            control.owner or "—",
+            _d(control.next_audit_date),
+        ] for control in risk.controls]
+        flow += [_table(ss, ["Ref", "Control", "Effectiveness", "Status", "Owner", "Next test"],
+                        rows, col_widths=[52, 150, 72, 62, 78, 58])]
+    else:
+        flow += [_h2(ss, "Mitigating controls"),
+                 _body(ss, "None linked — the residual rating rests on nothing recorded here.")]
+
+    treatment = risk.treatment_strategy.value.title() if risk.treatment_strategy else "Not decided"
+    flow += [_h2(ss, "Treatment"), _kv(ss, [
+        ("Strategy", treatment),
+        ("Owner", risk.treatment_owner),
+        ("Deadline", _d(risk.treatment_deadline)),
+        ("Cost", f"{risk.treatment_cost:,.2f}" if risk.treatment_cost else "—"),
+    ])]
+    if risk.treatment_description:
+        flow += [_body(ss, risk.treatment_description)]
+
+    accepted = [a for a in (risk.acceptances or [])]
+    if accepted:
+        flow += [_h2(ss, "Acceptance history")]
+        rows = [[a.status.value.title(), _d(a.expires_at), _d(a.decided_at),
+                 (a.rationale or "—")[:300]] for a in accepted]
+        flow += [_table(ss, ["Decision", "Expires", "Decided", "Rationale"], rows,
+                        col_widths=[62, 62, 62, None])]
+    return flow
 
 
 def executive_summary_pdf(stats: dict, org_name: str) -> bytes:

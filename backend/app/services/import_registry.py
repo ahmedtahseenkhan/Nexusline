@@ -331,10 +331,12 @@ _register(ResourceIO(
         text("description"),
         text("category"),
         enum_col("status", RiskStatus),
-        integer("inherent_likelihood", help="1-5"),
-        integer("inherent_impact", help="1-5"),
-        integer("residual_likelihood", help="1-5 (optional)"),
-        integer("residual_impact", help="1-5 (optional)"),
+        # The scale is per-tenant (3x3 up to 10x10), so the help names the range the
+        # organisation actually configured rather than a hard-coded 1-5.
+        integer("inherent_likelihood", help="1 to your configured matrix size"),
+        integer("inherent_impact", help="1 to your configured matrix size"),
+        integer("residual_likelihood", help="1 to your configured matrix size (optional)"),
+        integer("residual_impact", help="1 to your configured matrix size (optional)"),
         enum_col("treatment_strategy", TreatmentStrategy),
         text("treatment_description"),
         text("treatment_owner"),
@@ -345,6 +347,12 @@ _register(ResourceIO(
         enum_col("review_frequency", ReviewFrequency),
         enum_col("workflow_status", WorkflowState),
         text("workflow_owner"),
+        # Segment scoping. A bank's existing register almost always has a department or
+        # process column already, so importing it should land the segment too rather
+        # than making someone re-tag several hundred rows by hand.
+        link_col("business_units", "business_unit_ids", BusinessUnit, "business_units",
+                 match_field="name"),
+        link_col("processes", "process_ids", Process, "processes", match_field="name"),
         link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
         link_col("controls", "control_ids", Control, "controls", match_field="name"),
         link_col("threats", "threat_ids", Threat, "threats", match_field="name"),

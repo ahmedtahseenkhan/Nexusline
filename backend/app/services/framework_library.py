@@ -6,6 +6,8 @@ a new standard without reseeding.
 """
 from __future__ import annotations
 
+import uuid
+
 # ---------------------------------------------------------------- ISO/IEC 42001:2023
 _ISO_42001_2023 = {
     "name": "ISO/IEC 42001:2023",
@@ -3224,16 +3226,32 @@ def template_names(key: str) -> tuple[str, ...]:
     return (tpl["name"], *LEGACY_ALIASES.get(key, ()))
 
 
-async def installed_template_keys(db) -> set[str]:
-    """Template keys already present in this tenant (RLS-scoped), aliases included."""
+async def installed_template_frameworks(db) -> dict[str, uuid.UUID]:
+    """Template key -> id of the live Framework it was installed as (aliases included)."""
     from sqlalchemy import select
 
     from app.models.compliance import Framework
 
-    names = set(
-        (await db.scalars(select(Framework.name).where(Framework.deleted.is_(False)))).all()
-    )
-    return {key for key in TEMPLATES if any(n in names for n in template_names(key))}
+    by_name = {
+        name: fid
+        for fid, name in (
+            await db.execute(
+                select(Framework.id, Framework.name).where(Framework.deleted.is_(False))
+            )
+        ).all()
+    }
+    found: dict[str, uuid.UUID] = {}
+    for key in TEMPLATES:
+        for name in template_names(key):
+            if name in by_name:
+                found[key] = by_name[name]
+                break
+    return found
+
+
+async def installed_template_keys(db) -> set[str]:
+    """Template keys already present in this tenant (RLS-scoped), aliases included."""
+    return set(await installed_template_frameworks(db))
 
 
 async def install_template(db, user, key: str):

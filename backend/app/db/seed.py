@@ -1136,8 +1136,27 @@ async def seed_if_empty() -> None:
             admin_password=settings.seed_admin_password,
             admin_full_name="Platform Admin",
         )
+        # The bootstrap admin operates the deployment as well as this org — somebody has
+        # to be able to create the second one, and on a fresh install there is nobody else.
+        _admin.is_platform_admin = True
         await _seed_sample_data(db, tenant.id)
         print(
             f"Seeded org '{tenant.name}' (slug={tenant.slug}) "
-            f"with admin {settings.seed_admin_email}."
+            f"with admin {settings.seed_admin_email} (platform administrator)."
         )
+
+        if settings.seed_second_org:
+            # Deliberately left empty. Signing into it and finding an empty register is
+            # the demonstration: same URL, same build, none of the first org's data.
+            second, _ = await create_organization(
+                db,
+                name=settings.seed_second_org_name,
+                slug=settings.seed_second_org_slug,
+                admin_email=settings.seed_second_admin_email,
+                admin_password=settings.seed_admin_password,
+                admin_full_name="Organisation Admin",
+            )
+            print(
+                f"Seeded second org '{second.name}' (slug={second.slug}) "
+                f"with admin {settings.seed_second_admin_email} — empty, to show isolation."
+            )

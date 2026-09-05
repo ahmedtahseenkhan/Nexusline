@@ -104,6 +104,90 @@ def test_a_four_by_four_bands_differently_from_the_default():
     assert severity_for_score(9, max_score_for(4)) is Severity.critical
 
 
+# ------------------------------------------------------ the 1-10 scale (0024) ----
+# Banks arrive with a board-approved matrix already in force and 1-10 is common in the
+# local market, so the ceiling has to reach it. These pin the promise made to a client
+# choosing that scale; everything above already covers 7..10 by parametrisation.
+def test_the_ceiling_reaches_ten():
+    assert MAX_MATRIX_SIZE == 10
+
+
+def test_a_ten_by_ten_bands_as_documented():
+    """1-16 low, 17-36 medium, 37-56 high, 57-100 critical."""
+    assert band_ranges(max_score_for(10)) == [
+        (1, 16, Severity.low),
+        (17, 36, Severity.medium),
+        (37, 56, Severity.high),
+        (57, 100, Severity.critical),
+    ]
+
+
+def test_widening_the_matrix_leaves_the_default_untouched():
+    """A tenant that never opens the setting must score identically to before 0024."""
+    assert [severity_for_score(v) for v in (4, 5, 9, 10, 14, 15, 25)] == [
+        Severity.low, Severity.medium, Severity.medium,
+        Severity.high, Severity.high, Severity.critical, Severity.critical,
+    ]
+
+
+def test_default_scale_wording_covers_every_rung():
+    """A bank on 1-10 that has not written its criteria must still see words, not bare
+    numbers, on rungs 7-10 — otherwise the widened scale ships half-built."""
+    from app.services.risk_settings import DEFAULT_IMPACT_LABELS, DEFAULT_LIKELIHOOD_LABELS
+
+    for axis in (DEFAULT_LIKELIHOOD_LABELS, DEFAULT_IMPACT_LABELS):
+        for level in range(1, MAX_MATRIX_SIZE + 1):
+            assert axis.get(level), f"no default wording for level {level}"
+
+
+def test_database_checks_track_the_ceiling():
+    """The DDL, the ORM constraints and the validators all read one constant. If any of
+    them is edited by hand this fails rather than letting the schema reject a score the
+    API accepts."""
+    from app.db.schema_patches import risk_scale_constraint_statements
+
+    statements = risk_scale_constraint_statements()
+    assert statements, "no scale constraints generated"
+    for statement in statements:
+        assert f"BETWEEN 1 AND {MAX_MATRIX_SIZE}" in statement
+        # Migration 0017 applies these before risk_matrix_levels exists.
+        assert "to_regclass" in statement
+    assert any("risk_matrix_levels" in s for s in statements)
+
+
+def test_the_ceiling_is_importable_without_dragging_in_the_models():
+    """The DDL patches and the ORM constraints both need the ceiling, and the scoring
+    service needs the models' enums. Putting the constant in the service closed that
+    circle: ``python -m app.db.init_db`` imported the patches first and died on a
+    partially-initialised module, while the test suite (which imports the models first)
+    stayed green. It lives in a module that imports nothing, and this asserts that."""
+    import subprocess
+    import sys
+
+    for first in ("app.db.schema_patches", "app.db.init_db", "app.models"):
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {first}"], capture_output=True, text=True
+        )
+        assert result.returncode == 0, f"importing {first} first fails:\n{result.stderr}"
+
+
+def test_score_validators_accept_the_whole_scale():
+    from app.schemas.risk import RiskCreate
+
+    risk = RiskCreate(
+        title="Top of the scale",
+        inherent_likelihood=MAX_MATRIX_SIZE,
+        inherent_impact=MAX_MATRIX_SIZE,
+    )
+    assert risk.inherent_likelihood == MAX_MATRIX_SIZE
+    with pytest.raises(ValueError):
+        RiskCreate(
+            title="Off the scale",
+            inherent_likelihood=MAX_MATRIX_SIZE + 1,
+            inherent_impact=1,
+        )
+
+
 # ------------------------------------------------------------ residual engine ----
 def test_no_controls_means_residual_equals_inherent():
     s = suggest_residual(4, 5, [])

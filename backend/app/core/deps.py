@@ -64,6 +64,21 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
+async def require_platform_admin(user: CurrentUser) -> User:
+    """Gate the deployment-operator endpoints (organisation provisioning).
+
+    Checked against a column rather than a permission code on purpose: permissions live
+    in tenant-scoped ``roles`` rows, so an organisation's own admin could mint themselves
+    a role carrying any code they liked. The flag sits outside that blast radius.
+    """
+    if not user.is_platform_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Requires platform administrator access",
+        )
+    return user
+
+
 def require(*required: str):
     """Dependency factory enforcing that the current user holds all ``required`` perms."""
 

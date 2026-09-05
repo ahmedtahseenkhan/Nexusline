@@ -1,7 +1,8 @@
 """Risk register — the heart of the platform.
 
-Captures inherent vs residual scoring (5x5 matrix), treatment strategy, links to
-controls and assets, a risk-acceptance workflow with expiry, and review scheduling.
+Captures inherent vs residual scoring (matrix size is per-tenant), treatment strategy,
+links to controls, assets and the business segments the risk sits in, a risk-acceptance
+workflow with expiry, and review scheduling.
 ``*_score`` columns are Postgres generated columns so they can be sorted/filtered
 in the database.
 """
@@ -18,6 +19,7 @@ from sqlalchemy import (
     Date,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Table,
@@ -28,6 +30,7 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.risk_scale import MAX_MATRIX_SIZE
 from app.models.base import (
     Base,
     SoftDeleteMixin,
@@ -59,6 +62,38 @@ risk_controls = Table(
     ),
 )
 
+# --- segment scoping -------------------------------------------------------
+# Banks do not assess risk asset by asset; they assess a *segment* — a business unit, or
+# a process running inside it — and the assets are what that segment happens to run on.
+# Without these edges the register can be filtered by category and by asset but never by
+# "Digital Banking", which is the cut a risk workshop actually convenes around.
+#
+# Both are many-to-many on purpose. A single owning unit would be simpler, but a control
+# failure like "MFA not enforced" genuinely belongs to Retail and Corporate at once, and
+# forcing a choice would either duplicate the risk or hide it from one of them.
+# The composite primary key already indexes risk_id. These index the other direction,
+# which is the one the register actually filters on: "show me Digital Banking's risks".
+risk_business_units = Table(
+    "risk_business_units",
+    Base.metadata,
+    Column("risk_id", Uuid, ForeignKey("risks.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "business_unit_id",
+        Uuid,
+        ForeignKey("business_units.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Index("ix_risk_business_units_unit", "business_unit_id"),
+)
+
+risk_processes = Table(
+    "risk_processes",
+    Base.metadata,
+    Column("risk_id", Uuid, ForeignKey("risks.id", ondelete="CASCADE"), primary_key=True),
+    Column("process_id", Uuid, ForeignKey("processes.id", ondelete="CASCADE"), primary_key=True),
+    Index("ix_risk_processes_process", "process_id"),
+)
+
 risk_policies = Table(
     "risk_policies",
     Base.metadata,
@@ -73,10 +108,11 @@ risk_incidents = Table(
     Column("incident_id", Uuid, ForeignKey("incidents.id", ondelete="CASCADE"), primary_key=True),
 )
 
-# The database can only enforce the widest scale any tenant may configure (6x6); the
-# tenant's own ``RiskSetting.matrix_size`` is enforced in the API layer, because a check
-# constraint cannot vary per row-level-security tenant.
-_SCALE = "BETWEEN 1 AND 6"
+# The database can only enforce the widest scale any tenant may configure; the tenant's
+# own ``RiskSetting.matrix_size`` is enforced in the API layer, because a check
+# constraint cannot vary per row-level-security tenant. Derived from the one constant so
+# raising the ceiling never leaves the schema behind the validators.
+_SCALE = f"BETWEEN 1 AND {MAX_MATRIX_SIZE}"
 
 
 class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
@@ -170,6 +206,17 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
         secondary=risk_assets, lazy="selectin",
         secondaryjoin="and_(risk_assets.c.asset_id == Asset.id, Asset.deleted == False)",
+    )
+    business_units: Mapped[list["BusinessUnit"]] = relationship(  # noqa: F821
+        "BusinessUnit", secondary=risk_business_units, lazy="selectin",
+        secondaryjoin=(
+            "and_(risk_business_units.c.business_unit_id == BusinessUnit.id, "
+            "BusinessUnit.deleted == False)"
+        ),
+    )
+    processes: Mapped[list["Process"]] = relationship(  # noqa: F821
+        "Process", secondary=risk_processes, lazy="selectin",
+        secondaryjoin="and_(risk_processes.c.process_id == Process.id, Process.deleted == False)",
     )
     controls: Mapped[list["Control"]] = relationship(  # noqa: F821
         secondary=risk_controls, lazy="selectin",
@@ -278,7 +325,7 @@ class RiskSetting(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
 
     appetite_score: Mapped[int] = mapped_column(Integer, default=6, nullable=False)
     tolerance_score: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
-    # Size of the likelihood x impact matrix (3..6). Severity bands scale with it, so a
+    # Size of the likelihood x impact matrix (3..10). Severity bands scale with it, so a
     # bank can baseline the register on whichever scale its methodology (ISO 27005,
     # ISO 31000, its own ERM framework) prescribes.
     matrix_size: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
@@ -296,7 +343,7 @@ class RiskMatrixLevel(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "axis", "level", name="uq_risk_matrix_level"),
         CheckConstraint("axis IN ('likelihood', 'impact')", name="ck_risk_matrix_axis"),
-        CheckConstraint("level BETWEEN 1 AND 6", name="ck_risk_matrix_level"),
+        CheckConstraint(f"level {_SCALE}", name="ck_risk_matrix_level"),
     )
 
     axis: Mapped[str] = mapped_column(String(16), nullable=False, index=True)

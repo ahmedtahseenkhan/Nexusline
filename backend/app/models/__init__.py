@@ -49,9 +49,11 @@ from app.models.risk import (
     RiskMatrixLevel,
     RiskSetting,
     risk_assets,
+    risk_business_units,
     risk_controls,
     risk_incidents,
     risk_policies,
+    risk_processes,
 )
 from app.models.threat import (
     Threat,
@@ -202,9 +204,11 @@ __all__ = [
     "RiskMatrixLevel",
     "ResidualPolicy",
     "risk_assets",
+    "risk_business_units",
     "risk_controls",
     "risk_incidents",
     "risk_policies",
+    "risk_processes",
     "Threat",
     "Vulnerability",
     "risk_threats",

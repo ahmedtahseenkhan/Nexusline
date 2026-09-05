@@ -2,7 +2,7 @@
 and reconciles them into the ``notifications`` table (dedup + auto-resolve)."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,7 @@ from app.models.awareness import AwarenessProgram
 from app.models.continuity import ContinuityPlan
 from app.models.control import Control
 from app.models.enums import (
+    AcceptanceStatus,
     AccessReviewStatus,
     ApprovalStatus,
     DpiaStatus,
@@ -33,11 +34,12 @@ from app.models.incident import Incident, RegulatoryReport
 from app.models.aml import ScreeningCase, SuspiciousActivityReport
 from app.models.enums import RegulatoryReportStatus, ScreeningCaseStatus
 from app.models.enums import AuditEngagementStatus, AuditFindingStatus, ShariahFindingStatus
-from app.models.notification import Notification
+from app.models.notification import EVENT_PREFIX, Notification
 from app.models.policy import Policy
 from app.models.privacy import ProcessingActivity
 from app.models.project import Project
-from app.models.risk import Risk
+from app.models.risk import Risk, RiskAcceptance
+from app.services.risk_acceptance import EXPIRY_WARNING_DAYS
 from app.services.risk_scoring import effective_score
 from app.services.risk_settings import get_or_create_settings
 
@@ -45,9 +47,8 @@ _W = NotificationCategory.warning
 _C = NotificationCategory.critical
 _I = NotificationCategory.info
 
-#: Dedup-key prefix marking a notification as a recorded event rather than a live
-#: condition. Events are never auto-resolved by :func:`refresh`.
-EVENT_PREFIX = "event:"
+# EVENT_PREFIX is defined on the model and imported above; callers that already reach
+# for it through this module keep working.
 
 
 async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
@@ -85,6 +86,30 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
         if eff is not None and eff > settings.tolerance_score:
             add(f"risk-breach:{r.id}", f"Risk above tolerance: {r.reference}",
                 f"{r.title} — score {eff} exceeds tolerance {settings.tolerance_score}", _C, "risk", r.id, "/risks")
+
+    # An acceptance that lapses unnoticed puts the risk back in the register with nobody
+    # expecting it, so the chase starts a month out — the shortest notice on which an
+    # owner can restate the rationale and a second person can approve it. This is a live
+    # condition: renew the acceptance or let it lapse and the alert resolves itself. The
+    # lapse *event* is raised separately by `services.risk_acceptance`.
+    _acceptance_stmt = (
+        select(RiskAcceptance, Risk)
+        .join(Risk, Risk.id == RiskAcceptance.risk_id)
+        .where(
+            RiskAcceptance.status == AcceptanceStatus.approved,
+            RiskAcceptance.expires_at.is_not(None),
+            RiskAcceptance.expires_at >= today,
+            RiskAcceptance.expires_at <= today + timedelta(days=EXPIRY_WARNING_DAYS),
+            Risk.deleted.is_(False),
+        )
+    )
+    for acceptance, risk in (await db.execute(_acceptance_stmt)).all():
+        days_left = (acceptance.expires_at - today).days
+        add(f"risk-acceptance-expiring:{acceptance.id}",
+            f"Risk acceptance expiring: {risk.reference or risk.title}",
+            f"The approved acceptance lapses on {acceptance.expires_at} "
+            f"({days_left} day(s) left) — renew it or the risk returns to the register",
+            _W, "risk", risk.id, "/risks")
 
     _control_stmt = select(Control).where(
         Control.deleted.is_(False),

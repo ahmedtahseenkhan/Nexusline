@@ -1,10 +1,10 @@
 """Lightweight in-process background scheduler.
 
-Runs a periodic sweep across every tenant: refreshes the cross-module alert set and
-emails a digest of newly raised alerts to that tenant's active users. Implemented as
-a plain asyncio task (no external scheduler dependency) started/stopped by the app
-lifespan. Each tenant is processed in its own RLS-scoped transaction, and one
-tenant's failure never aborts the sweep.
+Runs a periodic sweep across every tenant: lapses risk acceptances whose approval has
+run out, refreshes the cross-module alert set, and emails a digest of newly raised
+alerts to that tenant's active users. Implemented as a plain asyncio task (no external
+scheduler dependency) started/stopped by the app lifespan. Each tenant is processed in
+its own RLS-scoped transaction, and one tenant's failure never aborts the sweep.
 
 This is what turns the notification engine from "computed on page load" into a true
 time-driven reminder/chasing system (eramba's cron model).
@@ -20,7 +20,7 @@ from app.core.config import settings
 from app.core.database import system_session, tenant_session
 from app.models.identity import User
 from app.models.tenant import Tenant
-from app.services import email, notifications
+from app.services import email, notifications, risk_acceptance
 
 logger = logging.getLogger("nexusline.scheduler")
 
@@ -35,9 +35,15 @@ async def run_sweep() -> dict:
 
     total_new = 0
     emailed = 0
+    lapsed_acceptances = 0
     for tenant_id, tenant_name in tenants:
         try:
             async with tenant_session(tenant_id) as db:
+                # State first, alerts second: lapsing an acceptance puts its risk back in
+                # the register, and the scan that follows must see that new state or the
+                # digest would describe a register one sweep out of date.
+                lapsed = await risk_acceptance.expire_lapsed(db, tenant_id)
+                lapsed_acceptances += lapsed.expired
                 new = await notifications.refresh(db, tenant_id)
                 if not new:
                     continue
@@ -55,7 +61,12 @@ async def run_sweep() -> dict:
         except Exception:  # noqa: BLE001 - isolate per-tenant failures
             logger.exception("Scheduler sweep failed for tenant %s", tenant_id)
 
-    return {"tenants": len(tenants), "new_alerts": total_new, "digests_sent": emailed}
+    return {
+        "tenants": len(tenants),
+        "new_alerts": total_new,
+        "digests_sent": emailed,
+        "acceptances_expired": lapsed_acceptances,
+    }
 
 
 async def _escalate_tat_breaches(db, tenant_name: str, new_alerts: list) -> None:

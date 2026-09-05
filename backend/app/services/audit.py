@@ -1,6 +1,6 @@
 """Helpers to append to the activity log / audit trail.
 
-Two entry points, because audit has two shapes:
+Three entry points, because audit has three shapes:
 
 * :func:`record` — a business record changed, attributed to an authenticated ``User``.
   Also snapshots a version and fans the event out to subscribed webhooks.
@@ -8,6 +8,10 @@ Two entry points, because audit has two shapes:
   when there is *no* authenticated user to attribute them to (a failed login, a lockout,
   an unknown email), which is precisely the class of event a bank examiner asks for
   first. Nothing is version-snapshotted — there is no record to snapshot.
+* :func:`record_system` — a business record changed with nobody at the keyboard: the
+  scheduled sweep lapsing an expired risk acceptance, for instance. The trail must not
+  imply a person did it, and it must not silently omit the change either — an auditor
+  asking "who un-accepted this risk?" gets ``system`` and the reason, not a blank.
 """
 from __future__ import annotations
 
@@ -21,6 +25,10 @@ from app.models.identity import User
 
 # entity_type used for authentication/session events.
 AUTH_ENTITY = "auth"
+
+#: Actor recorded for changes the platform makes on its own schedule. Deliberately not a
+#: real address: nothing should ever be able to authenticate as it.
+SYSTEM_ACTOR_EMAIL = "system@nexusline"
 
 
 async def record(
@@ -65,6 +73,53 @@ async def record(
             "entity_id": str(entity_id) if entity_id else None,
             "summary": summary,
             "actor": actor.email,
+            "changes": changes or {},
+        },
+    )
+
+
+async def record_system(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    action: str,
+    entity_type: str,
+    entity_id: uuid.UUID | None,
+    summary: str,
+    changes: dict[str, Any] | None = None,
+) -> None:
+    """Append a change the scheduler made, attributed to the platform itself.
+
+    Webhooks are fanned out exactly as for a user-driven change — a downstream system
+    that cares "this risk is no longer accepted" cares regardless of who caused it — but
+    no version snapshot is taken, since the platform is not an assessor and its edits
+    should not appear in the record's authored history.
+    """
+    db.add(
+        AuditLog(
+            tenant_id=tenant_id,
+            actor_id=None,
+            actor_email=SYSTEM_ACTOR_EMAIL,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            summary=summary,
+            changes=changes or {},
+        )
+    )
+
+    from app.services import webhooks
+
+    await webhooks.dispatch(
+        db,
+        entity_type=entity_type,
+        action=action,
+        payload={
+            "event": f"{entity_type}.{action}",
+            "entity_type": entity_type,
+            "entity_id": str(entity_id) if entity_id else None,
+            "summary": summary,
+            "actor": SYSTEM_ACTOR_EMAIL,
             "changes": changes or {},
         },
     )

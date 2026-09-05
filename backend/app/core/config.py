@@ -101,6 +101,15 @@ class Settings(BaseSettings):
     seed_org_slug: str = "acme"
     seed_admin_email: str = "admin@acme.com"
     seed_admin_password: str = "ChangeMe123!"
+    # A second, deliberately empty organisation created alongside the demo one. Its
+    # entire job is to make tenant isolation visible: sign in to it and the register is
+    # blank, because none of the demo org's data is reachable from here. Without it a
+    # deployment only ever gets exercised on one org, which is how multi-tenancy goes
+    # unvalidated right up to the day a second bank is onboarded.
+    seed_second_org: bool = True
+    seed_second_org_name: str = "Second Bank (isolation demo)"
+    seed_second_org_slug: str = "second"
+    seed_second_admin_email: str = "admin@second.com"
 
     def _url(self, user: str, password: str) -> str:
         return (

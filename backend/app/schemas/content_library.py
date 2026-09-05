@@ -21,6 +21,9 @@ class ContentPackSummary(BaseModel):
     domain: str
     requirement_count: int
     installed: bool = False
+    #: The tenant's Framework this pack was installed as — lets the library link straight
+    #: to it in Compliance. None until installed.
+    framework_id: uuid.UUID | None = None
 
 
 class InstallResult(BaseModel):
