@@ -281,6 +281,9 @@ const FINDING_BLANK: FindingState = {
 /* ================================================================== page */
 function ComplianceInner() {
   const [openId, setOpenId] = useRecordParam("id"); // open requirement id (deep-linkable)
+  // `?framework=<id>` lets other modules (the Framework Library, a risk's requirement chip)
+  // land on a specific framework instead of whichever sorts first.
+  const [frameworkParam] = useRecordParam("framework");
   const [frameworks, setFrameworks] = useState<Framework[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [gap, setGap] = useState<GapAnalysis | null>(null);
@@ -378,7 +381,11 @@ function ComplianceInner() {
   );
 
   useEffect(() => {
-    loadFrameworks().catch((e) => setError(e instanceof Error ? e.message : "Failed to load frameworks"));
+    loadFrameworks(frameworkParam ?? undefined).catch((e) =>
+      setError(e instanceof Error ? e.message : "Failed to load frameworks"),
+    );
+    // The URL param only steers the first load; later selection is the user's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadFrameworks]);
 
   // gap analysis stat cards for the selected framework (server-computed)

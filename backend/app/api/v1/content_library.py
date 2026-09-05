@@ -13,6 +13,8 @@ Reuses the compliance permission keys: ``compliance:read`` (browse) and
 """
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends, status
 
 from app.core.deps import CurrentUser, DbSession, require
@@ -24,6 +26,7 @@ from app.schemas.content_library import (
 from app.services.framework_library import (
     TEMPLATES,
     install_template,
+    installed_template_frameworks,
     installed_template_keys,
 )
 
@@ -51,7 +54,7 @@ _DOMAINS: dict[str, str] = {
 }
 
 
-def _summary(key: str, installed: set[str]) -> ContentPackSummary:
+def _summary(key: str, installed: dict[str, uuid.UUID]) -> ContentPackSummary:
     tpl = TEMPLATES[key]
     return ContentPackSummary(
         id=key,
@@ -61,6 +64,7 @@ def _summary(key: str, installed: set[str]) -> ContentPackSummary:
         domain=_DOMAINS.get(key, "Compliance"),
         requirement_count=len(tpl["requirements"]),
         installed=key in installed,
+        framework_id=installed.get(key),
     )
 
 
@@ -71,7 +75,7 @@ def _summary(key: str, installed: set[str]) -> ContentPackSummary:
 )
 async def list_packs(db: DbSession) -> list[ContentPackSummary]:
     """List every installable framework, flagging which are already installed."""
-    installed = await installed_template_keys(db)
+    installed = await installed_template_frameworks(db)
     return [_summary(key, installed) for key in TEMPLATES]
 
 
