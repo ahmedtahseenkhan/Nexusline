@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { api, apiCall, type CustomField, type RiskAcceptance, type RiskSetting } from "@/lib/api";
+import { api, apiCall, type CustomField, type MatrixLevel, type RiskAcceptance, type RiskMatrixConfig, type RiskSetting } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
@@ -279,6 +279,12 @@ function RisksPage() {
   // Segment scope. A risk workshop convenes around one business unit or process, so the
   // register needs to narrow to that cut — and whatever is narrowed to here is what the
   // register PDF exports, so the download always matches the screen it was launched from.
+  // The organisation's own wording for each rung of the two axes. An assessor picking
+  // "4" needs to know what the bank decided 4 means, or the number is just a number and
+  // two people scoring the same risk will disagree.
+  const [matrix, setMatrix] = useState<RiskMatrixConfig | null>(null);
+  const [showScale, setShowScale] = useState(false);
+
   const [segments, setSegments] = useState<{ units: Named[]; processes: Named[] }>({ units: [], processes: [] });
   const [scopeUnit, setScopeUnit] = useState("");
   const [scopeProcess, setScopeProcess] = useState("");
@@ -294,6 +300,49 @@ function RisksPage() {
   const matrixSize = settings?.matrix_size ?? 5;
   const maxScore = matrixSize * matrixSize;
   const SCALE = scaleOptions(matrixSize);
+
+  /* Each axis gets its own options, labelled in the organisation's words — "3 — Possible"
+     rather than a bare "3". The dropdown is a native <select>, so the option text is the
+     only thing that can carry meaning inside it; the full definition goes underneath the
+     field and in the reference table, where it has room to be a sentence. */
+  const axisOptions = (levels: MatrixLevel[] | undefined): Option[] =>
+    levels?.length
+      ? levels.map((l) => ({ value: String(l.level), label: l.label ? `${l.level} — ${l.label}` : String(l.level) }))
+      : SCALE;
+  const LIKELIHOOD = axisOptions(matrix?.likelihood_levels);
+  const IMPACT = axisOptions(matrix?.impact_levels);
+
+  /** The chosen rung's definition, for the line under the field. */
+  const rung = (levels: MatrixLevel[] | undefined, value: number | string) => {
+    const n = Number(value);
+    if (!n || !levels) return null;
+    const hit = levels.find((l) => l.level === n);
+    if (!hit || (!hit.label && !hit.definition)) return null;
+    return (
+      <span>
+        <b>{hit.level} — {hit.label}</b>
+        {hit.definition ? `: ${hit.definition}` : ""}
+      </span>
+    );
+  };
+
+  /** Both axes' chosen wording on one line, or nothing when neither is set. */
+  const chosen = (likelihood: number | string, impact: number | string) => {
+    const l = rung(matrix?.likelihood_levels, likelihood);
+    const i = rung(matrix?.impact_levels, impact);
+    if (!l && !i) return null;
+    return (
+      <div className="muted" style={{ fontSize: 12.5, lineHeight: 1.6, marginTop: 6 }}>
+        {l && <div>Likelihood {l}</div>}
+        {i && <div>Impact {i}</div>}
+      </div>
+    );
+  };
+
+  /** True once somebody has actually written the criteria down. */
+  const scaleIsDefined = Boolean(
+    matrix?.likelihood_levels?.some((l) => l.definition) || matrix?.impact_levels?.some((l) => l.definition),
+  );
   const fetchRisks = useCallback((qs: string) => apiCall<PagedList<RiskRow>>("GET", `/risks?${qs}`), []);
 
   // One scope object, read by the table and by the export. Undefined entries are
@@ -335,6 +384,7 @@ function RisksPage() {
       .then(([u, p]) => setSegments({ units: u.items, processes: p.items }))
       .catch(() => {});
     api.customFields("risk").then((d) => setCfDefs(d.filter((x) => x.enabled))).catch(() => {});
+    api.riskMatrixConfig().then(setMatrix).catch(() => {});
   }, []);
 
   function openNew() {
@@ -484,10 +534,63 @@ function RisksPage() {
 
   const assessmentTab = (
     <>
-      <Field label="Inherent Risk" help="Likelihood × Impact before any controls are considered (1–5 scale).">
+      {/* The criteria the two numbers below are supposed to mean, on the same screen as
+          the numbers. Collapsed by default so it does not push the form down, but one
+          click away — an assessor comparing rung 3 against rung 4 should not have to
+          leave the record to do it. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+        <span className="muted" style={{ fontSize: 12.5 }}>
+          Scoring on your {matrixSize}×{matrixSize} matrix — scores run 1 to {maxScore}.
+        </span>
+        <button type="button" className="btn secondary sm" onClick={() => setShowScale((v) => !v)}>
+          {showScale ? "Hide scale" : "What do 1–" + matrixSize + " mean?"}
+        </button>
+      </div>
+
+      {showScale && (
+        <div className="card card-pad" style={{ marginBottom: 14 }}>
+          {!scaleIsDefined && (
+            <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+              Your organisation has not written its criteria yet, so these are generic
+              placeholders. An administrator sets the real wording under{" "}
+              <b>Risk Register → Appetite → Risk methodology</b>; that is what makes two
+              assessors score the same risk the same way.
+            </div>
+          )}
+          {/* auto-fit rather than 1fr 1fr: the criteria column holds a sentence, and at
+              10 rungs in a modal two fixed columns squeeze it into a ribbon. */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+            {([["Likelihood", matrix?.likelihood_levels], ["Impact", matrix?.impact_levels]] as const).map(
+              ([axis, levels]) => (
+                <div key={axis}>
+                  <div className="bt" style={{ marginBottom: 6 }}>{axis}</div>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr><th style={{ width: 34 }}>#</th><th style={{ width: "34%" }}>Means</th><th>Criteria</th></tr>
+                      </thead>
+                      <tbody>
+                        {(levels ?? []).map((l) => (
+                          <tr key={`${axis}-${l.level}`}>
+                            <td className="ref">{l.level}</td>
+                            <td>{l.label || "—"}</td>
+                            <td className="muted" style={{ fontSize: 12.5 }}>{l.definition || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ),
+            )}
+          </div>
+        </div>
+      )}
+
+      <Field label="Inherent Risk" help={`Likelihood × Impact before any controls are considered (1–${matrixSize} scale).`}>
         <div className="field-row">
-          <Select value={String(f.inherent_likelihood)} onChange={(v) => set("inherent_likelihood", v === "" ? "" : Number(v))} options={SCALE} placeholder="Likelihood" />
-          <Select value={String(f.inherent_impact)} onChange={(v) => set("inherent_impact", v === "" ? "" : Number(v))} options={SCALE} placeholder="Impact" />
+          <Select value={String(f.inherent_likelihood)} onChange={(v) => set("inherent_likelihood", v === "" ? "" : Number(v))} options={LIKELIHOOD} placeholder="Likelihood" />
+          <Select value={String(f.inherent_impact)} onChange={(v) => set("inherent_impact", v === "" ? "" : Number(v))} options={IMPACT} placeholder="Impact" />
           <div className="field" style={{ margin: 0 }}>
             <label>Score</label>
             <div style={{ paddingTop: 4 }}>
@@ -495,11 +598,12 @@ function RisksPage() {
             </div>
           </div>
         </div>
+        {chosen(f.inherent_likelihood, f.inherent_impact)}
       </Field>
       <Field label="Residual Risk" help="Likelihood × Impact after controls. Leave blank until assessed.">
         <div className="field-row">
-          <Select value={f.residual_likelihood} onChange={(v) => set("residual_likelihood", v)} options={SCALE} placeholder="Likelihood" />
-          <Select value={f.residual_impact} onChange={(v) => set("residual_impact", v)} options={SCALE} placeholder="Impact" />
+          <Select value={f.residual_likelihood} onChange={(v) => set("residual_likelihood", v)} options={LIKELIHOOD} placeholder="Likelihood" />
+          <Select value={f.residual_impact} onChange={(v) => set("residual_impact", v)} options={IMPACT} placeholder="Impact" />
           <div className="field" style={{ margin: 0 }}>
             <label>Score</label>
             <div style={{ paddingTop: 4 }}>
@@ -507,6 +611,7 @@ function RisksPage() {
             </div>
           </div>
         </div>
+        {chosen(f.residual_likelihood, f.residual_impact)}
       </Field>
 
       <Field label="Quantitative (FAIR)" help="Annual Loss Expectancy = loss events / year × $ per event. Optional.">
@@ -679,7 +784,15 @@ function RisksPage() {
               </form>
 
               <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-                <RiskMethodology onSaved={() => { reload(); api.riskSettings().then(setSettings).catch(() => {}); }} />
+                <RiskMethodology
+                  onSaved={() => {
+                    reload();
+                    api.riskSettings().then(setSettings).catch(() => {});
+                    // Pull the new wording straight through, so criteria written here
+                    // show up on the next risk form without a page reload.
+                    api.riskMatrixConfig().then(setMatrix).catch(() => {});
+                  }}
+                />
               </div>
             </>
           )}
