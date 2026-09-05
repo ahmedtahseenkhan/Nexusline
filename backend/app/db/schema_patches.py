@@ -8,6 +8,8 @@ single source of truth, each statement written to be safely re-runnable.
 """
 from __future__ import annotations
 
+from app.core.risk_scale import MAX_MATRIX_SIZE
+
 # enum types referenced by the new columns on the existing assets table.
 ASSET_ENUMS: dict[str, tuple[str, ...]] = {
     "asset_class": ("it_asset", "information_asset"),
@@ -60,15 +62,26 @@ RISK_COLUMNS: list[tuple[str, str, str, str | None]] = [
     ("risks", "residual_override_reason", "TEXT", "''"),
 ]
 
-# The 1..5 scale checks predate the configurable matrix and would reject a 6x6 register.
-# The database can only police the widest scale any tenant may choose; the tenant's own
-# `matrix_size` is enforced in the API layer, since a check constraint cannot vary by
-# RLS tenant. Dropping before adding keeps the pair re-runnable.
-RISK_SCALE_CONSTRAINTS: list[tuple[str, str]] = [
-    ("ck_risk_inh_likelihood", "inherent_likelihood BETWEEN 1 AND 6"),
-    ("ck_risk_inh_impact", "inherent_impact BETWEEN 1 AND 6"),
-    ("ck_risk_res_likelihood", "residual_likelihood IS NULL OR residual_likelihood BETWEEN 1 AND 6"),
-    ("ck_risk_res_impact", "residual_impact IS NULL OR residual_impact BETWEEN 1 AND 6"),
+# The original 1..5 scale checks predate the configurable matrix and would reject a
+# wider register; every later widening (6x6, then 10x10) has to walk the same path. The
+# database can only police the widest scale any tenant may choose — `MAX_MATRIX_SIZE`,
+# the single source of truth also used by the ORM constraints and the Pydantic
+# validators; the tenant's own `matrix_size` is enforced in the API layer, since a check
+# constraint cannot vary by RLS tenant. Dropping before adding keeps the pair
+# re-runnable, so an installation already at 6 is simply re-stamped at 10.
+_CEILING = MAX_MATRIX_SIZE
+
+RISK_SCALE_CONSTRAINTS: list[tuple[str, str, str]] = [
+    # (table, constraint name, expression)
+    ("risks", "ck_risk_inh_likelihood", f"inherent_likelihood BETWEEN 1 AND {_CEILING}"),
+    ("risks", "ck_risk_inh_impact", f"inherent_impact BETWEEN 1 AND {_CEILING}"),
+    ("risks", "ck_risk_res_likelihood",
+     f"residual_likelihood IS NULL OR residual_likelihood BETWEEN 1 AND {_CEILING}"),
+    ("risks", "ck_risk_res_impact",
+     f"residual_impact IS NULL OR residual_impact BETWEEN 1 AND {_CEILING}"),
+    # The scale-definition rungs have to widen with the matrix, or a bank on a 1..10
+    # scale can set the scores but never write down what rungs 7..10 mean.
+    ("risk_matrix_levels", "ck_risk_matrix_level", f"level BETWEEN 1 AND {_CEILING}"),
 ]
 
 
@@ -86,10 +99,42 @@ def risk_methodology_ddl_statements() -> list[str]:
         statements.append(
             f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl_type}{default_clause}{not_null}"
         )
-    for name, expression in RISK_SCALE_CONSTRAINTS:
-        statements.append(f"ALTER TABLE risks DROP CONSTRAINT IF EXISTS {name}")
-        statements.append(f"ALTER TABLE risks ADD CONSTRAINT {name} CHECK ({expression})")
+    statements.extend(risk_scale_constraint_statements())
     return statements
+
+
+def risk_scale_constraint_statements() -> list[str]:
+    """Re-stamp each scale check at the current ceiling, skipping absent tables.
+
+    The table guard matters for one caller: migration 0017 applies these patches *before*
+    its ``create_all`` builds ``risk_matrix_levels``, so an unguarded ALTER would break a
+    fresh migrate-from-zero. Where the table is missing there is nothing to widen anyway —
+    ``create_all`` will build it from the ORM, which reads the same ceiling.
+    """
+    out: list[str] = []
+    for table, name, expression in RISK_SCALE_CONSTRAINTS:
+        out.append(
+            f"DO $$ BEGIN IF to_regclass('public.{table}') IS NOT NULL THEN "
+            f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}; "
+            f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({expression}); "
+            f"END IF; END $$;"
+        )
+    return out
+
+
+# --- platform administration --------------------------------------------------
+def platform_admin_ddl_statements() -> list[str]:
+    """The deployment-operator flag on the pre-existing ``users`` table.
+
+    A column rather than a permission code: permissions live in tenant-scoped ``roles``
+    rows, so an organisation's own admin could otherwise grant themselves the run of the
+    whole platform. Defaults to false, so applying this to a live database changes
+    nobody's access.
+    """
+    return [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_platform_admin "
+        "BOOLEAN DEFAULT false NOT NULL",
+    ]
 
 
 # --- turnaround-time (TAT) clock ---------------------------------------------

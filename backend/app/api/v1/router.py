@@ -52,6 +52,7 @@ from app.api.v1 import (
     organization,
     outsourcing,
     pdf,
+    platform,
     policies,
     privacy,
     projects,
@@ -153,6 +154,9 @@ api_router.include_router(vendors.router)
 api_router.include_router(vendors.types_router)
 api_router.include_router(assessments.router)
 api_router.include_router(organization.router)
+# Deployment operators, not organisation users — gated by the is_platform_admin column
+# rather than a module licence, because provisioning is how a deployment is run at all.
+api_router.include_router(platform.router)
 api_router.include_router(audit.router)
 api_router.include_router(versions.router)
 api_router.include_router(users.router)

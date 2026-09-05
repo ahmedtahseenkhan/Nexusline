@@ -102,6 +102,25 @@ export async function uploadMultipart<T>(path: string, file: File): Promise<T> {
 }
 
 /** Fetch a protected file with the bearer token and trigger a browser download. */
+/** Scope a risk export can be narrowed by — the register's own filter, by another name. */
+export type RiskExportScope = {
+  business_unit_id?: string;
+  process_id?: string;
+  status?: string;
+  category?: string;
+  search?: string;
+};
+
+/** "?a=1&b=2" from the defined entries, or "" when there are none. */
+export function queryString(params?: Record<string, string | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value) search.set(key, value);
+  }
+  const query = search.toString();
+  return query ? `?${query}` : "";
+}
+
 export async function downloadBlob(path: string, filename: string): Promise<void> {
   const token = getToken();
   const res = await fetch(`${API_BASE}/api/v1${path}`, {
@@ -452,6 +471,20 @@ export interface SuggestedResidual {
   matches_current: boolean;
 }
 
+/** A formal decision to accept a risk, with the expiry that makes it a decision rather
+ *  than a permanent omission. */
+export interface RiskAcceptance {
+  id: string;
+  risk_id: string;
+  requested_by: string | null;
+  approver_id: string | null;
+  rationale: string;
+  status: "pending" | "approved" | "rejected" | "expired";
+  expires_at: string | null;
+  decided_at: string | null;
+  created_at: string;
+}
+
 export interface RiskAggregateRow {
   category: string;
   count: number;
@@ -692,6 +725,30 @@ export interface Me {
   roles: { name: string }[];
   mfa_enabled?: boolean;
   auth_source?: string;
+  /** Operator of the deployment, not of this organisation — gates the Organisations console. */
+  is_platform_admin?: boolean;
+}
+
+/** One organisation on this deployment. Counts are read inside that organisation's own
+ *  scope, never across it. */
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  is_active: boolean;
+  created_at: string;
+  users: number;
+  active_users: number;
+  risks: number;
+  controls: number;
+}
+
+export interface PlatformSummary {
+  organizations: number;
+  active_organizations: number;
+  users: number;
+  deployment: string;
+  license: Record<string, unknown>;
 }
 
 export interface Notification {
@@ -1630,6 +1687,20 @@ export const api = {
     request<Framework>("/frameworks", { method: "POST", body: JSON.stringify(payload) }),
 
   me: () => request<Me>("/auth/me"),
+
+  // --- platform operations (organisation provisioning; platform admins only) ---
+  organizations: (withCounts = true) =>
+    request<Organization[]>(`/platform/organizations?with_counts=${withCounts}`),
+  createOrganization: (body: {
+    name: string;
+    slug: string;
+    admin_email: string;
+    admin_password: string;
+    admin_full_name?: string;
+  }) => request<Organization>("/platform/organizations", { method: "POST", body: JSON.stringify(body) }),
+  updateOrganization: (id: string, body: { name?: string; is_active?: boolean }) =>
+    request<Organization>(`/platform/organizations/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  platformSummary: () => request<PlatformSummary>("/platform/summary"),
   notifications: () => request<NotificationList>("/notifications"),
   markNotificationsSeen: () => request<void>("/notifications/seen", { method: "POST" }),
   approvals: () => request<Page<ApprovalRequest>>("/approvals?limit=200"),
@@ -1804,6 +1875,14 @@ export const api = {
       body: JSON.stringify({ items }),
     }),
 
+  requestAcceptance: (riskId: string, body: { rationale: string; expires_at?: string | null }) =>
+    request<RiskAcceptance>(`/risks/${riskId}/acceptances`, { method: "POST", body: JSON.stringify(body) }),
+  decideAcceptance: (riskId: string, acceptanceId: string, body: { approve: boolean; note?: string }) =>
+    request<RiskAcceptance>(`/risks/${riskId}/acceptances/${acceptanceId}/decision`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   suggestedResidual: (riskId: string) =>
     request<SuggestedResidual>(`/risks/${riskId}/suggested-residual`),
   acceptResidual: (riskId: string, payload: { likelihood?: number; impact?: number; override_reason?: string }) =>
@@ -1861,7 +1940,10 @@ export const api = {
   lossSummary: () => request<LossSummary>("/loss-events-summary"),
 
   // PDF reports (board / audit-committee / Shariah-board packs)
-  pdfRiskRegister: () => downloadBlob("/reports/pdf/risk-register", "risk-register.pdf"),
+  /** Exports exactly the scope the register is showing, so the PDF and the screen can
+   *  never disagree. Undefined entries are dropped. */
+  pdfRiskRegister: (scope?: RiskExportScope) =>
+    downloadBlob(`/reports/pdf/risk-register${queryString(scope)}`, "risk-register.pdf"),
   pdfExecutiveSummary: () => downloadBlob("/reports/pdf/executive-summary", "executive-summary.pdf"),
   pdfAuditEngagement: (id: string, ref: string) =>
     downloadBlob(`/reports/pdf/audit-engagement/${id}`, `audit-${ref}.pdf`),

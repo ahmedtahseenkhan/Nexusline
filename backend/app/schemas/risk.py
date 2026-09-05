@@ -62,6 +62,10 @@ class RiskBase(BaseModel):
 
 
 class RiskCreate(RiskBase):
+    # Segment scoping: which business units and processes this risk sits in. Banks run
+    # assessments a segment at a time, so these are what the register is filtered by.
+    business_unit_ids: list[uuid.UUID] = Field(default_factory=list)
+    process_ids: list[uuid.UUID] = Field(default_factory=list)
     asset_ids: list[uuid.UUID] = Field(default_factory=list)
     control_ids: list[uuid.UUID] = Field(default_factory=list)
     threat_ids: list[uuid.UUID] = Field(default_factory=list)
@@ -90,6 +94,8 @@ class RiskUpdate(BaseModel):
     owner_id: uuid.UUID | None = None
     annual_loss_frequency: float | None = Field(default=None, ge=0)
     single_loss_expectancy: float | None = Field(default=None, ge=0)
+    business_unit_ids: list[uuid.UUID] | None = None
+    process_ids: list[uuid.UUID] | None = None
     asset_ids: list[uuid.UUID] | None = None
     control_ids: list[uuid.UUID] | None = None
     threat_ids: list[uuid.UUID] | None = None
@@ -162,6 +168,8 @@ class RiskRead(BaseModel):
     workflow_status: WorkflowState
     workflow_owner: str
 
+    business_units: list[NamedRef] = []
+    processes: list[NamedRef] = []
     assets: list[AssetRef] = []
     controls: list[ControlRef] = []
     threats: list[NamedRef] = []
@@ -228,8 +236,9 @@ class RiskSettingRead(BaseModel):
 
 
 class RiskSettingUpdate(BaseModel):
-    # Upper bound is the largest score a 6x6 matrix can produce. A value above the
-    # tenant's own matrix maximum is rejected in the API, where the size is known.
+    # Upper bound is the largest score the widest configurable matrix can produce. A
+    # value above the tenant's own matrix maximum is rejected in the API, where the size
+    # is known.
     appetite_score: int = Field(ge=1, le=MAX_MATRIX_SIZE * MAX_MATRIX_SIZE)
     tolerance_score: int = Field(ge=1, le=MAX_MATRIX_SIZE * MAX_MATRIX_SIZE)
 

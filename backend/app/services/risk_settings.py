@@ -15,11 +15,17 @@ from app.services.risk_scoring import DEFAULT_MATRIX_SIZE, max_score_for
 
 #: Generic scale wording used until a bank supplies its own. Deliberately plain: these
 #: are placeholders that prompt someone to write the real criteria, not a methodology.
+#: Covers the full 1..``MAX_MATRIX_SIZE`` range — a bank on a 1-10 scale that has not yet
+#: written its criteria should still see words rather than bare numbers on rungs 7-10.
 DEFAULT_LIKELIHOOD_LABELS: dict[int, str] = {
-    1: "Rare", 2: "Unlikely", 3: "Possible", 4: "Likely", 5: "Almost certain", 6: "Expected",
+    1: "Rare", 2: "Unlikely", 3: "Possible", 4: "Likely", 5: "Almost certain",
+    6: "Expected", 7: "Frequent", 8: "Very frequent", 9: "Near-continuous",
+    10: "Continuous",
 }
 DEFAULT_IMPACT_LABELS: dict[int, str] = {
-    1: "Insignificant", 2: "Minor", 3: "Moderate", 4: "Major", 5: "Severe", 6: "Catastrophic",
+    1: "Insignificant", 2: "Minor", 3: "Moderate", 4: "Major", 5: "Severe",
+    6: "Catastrophic", 7: "Grave", 8: "Critical to solvency", 9: "Existential",
+    10: "Institution-ending",
 }
 
 

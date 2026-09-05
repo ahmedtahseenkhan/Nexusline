@@ -24,7 +24,8 @@ from app.models.enums import (
     RiskStatus,
     TreatmentStrategy,
 )
-from app.models.risk import Risk, RiskAcceptance, risk_assets
+from app.models.organization import BusinessUnit, Process
+from app.models.risk import Risk, RiskAcceptance, risk_assets, risk_business_units, risk_processes
 from app.models.threat import Threat, Vulnerability
 from app.schemas.common import Page
 from app.schemas.risk import (
@@ -88,11 +89,66 @@ async def _next_reference(db) -> str:
     return await next_reference(db, Risk, "R")
 
 
+def build_risk_query(
+    *,
+    status: RiskStatus | None = None,
+    category: str | None = None,
+    business_unit_id: uuid.UUID | None = None,
+    process_id: uuid.UUID | None = None,
+    asset_id: uuid.UUID | None = None,
+    search: str | None = None,
+) -> Select:
+    """The register's filter, in one place.
+
+    Shared with the PDF export so "download what I am looking at" means exactly that.
+    Duplicating these predicates is how a report quietly stops matching the screen it
+    was launched from, which is the worst kind of reporting bug: nothing errors, the
+    numbers are just wrong.
+
+    Segment filters are ``EXISTS`` sub-queries rather than joins, because a risk in two
+    business units would otherwise come back twice and inflate every count on the page.
+    """
+    stmt: Select = select(Risk).where(Risk.deleted.is_(False))
+    if status is not None:
+        stmt = stmt.where(Risk.status == status)
+    if category:
+        stmt = stmt.where(Risk.category == category)
+    if business_unit_id is not None:
+        stmt = stmt.where(
+            select(risk_business_units.c.risk_id)
+            .where(
+                risk_business_units.c.risk_id == Risk.id,
+                risk_business_units.c.business_unit_id == business_unit_id,
+            )
+            .exists()
+        )
+    if process_id is not None:
+        stmt = stmt.where(
+            select(risk_processes.c.risk_id)
+            .where(
+                risk_processes.c.risk_id == Risk.id,
+                risk_processes.c.process_id == process_id,
+            )
+            .exists()
+        )
+    if asset_id is not None:
+        stmt = stmt.where(
+            select(risk_assets.c.risk_id)
+            .where(risk_assets.c.risk_id == Risk.id, risk_assets.c.asset_id == asset_id)
+            .exists()
+        )
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(Risk.title.ilike(like) | Risk.reference.ilike(like))
+    return stmt
+
+
 async def _check_scale(db, user: CurrentUser, values: dict[str, object]) -> None:
     """Reject scores outside the tenant's configured matrix.
 
-    The schema only bounds scores to the widest scale any tenant may choose (1..6) and
-    the database check constraint does the same, because neither can vary per tenant.
+    The schema only bounds scores to the widest scale any tenant may choose
+    (``MAX_MATRIX_SIZE``) and the database check constraint does the same, because
+    neither can vary per tenant.
     This is where the tenant's own ``matrix_size`` is enforced — without it, a 4x4
     organisation could store a 5 that its own heat map has no cell for.
     """
@@ -159,20 +215,23 @@ async def list_risks(
     user: CurrentUser,
     status_filter: Annotated[RiskStatus | None, Query(alias="status")] = None,
     category: str | None = None,
+    business_unit_id: uuid.UUID | None = None,
+    process_id: uuid.UUID | None = None,
+    asset_id: uuid.UUID | None = None,
     search: str | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[RiskRead]:
-    stmt: Select = select(Risk).where(Risk.deleted.is_(False))
-    if status_filter is not None:
-        stmt = stmt.where(Risk.status == status_filter)
-    if category:
-        stmt = stmt.where(Risk.category == category)
-    if search:
-        like = f"%{search}%"
-        stmt = stmt.where(Risk.title.ilike(like) | Risk.reference.ilike(like))
+    stmt: Select = build_risk_query(
+        status=status_filter,
+        category=category,
+        business_unit_id=business_unit_id,
+        process_id=process_id,
+        asset_id=asset_id,
+        search=search,
+    )
 
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
@@ -199,10 +258,15 @@ async def list_risks(
 async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> RiskRead:
     await _check_scale(db, user, body.model_dump())
     data = body.model_dump(
-        exclude={"asset_ids", "control_ids", "threat_ids", "vulnerability_ids", "policy_ids", "incident_ids"}
+        exclude={
+            "business_unit_ids", "process_ids", "asset_ids", "control_ids",
+            "threat_ids", "vulnerability_ids", "policy_ids", "incident_ids",
+        }
     )
     risk = Risk(tenant_id=user.tenant_id, **data)
     risk.reference = await _next_reference(db)
+    risk.business_units = await _resolve(db, BusinessUnit, body.business_unit_ids)
+    risk.processes = await _resolve(db, Process, body.process_ids)
     risk.assets = await _resolve(db, Asset, body.asset_ids)
     risk.controls = await _resolve(db, Control, body.control_ids)
     risk.threats = await _resolve(db, Threat, body.threat_ids)
@@ -348,12 +412,18 @@ async def update_risk(
     data = body.model_dump(exclude_unset=True)
     await _check_scale(db, user, data)
 
+    business_unit_ids = data.pop("business_unit_ids", None)
+    process_ids = data.pop("process_ids", None)
     asset_ids = data.pop("asset_ids", None)
     control_ids = data.pop("control_ids", None)
     threat_ids = data.pop("threat_ids", None)
     vulnerability_ids = data.pop("vulnerability_ids", None)
     policy_ids = data.pop("policy_ids", None)
     incident_ids = data.pop("incident_ids", None)
+    if business_unit_ids is not None:
+        risk.business_units = await _resolve(db, BusinessUnit, business_unit_ids)
+    if process_ids is not None:
+        risk.processes = await _resolve(db, Process, process_ids)
     if asset_ids is not None:
         risk.assets = await _resolve(db, Asset, asset_ids)
     if control_ids is not None:

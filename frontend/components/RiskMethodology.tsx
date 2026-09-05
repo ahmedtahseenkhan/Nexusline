@@ -13,7 +13,10 @@ import { Badge } from "@/components/badges";
    2. **How much credit a control earns** toward the suggested residual. The engine only
       ever proposes; these weights decide what it proposes. */
 
-const SIZES = [3, 4, 5, 6];
+/* 3 is the floor at which four severity bands still separate; 10 is the ceiling because
+   a bank arriving with a board-approved 1-10 ERM matrix must be able to say so rather
+   than re-score its whole register onto ours. Mirrors MAX_MATRIX_SIZE on the server. */
+const SIZES = [3, 4, 5, 6, 7, 8, 9, 10];
 
 const EFFECTIVENESS_ROWS: { key: keyof ResidualPolicy; label: string; hint: string }[] = [
   { key: "weight_effective", label: "Effective", hint: "Tested and working as intended" },

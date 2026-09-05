@@ -1,6 +1,7 @@
 """Business Organization — the org backbone that every module links to.
 
-* Business Units (hierarchy + RACI head) — own assets, run processes, hold obligations.
+* Business Units (hierarchy + RACI head) — own assets, run processes, hold obligations,
+  and are the segment a risk assessment is normally scoped to.
 * Processes — business processes with continuity objectives (RTO / RPO / RPD) and criticality.
 * Legal — legal/regulatory obligations with a ``risk_magnifier`` and applicable countries.
 
@@ -47,6 +48,12 @@ class BusinessUnit(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMix
     legals: Mapped[list["Legal"]] = relationship(secondary=business_units_legals, lazy="selectin",
         secondaryjoin="and_(business_units_legals.c.legal_id == Legal.id, Legal.deleted == False)",
     )
+    # Read-only: the risk register owns the edge, so a unit page can show "what is on
+    # our risk register" without either side being able to edit the other's links.
+    risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
+        "Risk", secondary="risk_business_units", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(risk_business_units.c.risk_id == Risk.id, Risk.deleted == False)",
+    )
 
 
 class Process(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
@@ -67,6 +74,10 @@ class Process(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     rpd_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)  # max tolerable downtime
 
     business_unit: Mapped["BusinessUnit | None"] = relationship(lazy="selectin")
+    risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
+        "Risk", secondary="risk_processes", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(risk_processes.c.risk_id == Risk.id, Risk.deleted == False)",
+    )
 
 
 class Legal(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):

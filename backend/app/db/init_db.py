@@ -20,6 +20,7 @@ from app.db.schema_patches import (
     risk_methodology_ddl_statements,
     audit_type_ddl_statements,
     fortnightly_ddl_statements,
+    platform_admin_ddl_statements,
     tat_ddl_statements,
 )
 
@@ -92,6 +93,7 @@ async def init_models() -> None:
             *tat_ddl_statements(),
             *audit_type_ddl_statements(),
             *fortnightly_ddl_statements(),
+            *platform_admin_ddl_statements(),
         ):
             await conn.execute(text(statement))
         await apply_rls_policies(conn)

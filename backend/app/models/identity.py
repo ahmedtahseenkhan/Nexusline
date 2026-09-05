@@ -76,6 +76,14 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Operator of the *deployment*, not of this organisation: may create, list and
+    # suspend organisations. Deliberately NOT a role/permission — roles are tenant-scoped
+    # rows, so an org admin could otherwise grant themselves the run of the platform.
+    # This flag can only be set by another platform admin (or the seed/CLI at install),
+    # and it grants no read access to any tenant's business data: the platform endpoints
+    # never open a session scoped to somebody else's org.
+    is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     # Where this account authenticates: "local" (bcrypt) or "ldap" (directory bind).
     auth_source: Mapped[str] = mapped_column(String(16), default="local", nullable=False)
 

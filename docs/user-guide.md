@@ -159,16 +159,32 @@ The left navigation groups every module into seven sections, which this guide fo
 
 ### Risk Register (`/risks`)
 **Purpose:** The platform's central qualitative + quantitative (FAIR) risk log.
-**How to use it:** Create a risk → **General** tab (title, category, owner) → **Assessment** tab (inherent likelihood/impact, plus optional FAIR fields: annual loss frequency, single loss expectancy → auto-computed ALE) → **Links & Relations** tab (link Assets, Controls, Threats, Vulnerabilities, Policies, Incidents) → **Review** tab (frequency). Set your org's **Appetite/Tolerance** thresholds once from the settings panel on this page — every risk is then banded against it.
+**How to use it:** Create a risk → **General** tab (title, category, owner) → **Assessment** tab (inherent likelihood/impact, plus optional FAIR fields: annual loss frequency, single loss expectancy → auto-computed ALE) → **Links & Relations** tab (the **business units and processes** this risk sits in, then Assets, Controls, Threats, Vulnerabilities, Policies, Incidents) → **Review** tab (frequency). Set your org's **Appetite/Tolerance** thresholds once from the settings panel on this page — every risk is then banded against it.
 **Status flow:** `draft → assessed → treatment_planned → treatment_in_progress → accepted → closed`.
-**Key actions:** Appetite/Tolerance editor, risk-methodology editor, Import/Export, "Register PDF" export. A formal **Risk Acceptance** sub-workflow exists in the backend (request → approve/reject, forcing status to `accepted`) but isn't exposed as a button on this page yet.
+**Key actions:** segment scope bar, Appetite/Tolerance editor, risk-methodology editor, Risk Acceptance panel, Import/Export, "Register PDF" export.
 **Connects to:** the platform's hub — Assets, Controls, Threat/Vulnerability library, Policies, Incidents, Goals, Vendors, and optionally a Risk Quantification record.
+
+#### Assessing by segment, not just by asset
+
+Banks do not convene a risk workshop around an asset; they convene one around a **segment** — Digital Banking, Trade Finance, Branch Operations — and the assets are what that segment happens to run on. So a risk links to **business units** and **processes** as well as to assets, and the bar above the register narrows everything to one of them.
+
+Choosing a segment scopes the whole page, not just the table: the counts, and — this is the part that matters — the **Register PDF**. Exporting while scoped gives you that segment's risks and nothing else, with the scope printed on the cover so a filtered pack circulating on its own can never be mistaken for the bank's total exposure.
+
+Both links are many-to-many on purpose. "MFA is not enforced" genuinely belongs to Retail and Corporate at once; forcing a single owner would either duplicate the risk or hide it from one of them.
+
+> **Importing an existing register?** Your spreadsheet almost certainly already has a *Department*, *Division*, *Segment* or *Business Process* column. The importer recognises all of those and links the segment as it loads, so a segment-scoped assessment works on day one rather than after someone re-tags several hundred rows by hand. Deliberately ambiguous headings — "Branch Manager Signature", "Unit Price" — are reported unmapped rather than guessed, because a wrong silent mapping is worse than none.
+
+#### One risk per asset, not one rating stretched across four
+
+A common request is for a single risk tagged to several assets to carry a *different* severity per asset — "MFA missing" is worse on Internet Banking than on an internal reporting server. The register does not work that way, and deliberately: a risk carries one inherent and one residual rating, and the assets on it are references.
+
+The answer ISO 27005 gives, and the one the platform implements, is to produce **one risk per asset**. Press **Generate risks** on the register toolbar (or on either asset register, to scope it to those assets) and the scenario library pairs each selected asset with each applicable threat/vulnerability scenario; the opening impact is derived from *that asset's own* criticality and CIA ratings. So "MFA not enforced" against Internet Banking and against the core banking host arrive as two risks with two ratings and two owners — which is also what lets each be treated, accepted or closed on its own schedule. Nothing is written until you press Create: everything before that is an editable proposal, because a generated register nobody reviewed is worse than no register at all. The scenario catalogue itself is editable under **Scenario Analysis** (`/scenario-analysis`).
 
 #### Configuring your risk matrix
 
 The likelihood × impact matrix is **yours to define**, because ISO 27005 and ISO 31000 don't mandate a 5×5 and most banks already have a scale in their own methodology. Open the settings panel on the Risk Register and set:
 
-- **Matrix size** — 3×3, 4×4, 5×5 (the default) or 6×6. Scores run 1 to size², and the four severity bands scale with it automatically — on 5×5 they are the familiar 1–4 Low, 5–9 Medium, 10–14 High, 15–25 Critical; on 6×6 they become 1–5 / 6–12 / 13–20 / 21–36. There is no separate threshold to maintain, and the heat map, the register's severity chips and the dashboard all read the same bands, so they can never disagree.
+- **Matrix size** — anything from 3×3 up to **10×10**, with 5×5 the default. Scores run 1 to size², and the four severity bands scale with it automatically — on 5×5 they are the familiar 1–4 Low, 5–9 Medium, 10–14 High, 15–25 Critical; on 6×6 they become 1–5 / 6–12 / 13–20 / 21–36; on 10×10, 1–16 / 17–36 / 37–56 / 57–100. There is no separate threshold to maintain, and the heat map, the register's severity chips, the exports and the dashboard all read the same bands, so they can never disagree. A bank arriving with a board-approved 1–10 ERM matrix sets it here rather than re-scoring its register to fit ours.
 - **Scale definitions** — a label and a written definition for every rung of both axes ("3 = Possible — could occur once in 1–3 years", "5 = Severe — PKR 200m–1bn or regulatory censure"). This is what makes scoring repeatable between assessors, and it appears in the heat-map tooltips.
 - **Appetite and tolerance** — bounded by the matrix maximum, and appetite can't exceed tolerance.
 
@@ -195,6 +211,28 @@ Two behaviours worth knowing:
 
 - **A control that isn't working earns nothing.** A failed audit, an overdue test or an open audit finding drops the control out of the calculation, and the rationale says which. So if assurance lapses, the suggestion **rises back towards inherent on its own** the next time anyone opens the risk — no re-run needed.
 - **The weighting is your policy, not our formula.** In the same settings panel you set how many points each effectiveness rating earns, whether that credit reduces likelihood, impact or both, and the maximum any one risk may claim. The shipped default — effective = 2, partially effective = 1, likelihood only, capped at 3 — is deliberately conservative: controls change how often something happens more than how badly it hurts. Set the weights to zero, or switch the suggestion off entirely, and the panel simply reports that residual equals inherent.
+
+#### Accepting a risk, and why it expires
+
+Accepting a risk is the one place in the register where doing nothing is a *decision*. Open a risk and use the **Risk acceptance** panel:
+
+1. **Request acceptance** with a written rationale — the compensating measures, who agreed, and what would change the decision. That sentence is what an auditor reads.
+2. **A second person approves it.** Whoever requested it can never approve it; the platform refuses and says so, and a dual-control rule can require an even more senior approver above a chosen exposure. Approving sets the risk to `accepted` with treatment strategy `accept`.
+3. **Set an expiry.** An open-ended acceptance is how a risk quietly disappears for three years.
+
+With an expiry set, the platform manages the rest. Thirty days out it starts chasing you to renew. Once the date passes, the nightly sweep marks the acceptance **lapsed**, clears the `accept` strategy and returns the risk to `assessed` — back in the register, awaiting a fresh decision — and raises a notification saying so. Nothing is deleted: the acceptance record stays as evidence that the risk *was* accepted, until when and by whom, and the lapse is written to the activity log against the platform rather than against a person, because nobody clicked anything.
+
+A risk somebody has since moved on to treatment, or closed, is left where it is; the acceptance lapses without dragging the risk backwards.
+
+#### The risk report (PDF)
+
+**Register PDF** on the toolbar produces the pack a board or a regulator asks for, covering **whatever the page is currently showing** — scope the segment bar first and the export follows.
+
+- **Cover** — the scope it was taken under, the counts against appetite and tolerance, the methodology (your scale, your bands, your thresholds) and a heat map at your matrix size.
+- **Register** — one line per risk, worst exposure first: reference, title, segment, inherent and residual severity, appetite status, owner, control count.
+- **Detail page per risk** — the linked controls with their effectiveness, status, owner and next test date; the assets **with their classification and criticality**; both ratings written out (`L4 × I5 = 20 (Critical)`); the treatment plan; and the acceptance history.
+
+A risk with no controls linked says so explicitly — "None linked — the residual rating rests on nothing recorded here" — rather than showing a blank section that reads as *not filled in yet*.
 
 ### Operational Risk (`/operational-risk`)
 **Purpose:** Basel-style RCSA, Key Risk Indicators, and the loss-event database.
@@ -601,6 +639,29 @@ On a record with a live route, a progress strip shows which stage it is on, who 
 ### Settings (`/settings`)
 **Purpose:** General admin hub — organization info, system health, personal security, and LDAP.
 **What's here:** organization/role summary, a **Send test email** button (to verify SMTP), read-only system health/version/license info, the per-installation **module entitlement matrix** (which modules are on, hidden by config, or unlicensed), personal **MFA enable/change password**, the **LDAP/Active Directory** configuration card (host, bind DN, base DN, user filter, default role for JIT users), and an Administration hub linking out to Users & Roles, SSO, Webhooks, Custom Fields, Status Rules, Saved Filters, Import/Export, and the Activity Log.
+
+### Organisations (`/organizations`) — platform administrators only
+
+**Purpose:** running the *deployment*, as opposed to running an organisation inside it. One installation hosts many client organisations; this is where they are created, listed and suspended.
+
+**Who sees it:** only accounts flagged `is_platform_admin`. This is deliberately **not** a role or permission: permissions are rows in each organisation's own `roles` table, so an organisation's admin could otherwise grant themselves the run of the platform. The bootstrap admin created by the seed holds the flag; everyone else is promoted by another platform administrator.
+
+**How to use it:**
+- **Add organisation** — name, a sign-in identifier (the short slug its people type at the login screen alongside their email), and the first administrator's email and temporary password. That administrator gets the Admin role and invites everyone else. The organisation arrives complete: default roles, permission catalogue, and the baseline lookup vocabulary, so its forms are usable immediately.
+- **Suspend / Restore** — suspension blocks every login for that organisation and **deletes nothing**; every record stays exactly where it is and access can be restored at any time. There is no delete button: an organisation's data outlives its contract. You cannot suspend the organisation you are currently signed in to.
+- The summary strip shows totals and the deployment's licence.
+
+**What it cannot do:** read anybody's data. The per-organisation counts are the only figures crossing a boundary, and each is read inside that organisation's own scope. A grouped query across organisations is not expressible at all — row-level security prevents it — which is the guarantee, not a limitation to work around.
+
+#### How the isolation actually works
+
+Every tenant-scoped table (150 of them) carries a PostgreSQL row-level-security policy matching `tenant_id` against a transaction-local setting the connection makes per request. `FORCE ROW LEVEL SECURITY` means it applies even to the table owner, and the application connects as a non-superuser so the policy genuinely binds. If the tenant is never set, `NULLIF(…, '')::uuid` is NULL, `tenant_id = NULL` matches nothing, and the connection sees **zero rows** — it fails closed rather than open.
+
+The evidence to hand an auditor is `backend/tests/test_tenant_isolation.py`. Its structural half runs on every build and fails if a new table ships with a `tenant_id` and no policy — the one way this guarantee realistically breaks. Its live half, run with `TEST_DATABASE_URL` pointing at a real database, uses two organisations to prove that the second cannot list, count, fetch by primary key, or write into the first, and that a connection with no tenant set sees nothing.
+
+A fresh install seeds **two** organisations for exactly this reason: sign in to the second one and the register is empty. Same URL, same build, none of the first organisation's data.
+
+**Cloud and on-premise are the same build.** Multi-tenancy is always on; an on-premise bank simply runs an installation with one organisation in it, and the licence covers the deployment rather than each organisation. Nothing has to be forked or configured differently to serve either.
 
 ---
 

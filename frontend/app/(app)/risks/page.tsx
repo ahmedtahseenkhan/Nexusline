@@ -1,7 +1,7 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
-import { api, apiCall, type CustomField, type RiskSetting } from "@/lib/api";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { api, apiCall, type CustomField, type RiskAcceptance, type RiskSetting } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
@@ -11,12 +11,14 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordIssues from "@/components/RecordIssues";
 import RelatedChips from "@/components/RelatedChips";
+import RiskAcceptancePanel from "@/components/RiskAcceptancePanel";
 import ResidualSuggestion from "@/components/ResidualSuggestion";
 import WorkflowStrip from "@/components/WorkflowStrip";
 import RiskMethodology from "@/components/RiskMethodology";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import GenerateRisks from "@/components/GenerateRisks";
 import ImportExport from "@/components/ImportExport";
 import OrphanCleanup from "@/components/OrphanCleanup";
 import RichText from "@/components/RichText";
@@ -64,12 +66,16 @@ type RiskRow = {
 
   control_health?: string;
 
+  business_units: Ref[];
+  processes: Ref[];
   assets: Ref[];
   controls: Ref[];
   threats: Ref[];
   vulnerabilities: Ref[];
   policies: Ref[];
   incidents: Ref[];
+
+  acceptances?: RiskAcceptance[];
 
   // reverse graph links (read-only, from GET /risks/{id})
   requirements?: Ref[];
@@ -155,6 +161,8 @@ type FormState = {
   treatment_deadline: string;
   treatment_cost: number | "";
   review_frequency: string;
+  business_unit_ids: AsyncOption[];
+  process_ids: AsyncOption[];
   asset_ids: AsyncOption[];
   control_ids: AsyncOption[];
   threat_ids: AsyncOption[];
@@ -176,6 +184,7 @@ const BLANK: FormState = {
   annual_loss_frequency: "", single_loss_expectancy: "",
   treatment_strategy: "", treatment_description: "", treatment_owner: "",
   treatment_deadline: "", treatment_cost: "", review_frequency: "annual",
+  business_unit_ids: [], process_ids: [],
   asset_ids: [], control_ids: [], threat_ids: [], vulnerability_ids: [], policy_ids: [], incident_ids: [],
 };
 
@@ -200,6 +209,8 @@ function fromRisk(r: RiskRow): FormState {
     treatment_deadline: r.treatment_deadline || "",
     treatment_cost: r.treatment_cost ?? "",
     review_frequency: r.review_frequency,
+    business_unit_ids: (r.business_units ?? []).map(refToOpt),
+    process_ids: (r.processes ?? []).map(refToOpt),
     asset_ids: r.assets.map(refToOpt),
     control_ids: r.controls.map(refToOpt),
     threat_ids: r.threats.map(refToOpt),
@@ -232,6 +243,8 @@ function toPayload(f: FormState): Record<string, unknown> {
     treatment_deadline: f.treatment_deadline || null,
     treatment_cost: num(f.treatment_cost),
     review_frequency: f.review_frequency,
+    business_unit_ids: f.business_unit_ids.map((o) => o.value),
+    process_ids: f.process_ids.map((o) => o.value),
     asset_ids: f.asset_ids.map((o) => o.value),
     control_ids: f.control_ids.map((o) => o.value),
     threat_ids: f.threat_ids.map((o) => o.value),
@@ -263,6 +276,14 @@ function RisksPage() {
   const [f, setF] = useState<FormState>(BLANK);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
+  // Segment scope. A risk workshop convenes around one business unit or process, so the
+  // register needs to narrow to that cut — and whatever is narrowed to here is what the
+  // register PDF exports, so the download always matches the screen it was launched from.
+  const [segments, setSegments] = useState<{ units: Named[]; processes: Named[] }>({ units: [], processes: [] });
+  const [scopeUnit, setScopeUnit] = useState("");
+  const [scopeProcess, setScopeProcess] = useState("");
+  const [scopeStatus, setScopeStatus] = useState("");
+
   // org-defined custom fields, edited inside the form and saved with the record
   const [cfDefs, setCfDefs] = useState<CustomField[]>([]);
   const [cfValues, setCfValues] = useState<Record<string, string>>({});
@@ -274,6 +295,25 @@ function RisksPage() {
   const maxScore = matrixSize * matrixSize;
   const SCALE = scaleOptions(matrixSize);
   const fetchRisks = useCallback((qs: string) => apiCall<PagedList<RiskRow>>("GET", `/risks?${qs}`), []);
+
+  // One scope object, read by the table and by the export. Undefined entries are
+  // dropped from the query string, so "no scope" is the plain register.
+  const scopeFilters = useMemo(
+    () => ({
+      business_unit_id: scopeUnit || undefined,
+      process_id: scopeProcess || undefined,
+      status: scopeStatus || undefined,
+    }),
+    [scopeUnit, scopeProcess, scopeStatus],
+  );
+  const scopeLabel = useMemo(() => {
+    const parts = [
+      segments.units.find((u) => u.id === scopeUnit)?.name,
+      segments.processes.find((x) => x.id === scopeProcess)?.name,
+      scopeStatus ? cap(scopeStatus) : undefined,
+    ].filter(Boolean);
+    return parts.length ? `Scoped to ${parts.join(" · ")}` : "Whole register";
+  }, [scopeUnit, scopeProcess, scopeStatus, segments]);
 
   // Server typeahead sources for the form's link pickers (replaces 6 capped preloads).
   const linkSearch = (path: string) => (q: string) =>
@@ -288,6 +328,12 @@ function RisksPage() {
       setToleranceScore(s.tolerance_score);
     }).catch(() => {});
     apiCall<PagedList<UserRow>>("GET", "/users?limit=200").then((r) => setUsers(r.items)).catch(() => {});
+    Promise.all([
+      apiCall<PagedList<Named>>("GET", "/business-units?limit=200&sort_by=name"),
+      apiCall<PagedList<Named>>("GET", "/processes?limit=200&sort_by=name"),
+    ])
+      .then(([u, p]) => setSegments({ units: u.items, processes: p.items }))
+      .catch(() => {});
     api.customFields("risk").then((d) => setCfDefs(d.filter((x) => x.enabled))).catch(() => {});
   }, []);
 
@@ -506,6 +552,15 @@ function RisksPage() {
 
   const linksTab = (
     <>
+      <Field
+        label="Business units"
+        help="The segments this risk sits in — a workshop scopes to one of these, and the register can be filtered by it."
+      >
+        <AsyncMultiSelect search={linkSearch("business-units")} value={f.business_unit_ids} onChange={(v) => set("business_unit_ids", v)} />
+      </Field>
+      <Field label="Processes" help="Business processes this risk affects, where the exposure is narrower than a whole unit.">
+        <AsyncMultiSelect search={linkSearch("processes")} value={f.process_ids} onChange={(v) => set("process_ids", v)} />
+      </Field>
       <Field label="Assets" help="Assets exposed to or affected by this risk.">
         <AsyncMultiSelect search={linkSearch("assets")} value={f.asset_ids} onChange={(v) => set("asset_ids", v)} />
       </Field>
@@ -581,9 +636,14 @@ function RisksPage() {
             <IconGauge width={16} height={16} />
             Appetite
           </button>
+          {/* The answer to "one control applies to four assets — shouldn't each get its
+              own rating?". It should, and this is how: one proposed risk per asset, with
+              the opening impact taken from that asset's own criticality, rather than one
+              rating stretched across four assets that differ. */}
+          <GenerateRisks label="the asset inventory" onDone={reload} />
           <ImportExport resource="risks" label="Risks" onDone={reload} />
           <OrphanCleanup onDone={reload} />
-          <button className="btn secondary" onClick={() => api.pdfRiskRegister().catch(() => {})}>
+          <button className="btn secondary" onClick={() => api.pdfRiskRegister(scopeFilters).catch(() => {})}>
             Register PDF
           </button>
           <button className="btn" onClick={openNew}>
@@ -626,9 +686,49 @@ function RisksPage() {
         </div>
       )}
 
+      {/* Segment scope. Kept above the table rather than inside it because it is a
+          scope, not a column filter: everything on the page — counts, the export —
+          means "within this segment" once one is chosen. */}
+      <div className="card card-pad" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <div style={{ width: 220 }}>
+          <label className="label">Business unit</label>
+          <Select
+            value={scopeUnit}
+            onChange={setScopeUnit}
+            options={segments.units.map((u) => ({ value: u.id, label: u.name || u.id }))}
+            placeholder="All business units"
+          />
+        </div>
+        <div style={{ width: 220 }}>
+          <label className="label">Process</label>
+          <Select
+            value={scopeProcess}
+            onChange={setScopeProcess}
+            options={segments.processes.map((x) => ({ value: x.id, label: x.name || x.id }))}
+            placeholder="All processes"
+          />
+        </div>
+        <div style={{ width: 190 }}>
+          <label className="label">Status</label>
+          <Select value={scopeStatus} onChange={setScopeStatus} options={STATUS} placeholder="Any status" />
+        </div>
+        {(scopeUnit || scopeProcess || scopeStatus) && (
+          <button
+            className="btn secondary"
+            onClick={() => { setScopeUnit(""); setScopeProcess(""); setScopeStatus(""); }}
+          >
+            Clear scope
+          </button>
+        )}
+        <div className="muted" style={{ fontSize: 12.5, marginLeft: "auto", paddingBottom: 8 }}>
+          {scopeLabel}
+        </div>
+      </div>
+
       <DataTable<RiskRow>
         columns={riskColumns}
         fetcher={fetchRisks}
+        filters={scopeFilters}
         rowKey={(r) => r.id}
         onRowClick={(r) => setRecordId(r.id)}
         activeKey={recordId ?? undefined}
@@ -676,6 +776,13 @@ function RisksPage() {
               onAccepted={() => { reload(); loadDetail(detail.id); }}
             />
 
+            <RiskAcceptancePanel
+              riskId={detail.id}
+              riskReference={detail.reference}
+              acceptances={detail.acceptances ?? []}
+              onChange={() => { reload(); loadDetail(detail.id); }}
+            />
+
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Owner", userName(detail.owner_id))}
               {field("Status", <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>)}
@@ -712,6 +819,8 @@ function RisksPage() {
 
             <strong style={{ fontSize: 13 }}>Related records</strong>
             <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
+              <RelatedChips label="Business units" items={detail.business_units} href="/business-units" />
+              <RelatedChips label="Processes" items={detail.processes} href="/processes" />
               <RelatedChips label="Assets" items={detail.assets} href="/information-assets" />
               <RelatedChips label="Controls" items={detail.controls} href="/controls" />
               <RelatedChips label="Threats" items={detail.threats} href="/threat-library" />

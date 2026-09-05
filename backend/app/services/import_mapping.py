@@ -73,6 +73,24 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "lead_auditor": ("auditor", "audit lead", "lead", "engagement lead"),
     "information_owner": ("data owner", "business owner", "asset owner"),
     "business_unit": ("department", "dept", "bu", "function", "division", "unit", "branch"),
+    # Plural keys: the risk importer's segment columns are headed "business_units" and
+    # "processes", and the matcher looks the header up verbatim. A bank's existing
+    # register nearly always carries one of these already, and mapping it on import is
+    # what makes a segment-scoped assessment possible on day one rather than after
+    # someone re-tags several hundred rows by hand.
+    # Deliberately no bare "branch", "unit", "function" or "activity": a lone generic
+    # word is enough for the token-subset tier to claim any header containing it, and
+    # "Branch Manager Signature" silently landing in business_units is exactly the wrong
+    # guess this matcher refuses to make. Multi-word phrases carry their own context.
+    "business_units": (
+        "department", "departments", "dept", "bu", "business unit", "business units",
+        "division", "segment", "business segment", "business area",
+        "owning department", "responsible department",
+    ),
+    "processes": (
+        "business process", "business processes", "sub process", "sub-process",
+        "process name", "affected process", "value chain",
+    ),
     # --- qualitative scoring ----------------------------------------------
     "inherent_likelihood": (
         "likelihood", "probability", "prob", "chance", "frequency of occurrence",

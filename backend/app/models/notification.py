@@ -12,6 +12,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import NotificationCategory
 
+#: ``dedup_key`` prefix marking a notification as a recorded *event* rather than a live
+#: condition. The alert reconciler deletes any notification it no longer re-derives, on
+#: the basis that the condition has resolved; an event describes something that happened
+#: on a date and can never become false, so keys carrying this prefix are exempt. It
+#: lives on the model rather than in the scanner so that a service minting an event does
+#: not have to import the scanner just to spell the key.
+EVENT_PREFIX = "event:"
+
 
 class Notification(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     __tablename__ = "notifications"
