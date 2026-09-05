@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
@@ -176,17 +177,59 @@ function ControlsInner() {
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to record maintenance"); }
   }
 
+
+  /* Inline relation chips linking to each record's own page. */
+  const labelOf = (x: { id: string; label?: string; name?: string; title?: string; reference?: string }) =>
+    x.label || x.name || x.title || x.reference || x.id;
+  const linkChips = (items: { id: string; label?: string; name?: string; title?: string; reference?: string }[] | undefined, href: string) =>
+    items && items.length ? (
+      <div className="chips" onClick={(e) => e.stopPropagation()}>
+        {items.map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{labelOf(x)}</Link>)}
+      </div>
+    ) : <span className="muted">—</span>;
+  const names = (items: { id: string; label?: string; name?: string; title?: string; reference?: string }[] | undefined) =>
+    (items ?? []).map(labelOf).join(", ");
+
   const columns: Column<Control>[] = [
-    { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
-    { key: "name", header: "Name", sortable: true, render: (c) => <span className="cell-title">{c.name}</span> },
-    { key: "control_type", header: "Type", render: (c) => <Badge tone="neutral" plain>{cap(c.control_type)}</Badge> },
-    { key: "status", header: "Status", sortable: true, render: (c) => <StatusBadge value={c.status} tone={STATUS_TONE[c.status] === "low" ? "info" : "neutral"} /> },
-    { key: "effectiveness", header: "Effectiveness", sortable: true, render: (c) => <EffectivenessBadge value={c.effectiveness} /> },
+    { key: "reference", header: "Ref", sortable: true, locked: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, locked: true, render: (c) => <span className="cell-title">{c.name}</span> },
+    { key: "control_type", header: "Type", render: (c) => <Badge tone="neutral" plain>{cap(c.control_type)}</Badge>, text: (c) => cap(c.control_type) },
+    { key: "status", header: "Status", sortable: true, render: (c) => <StatusBadge value={c.status} tone={STATUS_TONE[c.status] === "low" ? "info" : "neutral"} />, text: (c) => cap(c.status) },
+    { key: "effectiveness", header: "Effectiveness", sortable: true, render: (c) => <EffectivenessBadge value={c.effectiveness} />, text: (c) => cap(c.effectiveness) },
     { key: "owner", header: "Owner", render: (c) => <span className="muted">{c.owner || "—"}</span> },
-    { key: "next_audit_date", header: "Next audit", sortable: true, render: (c) => (c.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{c.next_audit_date || "—"}</span>) },
-    { key: "links", header: "Links", align: "center", render: (c) => <span className="muted">{linkCount(c) || "—"}</span> },
+    { key: "classification", header: "Classification", hidden: true, render: (c) => <span className="muted">{c.classification || "—"}</span> },
+    { key: "risks", header: "Risks mitigated", render: (c) => linkChips(c.risks, "/risks"), text: (c) => names(c.risks) },
+    { key: "policies", header: "Policies", hidden: true, render: (c) => linkChips(c.policies, "/policies"), text: (c) => names(c.policies) },
+    { key: "requirements", header: "Requirements", hidden: true, render: (c) => linkChips(c.requirements, "/compliance"), text: (c) => names(c.requirements) },
+    { key: "assets", header: "Protected assets", hidden: true, render: (c) => linkChips(c.assets, "/information-assets"), text: (c) => names(c.assets) },
+    { key: "audit_frequency", header: "Test cycle", hidden: true, render: (c) => <span className="muted">{cap(c.audit_frequency)}</span>, text: (c) => cap(c.audit_frequency) },
+    { key: "last_audit_date", header: "Last tested", hidden: true, sortable: true, render: (c) => <span className="muted">{c.last_audit_date || "—"}</span> },
+    { key: "last_audit_result", header: "Last result", hidden: true, render: (c) => <span className="muted">{c.last_audit_result ? cap(c.last_audit_result) : "—"}</span>, text: (c) => c.last_audit_result ? cap(c.last_audit_result) : "" },
+    { key: "next_audit_date", header: "Next test", sortable: true, render: (c) => (c.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{c.next_audit_date || "—"}</span>), text: (c) => c.next_audit_date ?? "" },
+    { key: "audit_count", header: "Tests run", hidden: true, align: "center", render: (c) => <span className="muted">{c.audit_count || "—"}</span> },
+    { key: "next_maintenance_date", header: "Next maintenance", hidden: true, render: (c) => (c.is_maintenance_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{c.next_maintenance_date || "—"}</span>), text: (c) => c.next_maintenance_date ?? "" },
+    { key: "opex", header: "Opex / yr", hidden: true, align: "right", render: (c) => <span className="muted">{c.opex != null ? c.opex.toLocaleString() : "—"}</span>, text: (c) => c.opex != null ? String(c.opex) : "" },
+    { key: "capex", header: "Capex", hidden: true, align: "right", render: (c) => <span className="muted">{c.capex != null ? c.capex.toLocaleString() : "—"}</span>, text: (c) => c.capex != null ? String(c.capex) : "" },
+    { key: "workflow_status", header: "Workflow", hidden: true, render: (c) => <span className="muted">{cap(c.workflow_status)}</span>, text: (c) => cap(c.workflow_status) },
     { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(c)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(c)}>Delete</button></div> },
   ];
+
+  /** Delete every selected control after one confirmation, then drop the selection. */
+  async function removeMany(rowsToDelete: { id: string }[], clear: () => void) {
+    const ok = await confirmDialog({
+      title: `Delete ${rowsToDelete.length} control${rowsToDelete.length === 1 ? "" : "s"}?`,
+      message: "Links from other records are kept and the activity trail records who removed them.",
+      confirmLabel: "Delete", danger: true,
+    });
+    if (!ok) return;
+    let failed = 0;
+    for (const r of rowsToDelete) {
+      try { await apiCall("DELETE", `/controls/${r.id}`); } catch { failed += 1; }
+    }
+    clear();
+    reload();
+    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+  }
 
   /* ------------------------------ form tabs (unchanged) ------------------------------ */
   const generalTab = (
@@ -262,6 +305,11 @@ function ControlsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<Control>
+        tableKey="controls"
+        statusModel="control"
+        bulkActions={(rows, clear) => (
+          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+        )}
         columns={columns}
         fetcher={fetchControls}
         rowKey={(c) => c.id}

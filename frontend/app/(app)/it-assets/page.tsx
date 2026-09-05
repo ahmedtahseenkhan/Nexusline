@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { confirmDialog, toast } from "@/lib/feedback";
@@ -206,14 +207,44 @@ function ITAssetsInner() {
   const mediaTypeOpts: Option[] = useMemo(() => mediaTypes.map((m) => ({ value: m.id, label: m.name })), [mediaTypes]);
   const tagOpts: Option[] = useMemo(() => tags.map((t) => ({ value: t.id, label: t.name, sub: t.category || undefined })), [tags]);
 
+
   const columns: Column<Asset>[] = [
-    { key: "name", header: "Name", sortable: true, render: (a) => <span className="cell-title">{a.name}</span> },
-    { key: "environment", header: "Environment", sortable: true, render: (a) => <Badge tone="neutral" plain>{cap(a.environment)}</Badge> },
-    { key: "availability", header: "Availability", render: (a) => <CritBadge value={a.availability} /> },
-    { key: "replacement_cost", header: "Cost band", sortable: true, render: (a) => <CritBadge value={a.cost_band} /> },
-    { key: "effective_criticality", header: "Effective criticality", render: (a) => <CritBadge value={a.effective_criticality} /> },
-    { key: "hosted", header: "Hosted data", align: "center", render: (a) => <span className="muted">{a.dependencies?.length || "—"}</span> },
+    { key: "name", header: "Name", sortable: true, locked: true, render: (a) => <span className="cell-title">{a.name}</span> },
+    { key: "environment", header: "Environment", sortable: true, render: (a) => <Badge tone="neutral" plain>{cap(a.environment)}</Badge>, text: (a) => cap(a.environment) },
+    { key: "availability", header: "Availability", render: (a) => <CritBadge value={a.availability} />, text: (a) => cap(a.availability) },
+    { key: "replacement_cost", header: "Cost band", sortable: true, render: (a) => <CritBadge value={a.cost_band} />, text: (a) => cap(a.cost_band) },
+    { key: "effective_criticality", header: "Effective criticality", render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
+    { key: "hosted", header: "Hosted data", align: "center", render: (a) => <span className="muted">{a.dependencies?.length || "—"}</span>, text: (a) => String(a.dependencies?.length ?? 0) },
+    { key: "hostname", header: "Hostname", hidden: true, render: (a) => <span className="ref">{a.hostname || "—"}</span> },
+    { key: "ip_address", header: "IP address", hidden: true, render: (a) => <span className="ref">{a.ip_address || "—"}</span> },
+    { key: "location", header: "Location", hidden: true, render: (a) => <span className="muted">{a.location || "—"}</span> },
+    { key: "manufacturer", header: "Make / model", hidden: true, render: (a) => <span className="muted">{[a.manufacturer, a.model_number].filter(Boolean).join(" ") || "—"}</span>, text: (a) => [a.manufacturer, a.model_number].filter(Boolean).join(" ") },
+    { key: "os_version", header: "OS", hidden: true, render: (a) => <span className="muted">{a.os_version || "—"}</span> },
+    { key: "serial_number", header: "Serial", hidden: true, render: (a) => <span className="ref">{a.serial_number || "—"}</span> },
+    { key: "rto", header: "RTO / RPO (h)", hidden: true, render: (a) => <span className="muted">{a.rto_hours ?? "—"} / {a.rpo_hours ?? "—"}</span>, text: (a) => `${a.rto_hours ?? ""}/${a.rpo_hours ?? ""}` },
+    { key: "replacement_cost_value", header: "Replacement cost", hidden: true, align: "right", render: (a) => <span className="muted">{a.replacement_cost ? `${a.currency} ${a.replacement_cost.toLocaleString()}` : "—"}</span>, text: (a) => String(a.replacement_cost ?? "") },
+    { key: "discovery_source", header: "Discovered via", hidden: true, render: (a) => <span className="muted">{cap(a.discovery_source)}</span>, text: (a) => cap(a.discovery_source) },
+    { key: "tags", header: "Tags", hidden: true, render: (a) => a.tags?.length ? <div className="chips">{a.tags.map((t) => <span key={t.id} className="chip">{t.name}</span>)}</div> : <span className="muted">—</span>, text: (a) => (a.tags ?? []).map((t) => t.name).join(", ") },
+    { key: "workflow_status", header: "Workflow", hidden: true, render: (a) => <span className="muted">{cap(a.workflow_status)}</span>, text: (a) => cap(a.workflow_status) },
+    { key: "created_at", header: "Created", hidden: true, render: (a) => <span className="muted">{a.created_at?.slice(0, 10) || "—"}</span>, text: (a) => a.created_at?.slice(0, 10) ?? "" },
   ];
+
+  /** Delete every selected asset after one confirmation, then drop the selection. */
+  async function removeMany(rowsToDelete: { id: string }[], clear: () => void) {
+    const ok = await confirmDialog({
+      title: `Delete ${rowsToDelete.length} asset${rowsToDelete.length === 1 ? "" : "s"}?`,
+      message: "Links from other records are kept and the activity trail records who removed them.",
+      confirmLabel: "Delete", danger: true,
+    });
+    if (!ok) return;
+    let failed = 0;
+    for (const r of rowsToDelete) {
+      try { await apiCall("DELETE", `/assets/${r.id}`); } catch { failed += 1; }
+    }
+    clear();
+    setRefreshKey((k) => k + 1);
+    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+  }
 
   /* --------------------------------------------------------------- form tabs (unchanged) */
   const identityTab = (
@@ -308,6 +339,11 @@ function ITAssetsInner() {
       </div>
 
       <DataTable<Asset>
+        tableKey="it-assets"
+        statusModel="asset"
+        bulkActions={(rows, clear) => (
+          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+        )}
         columns={columns}
         fetcher={fetchAssets}
         rowKey={(a) => a.id}

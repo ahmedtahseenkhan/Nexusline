@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { confirmDialog, toast } from "@/lib/feedback";
@@ -281,14 +282,53 @@ function InformationAssetsInner() {
   );
   const unitOpts: Option[] = useMemo(() => units.map((u) => ({ value: u.id, label: u.name })), [units]);
 
+
+  /* Inline relation chips. The asset list returns {id,label} refs for its links. */
+  const linkChips = (items: LinkRef[] | undefined, href: string) =>
+    items && items.length ? (
+      <div className="chips" onClick={(e) => e.stopPropagation()}>
+        {items.map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{x.label}</Link>)}
+      </div>
+    ) : <span className="muted">—</span>;
+  const names = (items: LinkRef[] | undefined) => (items ?? []).map((x) => x.label).join(", ");
+
   const columns: Column<Asset>[] = [
-    { key: "name", header: "Name", sortable: true, render: (a) => <span className="cell-title">{a.name}</span> },
+    { key: "name", header: "Name", sortable: true, locked: true, render: (a) => <span className="cell-title">{a.name}</span> },
     { key: "information_owner", header: "Information owner", render: (a) => <span className="muted">{a.information_owner || "—"}</span> },
-    { key: "business_value", header: "Business value", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} /> },
-    { key: "classification", header: "Classification", render: (a) => <CritBadge value={maxCia(a)} /> },
-    { key: "self_assessed", header: "Self-assessed", sortable: true, render: (a) => (a.self_assessed ? <Badge tone="low">Self-assessed</Badge> : <Badge tone="neutral">Pending</Badge>) },
-    { key: "hosted", header: "Hosted on", align: "center", render: (a) => <span className="muted">{a.dependencies?.length || "—"}</span> },
+    { key: "owner", header: "Owning unit", hidden: true, render: (a) => <span className="muted">{a.owner?.label || "—"}</span>, text: (a) => a.owner?.label ?? "" },
+    { key: "business_value", header: "Business value", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
+    { key: "classification", header: "Classification", render: (a) => <CritBadge value={maxCia(a)} />, text: (a) => cap(maxCia(a)) },
+    { key: "cia", header: "C / I / A", hidden: true, render: (a) => <div className="chips"><span className="chip" title="Confidentiality">C {cap(a.confidentiality)}</span><span className="chip" title="Integrity">I {cap(a.integrity)}</span><span className="chip" title="Availability">A {cap(a.availability)}</span></div>, text: (a) => `${cap(a.confidentiality)} / ${cap(a.integrity)} / ${cap(a.availability)}` },
+    { key: "label", header: "Handling label", hidden: true, render: (a) => a.label ? <Badge tone="neutral" plain>{a.label.label}</Badge> : <span className="muted">—</span>, text: (a) => a.label?.label ?? "" },
+    { key: "data_categories", header: "Data categories", hidden: true, render: (a) => <span className="muted">{a.data_categories || "—"}</span> },
+    { key: "records_volume", header: "Records", hidden: true, render: (a) => <span className="muted">{a.records_volume || "—"}</span> },
+    { key: "self_assessed", header: "Self-assessed", sortable: true, render: (a) => (a.self_assessed ? <Badge tone="low">Self-assessed</Badge> : <Badge tone="neutral">Pending</Badge>), text: (a) => a.self_assessed ? "Yes" : "Pending" },
+    { key: "assessed_by", header: "Assessed by", hidden: true, render: (a) => <span className="muted">{a.assessed_by ? `${a.assessed_by}${a.assessed_date ? ` · ${a.assessed_date}` : ""}` : "—"}</span>, text: (a) => a.assessed_by ?? "" },
+    { key: "hosted", header: "Hosted on", align: "center", render: (a) => <span className="muted">{a.dependencies?.length || "—"}</span>, text: (a) => String(a.dependencies?.length ?? 0) },
+    { key: "risks", header: "Risks", hidden: true, render: (a) => linkChips(a.risks, "/risks"), text: (a) => names(a.risks) },
+    { key: "processes", header: "Processes", hidden: true, render: (a) => linkChips(a.processes, "/processes"), text: (a) => names(a.processes) },
+    { key: "requirements", header: "Requirements", hidden: true, render: (a) => linkChips(a.requirements, "/compliance"), text: (a) => names(a.requirements) },
+    { key: "next_review_date", header: "Next review", hidden: true, render: (a) => <span className="muted">{a.next_review_date || "—"}</span> },
+    { key: "workflow_status", header: "Workflow", hidden: true, render: (a) => <span className="muted">{cap(a.workflow_status)}</span>, text: (a) => cap(a.workflow_status) },
+    { key: "created_at", header: "Created", hidden: true, render: (a) => <span className="muted">{a.created_at?.slice(0, 10) || "—"}</span>, text: (a) => a.created_at?.slice(0, 10) ?? "" },
   ];
+
+  /** Delete every selected asset after one confirmation, then drop the selection. */
+  async function removeMany(rowsToDelete: { id: string }[], clear: () => void) {
+    const ok = await confirmDialog({
+      title: `Delete ${rowsToDelete.length} asset${rowsToDelete.length === 1 ? "" : "s"}?`,
+      message: "Links from other records are kept and the activity trail records who removed them.",
+      confirmLabel: "Delete", danger: true,
+    });
+    if (!ok) return;
+    let failed = 0;
+    for (const r of rowsToDelete) {
+      try { await apiCall("DELETE", `/assets/${r.id}`); } catch { failed += 1; }
+    }
+    clear();
+    setRefreshKey((k) => k + 1);
+    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+  }
 
   /* --------------------------------------------------------------- form tabs (unchanged) */
   const identityTab = (
@@ -405,6 +445,11 @@ function InformationAssetsInner() {
       </div>
 
       <DataTable<Asset>
+        tableKey="information-assets"
+        statusModel="asset"
+        bulkActions={(rows, clear) => (
+          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+        )}
         columns={columns}
         fetcher={fetchAssets}
         rowKey={(a) => a.id}

@@ -1,6 +1,8 @@
 """Activity log / audit trail (read-only)."""
 from __future__ import annotations
 
+import uuid
+
 from datetime import date, timedelta
 from typing import Annotated
 
@@ -28,6 +30,7 @@ async def list_audit(
     db: DbSession,
     search: Annotated[str | None, Query(description="Free-text over actor email / summary")] = None,
     entity_type: Annotated[str | None, Query()] = None,
+    entity_id: Annotated[uuid.UUID | None, Query(description="One record's own trail")] = None,
     action: Annotated[str | None, Query()] = None,
     actor: Annotated[str | None, Query(description="Filter by actor email (contains)")] = None,
     date_from: Annotated[date | None, Query(alias="from")] = None,
@@ -43,6 +46,8 @@ async def list_audit(
         stmt = stmt.where(or_(AuditLog.actor_email.ilike(like), AuditLog.summary.ilike(like)))
     if entity_type:
         stmt = stmt.where(AuditLog.entity_type == entity_type)
+    if entity_id is not None:
+        stmt = stmt.where(AuditLog.entity_id == entity_id)
     if action:
         stmt = stmt.where(AuditLog.action == action)
     if actor:
