@@ -479,6 +479,7 @@ function IncidentsInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="incident" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -570,7 +571,6 @@ function IncidentsInner() {
               </div>
             </div>
 
-            <RecordPanels model="incident" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

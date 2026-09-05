@@ -695,6 +695,7 @@ function IntegrationsInner() {
 
       {/* Read-only connector detail view (?id=) — click a row to see everything; Edit is separate. */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="connector" entityId={detail.id} /> : null}
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? `${detail.reference || ""} ${detail.name}`.trim() : "…"}
@@ -751,7 +752,6 @@ function IntegrationsInner() {
             </div>
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-              <RecordPanels model="connector" entityId={detail.id} />
             </div>
           </>
         )}

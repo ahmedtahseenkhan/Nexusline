@@ -471,6 +471,7 @@ function RiskQuantificationInner() {
 
       {/* ============================================= DRAWER */}
       <RecordDrawer
+        aside={quantDetail ? <RecordPanels model="risk_quantification" entityId={quantDetail.id} /> : null}
         open={!!openId && !!quantDetail}
         onClose={() => setOpenId(null)}
         title={quantDetail ? `${quantDetail.reference || ""} ${quantDetail.title}`.trim() : "…"}
@@ -543,7 +544,6 @@ function RiskQuantificationInner() {
               </div>
             </div>
 
-            <RecordPanels model="risk_quantification" entityId={quantDetail.id} />
           </>
         )}
       </RecordDrawer>

@@ -356,6 +356,7 @@ function ITAssetsInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="asset" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail?.name || "…"}
@@ -442,7 +443,6 @@ function ITAssetsInner() {
               </div>
             </div>
 
-            <div style={{ marginTop: 20 }}><RecordPanels model="asset" entityId={detail.id} /></div>
           </>
         )}
       </RecordDrawer>

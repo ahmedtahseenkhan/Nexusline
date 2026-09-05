@@ -912,6 +912,7 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="data_breach" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.title}`.trim() : "…"}
@@ -960,7 +961,6 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
             <div style={{ marginBottom: 16 }}>
               <RelatedChips label="Related incident" items={detail.incident ? [detail.incident] : []} href="/incidents" />
             </div>
-            <RecordPanels model="data_breach" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

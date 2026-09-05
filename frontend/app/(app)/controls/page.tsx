@@ -322,6 +322,7 @@ function ControlsInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="control" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference || detail.name : "…"}
@@ -394,7 +395,6 @@ function ControlsInner() {
               <RecordIssues entityId={detail.id} entityRef={detail.reference} sourceType="self_identified" />
             </div>
 
-            <RecordPanels model="control" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

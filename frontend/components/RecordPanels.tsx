@@ -8,16 +8,17 @@ import CollabPanel from "@/components/CollabPanel";
 import ActivityPanel from "@/components/ActivityPanel";
 
 /** The full cross-cutting record surface: what the status rules say about this record,
- * custom fields, review/attestation, collaboration (comments/tags/attachments), and the
- * record's own activity trail. Drop onto any record detail panel — 36 of them do. */
+ * custom fields, review/attestation, the record's own activity trail, and collaboration
+ * (comments/tags/attachments). Mounted in RecordDrawer's ``aside`` — the right-hand
+ * column that scrolls on its own — by every register that has a record view. */
 export default function RecordPanels({ model, entityId }: { model: string; entityId: string }) {
   return (
     <>
       <DynamicStatus model={model} entityId={entityId} />
       <CustomFieldsPanel model={model} entityId={entityId} />
       <AttestationPanel entityType={model} entityId={entityId} />
+      <ActivityPanel entityType={model} entityId={entityId} defaultOpen />
       <CollabPanel entityType={model} entityId={entityId} />
-      <ActivityPanel entityType={model} entityId={entityId} />
     </>
   );
 }

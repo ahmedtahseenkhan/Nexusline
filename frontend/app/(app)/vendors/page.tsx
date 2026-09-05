@@ -292,6 +292,7 @@ function VendorsInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="vendor" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail?.name || "…"}
@@ -320,7 +321,6 @@ function VendorsInner() {
               <RelatedChips label="Outsourcing arrangements" items={detail.outsourcing_arrangements} href="/outsourcing" />
             </div>
 
-            <RecordPanels model="vendor" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

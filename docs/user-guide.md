@@ -124,7 +124,7 @@ Every list page — risks, controls, assets, incidents, policies, and the rest �
 - **Density.** The ≡ button switches between comfortable and compact rows.
 - **Relation chips.** Columns such as *Assets*, *Controls*, *Policies* show the linked records inline, and each chip opens that record — the list is where the graph is walked, not just the drawer.
 
-**Record drawers** carry the same idea: status-rule chips at the top, custom fields, review/attestation, comments, tags and attachments, and an **Activity** section with the record's own audit trail — who changed what, and when.
+**Opening a record** takes the full page, in two columns that scroll independently — the same shape eramba uses, because a GRC record is not a form. On the **left** is the item: its fields, scores, related records and the page's own panels (for a risk: the suggested residual, the acceptance workflow, treatment). On the **right** is everything that has happened to it: status-rule chips, custom fields, review/attestation, an **Activity** timeline with the record's own audit trail (who changed what, and when), then comments, tags and attachments. **← Back**, the ✕, or Escape returns to the list exactly where you were. On a narrow screen the two columns stack.
 
 ## 4. How the sidebar is organized
 

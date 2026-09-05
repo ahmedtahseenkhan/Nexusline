@@ -1052,6 +1052,7 @@ function RegulatoryChangeInner() {
 
       {/* ============================================= CHANGE DRAWER (obligations) */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="regulatory_change" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -1169,7 +1170,6 @@ function RegulatoryChangeInner() {
               </div>
             </div>
 
-            <RecordPanels model="regulatory_change" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

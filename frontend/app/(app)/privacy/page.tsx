@@ -500,6 +500,7 @@ function PrivacyInner() {
       />
 
       <RecordDrawer
+        aside={detail ? <RecordPanels model="processing_activity" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.name}` : "…"}
@@ -535,7 +536,6 @@ function PrivacyInner() {
               <div><div className="muted" style={{ fontSize: 12 }}>Next review</div><div style={{ marginTop: 4, fontSize: 13 }}>{detail.review_date || "—"}</div></div>
             </div>
 
-            <RecordPanels model="processing_activity" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>

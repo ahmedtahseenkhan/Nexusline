@@ -716,6 +716,7 @@ function VulnerabilitiesInner() {
 
       {/* ============================================= FINDING DETAIL DRAWER */}
       <RecordDrawer
+        aside={detail ? <RecordPanels model="vuln_finding" entityId={detail.id} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -775,7 +776,6 @@ function VulnerabilitiesInner() {
               </div>
             </div>
 
-            <RecordPanels model="vuln_finding" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>
