@@ -68,14 +68,18 @@ const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUppe
 /* ------------------------------------------------------------------ atoms */
 function Gauge({ score, band }: { score: number; band: string }) {
   const R = 78, C = 2 * Math.PI * R, TRACK = C * 0.75;
-  const prog = Math.max(0, Math.min(1, score / 100)) * TRACK;
+  // Nothing in the registers: there is no score to give. An empty organisation is
+  // neither healthy nor critical, and printing a number for one is how a wiped
+  // system used to report 70/100.
+  const empty = band === "no_data";
+  const prog = empty ? 0 : Math.max(0, Math.min(1, score / 100)) * TRACK;
   const color = band === "healthy" ? "#34d399" : band === "elevated" ? "#fbbf24" : "#f87171";
   return (
-    <svg viewBox="0 0 200 170" width={190} height={162} aria-label={`Governance health ${score} of 100`}>
+    <svg viewBox="0 0 200 170" width={190} height={162} aria-label={empty ? "Governance health: no data yet" : `Governance health ${score} of 100`}>
       <circle cx="100" cy="100" r={R} fill="none" stroke="rgba(255,255,255,.08)" strokeWidth="14" strokeDasharray={`${TRACK} ${C}`} strokeLinecap="round" transform="rotate(135 100 100)" />
-      <circle cx="100" cy="100" r={R} fill="none" stroke={color} strokeWidth="14" strokeDasharray={`${prog} ${C}`} strokeLinecap="round" transform="rotate(135 100 100)" />
-      <text x="100" y="96" textAnchor="middle" fill="#f8fafc" fontFamily={FONT_MONO} fontSize="52" fontWeight="700">{score}</text>
-      <text x="100" y="118" textAnchor="middle" fill="#94a3b8" fontFamily={FONT_SANS} fontSize="12">/ 100</text>
+      {!empty && <circle cx="100" cy="100" r={R} fill="none" stroke={color} strokeWidth="14" strokeDasharray={`${prog} ${C}`} strokeLinecap="round" transform="rotate(135 100 100)" />}
+      <text x="100" y="96" textAnchor="middle" fill={empty ? "#64748b" : "#f8fafc"} fontFamily={FONT_MONO} fontSize={empty ? "44" : "52"} fontWeight="700">{empty ? "—" : score}</text>
+      <text x="100" y="118" textAnchor="middle" fill="#94a3b8" fontFamily={FONT_SANS} fontSize="12">{empty ? "no data yet" : "/ 100"}</text>
     </svg>
   );
 }
