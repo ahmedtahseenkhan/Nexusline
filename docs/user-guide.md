@@ -126,6 +126,18 @@ Every list page — risks, controls, assets, incidents, policies, and the rest �
 
 **Opening a record** takes the full page, in two columns that scroll independently — the same shape eramba uses, because a GRC record is not a form. On the **left** is the item: its fields, scores, related records and the page's own panels (for a risk: the suggested residual, the acceptance workflow, treatment). On the **right** is everything that has happened to it: status-rule chips, custom fields, review/attestation, an **Activity** timeline with the record's own audit trail (who changed what, and when), then comments, tags and attachments. **← Back**, the ✕, or Escape returns to the list exactly where you were. On a narrow screen the two columns stack.
 
+## 3c. The dashboard
+
+The dashboard is built around the five questions a risk function is judged on, in the order a board asks them. Every number on it links to the register that produced it, and the same rules apply as everywhere else — in particular, a control that has been mapped but never tested counts for nothing here, exactly as in the gap analysis and the residual engine.
+
+1. **Are we inside the boundary we set?** — the **Governance health** score and, beside it, **Needs a decision or is overdue**: one queue, each line a link. The score is a weighted mean of four named components, all shown with the counts behind them: *within tolerance* (35%), *control assurance* (30%), *compliance assured* (20%), *nothing overdue* (15%). A gauge with no reasons is decoration; this one says "49 — because 7 of 227 controls have been tested".
+2. **Are we inside appetite, and where?** — the KPI strip (above tolerance, control assurance, compliance assured, open incidents, KRIs breaching, tests overdue), the **risk matrix** on your own matrix size, and **Top risks**: the highest current exposures with owner, segment, appetite position, control count and review date — an unassigned owner or a risk with no controls is shown in red.
+3. **Are the controls actually working?** — **Control assurance**: effective / partially / ineffective / never tested as a stacked bar, with tests overdue, failed last test, and tests recorded in the period.
+4. **Are we compliant, and can we prove it?** — **Compliance**, one stacked bar per framework: *assured* (a working control behind the clause), *mapped but not tested*, *failing*, *no control*, plus the gap count and the percentage somebody has marked compliant — the two are shown side by side so an assertion without evidence is visible.
+5. **What happened?** — open incidents by severity with the regulator-reportable count and the change against the prior period; KRIs as red / amber / green / no data with the breaching ones listed; risks **by segment** with breaches; third parties; and **Movement** — what was added, closed, tested and lapsed in the period — with recent activity.
+
+The **30 days / Quarter / YTD** toggle sets the period for the movement and incident comparisons. **Executive summary** exports the board pack.
+
 ## 4. How the sidebar is organized
 
 The left navigation groups every module into seven sections, which this guide follows exactly: **Overview, Risk, Compliance, Governance, Organization, Operations, System**. **Policy Management sits under Governance**, alongside Board & Committees, Delegation of Authority and the Legal Register.

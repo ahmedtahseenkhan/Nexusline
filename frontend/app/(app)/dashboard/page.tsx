@@ -4,35 +4,48 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   api,
+  type ActionItem,
   type AuditEntry,
-  type ComplianceSummary,
-  type Dashboard,
+  type DashboardOverview,
+  type FrameworkPosture,
   type MatrixBand,
-  type RiskAggregate,
   type RiskMatrix,
-  type TatSummary,
+  type TopRisk,
 } from "@/lib/api";
 
-// Font stacks. The webfonts are loaded via a plain <link> (build-safe, no build-time
-// fetch); if unreachable (air-gapped on-prem) the browser falls back to system-ui.
+/* The dashboard, rebuilt around the questions a risk function is judged on, in the
+   order a board asks them:
+
+     1. Are we inside the boundary we set?      — posture against appetite, top risks
+     2. Are the controls actually working?      — assurance, tests overdue and failed
+     3. Are we compliant, and can we prove it?  — per framework, assured vs mapped
+     4. What is overdue or needs a decision?    — one queue, every line a link
+     5. What happened?                          — incidents, KRIs, movement, activity
+
+   Every number links to the register that produced it, and the headline score shows
+   its own components, because a gauge with no reasons is decoration. Mapped-but-
+   untested controls count for nothing anywhere on this page — same rule as the gap
+   analysis and the residual engine, so the three can never disagree. */
+
 const FONT_SANS = "'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 const FONT_MONO = "'Space Grotesk', 'Plus Jakarta Sans', system-ui, sans-serif";
-
-// ---------------------------------------------------------------- palette (from the v2 design)
 const SEV = { critical: "#b42318", high: "#c2622d", medium: "#b8892a", low: "#15803d" } as const;
 const EMERALD = "#10b981";
+const AMBER = "#d97706";
+const RED = "#dc2626";
+const SLATE = "#94a3b8";
 
-function money(n: number) {
-  if (!n) return "$0";
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${Math.round(n / 1_000)}K`;
-  return `$${Math.round(n)}`;
-}
-/** Band a score using the server-supplied bands, which scale with the tenant's matrix.
- *  Falls back to the 5x5 thresholds only until the matrix response has arrived. */
+const CARD: React.CSSProperties = {
+  background: "#fff", border: "1px solid #e6e9ef", borderRadius: 16, boxShadow: "0 1px 2px rgba(15,23,42,.04)",
+};
+const H2: React.CSSProperties = { fontSize: 16, fontWeight: 700, margin: 0 };
+const SUB: React.CSSProperties = { fontSize: 12.5, color: "#64748b" };
+
+type Range = "30d" | "quarter" | "ytd";
+
 function bandFromScore(score: number | null, bands?: MatrixBand[]): keyof typeof SEV {
   if (!score) return "low";
-  if (bands && bands.length) {
+  if (bands?.length) {
     const hit = bands.find((b) => score >= b.min_score && score <= b.max_score);
     if (hit) return hit.severity as keyof typeof SEV;
   }
@@ -41,6 +54,7 @@ function bandFromScore(score: number | null, bands?: MatrixBand[]): keyof typeof
   if (score >= 5) return "medium";
   return "low";
 }
+
 function timeAgo(iso: string) {
   const diff = (Date.now() - new Date(iso).getTime()) / 1000;
   if (diff < 60) return "just now";
@@ -49,412 +63,457 @@ function timeAgo(iso: string) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-const CARD: React.CSSProperties = {
-  background: "#fff",
-  border: "1px solid #e5e9ee",
-  borderRadius: 18,
-  boxShadow: "0 1px 2px rgba(16,24,40,.04)",
-};
+const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
-// ================================================================ Governance gauge
-function Gauge({ score }: { score: number }) {
-  const CIRC = 502.65; // 2πr, r=80
-  const TRACK = 376.99; // 270° arc
+/* ------------------------------------------------------------------ atoms */
+function Gauge({ score, band }: { score: number; band: string }) {
+  const R = 78, C = 2 * Math.PI * R, TRACK = C * 0.75;
   const prog = Math.max(0, Math.min(1, score / 100)) * TRACK;
-  const band = score >= 80 ? "Healthy" : score >= 60 ? "Elevated" : "Critical";
-  const bandColor = score >= 80 ? "#34d399" : score >= 60 ? "#fbbf24" : "#f87171";
-  const bandBg = score >= 80 ? "rgba(52,211,153,.12)" : score >= 60 ? "rgba(251,191,36,.12)" : "rgba(248,113,113,.12)";
+  const color = band === "healthy" ? "#34d399" : band === "elevated" ? "#fbbf24" : "#f87171";
   return (
-    <>
-      <div style={{ position: "relative", width: "100%", display: "flex", justifyContent: "center", marginTop: 4 }}>
-        <svg viewBox="0 0 200 168" style={{ width: 200 }}>
-          <defs>
-            <linearGradient id="gaugegrad" x1="0" y1="1" x2="1" y2="0">
-              <stop offset="0" stopColor="#ef4444" />
-              <stop offset="0.45" stopColor="#f59e0b" />
-              <stop offset="0.75" stopColor="#eab308" />
-              <stop offset="1" stopColor="#10b981" />
-            </linearGradient>
-          </defs>
-          <circle cx="100" cy="100" r="80" fill="none" stroke="rgba(255,255,255,.08)" strokeWidth="16" strokeLinecap="round" strokeDasharray={`${TRACK} ${CIRC}`} transform="rotate(135 100 100)" />
-          <circle cx="100" cy="100" r="80" fill="none" stroke="url(#gaugegrad)" strokeWidth="16" strokeLinecap="round" strokeDasharray={`${prog} ${CIRC}`} transform="rotate(135 100 100)" />
-          <text x="100" y="96" textAnchor="middle" fill="#f8fafc" fontFamily={FONT_MONO} fontSize="52" fontWeight="700">{score}</text>
-          <text x="100" y="120" textAnchor="middle" fill="#7d959d" fontSize="13" fontWeight="600">/ 100</text>
-        </svg>
-      </div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", marginTop: 2 }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: bandColor, background: bandBg, padding: "4px 12px", borderRadius: 20 }}>{band}</span>
-      </div>
-    </>
+    <svg viewBox="0 0 200 170" width={190} height={162} aria-label={`Governance health ${score} of 100`}>
+      <circle cx="100" cy="100" r={R} fill="none" stroke="rgba(255,255,255,.08)" strokeWidth="14" strokeDasharray={`${TRACK} ${C}`} strokeLinecap="round" transform="rotate(135 100 100)" />
+      <circle cx="100" cy="100" r={R} fill="none" stroke={color} strokeWidth="14" strokeDasharray={`${prog} ${C}`} strokeLinecap="round" transform="rotate(135 100 100)" />
+      <text x="100" y="96" textAnchor="middle" fill="#f8fafc" fontFamily={FONT_MONO} fontSize="52" fontWeight="700">{score}</text>
+      <text x="100" y="118" textAnchor="middle" fill="#94a3b8" fontFamily={FONT_SANS} fontSize="12">/ 100</text>
+    </svg>
   );
 }
 
-// ================================================================ compliance donut
-function Donut({ pct, size = 150, inset = 14, big }: { pct: number; size?: number; inset?: number; big?: boolean }) {
-  const deg = Math.round((pct / 100) * 360);
-  const color = pct >= 80 ? EMERALD : pct >= 40 ? "#0ea5a3" : "#c2622d";
+function Stat({ label, value, sub, tone, href }: { label: string; value: React.ReactNode; sub?: string; tone?: "danger" | "warn" | "ok"; href?: string }) {
+  const color = tone === "danger" ? RED : tone === "warn" ? AMBER : tone === "ok" ? "#15803d" : "#0f172a";
+  const body = (
+    <div style={{ ...CARD, padding: "16px 18px", height: "100%" }}>
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "#64748b" }}>{label}</div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 30, fontWeight: 700, color, marginTop: 6, lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ ...SUB, marginTop: 6 }}>{sub}</div>}
+    </div>
+  );
+  return href ? <Link href={href} style={{ textDecoration: "none", color: "inherit" }}>{body}</Link> : body;
+}
+
+/** A stacked bar with a legend — the shape eramba uses for "why is this package not
+ *  compliant", applied to assurance: what fraction is proven, untested, failing, absent. */
+function Stack({ parts, total }: { parts: { label: string; value: number; color: string }[]; total: number }) {
   return (
-    <div style={{ position: "relative", width: size, height: size, borderRadius: "50%", background: `conic-gradient(${color} 0deg ${deg}deg, #eef1f4 ${deg}deg 360deg)`, flex: "none" }}>
-      <div style={{ position: "absolute", inset, borderRadius: "50%", background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ fontFamily: big ? FONT_MONO : undefined, fontSize: big ? 34 : size <= 46 ? 11 : 13, fontWeight: 700, lineHeight: 1, color: pct >= 80 ? "#15803d" : "#0f172a" }}>{pct}%</div>
-        {big && <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 3 }}>overall</div>}
+    <div>
+      <div style={{ display: "flex", height: 12, borderRadius: 6, overflow: "hidden", background: "#eef1f5" }}>
+        {parts.filter((p) => p.value > 0).map((p) => (
+          <div key={p.label} title={`${p.label}: ${p.value}`} style={{ width: `${(100 * p.value) / Math.max(total, 1)}%`, background: p.color }} />
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 6, fontSize: 11.5, color: "#64748b" }}>
+        {parts.map((p) => (
+          <span key={p.label} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color, display: "inline-block" }} />
+            {p.label} <b style={{ color: "#0f172a" }}>{p.value}</b>
+          </span>
+        ))}
       </div>
     </div>
   );
 }
 
-// ================================================================ page
-type Range = "30d" | "quarter" | "ytd";
+function SevChip({ value }: { value: string | null }) {
+  if (!value) return <span style={{ color: SLATE }}>—</span>;
+  const c = SEV[value as keyof typeof SEV] ?? SLATE;
+  return <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 600, color: c }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: c }} />{cap(value)}</span>;
+}
 
+/* ------------------------------------------------------------------- page */
 export default function DashboardPage() {
-  const [d, setD] = useState<Dashboard | null>(null);
-  const [c, setC] = useState<ComplianceSummary | null>(null);
-  const [agg, setAgg] = useState<RiskAggregate | null>(null);
+  const [o, setO] = useState<DashboardOverview | null>(null);
   const [matrix, setMatrix] = useState<RiskMatrix | null>(null);
-  const [tat, setTat] = useState<TatSummary | null>(null);
   const [activity, setActivity] = useState<AuditEntry[]>([]);
   const [heatMode, setHeatMode] = useState<"inherent" | "residual">("residual");
   const [range, setRange] = useState<Range>("30d");
   const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const days = range === "30d" ? 30 : range === "quarter" ? 90 : Math.max(7, Math.ceil((Date.now() - new Date(new Date().getFullYear(), 0, 1).getTime()) / 864e5));
 
   useEffect(() => {
-    api.dashboard().then(setD).catch(() => {});
-    api.complianceSummary().then(setC).catch(() => {});
-    api.riskAggregate().then(setAgg).catch(() => {});
+    api.dashboardOverview(days).then(setO).catch((e) => setError(e instanceof Error ? e.message : "Could not load the dashboard"));
+  }, [days]);
+  useEffect(() => {
     api.riskMatrix().then(setMatrix).catch(() => {});
-    api.slaBreaches().then(setTat).catch(() => {});
-    api.audit(50).then((r) => setActivity(r.items)).catch(() => {});
+    api.audit(30).then((r) => setActivity(r.items)).catch(() => {});
   }, []);
 
   const today = useMemo(() => new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }), []);
-  const clock = useMemo(() => new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }), []);
 
-  const critical = d?.risks_by_inherent_severity?.critical || 0;
-  const criticalResidual = d?.risks_by_residual_severity?.critical || 0;
-  const highResidual = d?.risks_by_residual_severity?.high || 0;
-  const withinTolerance = d ? d.total_risks - d.risks_in_breach : 0;
-  const onTrack = c ? c.frameworks.filter((f) => f.compliant_pct >= 80).length : 0;
-
-  // ---- composite governance-health score (0-100), computed from live posture ----
-  const score = useMemo(() => {
-    if (!d) return 0;
-    const tol = d.total_risks ? withinTolerance / d.total_risks : 1;
-    const comp = c ? c.overall_compliant_pct / 100 : 0.5;
-    const resid = d.total_risks ? 1 - (criticalResidual + highResidual) / d.total_risks : 1;
-    return Math.round(100 * (0.5 * tol + 0.3 * comp + 0.2 * resid));
-  }, [d, c, withinTolerance, criticalResidual, highResidual]);
-
-  // ---- "needs your attention" queue, derived from real data ----
-  const attention = useMemo(() => {
-    if (!d) return [];
-    const items: { tag: string; chip: [string, string]; title: string; meta: string; action: string; href: string; danger?: boolean }[] = [];
-    if (tat && tat.breached > 0)
-      items.push({ tag: "TAT", chip: ["rgba(239,68,68,.16)", "#fca5a5"], title: `${tat.breached} record${tat.breached > 1 ? "s are" : " is"} past the turnaround time`, meta: tat.by_type.filter((t) => t.breached).map((t) => `${t.breached} ${t.label.toLowerCase()}`).join(" · "), action: "Chase", href: "/sla-policies", danger: true });
-    if (d.risks_in_breach > 0)
-      items.push({ tag: "BREACH", chip: ["rgba(239,68,68,.16)", "#fca5a5"], title: `${d.risks_in_breach} risk${d.risks_in_breach > 1 ? "s" : ""} exceed tolerance (residual ≥ ${d.tolerance_score})`, meta: "Escalation to risk owner required", action: "Escalate", href: "/risks", danger: true });
-    if (critical > 0)
-      items.push({ tag: "CRITICAL", chip: ["rgba(251,191,36,.16)", "#fcd34d"], title: `${critical} critical inherent risk${critical > 1 ? "s" : ""} pending treatment`, meta: "No residual assessment recorded", action: "Assign", href: "/risks" });
-    if (c)
-      c.frameworks.filter((f) => f.compliant_pct < 80).slice(0, 1).forEach((f) =>
-        items.push({ tag: "REVIEW", chip: ["rgba(251,191,36,.16)", "#fcd34d"], title: `${f.name} at ${f.compliant_pct}% — ${f.total_requirements - f.compliant} controls awaiting evidence`, meta: "Framework below target compliance", action: "Review", href: "/compliance" }));
-    if (d.overdue_reviews > 0)
-      items.push({ tag: "REVIEW", chip: ["rgba(251,191,36,.16)", "#fcd34d"], title: `${d.overdue_reviews} asset review${d.overdue_reviews > 1 ? "s" : ""} overdue`, meta: "Review cycle lapsed", action: "Review", href: "/it-assets" });
-    if (d.pending_acceptances > 0)
-      items.push({ tag: "APPROVE", chip: ["rgba(52,211,153,.16)", "#6ee7b7"], title: `${d.pending_acceptances} risk acceptance${d.pending_acceptances > 1 ? "s" : ""} awaiting sign-off`, meta: "Pending approver decision", action: "Approve", href: "/approvals" });
-    return items.slice(0, 3);
-  }, [d, c, critical, tat]);
-
-  // ---- risk matrix cells + bubbles ----
-  // The matrix is per-organisation configurable (3x3 to 6x6), so cell centres are
-  // derived from its size rather than a fixed five-point lookup.
-  const matrixSize = matrix?.size ?? 5;
-  const centre = (n: number) => ((n - 0.5) / matrixSize) * 100;
   const bubbles = useMemo(() => {
     if (!matrix) return [];
-    return matrix.cells
-      .map((cell) => {
-        const count = heatMode === "residual" ? cell.residual_count : cell.inherent_count;
-        if (!count) return null;
-        const band = bandFromScore(cell.score, matrix.bands);
-        const size = 24 + Math.min(count, 5) * 5;
-        return {
-          key: `${cell.likelihood}-${cell.impact}`,
-          count,
-          left: `${((cell.likelihood - 0.5) / matrix.size) * 100}%`,
-          top: `${100 - ((cell.impact - 0.5) / matrix.size) * 100}%`,
-          size,
-          color: SEV[band],
-          title: `Likelihood ${cell.likelihood} × Impact ${cell.impact} · ${count} risk${count > 1 ? "s" : ""} · ${band}`,
-        };
-      })
-      .filter(Boolean) as { key: string; count: number; left: string; top: string; size: number; color: string; title: string }[];
+    return matrix.cells.map((cell) => {
+      const count = heatMode === "residual" ? cell.residual_count : cell.inherent_count;
+      if (!count) return null;
+      const band = bandFromScore(cell.score, matrix.bands);
+      return {
+        key: `${cell.likelihood}-${cell.impact}`, count,
+        left: `${((cell.likelihood - 0.5) / matrix.size) * 100}%`, top: `${100 - ((cell.impact - 0.5) / matrix.size) * 100}%`,
+        size: 24 + Math.min(count, 5) * 5, color: SEV[band],
+        title: `Likelihood ${cell.likelihood} × Impact ${cell.impact} · ${count} risk${count > 1 ? "s" : ""} · ${band}`,
+      };
+    }).filter(Boolean) as { key: string; count: number; left: string; top: string; size: number; color: string; title: string }[];
   }, [matrix, heatMode]);
-
-  // ---- activity filtered by the selected range ----
-  const rangeStart = useMemo(() => {
-    const now = new Date();
-    if (range === "30d") return new Date(now.getTime() - 30 * 864e5);
-    if (range === "quarter") return new Date(now.getTime() - 90 * 864e5);
-    return new Date(now.getFullYear(), 0, 1);
-  }, [range]);
-  const shownActivity = useMemo(
-    () => activity.filter((a) => new Date(a.created_at) >= rangeStart).slice(0, 7),
-    [activity, rangeStart]
-  );
 
   async function execSummary() {
     setDownloading(true);
     try { await api.pdfExecutiveSummary(); } catch { /* ignore */ } finally { setDownloading(false); }
   }
 
-  const tabStyle = (active: boolean): React.CSSProperties => ({
-    padding: "7px 13px", borderRadius: 8, cursor: "pointer", fontWeight: 600,
+  const tab = (active: boolean): React.CSSProperties => ({
+    padding: "7px 13px", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: 13,
     background: active ? "#0f172a" : "transparent", color: active ? "#fff" : "#64748b",
   });
-  const heatBtn = (active: boolean): React.CSSProperties => ({
-    border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 600,
-    padding: "6px 14px", borderRadius: 7, background: active ? "#0f172a" : "transparent", color: active ? "#fff" : "#64748b",
-  });
+  const toneColor = (t: ActionItem["tone"]) => (t === "critical" ? RED : t === "warning" ? AMBER : "#2563eb");
+  const toneBg = (t: ActionItem["tone"]) => (t === "critical" ? "rgba(239,68,68,.14)" : t === "warning" ? "rgba(251,191,36,.16)" : "rgba(37,99,235,.14)");
+
+  const a = o?.assurance;
+  const assuredPct = a && a.total ? Math.round((100 * (a.effective + a.partially_effective)) / a.total) : 0;
+  const incidentDelta = o ? o.incidents.opened_in_period - o.incidents.opened_prior_period : 0;
 
   return (
     <div style={{ fontFamily: FONT_SANS, display: "flex", flexDirection: "column", gap: 18, color: "#0f172a" }}>
-      {/* Build-safe webfont load — degrades to system-ui if unreachable (air-gapped). */}
       <link rel="preconnect" href="https://fonts.googleapis.com" />
       <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
       <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
 
-      {/* ---------- page header ---------- */}
+      {/* ------------------------------------------------------------ header */}
       <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 24, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ margin: "0 0 6px", fontSize: 27, fontWeight: 800, letterSpacing: "-.02em" }}>Governance &amp; risk overview</h1>
           <p style={{ margin: 0, fontSize: 14, color: "#64748b" }}>
-            Enterprise posture across risk, compliance and controls — as of {today}.
-            <span style={{ marginLeft: 10, display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600, color: "#0f766e" }}>
-              <span style={{ width: 7, height: 7, borderRadius: "50%", background: EMERALD, display: "inline-block" }} />Live · {clock}
-            </span>
+            Are we inside appetite, are the controls working, can we prove it, and what needs a decision — as of {today}.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ display: "flex", background: "#fff", border: "1px solid #e5e9ee", borderRadius: 11, padding: 3, fontSize: 12.5, fontWeight: 600 }}>
-            <span style={tabStyle(range === "30d")} onClick={() => setRange("30d")}>30 days</span>
-            <span style={tabStyle(range === "quarter")} onClick={() => setRange("quarter")}>Quarter</span>
-            <span style={tabStyle(range === "ytd")} onClick={() => setRange("ytd")}>YTD</span>
+          <div style={{ display: "flex", gap: 2, background: "#fff", border: "1px solid #e6e9ef", borderRadius: 10, padding: 3 }}>
+            <span style={tab(range === "30d")} onClick={() => setRange("30d")}>30 days</span>
+            <span style={tab(range === "quarter")} onClick={() => setRange("quarter")}>Quarter</span>
+            <span style={tab(range === "ytd")} onClick={() => setRange("ytd")}>YTD</span>
           </div>
-          <button onClick={execSummary} disabled={downloading}
-            style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 15px", border: "none", borderRadius: 11, background: EMERALD, cursor: "pointer", fontFamily: "inherit", fontSize: 13.5, fontWeight: 700, color: "#04231b", boxShadow: "0 2px 8px rgba(16,185,129,.3)", opacity: downloading ? 0.7 : 1 }}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 16, height: 16 }}><path d="M6 3h8l4 4v14H6zM14 3v4h4M9 13h6M9 17h6" /></svg>
-            {downloading ? "Preparing…" : "Executive summary"}
-          </button>
+          <button className="btn" onClick={execSummary} disabled={downloading}>{downloading ? "Preparing…" : "Executive summary"}</button>
         </div>
       </div>
 
-      {/* ---------- HERO BAND ---------- */}
-      <div style={{ background: "radial-gradient(120% 140% at 0% 0%, #12242c 0%, #0b1519 60%)", border: "1px solid #0a1418", borderRadius: 22, padding: "26px 30px", display: "grid", gridTemplateColumns: "300px 1fr", gap: 34, boxShadow: "0 16px 40px -18px rgba(6,20,24,.5)" }}>
-        <div style={{ borderRight: "1px solid rgba(255,255,255,.08)", paddingRight: 30 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".11em", color: "#5f7a83", marginBottom: 6 }}>GOVERNANCE HEALTH</div>
-          <Gauge score={score} />
-          <div style={{ display: "flex", flexDirection: "column", gap: 9, marginTop: 20 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}><span style={{ color: "#9fb2ba" }}>Risks within tolerance</span><span style={{ color: "#e2e8f0", fontWeight: 700 }}>{withinTolerance} / {d?.total_risks ?? 0}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}><span style={{ color: "#9fb2ba" }}>Residual within appetite</span><span style={{ color: "#e2e8f0", fontWeight: 700 }}>{d?.risks_within_appetite ?? 0} / {d?.total_risks ?? 0}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}><span style={{ color: "#9fb2ba" }}>Frameworks on track</span><span style={{ color: "#e2e8f0", fontWeight: 700 }}>{onTrack} / {c?.total_frameworks ?? 0}</span></div>
+      {error && <div className="error">{error}</div>}
+
+      {/* --------------------------------------- hero: health + the decision queue */}
+      <div style={{ background: "linear-gradient(135deg,#0b1220 0%,#111c33 100%)", borderRadius: 18, padding: 22, display: "grid", gridTemplateColumns: "300px 1fr", gap: 22, color: "#e2e8f0" }}>
+        <div style={{ borderRight: "1px solid rgba(255,255,255,.08)", paddingRight: 22 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "#94a3b8" }}>Governance health</div>
+          <div style={{ display: "flex", justifyContent: "center", margin: "6px 0 2px" }}>
+            {o ? <Gauge score={o.health.score} band={o.health.band} /> : <div style={{ height: 162 }} />}
           </div>
+          {o && (
+            <div style={{ display: "grid", gap: 7, marginTop: 4 }}>
+              {o.health.components.map((c) => (
+                <div key={c.key} title={c.detail}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                    <span style={{ color: "#cbd5e1" }}>{c.label} <span style={{ color: "#64748b" }}>· {Math.round(c.weight * 100)}%</span></span>
+                    <b style={{ fontFamily: FONT_MONO, color: c.value >= 80 ? "#6ee7b7" : c.value >= 50 ? "#fcd34d" : "#fca5a5" }}>{Math.round(c.value)}%</b>
+                  </div>
+                  <div style={{ height: 4, borderRadius: 2, background: "rgba(255,255,255,.08)", marginTop: 3 }}>
+                    <div style={{ width: `${c.value}%`, height: "100%", borderRadius: 2, background: c.value >= 80 ? "#34d399" : c.value >= 50 ? "#fbbf24" : "#f87171" }} />
+                  </div>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{c.detail}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-              <span style={{ fontSize: 15, fontWeight: 700, color: "#f8fafc" }}>Needs your attention</span>
-              <span style={{ fontSize: 11, fontWeight: 700, color: "#052e26", background: "#34d399", borderRadius: 20, padding: "2px 9px" }}>{attention.length}</span>
-            </div>
-            <Link href="/issues" style={{ fontSize: 12.5, color: "#7d959d", fontWeight: 600, textDecoration: "none" }}>View all →</Link>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: "#f8fafc" }}>
+              Needs a decision or is overdue
+              {o && <span style={{ marginLeft: 8, fontSize: 12, fontWeight: 700, background: "rgba(52,211,153,.18)", color: "#6ee7b7", borderRadius: 999, padding: "2px 8px" }}>{o.actions.length}</span>}
+            </span>
+            <Link href="/notifications" style={{ fontSize: 12.5, color: "#94a3b8" }}>All alerts →</Link>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-            {attention.map((a, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, padding: "13px 16px", background: "rgba(255,255,255,.045)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 13 }}>
-                <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".05em", color: a.chip[1], background: a.chip[0], borderRadius: 7, padding: "5px 9px", flex: "none" }}>{a.tag}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "#f1f5f9", lineHeight: 1.35 }}>{a.title}</div>
-                  <div style={{ fontSize: 11.5, color: "#7d959d", marginTop: 2 }}>{a.meta}</div>
-                </div>
-                <Link href={a.href} style={{ textDecoration: "none", fontSize: 12, fontWeight: 700, padding: "8px 14px", borderRadius: 9, flex: "none", background: a.danger ? "#e11d48" : "rgba(255,255,255,.1)", color: a.danger ? "#fff" : "#e2e8f0" }}>{a.action}</Link>
-              </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {o?.actions.slice(0, 6).map((it) => (
+              <Link key={it.key} href={it.href} style={{ display: "flex", alignItems: "center", gap: 12, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 12, padding: "10px 14px", textDecoration: "none", color: "inherit" }}>
+                <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase", padding: "3px 8px", borderRadius: 6, background: toneBg(it.tone), color: toneColor(it.tone) }}>{it.tone}</span>
+                <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, color: "#f1f5f9" }}>{it.label}</span>
+                <span style={{ fontSize: 12.5, color: "#94a3b8" }}>Open →</span>
+              </Link>
             ))}
-            {d && attention.length === 0 && (
-              <div style={{ padding: "22px 16px", textAlign: "center", background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.07)", borderRadius: 13, color: "#9fb2ba", fontSize: 13 }}>
-                ✓ Nothing needs escalation — all risks within tolerance and reviews current.
-              </div>
-            )}
+            {o && o.actions.length === 0 && <div style={{ fontSize: 13.5, color: "#94a3b8" }}>Nothing overdue and nothing waiting on a decision.</div>}
+            {o && o.actions.length > 6 && <div style={{ fontSize: 12, color: "#64748b" }}>+ {o.actions.length - 6} more in the list below.</div>}
           </div>
         </div>
       </div>
 
-      {/* ---------- METRIC STRIP ---------- */}
-      <div style={{ ...CARD, display: "grid", gridTemplateColumns: "repeat(5,1fr)", overflow: "hidden" }}>
-        {[
-          { k: "TOTAL RISKS", v: d?.total_risks ?? "—", sub: `${withinTolerance} within tolerance`, color: "#0f172a" },
-          { k: "CRITICAL INHERENT", v: critical, sub: `of ${d?.total_risks ?? 0} total`, color: SEV.critical },
-          { k: "OVERALL COMPLIANT", v: c ? `${c.overall_compliant_pct}%` : "—", sub: `${c?.total_frameworks ?? 0} frameworks`, color: "#0f172a" },
-          { k: "ANNUAL EXPOSURE", v: d ? money(d.total_exposure) : "—", sub: "expected annual loss", color: "#0f172a" },
-          { k: "TOLERANCE BREACHES", v: d?.risks_in_breach ?? "—", sub: d && d.risks_in_breach > 0 ? "escalation due" : "within tolerance", color: d && d.risks_in_breach > 0 ? SEV.critical : "#0f172a" },
-        ].map((t, i) => (
-          <div key={t.k} style={{ padding: "18px 20px", borderRight: i < 4 ? "1px solid #eef1f4" : "none" }}>
-            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".05em", color: "#94a3b8" }}>{t.k}</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 30, fontWeight: 700, lineHeight: 1, marginTop: 8, color: t.color }}>{t.v}</div>
-            <div style={{ fontSize: 11.5, color: "#94a3b8", fontWeight: 500, marginTop: 6 }}>{t.sub}</div>
+      {/* ---------------------------------------------------------- KPI strip */}
+      {o && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12 }}>
+          <Stat label="Above tolerance" value={o.posture.breach} sub={`${o.posture.elevated} elevated · ${o.posture.within_appetite} within appetite`} tone={o.posture.breach ? "danger" : "ok"} href="/risks" />
+          <Stat label="Control assurance" value={`${assuredPct}%`} sub={`${a!.effective + a!.partially_effective} of ${a!.total} controls proven working`} tone={assuredPct >= 70 ? "ok" : assuredPct >= 40 ? "warn" : "danger"} href="/controls" />
+          <Stat label="Compliance assured" value={`${o.compliance.overall_assured_pct}%`} sub={`${o.compliance.frameworks.length} frameworks · ${o.compliance.frameworks.reduce((n, f) => n + f.gaps, 0)} open gaps`} tone={o.compliance.overall_assured_pct >= 70 ? "ok" : o.compliance.overall_assured_pct >= 40 ? "warn" : "danger"} href="/compliance" />
+          <Stat label="Open incidents" value={o.incidents.open} sub={`${o.incidents.reportable_open} reportable · ${incidentDelta >= 0 ? "+" : ""}${incidentDelta} vs prior ${o.period_days}d`} tone={o.incidents.reportable_open ? "danger" : o.incidents.open ? "warn" : "ok"} href="/incidents" />
+          <Stat label="KRIs breaching" value={o.kris.red} sub={`${o.kris.amber} amber · ${o.kris.green} green · ${o.kris.no_data} no data`} tone={o.kris.red ? "danger" : o.kris.amber ? "warn" : "ok"} href="/operational-risk" />
+          <Stat label="Tests overdue" value={a!.tests_overdue} sub={`${a!.last_test_failed} failed last test · ${a!.tests_due_30d} due in 30d`} tone={a!.last_test_failed ? "danger" : a!.tests_overdue ? "warn" : "ok"} href="/controls" />
+        </div>
+      )}
+
+      {/* ------------------------------------------- 1. are we inside appetite? */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(330px, 0.85fr) minmax(0, 1.7fr)", gap: 18 }}>
+        <div style={{ ...CARD, padding: "20px 22px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+            <div>
+              <h2 style={H2}>Risk matrix</h2>
+              <div style={SUB}>Bubble = risks in cell{o ? ` · ${o.posture.total_risks} plotted` : ""}</div>
+            </div>
+            <div style={{ display: "flex", gap: 2, background: "#f3f4f7", borderRadius: 9, padding: 3 }}>
+              <button onClick={() => setHeatMode("inherent")} style={{ ...tab(heatMode === "inherent"), border: "none", fontFamily: "inherit" }}>Inherent</button>
+              <button onClick={() => setHeatMode("residual")} style={{ ...tab(heatMode === "residual"), border: "none", fontFamily: "inherit" }}>Residual</button>
+            </div>
           </div>
-        ))}
+          <div style={{ position: "relative", aspectRatio: "1 / 1", maxHeight: 360, margin: "14px 0 6px 18px" }}>
+            <div style={{ position: "absolute", left: -18, top: "50%", transform: "translateY(-50%) rotate(-90deg)", fontSize: 10.5, fontWeight: 700, letterSpacing: ".07em", color: "#94a3b8" }}>IMPACT →</div>
+            <div style={{ position: "absolute", inset: 0, display: "grid", gridTemplateColumns: `repeat(${matrix?.size ?? 5},1fr)`, gridTemplateRows: `repeat(${matrix?.size ?? 5},1fr)`, gap: 5 }}>
+              {Array.from({ length: (matrix?.size ?? 5) ** 2 }).map((_, idx) => {
+                const size = matrix?.size ?? 5;
+                const row = Math.floor(idx / size), col = idx % size;
+                const impact = size - row, likelihood = col + 1;
+                const band = bandFromScore(likelihood * impact, matrix?.bands);
+                const tint = { critical: "rgba(180,35,24,.12)", high: "rgba(194,98,45,.12)", medium: "rgba(184,137,42,.10)", low: "rgba(21,128,61,.08)" }[band];
+                return <div key={idx} style={{ background: tint, borderRadius: 8, border: "1px solid rgba(15,23,42,.05)" }} />;
+              })}
+            </div>
+            {bubbles.map((b) => (
+              <div key={b.key} title={b.title} style={{ position: "absolute", left: b.left, top: b.top, width: b.size, height: b.size, transform: "translate(-50%,-50%)", borderRadius: "50%", background: b.color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_MONO, fontSize: 12, fontWeight: 700, boxShadow: "0 0 0 3px #fff, 0 4px 10px rgba(15,23,42,.18)" }}>
+                {b.count}
+              </div>
+            ))}
+            <div style={{ position: "absolute", right: 0, bottom: -18, fontSize: 10.5, fontWeight: 700, letterSpacing: ".07em", color: "#94a3b8" }}>LIKELIHOOD →</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 22, ...SUB }}>
+            <span style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>{(["critical", "high", "medium", "low"] as const).map((s) => <SevChip key={s} value={s} />)}</span>
+            {o && <span style={{ whiteSpace: "nowrap" }}>Appetite <b>{o.posture.appetite_score}</b> · tolerance <b>{o.posture.tolerance_score}</b> on a {matrix?.size ?? 5}×{matrix?.size ?? 5} matrix</span>}
+          </div>
+        </div>
+
+        <div style={{ ...CARD, padding: "20px 22px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div>
+              <h2 style={H2}>Top risks</h2>
+              <div style={SUB}>Highest current exposure — residual where assessed, otherwise inherent</div>
+            </div>
+            <Link href="/risks" style={{ fontSize: 12.5 }}>Register →</Link>
+          </div>
+          <div className="table-wrap">
+            <div style={{ overflowX: "auto", minWidth: 0 }}>
+            <table style={{ fontSize: 13, width: "100%", tableLayout: "fixed", minWidth: 560 }}>
+              <colgroup><col style={{ width: 62 }} /><col /><col style={{ width: 118 }} /><col style={{ width: 80 }} /><col style={{ width: 52 }} /><col style={{ width: 96 }} /></colgroup>
+              <thead><tr><th>Ref</th><th>Risk · owner · segment</th><th>Exposure</th><th>Appetite</th><th>Ctrls</th><th>Review</th></tr></thead>
+              <tbody>
+                {o?.posture.top_risks.map((r: TopRisk) => (
+                  <tr key={r.id} onClick={() => { window.location.href = `/risks?id=${r.id}`; }} style={{ cursor: "pointer" }}>
+                    <td style={{ whiteSpace: "nowrap" }}><span className="ref">{r.reference}</span></td>
+                    <td style={{ overflow: "hidden" }} title={r.title}>
+                      <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
+                      <div style={{ fontSize: 11.5, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>
+                        <span style={{ color: r.owner ? "#64748b" : RED }}>{r.owner || "Unassigned"}</span>{r.business_units.length > 0 && <> · {r.business_units.join(", ")}</>}
+                      </div>
+                    </td>
+                    <td style={{ whiteSpace: "nowrap" }}><SevChip value={r.severity} /> <span style={{ color: SLATE }}>({r.score ?? "—"})</span></td>
+                    <td>{r.appetite_status === "breach" ? <span style={{ color: RED, fontWeight: 700 }}>Breach</span> : r.appetite_status === "elevated" ? <span style={{ color: AMBER, fontWeight: 600 }}>Elevated</span> : <span style={{ color: "#15803d" }}>Within</span>}</td>
+                    <td style={{ textAlign: "center", color: r.control_count ? "#0f172a" : RED }}>{r.control_count || "none"}</td>
+                    <td style={{ color: r.review_overdue ? RED : "#64748b", whiteSpace: "nowrap" }}>{r.review_overdue ? "Overdue" : r.next_review_date ?? "—"}</td>
+                  </tr>
+                ))}
+                {o && o.posture.top_risks.length === 0 && <tr><td colSpan={6} style={{ color: SLATE, padding: 16 }}>No risks yet.</td></tr>}
+              </tbody>
+            </table>
+            </div>
+          </div>
+        </div>
       </div>
 
-      {/* ---------- MATRIX + COMPLIANCE ---------- */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.55fr 1fr", gap: 18 }}>
-        {/* risk matrix */}
-        <div style={{ ...CARD, padding: "22px 24px" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+      {/* ------------------- 2. are the controls working?  3. can we prove compliance? */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.35fr", gap: 18 }}>
+        <div style={{ ...CARD, padding: "20px 22px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
             <div>
-              <div style={{ fontSize: 16, fontWeight: 700 }}>Risk matrix</div>
-              <div style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 2 }}>Bubble = risks in cell · {matrix?.total ?? 0} plotted</div>
+              <h2 style={H2}>Control assurance</h2>
+              <div style={SUB}>Proven by a test, not by being on the list</div>
             </div>
-            <div style={{ display: "flex", background: "#f4f6f8", border: "1px solid #e5e9ee", borderRadius: 9, padding: 3 }}>
-              <button onClick={() => setHeatMode("inherent")} style={heatBtn(heatMode === "inherent")}>Inherent</button>
-              <button onClick={() => setHeatMode("residual")} style={heatBtn(heatMode === "residual")}>Residual</button>
-            </div>
+            <Link href="/controls" style={{ fontSize: 12.5 }}>Catalogue →</Link>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "20px 1fr", gap: 12, marginTop: 14 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <span style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 10, fontWeight: 700, letterSpacing: ".12em", color: "#94a3b8" }}>IMPACT →</span>
-            </div>
-            <div>
-              <div style={{ position: "relative", width: "100%", aspectRatio: "1.35 / 1" }}>
-                <div style={{ position: "absolute", inset: 0, display: "grid", gridTemplateColumns: `repeat(${matrixSize},1fr)`, gridTemplateRows: `repeat(${matrixSize},1fr)`, gap: 5 }}>
-                  {Array.from({ length: matrixSize * matrixSize }).map((_, idx) => {
-                    const row = Math.floor(idx / matrixSize), col = idx % matrixSize;
-                    const impact = matrixSize - row, likelihood = col + 1;
-                    const band = bandFromScore(impact * likelihood, matrix?.bands);
-                    return <div key={idx} style={{ borderRadius: 9, background: SEV[band] + "22", border: `1px solid ${SEV[band]}2e` }} />;
-                  })}
-                </div>
-                {bubbles.map((b) => (
-                  <div key={b.key} title={b.title}
-                    style={{ fontFamily: FONT_MONO, position: "absolute", left: b.left, top: b.top, transform: "translate(-50%,-50%)", width: b.size, height: b.size, borderRadius: "50%", background: b.color + "e0", border: "2px solid #fff", boxShadow: `0 2px 8px ${b.color}66`, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 11, fontWeight: 700, zIndex: 2, cursor: "default" }}>
-                    {b.count}
+          {a && (
+            <>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 10 }}>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 34, fontWeight: 700, color: assuredPct >= 70 ? "#15803d" : assuredPct >= 40 ? AMBER : RED }}>{assuredPct}%</span>
+                <span style={SUB}>of {a.total} controls effective or partially effective</span>
+              </div>
+              <Stack total={a.total} parts={[
+                { label: "Effective", value: a.effective, color: "#15803d" },
+                { label: "Partially", value: a.partially_effective, color: "#65a30d" },
+                { label: "Ineffective", value: a.ineffective, color: RED },
+                { label: "Never tested", value: a.not_assessed, color: "#cbd5e1" },
+              ]} />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginTop: 16 }}>
+                {[
+                  ["Tests overdue", a.tests_overdue, a.tests_overdue ? AMBER : "#0f172a"],
+                  ["Failed last test", a.last_test_failed, a.last_test_failed ? RED : "#0f172a"],
+                  [`Tested last ${o!.period_days}d`, a.tests_in_period, "#0f172a"],
+                ].map(([l, v, c]) => (
+                  <div key={String(l)} style={{ background: "#f8fafc", borderRadius: 10, padding: "10px 12px" }}>
+                    <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 700, color: String(c) }}>{v as number}</div>
+                    <div style={{ fontSize: 11.5, color: "#64748b" }}>{l as string}</div>
                   </div>
                 ))}
               </div>
-              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".12em", color: "#94a3b8", marginTop: 10, textAlign: "right" }}>LIKELIHOOD →</div>
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 14, paddingTop: 14, borderTop: "1px solid #f1f4f7" }}>
-            {(["critical", "high", "medium", "low"] as const).map((k) => (
-              <div key={k} style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                <span style={{ width: 10, height: 10, borderRadius: "50%", background: SEV[k] }} />
-                <span style={{ fontSize: 12.5, color: "#475569", textTransform: "capitalize" }}>{k}</span>
-              </div>
-            ))}
-            <div style={{ marginLeft: "auto", fontSize: 12, color: "#94a3b8" }}>appetite <b style={{ color: "#334155" }}>{matrix?.appetite_score ?? d?.appetite_score ?? "—"}</b> · tolerance <b style={{ color: "#334155" }}>{matrix?.tolerance_score ?? d?.tolerance_score ?? "—"}</b></div>
-          </div>
+              {a.not_assessed > 0 && a.not_assessed >= a.total / 2 && (
+                <div style={{ marginTop: 12, fontSize: 12.5, color: AMBER }}>
+                  Most of the catalogue has never been tested. Until it is, these controls earn no residual credit and assure no clause.
+                </div>
+              )}
+            </>
+          )}
         </div>
 
-        {/* compliance rings */}
-        <div style={{ ...CARD, padding: "22px 24px", display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>Compliance</div>
-            <div style={{ fontSize: 12.5, color: "#94a3b8" }}>{c?.total_frameworks ?? 0} frameworks</div>
+        <div style={{ ...CARD, padding: "20px 22px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <div>
+              <h2 style={H2}>Compliance</h2>
+              <div style={SUB}>Per framework: clauses backed by a working control, versus mapped-but-untested, failing, or nothing</div>
+            </div>
+            <Link href="/compliance" style={{ fontSize: 12.5 }}>Gap analysis →</Link>
           </div>
-          <div style={{ display: "flex", justifyContent: "center", padding: "12px 0 18px" }}>
-            <Donut pct={c?.overall_compliant_pct ?? 0} big />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: "auto" }}>
-            {(c?.frameworks ?? []).slice(0, 4).map((f) => (
-              <div key={f.framework_id} style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                <Donut pct={f.compliant_pct} size={46} inset={6} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.name}</div>
-                  <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 1 }}>{f.compliant} of {f.total_requirements} controls met</div>
+          <div style={{ display: "grid", gap: 14 }}>
+            {o?.compliance.frameworks.slice(0, 6).map((f: FrameworkPosture) => (
+              <div key={f.id}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+                  <Link href={`/compliance?framework=${f.id}`} style={{ fontSize: 13.5, fontWeight: 600, color: "#0f172a", textDecoration: "none" }}>{f.name}</Link>
+                  <span style={SUB}>
+                    <b style={{ color: f.applicable && f.assured === f.applicable ? "#15803d" : "#0f172a" }}>{f.assured}</b> of {f.applicable} assured · {f.gaps} gaps · {f.compliant_pct}% marked compliant
+                  </span>
                 </div>
+                <Stack total={f.applicable} parts={[
+                  { label: "Assured", value: f.assured, color: "#15803d" },
+                  { label: "Mapped, not tested", value: f.unassessed, color: "#f59e0b" },
+                  { label: "Failing", value: f.failing, color: RED },
+                  { label: "No control", value: f.unmapped, color: "#cbd5e1" },
+                ]} />
               </div>
             ))}
-            {c && c.frameworks.length === 0 && <span style={{ fontSize: 13, color: "#94a3b8" }}>No frameworks yet — install one from the Framework Library.</span>}
+            {o && o.compliance.frameworks.length === 0 && <span style={SUB}>No frameworks yet — install one from the Framework Library.</span>}
           </div>
         </div>
       </div>
 
-      {/* ---------- ROLL-UP + ACTIVITY ---------- */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.55fr 1fr", gap: 18 }}>
-        {/* enterprise roll-up */}
-        <div style={{ ...CARD, padding: "22px 24px 10px" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>Enterprise risk roll-up</div>
-            <div style={{ fontSize: 12.5, color: "#94a3b8" }}>by category</div>
+      {/* ------------------------------ 5. what happened: incidents, KRIs, segments, activity */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18 }}>
+        <div style={{ ...CARD, padding: "20px 22px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <h2 style={H2}>Incidents &amp; KRIs</h2>
+            <Link href="/incidents" style={{ fontSize: 12.5 }}>Incidents →</Link>
           </div>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", color: "#94a3b8", fontSize: 10.5, fontWeight: 700, letterSpacing: ".06em" }}>
-                <th style={{ padding: "8px 12px 8px 0" }}>CATEGORY</th>
-                <th style={{ padding: "8px 12px", textAlign: "center" }}>RISKS</th>
-                <th style={{ padding: "8px 12px" }}>RESIDUAL</th>
-                <th style={{ padding: "8px 12px", textAlign: "center" }}>BREACH</th>
-                <th style={{ padding: "8px 0 8px 12px", textAlign: "right" }}>EXPOSURE</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(agg?.rows ?? []).map((r) => {
-                const band = bandFromScore(r.max_residual_score, matrix?.bands);
-                return (
-                  <tr key={r.category} style={{ borderTop: "1px solid #f1f4f7", fontSize: 13.5 }}>
-                    <td style={{ padding: "14px 12px 14px 0", fontWeight: 600 }}>{r.category}</td>
-                    <td style={{ padding: "14px 12px", color: "#475569", textAlign: "center" }}>{r.count}</td>
-                    <td style={{ padding: "14px 12px" }}>
-                      <div title={`max residual: ${band}`} style={{ display: "flex", height: 8, borderRadius: 5, overflow: "hidden", background: "#eef1f4", minWidth: 110 }}>
-                        <div style={{ width: `${Math.min(100, ((r.max_residual_score ?? 0) / 25) * 100)}%`, background: SEV[band] }} />
-                      </div>
-                    </td>
-                    <td style={{ padding: "14px 12px", textAlign: "center" }}>
-                      {r.breaches > 0 ? (
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 9px", background: "rgba(225,29,72,.09)", color: SEV.critical, fontWeight: 700, borderRadius: 20, fontSize: 12 }}>
-                          <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#e11d48" }} />{r.breaches}
-                        </span>
-                      ) : <span style={{ color: "#cbd5e1" }}>—</span>}
-                    </td>
-                    <td style={{ padding: "14px 0 14px 12px", textAlign: "right", fontWeight: 700 }}>{r.exposure ? money(r.exposure) : "—"}</td>
-                  </tr>
-                );
-              })}
-              {agg && agg.rows.length > 0 && (
-                <tr style={{ borderTop: "2px solid #e5e9ee", fontSize: 13.5 }}>
-                  <td style={{ padding: "14px 12px 14px 0", fontWeight: 700 }}>Total</td>
-                  <td style={{ padding: "14px 12px", textAlign: "center", fontWeight: 700 }}>{agg.rows.reduce((s, r) => s + r.count, 0)}</td>
-                  <td style={{ padding: "14px 12px" }} />
-                  <td style={{ padding: "14px 12px", textAlign: "center", fontWeight: 700, color: SEV.critical }}>{agg.rows.reduce((s, r) => s + r.breaches, 0)}</td>
-                  <td style={{ fontFamily: FONT_MONO, padding: "14px 0 14px 12px", textAlign: "right", fontWeight: 800 }}>{money(agg.total_exposure)}</td>
-                </tr>
-              )}
-              {agg && agg.rows.length === 0 && (
-                <tr><td colSpan={5} style={{ padding: "20px 0", color: "#94a3b8", fontSize: 13 }}>No risks recorded yet.</td></tr>
-              )}
-            </tbody>
-          </table>
+          {o && (
+            <>
+              <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 30, fontWeight: 700, color: o.incidents.open ? AMBER : "#15803d" }}>{o.incidents.open}</span>
+                <span style={SUB}>open · {o.incidents.reportable_open} regulator-reportable · {o.incidents.tat_breached} past TAT</span>
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", margin: "8px 0 14px" }}>
+                {(["critical", "high", "medium", "low"] as const).map((s) => (
+                  <span key={s} style={{ fontSize: 12.5 }}><SevChip value={s} /> <b>{o.incidents.open_by_severity[s] ?? 0}</b></span>
+                ))}
+              </div>
+              <div style={{ fontSize: 12.5, color: "#64748b", marginBottom: 12 }}>
+                {o.incidents.opened_in_period} opened in the last {o.period_days} days ({incidentDelta >= 0 ? "+" : ""}{incidentDelta} vs the {o.period_days} before).
+              </div>
+              <div style={{ borderTop: "1px solid #eef1f5", paddingTop: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ fontSize: 13, fontWeight: 700 }}>Key risk indicators</span>
+                  <Link href="/operational-risk" style={{ fontSize: 12 }}>All KRIs →</Link>
+                </div>
+                <div style={{ display: "flex", gap: 12, fontSize: 12.5 }}>
+                  <span><b style={{ color: RED }}>{o.kris.red}</b> red</span>
+                  <span><b style={{ color: AMBER }}>{o.kris.amber}</b> amber</span>
+                  <span><b style={{ color: "#15803d" }}>{o.kris.green}</b> green</span>
+                  <span style={{ color: SLATE }}>{o.kris.no_data} no data</span>
+                </div>
+                {o.kris.red_items.map((k) => (
+                  <div key={k.id} style={{ marginTop: 8, fontSize: 12.5, display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k.reference ? `${k.reference} · ` : ""}{k.name}</span>
+                    <span style={{ color: RED, fontFamily: FONT_MONO, whiteSpace: "nowrap" }}>{k.current_value ?? "—"}{k.unit ? ` ${k.unit}` : ""} / limit {k.limit_threshold ?? "—"}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
-        {/* activity timeline */}
-        <div style={{ ...CARD, padding: "22px 24px" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>Recent activity</div>
-            <div style={{ fontSize: 12, color: "#94a3b8" }}>{range === "30d" ? "30 days" : range === "quarter" ? "Quarter" : "YTD"}</div>
+        <div style={{ ...CARD, padding: "20px 22px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <h2 style={H2}>By segment</h2>
+            <Link href="/business-units" style={{ fontSize: 12.5 }}>Business units →</Link>
           </div>
-          <div style={{ display: "flex", flexDirection: "column" }}>
-            {shownActivity.map((ev, i) => (
-              <div key={ev.id} style={{ display: "flex", gap: 14 }}>
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "none" }}>
-                  <span style={{ width: 9, height: 9, borderRadius: "50%", background: EMERALD, marginTop: 5, boxShadow: "0 0 0 3px rgba(16,185,129,.14)" }} />
-                  {i < shownActivity.length - 1 && <span style={{ width: 2, flex: 1, background: "#eef1f4" }} />}
+          <div className="table-wrap">
+            <table style={{ fontSize: 13 }}>
+              <thead><tr><th>Business unit</th><th style={{ textAlign: "right" }}>Risks</th><th style={{ textAlign: "right" }}>Breach</th><th style={{ textAlign: "right" }}>Critical</th></tr></thead>
+              <tbody>
+                {o?.segments.slice(0, 7).map((s) => (
+                  <tr key={s.id} onClick={() => { window.location.href = `/risks?business_unit_id=${s.id}`; }} style={{ cursor: "pointer" }}>
+                    <td style={{ fontWeight: 600 }}>{s.name}</td>
+                    <td style={{ textAlign: "right" }}>{s.risks}</td>
+                    <td style={{ textAlign: "right", color: s.breach ? RED : "#64748b", fontWeight: s.breach ? 700 : 400 }}>{s.breach || "—"}</td>
+                    <td style={{ textAlign: "right", color: s.critical ? SEV.critical : "#64748b" }}>{s.critical || "—"}</td>
+                  </tr>
+                ))}
+                {o && o.segments.length === 0 && <tr><td colSpan={4} style={{ color: SLATE, padding: 12 }}>No risks are tagged to a business unit yet.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          {o && (
+            <div style={{ borderTop: "1px solid #eef1f5", marginTop: 12, paddingTop: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Third parties</div>
+              <div style={{ fontSize: 12.5, color: "#64748b" }}>
+                {o.third_parties.total} vendors · <b style={{ color: o.third_parties.critical ? "#0f172a" : "#64748b" }}>{o.third_parties.critical}</b> critical ·{" "}
+                <b style={{ color: o.third_parties.assessments_overdue ? RED : "#64748b" }}>{o.third_parties.assessments_overdue}</b> assessments overdue
+                {Object.keys(o.third_parties.by_rating).length > 0 && (
+                  <> · rated {Object.entries(o.third_parties.by_rating).map(([k, v]) => `${v} ${k}`).join(", ")}</>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ ...CARD, padding: "20px 22px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <h2 style={H2}>Movement</h2>
+            <span style={SUB}>last {o?.period_days ?? days} days</span>
+          </div>
+          {o && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+              {[
+                ["Risks added", o.movement.risks_created], ["Risks closed", o.movement.risks_closed],
+                ["Control tests recorded", o.movement.tests_recorded], ["Issues closed", o.movement.issues_closed],
+                ["Incidents opened", o.movement.incidents_opened], ["Acceptances lapsed", o.movement.acceptances_lapsed],
+              ].map(([l, v]) => (
+                <div key={String(l)} style={{ background: "#f8fafc", borderRadius: 10, padding: "8px 12px" }}>
+                  <div style={{ fontFamily: FONT_MONO, fontSize: 20, fontWeight: 700 }}>{v as number}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748b" }}>{l as string}</div>
                 </div>
-                <div style={{ paddingBottom: 16, minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "#1e293b", lineHeight: 1.35 }}>{ev.summary}</div>
-                  <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 2 }}>{ev.actor_email} · {timeAgo(ev.created_at)}</div>
+              ))}
+            </div>
+          )}
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Recent activity</div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {activity.slice(0, 6).map((e) => (
+              <div key={e.id} style={{ display: "flex", gap: 10, fontSize: 12.5 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: EMERALD, marginTop: 6, flexShrink: 0 }} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.summary}</div>
+                  <div style={{ fontSize: 11.5, color: SLATE }}>{e.actor_email} · {timeAgo(e.created_at)}</div>
                 </div>
               </div>
             ))}
-            {shownActivity.length === 0 && <span style={{ fontSize: 13, color: "#94a3b8" }}>No activity in this period.</span>}
           </div>
         </div>
       </div>

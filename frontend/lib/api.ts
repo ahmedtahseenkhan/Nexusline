@@ -616,6 +616,43 @@ export interface Page<T> {
   offset: number;
 }
 
+// --- dashboard overview (the redesigned page's single payload) ---------------------
+export interface HealthComponent { key: string; label: string; value: number; weight: number; detail: string }
+export interface TopRisk {
+  id: string; reference: string; title: string; score: number | null; severity: string | null;
+  appetite_status: string | null; owner: string; business_units: string[]; status: string;
+  treatment_strategy: string | null; next_review_date: string | null; review_overdue: boolean; control_count: number;
+}
+export interface FrameworkPosture {
+  id: string; name: string; total: number; applicable: number; assured: number; unassessed: number;
+  failing: number; unmapped: number; compliant_pct: number; gaps: number;
+}
+export interface ActionItem { key: string; label: string; count: number; href: string; tone: "critical" | "warning" | "info" }
+export interface KriItem {
+  id: string; reference: string; name: string; current_value: number | null; warning_threshold: number | null;
+  limit_threshold: number | null; unit: string; owner: string; status: string;
+}
+export interface DashboardOverview {
+  as_of: string;
+  period_days: number;
+  health: { score: number; band: string; components: HealthComponent[] };
+  posture: {
+    total_risks: number; appetite_score: number; tolerance_score: number; within_appetite: number; elevated: number;
+    breach: number; by_inherent_severity: Record<string, number>; by_residual_severity: Record<string, number>; top_risks: TopRisk[];
+  };
+  assurance: {
+    total: number; effective: number; partially_effective: number; ineffective: number; not_assessed: number;
+    tests_overdue: number; tests_due_30d: number; last_test_failed: number; tests_in_period: number;
+  };
+  compliance: { frameworks: FrameworkPosture[]; overall_assured_pct: number };
+  actions: ActionItem[];
+  incidents: { open: number; open_by_severity: Record<string, number>; reportable_open: number; opened_in_period: number; opened_prior_period: number; tat_breached: number };
+  kris: { green: number; amber: number; red: number; no_data: number; red_items: KriItem[] };
+  third_parties: { total: number; by_rating: Record<string, number>; assessments_overdue: number; critical: number };
+  segments: { id: string; name: string; risks: number; breach: number; elevated: number; critical: number }[];
+  movement: { period_days: number; risks_created: number; risks_closed: number; acceptances_lapsed: number; tests_recorded: number; incidents_opened: number; issues_closed: number };
+}
+
 export interface Dashboard {
   total_risks: number;
   total_controls: number;
@@ -1783,6 +1820,7 @@ export const api = {
       body: JSON.stringify({ risk_ids: riskIds }),
     }),
   dashboard: () => request<Dashboard>("/dashboard"),
+  dashboardOverview: (days = 30) => request<DashboardOverview>(`/dashboard/overview?days=${days}`),
   createRisk: (payload: Record<string, unknown>) =>
     request<Risk>("/risks", { method: "POST", body: JSON.stringify(payload) }),
   frameworks: () => request<Page<Framework>>("/frameworks"),
