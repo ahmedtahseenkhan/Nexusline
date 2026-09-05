@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
+from app.services import control_assurance
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.compliance import (
@@ -557,40 +558,65 @@ def _compliant_pct(reqs: list[Requirement]) -> tuple[int, int, float]:
 # What counts as a gap
 # ---------------------------------------------------------------------------
 # A requirement is a gap when its status is not settled (compliant / not applicable)
-# OR when nothing evidences it. Both halves matter: "compliant" with no control mapped
-# is an assertion nobody can support, and a mapped control against a non-compliant
-# status is work still outstanding.
+# OR when no *working* control assures it. Both halves matter: "compliant" with nothing
+# behind it is an assertion nobody can support, and an assured clause against a
+# non-compliant status is work still outstanding.
+#
+# "Working" is the part that changed. Installing a framework now maps a control to every
+# clause; if mapping alone counted, a freshly installed framework — 93 planned, untested
+# controls — would look covered with nothing behind it. Coverage has states (unmapped,
+# unassessed, failing, assured; see services.control_assurance) and only the last is
+# coverage. A not-assessed control stays a gap until somebody tests it, and a test is
+# what sets effectiveness, so the two rules meet in the middle.
 #
 # The rule lives here once because it is applied in two places — the requirements list
 # filter and the gap-analysis roll-up — and the two disagreeing would mean the count in
 # the header never matched the rows on screen.
 _SETTLED = (ComplianceStatus.compliant, ComplianceStatus.not_applicable)
 
+_COVERAGE_REASON = {
+    control_assurance.UNMAPPED: "No controls mapped",
+    control_assurance.UNASSESSED: "Controls mapped but none assessed yet",
+    control_assurance.FAILING: "Mapped controls are ineffective",
+}
+
 
 def _gap_reason(requirement: Requirement) -> str:
     """Why this requirement is a gap, or ``""`` when it is not one."""
+    # Nothing is required for a clause that does not apply — no control, no status.
+    if requirement.status == ComplianceStatus.not_applicable:
+        return ""
     unsettled = requirement.status not in _SETTLED
-    if not requirement.is_covered and unsettled:
-        return "No controls mapped and not compliant"
-    if not requirement.is_covered:
-        return "No controls mapped"
+    coverage = requirement.coverage
+    parts = []
+    if coverage != control_assurance.ASSURED:
+        parts.append(_COVERAGE_REASON[coverage])
     if unsettled:
-        return f"Status is {requirement.status.value.replace('_', ' ')}"
-    return ""
+        status = f"status is {requirement.status.value.replace('_', ' ')}"
+        parts.append(status if parts else status[0].upper() + status[1:])
+    return "; ".join(parts)
 
 
 def _gap_predicate():
     """The same rule expressed in SQL, so the filter pages in the database.
 
-    ``is_covered`` is a Python property over the controls relationship, so coverage is
-    tested here with an EXISTS against the join table rather than by loading every row.
+    Assurance is tested with an EXISTS against the join table, restricted to live
+    controls whose effectiveness counts — the exact set ``control_assurance`` uses —
+    rather than by loading every row.
     """
-    covered = (
+    assured = (
         select(requirement_controls.c.requirement_id)
-        .where(requirement_controls.c.requirement_id == Requirement.id)
+        .join(Control, Control.id == requirement_controls.c.control_id)
+        .where(
+            requirement_controls.c.requirement_id == Requirement.id,
+            Control.deleted.is_(False),
+            Control.effectiveness.in_(control_assurance.ASSURED_EFFECTIVENESS),
+        )
         .exists()
     )
-    return Requirement.status.not_in(_SETTLED) | ~covered
+    return (Requirement.status != ComplianceStatus.not_applicable) & (
+        Requirement.status.not_in(_SETTLED) | ~assured
+    )
 
 
 @router.get(
@@ -603,17 +629,20 @@ async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
     reqs = fw.requirements
     by_status: dict[str, int] = {}
     covered = 0
+    by_coverage: dict[str, int] = {}
     gaps: list[GapItem] = []
     for r in reqs:
         by_status[r.status.value] = by_status.get(r.status.value, 0) + 1
         if r.is_covered:
             covered += 1
+        coverage = r.coverage
+        by_coverage[coverage] = by_coverage.get(coverage, 0) + 1
         reason = _gap_reason(r)
         if reason:
             gaps.append(
                 GapItem(
                     id=r.id, reference=r.reference, title=r.title, status=r.status,
-                    is_covered=r.is_covered, reason=reason,
+                    is_covered=r.is_covered, coverage=coverage, reason=reason,
                 )
             )
     compliant, _applicable, pct = _compliant_pct(reqs)
@@ -624,6 +653,9 @@ async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
         by_status=by_status,
         covered=covered,
         uncovered=len(reqs) - covered,
+        assured=by_coverage.get(control_assurance.ASSURED, 0),
+        unassessed=by_coverage.get(control_assurance.UNASSESSED, 0),
+        failing=by_coverage.get(control_assurance.FAILING, 0),
         compliant_pct=pct,
         gaps=gaps,
     )

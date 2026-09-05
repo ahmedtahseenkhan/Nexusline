@@ -24,6 +24,7 @@ from app.schemas.control import (
     ControlRead,
     ControlUpdate,
 )
+from app.services import control_assurance
 from app.services import audit as audit_log
 from app.services import dual_control
 from app.services.risk_scoring import next_review_date
@@ -324,14 +325,29 @@ async def record_control_audit(
         checker_id=user.id, subject="control audit",
     )
     conducted = body.conducted_date or date.today()
+    fields = body.model_dump()
+    override = fields.pop("effectiveness", None)
     db.add(ControlAudit(tenant_id=user.tenant_id, control_id=control_id,
-                        **{**body.model_dump(), "conducted_date": conducted}))
+                        **{**fields, "conducted_date": conducted}))
     control.last_audit_date = conducted
     control.next_audit_date = next_review_date(control.audit_frequency, conducted)
+
+    # The test *is* the assessment. Recording "passed" and then separately editing the
+    # control to say "effective" was two steps where one is the record; the second was
+    # skipped in practice and every control stayed not-assessed, which starved the
+    # residual suggestion on every risk it mitigates.
+    before = control.effectiveness
+    after = control_assurance.effectiveness_after_test(body.result, override, before)
+    changes = {}
+    if after != before:
+        control.effectiveness = after
+        changes = {"effectiveness": {"from": before.value, "to": after.value}}
     await db.flush()
     await audit_log.record(
         db, actor=user, action="audit", entity_type="control", entity_id=control.id,
-        summary=f"Recorded {body.result.value} audit for control {control.reference or control.name}",
+        summary=f"Recorded {body.result.value} audit for control {control.reference or control.name}"
+        + (f" — effectiveness {before.value} → {after.value}" if changes else ""),
+        changes=changes,
     )
     return ControlRead.model_validate(await _fresh(db, control.id))
 

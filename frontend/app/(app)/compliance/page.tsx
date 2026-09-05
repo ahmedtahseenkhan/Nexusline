@@ -74,6 +74,8 @@ type Requirement = {
   vendors?: Ref[];
   findings: Finding[];
   is_covered: boolean;
+  /** unmapped | unassessed | failing | assured — mapped-but-untested is not coverage. */
+  coverage: string;
   open_findings: number;
   evidence_count: number;
   crosswalk_count: number;
@@ -103,6 +105,7 @@ type GapItem = {
   title: string;
   status: string;
   is_covered: boolean;
+  coverage: string;
   reason: string;
 };
 
@@ -113,6 +116,9 @@ type GapAnalysis = {
   by_status: Record<string, number>;
   covered: number;
   uncovered: number;
+  assured: number;
+  unassessed: number;
+  failing: number;
   compliant_pct: number;
   gaps: GapItem[];
 };
@@ -277,6 +283,17 @@ const FINDING_BLANK: FindingState = {
   severity: "medium",
   deadline: "",
 };
+
+/** A clause's coverage. Only "assured" is coverage a gap analysis may rely on — a
+ *  mapped control that nobody has tested is a promise, not evidence. */
+function CoverageBadge({ value }: { value: string }) {
+  switch (value) {
+    case "assured": return <Badge tone="low" plain>Assured</Badge>;
+    case "failing": return <Badge tone="high" plain>Controls failing</Badge>;
+    case "unassessed": return <Badge tone="medium" plain>Mapped, not tested</Badge>;
+    default: return <Badge tone="neutral" plain>No controls</Badge>;
+  }
+}
 
 /* ================================================================== page */
 function ComplianceInner() {
@@ -747,7 +764,7 @@ function ComplianceInner() {
     { key: "title", header: "Requirement", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
     { key: "domain", header: "Domain", sortable: true, render: (r) => <span className="muted">{r.domain || "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (r) => <ComplianceBadge value={r.status} /> },
-    { key: "covered", header: "Covered", render: (r) => (r.is_covered ? <Badge tone="low" plain>Yes</Badge> : <Badge tone="high" plain>No</Badge>) },
+    { key: "coverage", header: "Coverage", render: (r) => <CoverageBadge value={r.coverage} /> },
     { key: "gap_reason", header: "Why it's a gap", render: (r) => (r.gap_reason ? <span className="muted" style={{ fontSize: 12.5 }}>{r.gap_reason}</span> : <span className="muted">—</span>) },
     { key: "controls", header: "Controls", align: "center", render: (r) => <span className="muted">{r.controls.length}</span> },
     { key: "policies", header: "Policies", align: "center", render: (r) => <span className="muted">{r.policies.length}</span> },
@@ -826,8 +843,11 @@ function ComplianceInner() {
             </div>
           </div>
           <div className="card stat">
-            <div className="stat-top"><span className="n">{gap.covered}/{gap.total_requirements}</span></div>
-            <span className="l">Controls mapped</span>
+            <div className="stat-top"><span className="n">{gap.assured}/{gap.total_requirements}</span></div>
+            <span className="l">Assured by a working control</span>
+            <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+              {gap.covered} mapped · {gap.unassessed} not yet tested · {gap.failing} failing
+            </div>
           </div>
           <div className="card stat warn">
             <div className="stat-top"><span className="n" style={{ color: "var(--orange)" }}>{gap.gaps.length}</span></div>
@@ -913,7 +933,7 @@ function ComplianceInner() {
           <>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
               <ComplianceBadge value={detail.status} />
-              {detail.is_covered ? <Badge tone="low" plain>Covered</Badge> : <Badge tone="high" plain>Not covered</Badge>}
+              <CoverageBadge value={detail.coverage} />
               {detail.domain && <Badge tone="neutral" plain>{detail.domain}</Badge>}
               {detail.open_findings > 0 && <Badge tone="high" plain>{detail.open_findings} open findings</Badge>}
               {controlHealth(detail.control_health)}

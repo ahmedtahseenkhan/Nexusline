@@ -136,6 +136,8 @@ class RequirementRead(RequirementBase):
     legal: CompRef | None = None
     findings: list[ComplianceFindingRead] = []
     is_covered: bool
+    #: unmapped | unassessed | failing | assured. Mapped-but-untested is not coverage.
+    coverage: str = "unmapped"
     #: Why this requirement counts as a gap, or "" when it does not. Carried on the row
     #: so the requirements table can explain a gap in place, rather than the page having
     #: to render a second list of the same requirements underneath it.
@@ -173,6 +175,7 @@ class GapItem(BaseModel):
     title: str
     status: ComplianceStatus
     is_covered: bool
+    coverage: str = "unmapped"
     reason: str
 
 
@@ -181,8 +184,14 @@ class GapAnalysis(BaseModel):
     framework_name: str
     total_requirements: int
     by_status: dict[str, int]
+    #: Mapped to at least one control (the old meaning of covered, kept for the API).
     covered: int
     uncovered: int
+    #: Coverage that a gap analysis may rely on — a mapped control that is effective
+    #: or partially effective — and the two ways a mapped clause falls short of it.
+    assured: int = 0
+    unassessed: int = 0
+    failing: int = 0
     compliant_pct: float
     gaps: list[GapItem]
 
