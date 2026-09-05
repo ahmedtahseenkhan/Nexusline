@@ -13,6 +13,7 @@ import { Field, TextInput, TextArea, Select, MultiSelect, type Option } from "@/
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import RecordPanels from "@/components/RecordPanels";
+import AssetRiskReport from "@/components/AssetRiskReport";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import ImportExport from "@/components/ImportExport";
 import GenerateRisks from "@/components/GenerateRisks";
@@ -380,6 +381,12 @@ function ITAssetsInner() {
                 {detail.tags.map((t) => (<Badge key={t.id} tone="neutral" plain>{t.name}</Badge>))}
               </div>
             )}
+
+            <AssetRiskReport
+              assetId={detail.id}
+              assetName={detail.name}
+              riskCount={(detail.risks ?? []).length}
+            />
 
             <div style={{ marginTop: 20 }}>
               <strong style={{ fontSize: 13 }}>Related records</strong>

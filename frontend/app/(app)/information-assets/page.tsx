@@ -13,6 +13,7 @@ import { Field, TextInput, TextArea, Select, Toggle, MultiSelect, type Option } 
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import RecordPanels from "@/components/RecordPanels";
+import AssetRiskReport from "@/components/AssetRiskReport";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import ImportExport from "@/components/ImportExport";
 import GenerateRisks from "@/components/GenerateRisks";
@@ -500,6 +501,12 @@ function InformationAssetsInner() {
                 </tbody>
               </table>
             </div>
+
+            <AssetRiskReport
+              assetId={detail.id}
+              assetName={detail.name}
+              riskCount={(detail.risks ?? []).length}
+            />
 
             <div style={{ marginTop: 20 }}>
               <strong style={{ fontSize: 13 }}>Related records</strong>

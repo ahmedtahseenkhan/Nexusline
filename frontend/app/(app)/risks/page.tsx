@@ -16,6 +16,7 @@ import ResidualSuggestion from "@/components/ResidualSuggestion";
 import WorkflowStrip from "@/components/WorkflowStrip";
 import RiskMethodology from "@/components/RiskMethodology";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import AsyncSelect from "@/components/AsyncSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import GenerateRisks from "@/components/GenerateRisks";
@@ -289,6 +290,7 @@ function RisksPage() {
   const [scopeUnit, setScopeUnit] = useState("");
   const [scopeProcess, setScopeProcess] = useState("");
   const [scopeStatus, setScopeStatus] = useState("");
+  const [scopeAsset, setScopeAsset] = useState<{ id: string; name: string } | null>(null);
 
   // org-defined custom fields, edited inside the form and saved with the record
   const [cfDefs, setCfDefs] = useState<CustomField[]>([]);
@@ -351,18 +353,20 @@ function RisksPage() {
     () => ({
       business_unit_id: scopeUnit || undefined,
       process_id: scopeProcess || undefined,
+      asset_id: scopeAsset?.id || undefined,
       status: scopeStatus || undefined,
     }),
-    [scopeUnit, scopeProcess, scopeStatus],
+    [scopeUnit, scopeProcess, scopeAsset, scopeStatus],
   );
   const scopeLabel = useMemo(() => {
     const parts = [
       segments.units.find((u) => u.id === scopeUnit)?.name,
       segments.processes.find((x) => x.id === scopeProcess)?.name,
+      scopeAsset?.name,
       scopeStatus ? cap(scopeStatus) : undefined,
     ].filter(Boolean);
     return parts.length ? `Scoped to ${parts.join(" · ")}` : "Whole register";
-  }, [scopeUnit, scopeProcess, scopeStatus, segments]);
+  }, [scopeUnit, scopeProcess, scopeAsset, scopeStatus, segments]);
 
   // Server typeahead sources for the form's link pickers (replaces 6 capped preloads).
   const linkSearch = (path: string) => (q: string) =>
@@ -734,7 +738,7 @@ function RisksPage() {
       <div className="page-head row-between">
         <div>
           <h1>Risk Register</h1>
-          <p>Identify, score and treat risks — qualitative (5×5) and quantitative (FAIR), with controls, threats and review cycles.</p>
+          <p>Identify, score and treat risks — qualitative ({matrixSize}×{matrixSize}) and quantitative (FAIR), with controls, threats and review cycles.</p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn secondary" onClick={() => setShowSettings((v) => !v)}>
@@ -748,7 +752,14 @@ function RisksPage() {
           <GenerateRisks label="the asset inventory" onDone={reload} />
           <ImportExport resource="risks" label="Risks" onDone={reload} />
           <OrphanCleanup onDone={reload} />
-          <button className="btn secondary" onClick={() => api.pdfRiskRegister(scopeFilters).catch(() => {})}>
+          <button
+            className="btn secondary"
+            onClick={() =>
+              api
+                .pdfRiskRegister(scopeFilters, scopeLabel === "Whole register" ? undefined : scopeLabel)
+                .catch(() => {})
+            }
+          >
             Register PDF
           </button>
           <button className="btn" onClick={openNew}>
@@ -821,14 +832,26 @@ function RisksPage() {
             placeholder="All processes"
           />
         </div>
+        <div style={{ width: 230 }}>
+          <label className="label">Asset</label>
+          {/* Typeahead rather than a dropdown: an inventory runs to thousands, and a
+              preloaded list could never reach the asset somebody actually wants. */}
+          <AsyncSelect
+            search={linkSearch("assets")}
+            value={scopeAsset?.id ?? null}
+            selectedLabel={scopeAsset?.name}
+            onChange={(id, opt) => setScopeAsset(id ? { id, name: opt?.label ?? "" } : null)}
+            placeholder="All assets"
+          />
+        </div>
         <div style={{ width: 190 }}>
           <label className="label">Status</label>
           <Select value={scopeStatus} onChange={setScopeStatus} options={STATUS} placeholder="Any status" />
         </div>
-        {(scopeUnit || scopeProcess || scopeStatus) && (
+        {(scopeUnit || scopeProcess || scopeAsset || scopeStatus) && (
           <button
             className="btn secondary"
-            onClick={() => { setScopeUnit(""); setScopeProcess(""); setScopeStatus(""); }}
+            onClick={() => { setScopeUnit(""); setScopeProcess(""); setScopeAsset(null); setScopeStatus(""); }}
           >
             Clear scope
           </button>
