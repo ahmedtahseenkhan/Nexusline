@@ -119,6 +119,10 @@ class ControlRef(BaseModel):
 # --------------------------------------------------------------- control tests
 class ControlAuditCreate(BaseModel):
     result: TestResult = TestResult.not_assessed
+    #: What the control's effectiveness should be after this test. Optional: the result
+    #: decides (passed -> effective, failed -> ineffective) unless the tester says
+    #: otherwise — "passed, but only partially".
+    effectiveness: ControlEffectiveness | None = None
     planned_date: date | None = None
     conducted_date: date | None = None
     metric_description: str = ""

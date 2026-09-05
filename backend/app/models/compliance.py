@@ -163,7 +163,16 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
 
     @property
     def is_covered(self) -> bool:
+        """Mapped to at least one control. Mapping is not assurance — see ``coverage``."""
         return len(self.controls) > 0
+
+    @property
+    def coverage(self) -> str:
+        """unmapped | unassessed | failing | assured — the strongest state any mapped
+        control reaches. Only ``assured`` is coverage a gap analysis may rely on."""
+        from app.services.control_assurance import coverage_state
+
+        return coverage_state(c.effectiveness for c in self.controls)
 
     @property
     def open_findings(self) -> int:

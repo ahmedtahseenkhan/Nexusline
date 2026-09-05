@@ -23,10 +23,12 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.asset import Asset
+from app.models.compliance import requirement_controls, requirement_risks
 from app.models.control import Control
 from app.models.enums import Criticality
 from app.models.risk import Risk
@@ -473,6 +475,7 @@ async def commit(body: CommitRequest, db: DbSession, user: CurrentUser) -> Commi
             )
             async with db.begin_nested():
                 risk = await create_risk(body=payload, db=db, user=user)
+                await _link_clauses(db, risk.id, item.control_ids)
             created += 1
             references.append(risk.reference)
         except Exception as exc:  # noqa: BLE001 - per-item isolation, same as bulk import
@@ -487,6 +490,37 @@ async def commit(body: CommitRequest, db: DbSession, user: CurrentUser) -> Commi
     return CommitResult(
         created=created, skipped=len(body.items) - created, references=references, errors=errors
     )
+
+
+def _clauses_for_controls_stmt(control_ids: list[uuid.UUID]):
+    """The framework clauses the given controls satisfy — one row per clause."""
+    return (
+        select(requirement_controls.c.requirement_id)
+        .where(requirement_controls.c.control_id.in_(control_ids))
+        .distinct()
+    )
+
+
+async def _link_clauses(db: DbSession, risk_id: uuid.UUID, control_ids: list[uuid.UUID]) -> int:
+    """Link a generated risk to every clause its controls satisfy.
+
+    Scenario -> controls -> clauses is now known, so the risk-to-requirement edge is
+    free: the compliance module can show the risks behind each clause, and the register
+    can be cut by framework domain — the "assess by control objective" the client asked
+    for. Only generated risks are linked this way; a hand-made risk's clause links are
+    the author's choice.
+    """
+    if not control_ids:
+        return 0
+    clause_ids = list((await db.scalars(_clauses_for_controls_stmt(control_ids))).all())
+    if not clause_ids:
+        return 0
+    await db.execute(
+        pg_insert(requirement_risks)
+        .values([{"requirement_id": rid, "risk_id": risk_id} for rid in clause_ids])
+        .on_conflict_do_nothing()
+    )
+    return len(clause_ids)
 
 
 async def _name_index(db: DbSession, model: type) -> dict[str, uuid.UUID]:
