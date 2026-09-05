@@ -11,7 +11,7 @@ import uuid
 
 from sqlalchemy.dialects import postgresql
 
-from app.api.v1.risks import build_risk_query
+from app.services.risk_query import build_risk_query
 from app.models.enums import RiskStatus
 from app.models.organization import BusinessUnit, Process
 from app.models.risk import Risk, risk_business_units, risk_processes

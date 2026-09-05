@@ -21,6 +21,8 @@ from fastapi import HTTPException, status
 #: are budgeted against this: overshoot it and ReportLab silently squeezes columns until
 #: words like "CRITICAL" break mid-syllable.
 CONTENT_WIDTH = 493
+#: The same for a landscape page — what a wide report table gets.
+LANDSCAPE_CONTENT_WIDTH = 740
 
 PRIMARY = "#1d4fd7"
 INK = "#111827"
@@ -74,14 +76,20 @@ def _footer(org_name: str):
     return draw
 
 
-def _render(story, org_name: str) -> bytes:
+def content_width(landscape: bool = False) -> int:
+    """Usable width between the margins for either orientation, in points."""
+    return LANDSCAPE_CONTENT_WIDTH if landscape else CONTENT_WIDTH
+
+
+def _render(story, org_name: str, landscape: bool = False) -> bytes:
     from reportlab.lib.pagesizes import A4
+    from reportlab.lib.pagesizes import landscape as _landscape
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf, pagesize=A4,
+        buf, pagesize=_landscape(A4) if landscape else A4,
         leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=20 * mm,
     )
     foot = _footer(org_name)
@@ -529,6 +537,95 @@ def _risk_detail(ss, risk, context: RiskReportContext) -> list:
                  (a.rationale or "—")[:300]] for a in accepted]
         flow += [_table(ss, ["Decision", "Expires", "Decided", "Rationale"], rows,
                         col_widths=[62, 62, 62, None])]
+    return flow
+
+
+def tabular_report_pdf(
+    *,
+    title: str,
+    org_name: str,
+    subject_label: str,
+    run_by: str,
+    params: list[tuple[str, str]],
+    summary: dict[str, dict[str, int]],
+    headers: list[str],
+    rows: list[list],
+    widths: list[int],
+    landscape: bool = False,
+    detail: list | None = None,
+) -> bytes:
+    """A report-builder run as a pack: cover, breakdowns, the table, optional detail.
+
+    The cover states every filter that was applied. A filtered report circulating
+    without that is indistinguishable from the whole register, which is how one
+    segment's exposure gets read as the bank's. ``widths`` are relative hints from the
+    subject registry, scaled to whatever the page orientation allows; the caller picks
+    landscape once the chosen columns would not fit upright.
+    """
+    _require_reportlab()
+    from reportlab.platypus import PageBreak, Paragraph, Spacer
+
+    ss = _styles()
+    story = _title_block(
+        ss, title, f"{subject_label} · {len(rows)} row(s) · run by {run_by}", org_name
+    )
+
+    story += [_h2(ss, "Parameters")]
+    story += [_kv(ss, params or [("Filters", "None — whole register")])]
+
+    if summary:
+        story += [_h2(ss, "Summary")]
+        blocks = []
+        for section, counts in summary.items():
+            body = "<br/>".join(
+                f"{k}: <b>{n}</b>" for k, n in sorted(counts.items(), key=lambda kv: -kv[1])
+            ) or "—"
+            blocks.append(Paragraph(f"<b>{section}</b><br/>{body}", ss["NxCell"]))
+        story += [_side_by_side(blocks, content_width(landscape)), Spacer(1, 4)]
+
+    story += [_h2(ss, "Results")]
+    if rows:
+        total = float(sum(widths) or 1)
+        available = content_width(landscape) - 4
+        col_widths = [max(28, available * w / total) for w in widths]
+        story += [_table(ss, headers, rows, col_widths=col_widths)]
+    else:
+        story += [_body(ss, "No records match these parameters.")]
+
+    if detail:
+        story += [PageBreak()] + detail
+
+    return _render(story, org_name, landscape=landscape)
+
+
+def _side_by_side(flowables: list, width: float):
+    """Lay small blocks out in one row, equal widths, no borders."""
+    from reportlab.lib import colors
+    from reportlab.platypus import Spacer, Table, TableStyle
+
+    if not flowables:
+        return Spacer(1, 0)  # pragma: no cover
+    t = Table([flowables], colWidths=[width / len(flowables)] * len(flowables))
+    t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOX", (0, 0), (-1, -1), 0.3, colors.HexColor(LINE)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor(LINE)),
+        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return t
+
+
+def risk_detail_pages(risks, context: RiskReportContext) -> list:
+    """The per-risk detail flowables, for a report builder run over risks."""
+    from reportlab.platypus import PageBreak
+
+    ss = _styles()
+    flow: list = [_h2(ss, "Risk detail")]
+    for index, risk in enumerate(risks):
+        if index:
+            flow.append(PageBreak())
+        flow += _risk_detail(ss, risk, context)
     return flow
 
 

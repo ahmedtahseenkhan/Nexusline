@@ -68,6 +68,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Exports name their file server-side (Content-Disposition). A browser on another
+    # origin — the dev server, or a web tier on its own host — cannot read that header
+    # unless it is exposed, and silently falls back to "download.pdf".
+    expose_headers=["Content-Disposition"],
 )
 # Compress list/detail JSON payloads (nested-collection responses are large at scale).
 app.add_middleware(GZipMiddleware, minimum_size=1024)

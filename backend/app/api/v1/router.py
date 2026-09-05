@@ -58,6 +58,7 @@ from app.api.v1 import (
     projects,
     regulatory,
     regulatory_change,
+    report_builder,
     reports,
     risk_program,
     audit_plan,
@@ -141,6 +142,7 @@ api_router.include_router(notifications.router)
 api_router.include_router(approvals.router)
 api_router.include_router(custom_fields.router)
 api_router.include_router(reports.router)
+api_router.include_router(report_builder.router)
 api_router.include_router(pdf.router)
 api_router.include_router(collab.router)
 api_router.include_router(webhooks.router)

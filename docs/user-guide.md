@@ -136,6 +136,21 @@ The left navigation groups every module into seven sections, which this guide fo
 **Key action:** "Executive summary" PDF export button.
 **Note:** content is still fixed to risk/compliance metrics — for a customizable dashboard, use Reports & KPIs instead.
 
+### Report Builder (`/report-builder`)
+
+**Purpose:** the report system. Every module used to offer one fixed export; this is where you ask the organisation's own questions — *critical risks in Digital Banking with no controls*, *controls not tested this year*, *regulator-reportable incidents this quarter* — and get the answer on screen, as a PDF for the committee pack, or as Excel for the analyst.
+
+**How to use it:**
+1. **Subject** — Risks, Controls or Incidents. Everything below is generated from what the subject declares, so a subject you cannot read is simply not offered.
+2. **Filters** — every one compiles to a database query, so a report over the whole register costs one query, not a scan. Risks filter by business unit, process, asset, owner, category, status, inherent and residual severity (bands follow *your* matrix — "critical" means 15–25 on a 5×5 and 57–100 on a 10×10), position against appetite, treatment strategy, whether controls are linked, review overdue, next-review and created date ranges, and free text. Controls filter by status, effectiveness, type, owner, the risk they mitigate, the asset they protect, and test dates. Incidents by status, severity, category, assignee, regulator-reportable, resolved, affected asset, failed control, and occurred/detected dates.
+3. **Columns** — toggle chips; the order you choose is the order in the file. Reset returns the subject's default set.
+4. **Sort**, and for risks whether the PDF should carry a **detail page per record** (controls with effectiveness, assets with classification, both ratings, treatment, acceptance history).
+5. **Run report** shows the rows with a summary — by severity, by status, against appetite — computed over *everything that matched*, not just the page you are looking at.
+6. **Export** PDF, Excel or CSV. The PDF states its parameters on the cover and goes landscape when the columns need it. The Excel has a **Parameters** sheet — subject, every filter, who ran it and when, the summary counts — because a spreadsheet that circulates without its parameters becomes "the risk register" in someone's inbox; with them it is provably *critical risks in Digital Banking as at 5 September*.
+7. **Save** the question with a name. Saved reports sit in the left rail; one click re-runs them live or exports them in any format. Shared reports are visible to everyone with access to the subject — only the question is shared, and each reader sees the records they are permitted to.
+
+**What it will not do:** hand you more than 10,000 rows in one file (it asks you to narrow the filters instead), or let a report reach a module you lack read permission for — running a risk report needs `risk:read`, exactly as the register does. Every export is written to the activity log: who, which report, which format, how many rows.
+
 ### Reports & KPIs (`/reports`)
 **Purpose:** Build your own KPI dashboard from a metrics catalog spanning every module.
 **How to use it:** Click **Add widget** → pick a metric (grouped by category — risk, compliance, incidents, assets, vendors, policies, projects, approvals...) → pick a visualization (Number / Bar / Donut) → it's added live.

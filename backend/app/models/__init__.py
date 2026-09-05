@@ -170,6 +170,7 @@ from app.models.project import (
 from app.models.policy import Policy, PolicyAcknowledgment, PolicyReview, policies_related
 from app.models.vendor import ServiceContract, Vendor, VendorType, vendor_assets, vendor_risks
 from app.models.saved_filter import SavedFilter
+from app.models.saved_report import SavedReport
 from app.models.sso import SsoConfig
 from app.models.ldap_config import LdapConfig
 from app.models.status_rule import StatusRule
@@ -318,6 +319,7 @@ __all__ = [
     "StatusRule",
     "Attestation",
     "SavedFilter",
+    "SavedReport",
     "SsoConfig",
     "LdapConfig",
     # Banking-productionization modules

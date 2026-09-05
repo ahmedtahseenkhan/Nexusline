@@ -25,7 +25,8 @@ from app.models.enums import (
     TreatmentStrategy,
 )
 from app.models.organization import BusinessUnit, Process
-from app.models.risk import Risk, RiskAcceptance, risk_assets, risk_business_units, risk_processes
+from app.models.risk import Risk, RiskAcceptance, risk_assets
+from app.services.risk_query import build_risk_query  # noqa: F401 - re-exported for callers
 from app.models.threat import Threat, Vulnerability
 from app.schemas.common import Page
 from app.schemas.risk import (
@@ -89,58 +90,6 @@ async def _next_reference(db) -> str:
     return await next_reference(db, Risk, "R")
 
 
-def build_risk_query(
-    *,
-    status: RiskStatus | None = None,
-    category: str | None = None,
-    business_unit_id: uuid.UUID | None = None,
-    process_id: uuid.UUID | None = None,
-    asset_id: uuid.UUID | None = None,
-    search: str | None = None,
-) -> Select:
-    """The register's filter, in one place.
-
-    Shared with the PDF export so "download what I am looking at" means exactly that.
-    Duplicating these predicates is how a report quietly stops matching the screen it
-    was launched from, which is the worst kind of reporting bug: nothing errors, the
-    numbers are just wrong.
-
-    Segment filters are ``EXISTS`` sub-queries rather than joins, because a risk in two
-    business units would otherwise come back twice and inflate every count on the page.
-    """
-    stmt: Select = select(Risk).where(Risk.deleted.is_(False))
-    if status is not None:
-        stmt = stmt.where(Risk.status == status)
-    if category:
-        stmt = stmt.where(Risk.category == category)
-    if business_unit_id is not None:
-        stmt = stmt.where(
-            select(risk_business_units.c.risk_id)
-            .where(
-                risk_business_units.c.risk_id == Risk.id,
-                risk_business_units.c.business_unit_id == business_unit_id,
-            )
-            .exists()
-        )
-    if process_id is not None:
-        stmt = stmt.where(
-            select(risk_processes.c.risk_id)
-            .where(
-                risk_processes.c.risk_id == Risk.id,
-                risk_processes.c.process_id == process_id,
-            )
-            .exists()
-        )
-    if asset_id is not None:
-        stmt = stmt.where(
-            select(risk_assets.c.risk_id)
-            .where(risk_assets.c.risk_id == Risk.id, risk_assets.c.asset_id == asset_id)
-            .exists()
-        )
-    if search:
-        like = f"%{search}%"
-        stmt = stmt.where(Risk.title.ilike(like) | Risk.reference.ilike(like))
-    return stmt
 
 
 async def _check_scale(db, user: CurrentUser, values: dict[str, object]) -> None:

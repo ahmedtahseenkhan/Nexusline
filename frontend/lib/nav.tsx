@@ -44,6 +44,7 @@ export const NAV: NavSection[] = [
     icon: <IconGauge />,
     items: [
       { href: "/reports", label: "Reports & KPIs", icon: <IconActivity /> },
+      { href: "/report-builder", label: "Report Builder", icon: <IconCompliance /> },
       { href: "/goals", label: "Strategy & Goals", icon: <IconGauge /> },
       { href: "/projects", label: "Projects", icon: <IconLayers /> },
       { href: "/approvals", label: "Approvals", icon: <IconCheck /> },

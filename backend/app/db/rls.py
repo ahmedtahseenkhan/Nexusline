@@ -166,6 +166,7 @@ TENANT_SCOPED_TABLES: list[str] = [
     "workflow_instance_stages",
     "attestations",
     "saved_filters",
+    "saved_reports",
     "import_profiles",
     "sso_configs",
     "ldap_configs",

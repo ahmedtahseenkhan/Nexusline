@@ -133,6 +133,44 @@ export function queryString(params?: Record<string, string | undefined>): string
   return query ? `?${query}` : "";
 }
 
+/** Filename the server chose (RFC 5987 `filename*=UTF-8''...`), else the fallback. */
+function filenameFrom(res: Response, fallback: string): string {
+  const cd = res.headers.get("content-disposition") || "";
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  if (star) {
+    try { return decodeURIComponent(star[1]); } catch { /* fall through */ }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(cd);
+  return plain ? plain[1] : fallback;
+}
+
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "download";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/** Like downloadBlob, for exports whose parameters travel in a POST body. */
+export async function downloadBlobPost(path: string, body: unknown, fallback = "download"): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/api/v1${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let message = `Export failed (${res.status})`;
+    try { message = formatDetail((await res.json()).detail, message); } catch { /* ignore */ }
+    throw new Error(message);
+  }
+  saveBlob(await res.blob(), filenameFrom(res, fallback));
+}
+
 export async function downloadBlob(path: string, filename: string): Promise<void> {
   const token = getToken();
   const res = await fetch(`${API_BASE}/api/v1${path}`, {
@@ -482,6 +520,62 @@ export interface SuggestedResidual {
   current_residual_score: number | null;
   matches_current: boolean;
 }
+
+// --- report builder ---------------------------------------------------------
+export interface ReportFilterSpec {
+  key: string;
+  label: string;
+  kind: "select" | "multiselect" | "typeahead" | "date" | "bool" | "text";
+  options: { value: string; label: string }[];
+  source: string;
+  help: string;
+}
+export interface ReportColumnSpec {
+  key: string;
+  label: string;
+  default: boolean;
+  sortable: boolean;
+}
+export interface ReportSubject {
+  key: string;
+  label: string;
+  has_detail: boolean;
+  default_sort: string;
+  default_sort_dir: "asc" | "desc";
+  columns: ReportColumnSpec[];
+  filters: ReportFilterSpec[];
+}
+/** What the server needs to answer a report: the question, not the rows. */
+export interface ReportDefinition {
+  subject: string;
+  filters: Record<string, unknown>;
+  columns: string[];
+  sort_by?: string | null;
+  sort_dir?: "asc" | "desc" | null;
+  include_details?: boolean;
+  title?: string;
+}
+export interface ReportRun {
+  columns: { key: string; label: string }[];
+  items: { id: string; cells: Record<string, unknown> }[];
+  total: number;
+  summary: Record<string, Record<string, number>>;
+  summary_over: number;
+  params: [string, string][];
+}
+export interface SavedReport {
+  id: string;
+  name: string;
+  description: string;
+  subject: string;
+  definition: Record<string, unknown>;
+  shared: boolean;
+  owner_id: string | null;
+  owner_email: string;
+  created_at: string;
+  updated_at: string;
+}
+export type ReportFormat = "pdf" | "xlsx" | "csv";
 
 /** A formal decision to accept a risk, with the expiry that makes it a decision rather
  *  than a permanent omission. */
@@ -1886,6 +1980,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ items }),
     }),
+
+  // --- report builder ---
+  reportSubjects: () => request<ReportSubject[]>("/report-builder/subjects"),
+  runReport: (body: ReportDefinition & { limit: number; offset: number }) =>
+    request<ReportRun>("/report-builder/run", { method: "POST", body: JSON.stringify(body) }),
+  exportReport: (body: ReportDefinition, format: ReportFormat) =>
+    downloadBlobPost(`/report-builder/export?format=${format}`, body, `report.${format}`),
+  savedReports: () => request<Page<SavedReport>>("/report-builder/saved?limit=200"),
+  createSavedReport: (body: { name: string; description?: string; subject: string; definition: Record<string, unknown>; shared: boolean }) =>
+    request<SavedReport>("/report-builder/saved", { method: "POST", body: JSON.stringify(body) }),
+  updateSavedReport: (id: string, body: Partial<{ name: string; description: string; definition: Record<string, unknown>; shared: boolean }>) =>
+    request<SavedReport>(`/report-builder/saved/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteSavedReport: (id: string) => request<void>(`/report-builder/saved/${id}`, { method: "DELETE" }),
+  exportSavedReport: (id: string, format: ReportFormat, name: string) =>
+    downloadBlob(`/report-builder/saved/${id}/export?format=${format}`, `${slugForFile(name)}.${format}`),
 
   requestAcceptance: (riskId: string, body: { rationale: string; expires_at?: string | null }) =>
     request<RiskAcceptance>(`/risks/${riskId}/acceptances`, { method: "POST", body: JSON.stringify(body) }),
