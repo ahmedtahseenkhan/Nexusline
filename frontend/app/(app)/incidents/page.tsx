@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
@@ -273,15 +274,37 @@ function IncidentsInner() {
   const linkCount = (i: IncidentFull) =>
     i.controls.length + i.vendors.length + i.assets.length + i.risks.length;
 
+
+  /* Inline relation chips linking to each record's own page. */
+  const labelOf = (x: { id: string; label?: string; name?: string; title?: string; reference?: string }) =>
+    x.label || x.name || x.title || x.reference || x.id;
+  const linkChips = (items: { id: string; label?: string; name?: string; title?: string; reference?: string }[] | undefined, href: string) =>
+    items && items.length ? (
+      <div className="chips" onClick={(e) => e.stopPropagation()}>
+        {items.map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{labelOf(x)}</Link>)}
+      </div>
+    ) : <span className="muted">—</span>;
+  const names = (items: { id: string; label?: string; name?: string; title?: string; reference?: string }[] | undefined) =>
+    (items ?? []).map(labelOf).join(", ");
+
   const columns: Column<IncidentFull>[] = [
-    { key: "reference", header: "Ref", sortable: true, render: (i) => <span className="ref">{i.reference}</span> },
-    { key: "title", header: "Title", sortable: true, render: (i) => <span className="cell-title">{i.title}</span> },
+    { key: "reference", header: "Ref", sortable: true, locked: true, render: (i) => <span className="ref">{i.reference}</span> },
+    { key: "title", header: "Title", sortable: true, locked: true, render: (i) => <span className="cell-title">{i.title}</span> },
     { key: "category", header: "Type", sortable: true, render: (i) => <span className="muted">{i.category || "—"}</span> },
-    { key: "severity", header: "Severity", sortable: true, render: (i) => <Severity value={i.severity} /> },
-    { key: "status", header: "Status", sortable: true, render: (i) => <Badge tone={STATUS_TONE[i.status] || "neutral"}>{cap(i.status)}</Badge> },
-    { key: "detected_at", header: "Detected", sortable: true, render: (i) => <span className="muted">{i.detected_at || "—"}</span> },
+    { key: "classification", header: "Classification", hidden: true, render: (i) => <span className="muted">{i.classification || "—"}</span> },
+    { key: "severity", header: "Severity", sortable: true, render: (i) => <Severity value={i.severity} />, text: (i) => cap(i.severity) },
+    { key: "status", header: "Status", sortable: true, render: (i) => <Badge tone={STATUS_TONE[i.status] || "neutral"}>{cap(i.status)}</Badge>, text: (i) => cap(i.status) },
     { key: "assignee", header: "Owner", render: (i) => <span className="muted">{i.assignee || "—"}</span> },
-    { key: "links", header: "Links", align: "center", render: (i) => <span className="muted">{linkCount(i) || "—"}</span> },
+    { key: "reported_by", header: "Reported by", hidden: true, render: (i) => <span className="muted">{i.reported_by || "—"}</span> },
+    { key: "detected_at", header: "Detected", sortable: true, render: (i) => <span className="muted">{i.detected_at || "—"}</span> },
+    { key: "occurred_at", header: "Occurred", hidden: true, sortable: true, render: (i) => <span className="muted">{i.occurred_at || "—"}</span> },
+    { key: "resolved_at", header: "Resolved", hidden: true, sortable: true, render: (i) => <span className="muted">{i.resolved_at || "—"}</span> },
+    { key: "is_reportable", header: "Reportable", hidden: true, render: (i) => (i.is_reportable ? <Badge tone="high">Reportable{i.regulator ? ` · ${i.regulator}` : ""}</Badge> : <span className="muted">—</span>), text: (i) => i.is_reportable ? `Yes${i.regulator ? ` (${i.regulator})` : ""}` : "No" },
+    { key: "cost", header: "Cost", hidden: true, align: "right", render: (i) => <span className="muted">{i.cost != null ? i.cost.toLocaleString() : "—"}</span>, text: (i) => i.cost != null ? String(i.cost) : "" },
+    { key: "assets", header: "Assets", render: (i) => linkChips(i.assets, "/information-assets"), text: (i) => names(i.assets) },
+    { key: "controls", header: "Controls", hidden: true, render: (i) => linkChips(i.controls, "/controls"), text: (i) => names(i.controls) },
+    { key: "risks", header: "Risks", hidden: true, render: (i) => linkChips(i.risks, "/risks"), text: (i) => names(i.risks) },
+    { key: "vendors", header: "Third parties", hidden: true, render: (i) => linkChips(i.vendors, "/vendors"), text: (i) => names(i.vendors) },
     {
       key: "lifecycle", header: "Lifecycle", width: 150, render: (i) => (
         i.lifecycle_complete ? (
@@ -293,9 +316,29 @@ function IncidentsInner() {
           </>
         )
       ),
+      text: (i) => i.lifecycle_complete ? "complete" : `${i.completed_stages}/${i.stage_count}`,
     },
+    { key: "workflow_status", header: "Workflow", hidden: true, render: (i) => <span className="muted">{cap(i.workflow_status)}</span>, text: (i) => cap(i.workflow_status) },
+    { key: "created_at", header: "Logged", hidden: true, render: (i) => <span className="muted">{i.created_at?.slice(0, 10) || "—"}</span>, text: (i) => i.created_at?.slice(0, 10) ?? "" },
     { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button></div> },
   ];
+
+  /** Delete every selected incident after one confirmation, then drop the selection. */
+  async function removeMany(rowsToDelete: { id: string }[], clear: () => void) {
+    const ok = await confirmDialog({
+      title: `Delete ${rowsToDelete.length} incident${rowsToDelete.length === 1 ? "" : "s"}?`,
+      message: "Links from other records are kept and the activity trail records who removed them.",
+      confirmLabel: "Delete", danger: true,
+    });
+    if (!ok) return;
+    let failed = 0;
+    for (const r of rowsToDelete) {
+      try { await apiCall("DELETE", `/incidents/${r.id}`); } catch { failed += 1; }
+    }
+    clear();
+    reload();
+    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+  }
 
   const filters = { status: fStatus || undefined, severity: fSeverity || undefined };
 
@@ -406,6 +449,11 @@ function IncidentsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<IncidentFull>
+        tableKey="incidents"
+        statusModel="incident"
+        bulkActions={(rows, clear) => (
+          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+        )}
         columns={columns}
         fetcher={fetchIncidents}
         rowKey={(i) => i.id}

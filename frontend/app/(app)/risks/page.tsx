@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { api, apiCall, type CustomField, type MatrixLevel, type RiskAcceptance, type RiskMatrixConfig, type RiskSetting } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
@@ -77,6 +78,8 @@ type RiskRow = {
   incidents: Ref[];
 
   acceptances?: RiskAcceptance[];
+  created_at?: string;
+  updated_at?: string;
 
   // reverse graph links (read-only, from GET /risks/{id})
   requirements?: Ref[];
@@ -717,21 +720,98 @@ function RisksPage() {
     </>
   );
 
+  /* Inline relation chips. Each links to the record's own page, the same way the
+     drawer's related-record chips do — the list is the workbench, so the graph has to
+     be walkable from it. */
+  const linkChips = (items: Ref[] | undefined, href: string) =>
+    items && items.length ? (
+      <div className="chips" onClick={(e) => e.stopPropagation()}>
+        {items.map((x) => (
+          <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{x.name || x.title || x.reference || x.id}</Link>
+        ))}
+      </div>
+    ) : <span className="muted">—</span>;
+  const names = (items: Ref[] | undefined) => (items ?? []).map((x) => x.name || x.title || x.reference || "").join(", ");
+  const rungLabel = (axis: "likelihood" | "impact", n: number | null) => {
+    if (!n) return "—";
+    const lvl = (axis === "likelihood" ? matrix?.likelihood_levels : matrix?.impact_levels)?.find((l) => l.level === n);
+    return lvl?.label ? `${n} — ${lvl.label}` : String(n);
+  };
+  const classification = (l: number | null, i: number | null) =>
+    l && i ? (
+      <div className="chips">
+        <span className="chip" title="Likelihood">L {rungLabel("likelihood", l)}</span>
+        <span className="chip" title="Impact">I {rungLabel("impact", i)}</span>
+      </div>
+    ) : <span className="muted">—</span>;
+  const scoreCell = (sev: string | null, score: number | null) => (
+    <><Severity value={sev} /> <span className="muted">({score ?? "—"})</span></>
+  );
+
+  /* The full catalogue. What is shown by default is the working set a risk manager
+     scans; everything else is one click away in the column chooser, and the layout
+     is remembered per person. */
   const riskColumns: Column<RiskRow>[] = [
-    { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference}</span> },
-    { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
+    { key: "reference", header: "Ref", sortable: true, locked: true, render: (r) => <span className="ref">{r.reference}</span> },
+    { key: "title", header: "Title", sortable: true, locked: true, render: (r) => <span className="cell-title">{r.title}</span> },
     { key: "category", header: "Category", sortable: true, render: (r) => <span className="muted">{r.category || "—"}</span> },
-    { key: "inherent_score", header: "Inherent", sortable: true, render: (r) => <><Severity value={r.inherent_severity} /> <span className="muted">({r.inherent_score ?? "—"})</span></> },
-    { key: "residual_score", header: "Residual", sortable: true, render: (r) => <><Severity value={r.residual_severity} /> <span className="muted">({r.residual_score ?? "—"})</span></> },
-    { key: "appetite", header: "Appetite", render: (r) => { const a = appetite(r, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; } },
-    { key: "control_health", header: "Control health", render: (r) => controlHealth(r.control_health) },
-    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
-    { key: "owner", header: "Owner", render: (r) => <span className="muted">{userName(r.owner_id)}</span> },
-    { key: "exposure", header: "Exposure", render: (r) => <span className="muted">{money(r.annual_loss_expectancy)}</span> },
-    { key: "links", header: "Links", align: "center", render: (r) => <span className="muted">{linkCount(r) || "—"}</span> },
-    { key: "next_review_date", header: "Review", sortable: true, render: (r) => (isOverdue(r.next_review_date) ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.next_review_date || "—"}</span>) },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge>, text: (r) => cap(r.status) },
+    { key: "owner", header: "Owner", render: (r) => <span className="muted">{userName(r.owner_id)}</span>, text: (r) => userName(r.owner_id) },
+    { key: "business_units", header: "Business units", render: (r) => linkChips(r.business_units, "/business-units"), text: (r) => names(r.business_units) },
+    { key: "processes", header: "Processes", hidden: true, render: (r) => linkChips(r.processes, "/processes"), text: (r) => names(r.processes) },
+    { key: "assets", header: "Assets", render: (r) => linkChips(r.assets, "/information-assets"), text: (r) => names(r.assets) },
+    { key: "controls", header: "Controls", render: (r) => linkChips(r.controls, "/controls"), text: (r) => names(r.controls) },
+    { key: "policies", header: "Policies", hidden: true, render: (r) => linkChips(r.policies, "/policies"), text: (r) => names(r.policies) },
+    { key: "threats", header: "Threats", hidden: true, render: (r) => linkChips(r.threats, "/threat-library"), text: (r) => names(r.threats) },
+    { key: "vulnerabilities", header: "Vulnerabilities", hidden: true, render: (r) => linkChips(r.vulnerabilities, "/threat-library"), text: (r) => names(r.vulnerabilities) },
+    { key: "incidents", header: "Incidents", hidden: true, render: (r) => linkChips(r.incidents, "/incidents"), text: (r) => names(r.incidents) },
+    { key: "inherent_classification", header: "Inherent classification", hidden: true, render: (r) => classification(r.inherent_likelihood, r.inherent_impact), text: (r) => `L${r.inherent_likelihood} I${r.inherent_impact}` },
+    { key: "inherent_score", header: "Inherent", sortable: true, render: (r) => scoreCell(r.inherent_severity, r.inherent_score), text: (r) => `${r.inherent_score ?? ""} ${r.inherent_severity ?? ""}`.trim() },
+    { key: "residual_classification", header: "Residual classification", hidden: true, render: (r) => classification(r.residual_likelihood, r.residual_impact), text: (r) => r.residual_likelihood ? `L${r.residual_likelihood} I${r.residual_impact}` : "" },
+    { key: "residual_score", header: "Residual", sortable: true, render: (r) => scoreCell(r.residual_severity, r.residual_score), text: (r) => `${r.residual_score ?? ""} ${r.residual_severity ?? ""}`.trim() },
+    { key: "appetite", header: "Appetite", render: (r) => { const a = appetite(r, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; }, text: (r) => appetite(r, settings)?.label ?? "" },
+    { key: "control_health", header: "Control health", render: (r) => controlHealth(r.control_health), text: (r) => r.control_health ?? "" },
+    { key: "treatment_strategy", header: "Treatment", hidden: true, render: (r) => <span className="muted">{r.treatment_strategy ? cap(r.treatment_strategy) : "—"}</span>, text: (r) => r.treatment_strategy ? cap(r.treatment_strategy) : "" },
+    { key: "treatment_owner", header: "Treatment owner", hidden: true, render: (r) => <span className="muted">{r.treatment_owner || "—"}</span> },
+    { key: "treatment_deadline", header: "Treatment deadline", hidden: true, sortable: true, render: (r) => <span className="muted">{r.treatment_deadline || "—"}</span> },
+    { key: "exposure", header: "Exposure", render: (r) => <span className="muted">{money(r.annual_loss_expectancy)}</span>, text: (r) => money(r.annual_loss_expectancy) },
+    { key: "workflow_status", header: "Workflow", hidden: true, render: (r) => <span className="muted">{cap(r.workflow_status)}</span>, text: (r) => cap(r.workflow_status) },
+    { key: "review_frequency", header: "Review cycle", hidden: true, render: (r) => <span className="muted">{cap(r.review_frequency)}</span>, text: (r) => cap(r.review_frequency) },
+    { key: "last_review_date", header: "Last review", hidden: true, render: (r) => <span className="muted">{r.last_review_date || "—"}</span> },
+    { key: "next_review_date", header: "Review", sortable: true, render: (r) => (isOverdue(r.next_review_date) ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.next_review_date || "—"}</span>), text: (r) => r.next_review_date ?? "" },
+    { key: "created_at", header: "Created", hidden: true, render: (r) => <span className="muted">{r.created_at?.slice(0, 10) || "—"}</span>, text: (r) => r.created_at?.slice(0, 10) ?? "" },
+    { key: "updated_at", header: "Updated", hidden: true, render: (r) => <span className="muted">{r.updated_at?.slice(0, 10) || "—"}</span>, text: (r) => r.updated_at?.slice(0, 10) ?? "" },
     { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(r)}>Delete</button></div> },
   ];
+
+  /** Delete every selected risk after one confirmation, then drop the selection. */
+  async function removeMany(rowsToDelete: RiskRow[], clear: () => void) {
+    const ok = await confirmDialog({
+      title: `Delete ${rowsToDelete.length} risk${rowsToDelete.length === 1 ? "" : "s"}?`,
+      message: "They are archived, not destroyed: links from other records are kept and the activity trail records who removed them.",
+      confirmLabel: "Delete", danger: true,
+    });
+    if (!ok) return;
+    let failed = 0;
+    for (const r of rowsToDelete) {
+      try { await apiCall("DELETE", `/risks/${r.id}`); } catch { failed += 1; }
+    }
+    clear();
+    reload();
+    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+  }
+
+  /** A saved view restoring its filters into the page's own scope state. */
+  const applyScope = (f: Record<string, string | number | boolean | undefined>) => {
+    setScopeUnit(typeof f.business_unit_id === "string" ? f.business_unit_id : "");
+    setScopeProcess(typeof f.process_id === "string" ? f.process_id : "");
+    setScopeStatus(typeof f.status === "string" ? f.status : "");
+    const assetId = typeof f.asset_id === "string" ? f.asset_id : "";
+    if (!assetId) { setScopeAsset(null); return; }
+    setScopeAsset({ id: assetId, name: "" });
+    apiCall<{ id: string; name: string }>("GET", `/assets/${assetId}`)
+      .then((a) => setScopeAsset({ id: a.id, name: a.name })).catch(() => {});
+  };
 
   return (
     <>
@@ -862,9 +942,15 @@ function RisksPage() {
       </div>
 
       <DataTable<RiskRow>
+        tableKey="risks"
+        statusModel="risk"
         columns={riskColumns}
         fetcher={fetchRisks}
         filters={scopeFilters}
+        onApplyFilters={applyScope}
+        bulkActions={(rows, clear) => (
+          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+        )}
         rowKey={(r) => r.id}
         onRowClick={(r) => setRecordId(r.id)}
         activeKey={recordId ?? undefined}

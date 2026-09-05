@@ -113,6 +113,19 @@ These are System-section services that plug into modules rather than modules in 
 
 ---
 
+## 3b. How every register works
+
+Every list page — risks, controls, assets, incidents, policies, and the rest — is the same workbench, so what you learn on one applies to all of them.
+
+- **Columns.** Each register declares far more columns than it shows by default. **Columns · N** on the toolbar opens the chooser: hide what you do not need, add anything from the catalogue (relation chips such as *Assets* and *Controls*, classification chips such as *L 3 — Possible · I 4 — Major*, dates, treatment, workflow), and drag to reorder. Locked columns (the reference and title) always stay. The layout is remembered per person, per register.
+- **Views.** Once the columns, sort, search and filters are the way you want them, **+ Save view** keeps that arrangement as a tab — *Top risks*, *Review due this month*, *Mine*. Click a tab to restore it; *All items* is always the plain register. Views are yours and live in your browser; for a shared, exportable question use the **Report Builder**.
+- **Dynamic status.** The first column shows what the organisation's **Status Rules** say about each row — *High Exposure*, *Review Overdue*, *Control Audit Failed* — evaluated live for the page. The same chips appear at the top of the record when you open it.
+- **Selection.** Tick rows (or the header box for the page) and a bar appears with the register's bulk actions — *Delete selected* — plus **Export CSV** of exactly the visible columns for the selected rows.
+- **Density.** The ≡ button switches between comfortable and compact rows.
+- **Relation chips.** Columns such as *Assets*, *Controls*, *Policies* show the linked records inline, and each chip opens that record — the list is where the graph is walked, not just the drawer.
+
+**Record drawers** carry the same idea: status-rule chips at the top, custom fields, review/attestation, comments, tags and attachments, and an **Activity** section with the record's own audit trail — who changed what, and when.
+
 ## 4. How the sidebar is organized
 
 The left navigation groups every module into seven sections, which this guide follows exactly: **Overview, Risk, Compliance, Governance, Organization, Operations, System**. **Policy Management sits under Governance**, alongside Board & Committees, Delegation of Authority and the Legal Register.
