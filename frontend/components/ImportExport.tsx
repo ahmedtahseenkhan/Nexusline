@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
+import { toast } from "@/lib/feedback";
 import { apiCall } from "@/lib/api";
 import { Badge } from "@/components/badges";
 
@@ -191,7 +192,14 @@ const BAND_LABEL: Record<MappingSuggestion["band"], string> = {
 /* ---------------------------------------------------------------- Export --- */
 
 /** Reusable Export / Template / Import control. */
-export default function ImportExport({ resource, label, onDone }: Props) {
+export type ImportExportHandle = { exportCsv: () => void; template: () => void; openImport: () => void };
+
+/** Import/export for one register. Renders its own three buttons unless `hideButtons`
+ *  is set, in which case the page drives it through the ref — the buttons then live in
+ *  a menu rather than crowding the page head. */
+const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: boolean }>(function ImportExport(
+  { resource, label, onDone, hideButtons }, ref,
+) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<"export" | "template" | null>(null);
   const [barError, setBarError] = useState<string | null>(null);
@@ -209,8 +217,17 @@ export default function ImportExport({ resource, label, onDone }: Props) {
     }
   }
 
+  useImperativeHandle(ref, () => ({
+    exportCsv: () => doDownload("export"),
+    template: () => doDownload("template"),
+    openImport: () => setOpen(true),
+  }));
+  // With the buttons hidden there is nowhere to show a download error inline.
+  useEffect(() => { if (hideButtons && barError) toast(barError); }, [hideButtons, barError]);
+
   return (
     <>
+      {!hideButtons && (
       <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
         <div style={{ display: "inline-flex", gap: 6 }}>
           <button
@@ -243,6 +260,7 @@ export default function ImportExport({ resource, label, onDone }: Props) {
           </div>
         )}
       </div>
+      )}
 
       {open && (
         <ImportWizard
@@ -255,7 +273,9 @@ export default function ImportExport({ resource, label, onDone }: Props) {
       )}
     </>
   );
-}
+});
+
+export default ImportExport;
 
 /* -------------------------------------------------------- Import wizard --- */
 /* Upload → Map → Preview → Import. The client's own spreadsheet is accepted as-is:

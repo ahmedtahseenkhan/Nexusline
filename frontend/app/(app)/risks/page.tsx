@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, apiCall, type CustomField, type MatrixLevel, type RiskAcceptance, type RiskMatrixConfig, type RiskSetting } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
@@ -20,13 +20,14 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import AsyncSelect from "@/components/AsyncSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
-import GenerateRisks from "@/components/GenerateRisks";
-import ImportExport from "@/components/ImportExport";
-import OrphanCleanup from "@/components/OrphanCleanup";
+import GenerateRisks, { type GenerateRisksHandle } from "@/components/GenerateRisks";
+import Menu from "@/components/Menu";
+import ImportExport, { type ImportExportHandle } from "@/components/ImportExport";
+import OrphanCleanup, { type OrphanCleanupHandle } from "@/components/OrphanCleanup";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
-import { IconGauge, IconPlus } from "@/components/icons";
+import { IconPlus } from "@/components/icons";
 
 // --------------------------------------------------------------- inline types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -270,6 +271,11 @@ function RisksPage() {
 
   // appetite editor
   const [showSettings, setShowSettings] = useState(false);
+  // The import/export, generator and orphan dialogs are driven from the More menu, so
+  // the page head holds three controls instead of eight.
+  const io = useRef<ImportExportHandle>(null);
+  const gen = useRef<GenerateRisksHandle>(null);
+  const orphans = useRef<OrphanCleanupHandle>(null);
   const [appetiteScore, setAppetiteScore] = useState(6);
   const [toleranceScore, setToleranceScore] = useState(12);
 
@@ -818,30 +824,40 @@ function RisksPage() {
       <div className="page-head row-between">
         <div>
           <h1>Risk Register</h1>
-          <p>Identify, score and treat risks — qualitative ({matrixSize}×{matrixSize}) and quantitative (FAIR), with controls, threats and review cycles.</p>
+          <p>Qualitative ({matrixSize}×{matrixSize}) and quantitative (FAIR) risks, with controls, threats and review cycles.</p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn secondary" onClick={() => setShowSettings((v) => !v)}>
-            <IconGauge width={16} height={16} />
-            Appetite
-          </button>
-          {/* The answer to "one control applies to four assets — shouldn't each get its
-              own rating?". It should, and this is how: one proposed risk per asset, with
-              the opening impact taken from that asset's own criticality, rather than one
-              rating stretched across four assets that differ. */}
-          <GenerateRisks label="the asset inventory" onDone={reload} />
-          <ImportExport resource="risks" label="Risks" onDone={reload} />
-          <OrphanCleanup onDone={reload} />
-          <button
-            className="btn secondary"
-            onClick={() =>
-              api
-                .pdfRiskRegister(scopeFilters, scopeLabel === "Whole register" ? undefined : scopeLabel)
-                .catch(() => {})
-            }
-          >
-            Register PDF
-          </button>
+          <Menu
+            label="Export"
+            items={[
+              {
+                label: "Register PDF",
+                hint: scopeLabel === "Whole register" ? "Every risk, with detail pages" : scopeLabel,
+                onClick: () =>
+                  api.pdfRiskRegister(scopeFilters, scopeLabel === "Whole register" ? undefined : scopeLabel).catch(() => {}),
+              },
+              { label: "Export CSV", hint: "All risks, every column", onClick: () => io.current?.exportCsv() },
+            ]}
+          />
+          <Menu
+            label="More"
+            items={[
+              { label: "Import risks…", hint: "From your existing register — CSV or Excel", onClick: () => io.current?.openImport() },
+              { label: "Download import template", onClick: () => io.current?.template() },
+              "divider",
+              /* The answer to "one control applies to four assets — shouldn't each get its
+                 own rating?": one proposed risk per asset, impact from that asset's own
+                 criticality, rather than one rating stretched across four assets. */
+              { label: "Generate risks from assets…", hint: "One proposed risk per asset, from the scenario library", onClick: () => gen.current?.open() },
+              { label: "Clean up orphans…", hint: "Risks whose every linked asset has since been deleted", onClick: () => orphans.current?.open() },
+              "divider",
+              {
+                label: "Risk methodology…",
+                hint: settings ? `Appetite ≤ ${settings.appetite_score} · tolerance ≤ ${settings.tolerance_score} · ${matrixSize}×${matrixSize} matrix` : undefined,
+                onClick: () => setShowSettings(true),
+              },
+            ]}
+          />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} />
             Add risk
@@ -849,99 +865,57 @@ function RisksPage() {
         </div>
       </div>
 
+      {/* Dialogs driven from the menus above; they render nothing until opened. */}
+      <ImportExport ref={io} resource="risks" label="Risks" onDone={reload} hideButtons />
+      <GenerateRisks ref={gen} label="the asset inventory" onDone={reload} hideButton />
+      <OrphanCleanup ref={orphans} onDone={reload} hideButton />
+
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      {settings && (
-        <div className="card card-pad" style={{ marginBottom: 16 }}>
-          <div className="row-between">
-            <span className="muted">
-              Risk appetite ≤ <b style={{ color: "var(--green)" }}>{settings.appetite_score}</b>{" "}
-              · Tolerance ≤ <b style={{ color: "var(--amber)" }}>{settings.tolerance_score}</b>{" "}
-              <span style={{ color: "var(--faint)" }}>(score above tolerance = breach)</span>
-            </span>
-          </div>
-          {showSettings && (
-            <>
-              <form onSubmit={saveSettings} style={{ display: "flex", gap: 14, alignItems: "flex-end", marginTop: 14 }}>
-                <div style={{ width: 190 }}>
-                  <label className="label">Appetite (1–{maxScore})</label>
-                  <input className="input" type="number" min={1} max={maxScore} value={appetiteScore} onChange={(e) => setAppetiteScore(Number(e.target.value))} />
-                </div>
-                <div style={{ width: 190 }}>
-                  <label className="label">Tolerance (1–{maxScore})</label>
-                  <input className="input" type="number" min={1} max={maxScore} value={toleranceScore} onChange={(e) => setToleranceScore(Number(e.target.value))} />
-                </div>
-                <button className="btn">Save thresholds</button>
-              </form>
-
-              <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-                <RiskMethodology
-                  onSaved={() => {
-                    reload();
-                    api.riskSettings().then(setSettings).catch(() => {});
-                    // Pull the new wording straight through, so criteria written here
-                    // show up on the next risk form without a page reload.
-                    api.riskMatrixConfig().then(setMatrix).catch(() => {});
-                  }}
-                />
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Segment scope. Kept above the table rather than inside it because it is a
-          scope, not a column filter: everything on the page — counts, the export —
-          means "within this segment" once one is chosen. */}
-      <div className="card card-pad" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
-        <div style={{ width: 220 }}>
-          <label className="label">Business unit</label>
-          <Select
-            value={scopeUnit}
-            onChange={setScopeUnit}
-            options={segments.units.map((u) => ({ value: u.id, label: u.name || u.id }))}
-            placeholder="All business units"
-          />
-        </div>
-        <div style={{ width: 220 }}>
-          <label className="label">Process</label>
-          <Select
-            value={scopeProcess}
-            onChange={setScopeProcess}
-            options={segments.processes.map((x) => ({ value: x.id, label: x.name || x.id }))}
-            placeholder="All processes"
-          />
-        </div>
-        <div style={{ width: 230 }}>
-          <label className="label">Asset</label>
-          {/* Typeahead rather than a dropdown: an inventory runs to thousands, and a
-              preloaded list could never reach the asset somebody actually wants. */}
-          <AsyncSelect
-            search={linkSearch("assets")}
-            value={scopeAsset?.id ?? null}
-            selectedLabel={scopeAsset?.name}
-            onChange={(id, opt) => setScopeAsset(id ? { id, name: opt?.label ?? "" } : null)}
-            placeholder="All assets"
-          />
-        </div>
-        <div style={{ width: 190 }}>
-          <label className="label">Status</label>
-          <Select value={scopeStatus} onChange={setScopeStatus} options={STATUS} placeholder="Any status" />
-        </div>
-        {(scopeUnit || scopeProcess || scopeAsset || scopeStatus) && (
-          <button
-            className="btn secondary"
-            onClick={() => { setScopeUnit(""); setScopeProcess(""); setScopeAsset(null); setScopeStatus(""); }}
-          >
-            Clear scope
-          </button>
-        )}
-        <div className="muted" style={{ fontSize: 12.5, marginLeft: "auto", paddingBottom: 8 }}>
-          {scopeLabel}
-        </div>
-      </div>
-
       <DataTable<RiskRow>
+        toolbarLeft={
+          /* The segment scope. Sits beside the search box rather than in a card of its
+             own: it narrows the whole page — counts and the export included — but it
+             does not need its own hundred and fifty pixels to say so. */
+          <div className="toolbar-filters">
+            <div style={{ width: 180 }}>
+              <Select value={scopeUnit} onChange={setScopeUnit} options={segments.units.map((u) => ({ value: u.id, label: u.name || u.id }))} placeholder="All business units" />
+            </div>
+            <div style={{ width: 160 }}>
+              <Select value={scopeProcess} onChange={setScopeProcess} options={segments.processes.map((x) => ({ value: x.id, label: x.name || x.id }))} placeholder="All processes" />
+            </div>
+            <div style={{ width: 180 }}>
+              <AsyncSelect
+                search={linkSearch("assets")}
+                value={scopeAsset?.id ?? null}
+                selectedLabel={scopeAsset?.name}
+                onChange={(id, opt) => setScopeAsset(id ? { id, name: opt?.label ?? "" } : null)}
+                placeholder="All assets"
+              />
+            </div>
+            <div style={{ width: 150 }}>
+              <Select value={scopeStatus} onChange={setScopeStatus} options={STATUS} placeholder="Any status" />
+            </div>
+            {(scopeUnit || scopeProcess || scopeAsset || scopeStatus) && (
+              <button className="btn secondary sm" onClick={() => { setScopeUnit(""); setScopeProcess(""); setScopeAsset(null); setScopeStatus(""); }}>
+                Clear
+              </button>
+            )}
+          </div>
+        }
+        tabsRight={
+          settings && (
+            <span className="appetite-chip">
+              <span>{scopeLabel}</span>
+              <span>·</span>
+              <span>
+                Appetite ≤ <b style={{ color: "var(--green)" }}>{settings.appetite_score}</b>
+                {" "}· Tolerance ≤ <b style={{ color: "var(--amber)" }}>{settings.tolerance_score}</b>
+              </span>
+              <button className="linklike" onClick={() => setShowSettings(true)}>Methodology</button>
+            </span>
+          )
+        }
         tableKey="risks"
         statusModel="risk"
         columns={riskColumns}
@@ -959,6 +933,39 @@ function RisksPage() {
         emptyMessage="No risks yet. Create your first risk to start building the register."
         refreshKey={refreshKey}
       />
+
+      {/* Appetite, tolerance and the matrix — the organisation's methodology. A side
+          panel rather than a card above the register: it is edited once a year and
+          read every day, and reading it should cost one line, not a hundred pixels. */}
+      <RecordDrawer
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        layout="panel"
+        width={780}
+        title="Risk methodology"
+        subtitle={`${matrixSize}×${matrixSize} matrix · scores 1–${maxScore} · score above tolerance is a breach`}
+      >
+        <form onSubmit={saveSettings} style={{ display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div style={{ width: 190 }}>
+            <label className="label">Appetite (1–{maxScore})</label>
+            <input className="input" type="number" min={1} max={maxScore} value={appetiteScore} onChange={(e) => setAppetiteScore(Number(e.target.value))} />
+          </div>
+          <div style={{ width: 190 }}>
+            <label className="label">Tolerance (1–{maxScore})</label>
+            <input className="input" type="number" min={1} max={maxScore} value={toleranceScore} onChange={(e) => setToleranceScore(Number(e.target.value))} />
+          </div>
+          <button className="btn">Save thresholds</button>
+        </form>
+        <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+          <RiskMethodology
+            onSaved={() => {
+              reload();
+              api.riskSettings().then(setSettings).catch(() => {});
+              api.riskMatrixConfig().then(setMatrix).catch(() => {});
+            }}
+          />
+        </div>
+      </RecordDrawer>
 
       {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}
       <RecordDrawer

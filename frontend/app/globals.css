@@ -1172,3 +1172,26 @@ td .chips .chip { padding: 1px 7px; font-size: 12px; font-weight: 500; white-spa
   background: var(--primary-weak); border: 2px solid var(--primary);
 }
 .activity-when { font-size: 11.5px; color: var(--muted); }
+
+/* ------------------------------------------------------------------- Menus */
+.menu {
+  position: absolute; top: calc(100% + 6px); z-index: 30; min-width: 240px;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-md); padding: 6px;
+  display: grid; gap: 2px;
+}
+.menu-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  width: 100%; text-align: left; padding: 8px 10px; border: none; border-radius: 6px;
+  background: transparent; font: inherit; font-size: 13.5px; color: var(--text); cursor: pointer;
+}
+.menu-item:hover:not(:disabled) { background: var(--primary-weak-2); }
+.menu-item:disabled { opacity: 0.5; cursor: default; }
+.menu-item.danger { color: var(--red); }
+.menu-hint { font-size: 11.5px; color: var(--muted); }
+.menu-divider { height: 1px; background: var(--border); margin: 4px 2px; }
+
+/* Compact filter controls that sit in the table toolbar rather than a card of their own. */
+.toolbar-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.toolbar-filters .select, .toolbar-filters .input, .toolbar-filters button.input { padding: 7px 10px; font-size: 13px; min-height: 0; }
+.appetite-chip { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin-left: auto; padding-right: 6px; }

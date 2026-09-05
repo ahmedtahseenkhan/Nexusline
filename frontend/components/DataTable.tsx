@@ -75,6 +75,12 @@ type Props<T> = {
   filters?: Record<string, string | number | boolean | undefined>;
   /** toolbar content on the right (Add button, export, …) */
   toolbarRight?: ReactNode;
+  /** Page-level filters, rendered beside the search box so they do not need a card of
+   *  their own above the table. Pair with `filters` for the values. */
+  toolbarLeft?: ReactNode;
+  /** Right end of the view-tabs row — a place for a one-line summary such as the
+   *  organisation's appetite thresholds, next to the record count. */
+  tabsRight?: ReactNode;
   pageSize?: number;
   defaultSort?: { by: string; dir: "asc" | "desc" };
   emptyMessage?: string;
@@ -137,6 +143,8 @@ export default function DataTable<T>({
   searchPlaceholder = "Search…",
   filters,
   toolbarRight,
+  toolbarLeft,
+  tabsRight,
   pageSize = 25,
   defaultSort,
   emptyMessage = "No records yet.",
@@ -390,6 +398,7 @@ export default function DataTable<T>({
             + Save view
           </button>
         )}
+        {tabsRight}
       </div>
 
       {/* --------------------------------------------------------- toolbar */}
@@ -401,6 +410,7 @@ export default function DataTable<T>({
           value={rawSearch}
           onChange={(e) => setRawSearch(e.target.value)}
         />
+        {toolbarLeft}
         {selected.size > 0 && bulkActions && (
           <div className="bulk-bar">
             <b>{selected.size} selected</b>

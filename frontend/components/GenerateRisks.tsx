@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import {
   api,
   type GenerateRisksResponse,
@@ -29,10 +29,17 @@ type Props = {
 
 const CRITICALITY = ["low", "medium", "high", "critical"] as const;
 
-export default function GenerateRisks({ assetClass, assetIds, label, onDone }: Props) {
+export type GenerateRisksHandle = { open: () => void };
+
+const GenerateRisks = forwardRef<GenerateRisksHandle, Props & { hideButton?: boolean }>(function GenerateRisks(
+  { assetClass, assetIds, label, onDone, hideButton }, ref,
+) {
   const [open, setOpen] = useState(false);
+  useImperativeHandle(ref, () => ({ open: () => setOpen(true) }));
+
   return (
     <>
+      {!hideButton && (
       <button
         className="btn secondary"
         onClick={() => setOpen(true)}
@@ -40,6 +47,7 @@ export default function GenerateRisks({ assetClass, assetIds, label, onDone }: P
       >
         Generate risks
       </button>
+      )}
       {open && (
         <GenerateModal
           assetClass={assetClass}
@@ -51,7 +59,9 @@ export default function GenerateRisks({ assetClass, assetIds, label, onDone }: P
       )}
     </>
   );
-}
+});
+
+export default GenerateRisks;
 
 function GenerateModal({
   assetClass,
