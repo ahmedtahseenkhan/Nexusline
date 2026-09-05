@@ -66,6 +66,15 @@ function timeAgo(iso: string) {
 const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
 /* ------------------------------------------------------------------ atoms */
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "2026-09-05" -> "Sep 5, 2026", without going through Date and its timezone. */
+function formatIsoDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  return `${MONTHS[m - 1]} ${d}, ${y}`;
+}
+
 function Gauge({ score, band }: { score: number; band: string }) {
   const R = 78, C = 2 * Math.PI * R, TRACK = C * 0.75;
   // Nothing in the registers: there is no score to give. An empty organisation is
@@ -144,7 +153,11 @@ export default function DashboardPage() {
     api.audit(30).then((r) => setActivity(r.items)).catch(() => {});
   }, []);
 
-  const today = useMemo(() => new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }), []);
+  // The "as of" date comes from the API's own as_of, formatted from its parts.
+  // Rendering the browser's clock during SSR is a hydration mismatch: the server
+  // is UTC and the reader is not, so the two renders disagree and React throws
+  // (errors 418/423/425). Empty until the data lands, which both renders agree on.
+  const today = useMemo(() => (o ? formatIsoDate(o.as_of) : ""), [o]);
 
   const bubbles = useMemo(() => {
     if (!matrix) return [];
@@ -188,7 +201,7 @@ export default function DashboardPage() {
         <div>
           <h1 style={{ margin: "0 0 6px", fontSize: 27, fontWeight: 800, letterSpacing: "-.02em" }}>Governance &amp; risk overview</h1>
           <p style={{ margin: 0, fontSize: 14, color: "#64748b" }}>
-            Are we inside appetite, are the controls working, can we prove it, and what needs a decision — as of {today}.
+            Are we inside appetite, are the controls working, can we prove it, and what needs a decision{today && <> — as of {today}</>}.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
