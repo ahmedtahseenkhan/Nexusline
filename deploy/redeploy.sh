@@ -18,7 +18,26 @@ set -uo pipefail
 
 COMPOSE="docker compose -f docker-compose.prod.yml"
 RECLAIM=0
-[ "${1:-}" = "--reclaim" ] && RECLAIM=1
+FORCE=0
+SERVICES=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reclaim) RECLAIM=1 ;;
+    --force)   FORCE=1 ;;                 # build anyway, whatever the free space
+    api|web)   SERVICES="$SERVICES $1" ;; # build just this one — far less headroom
+    *) echo "usage: bash deploy/redeploy.sh [--reclaim] [--force] [api] [web]"; exit 2 ;;
+  esac
+  shift
+done
+SERVICES="${SERVICES:-api web}"
+SERVICES="${SERVICES# }"
+
+# Building both images at once needs room for two new images beside the two old
+# ones. One at a time needs far less, which matters on a small root disk.
+case "$SERVICES" in
+  "api web"|"web api") MIN_FREE_MB=6000 ;;
+  *)                   MIN_FREE_MB=2500 ;;
+esac
 MARKER="Needs a decision or is overdue"   # only in the rebuilt dashboard
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
@@ -41,17 +60,32 @@ say "3/6  Checking disk space"
 if [ "$RECLAIM" = "1" ]; then
   echo "Reclaiming space. This removes images, build cache and abandoned build"
   echo "contexts. It does NOT touch volumes, so the database is untouched."
+  before=$(df -Pm . | awk 'NR==2 {print $4}')
   sudo rm -rf /var/tmp/libpod_builder* 2>/dev/null || true
-  docker image prune -af || true
-  docker builder prune -af || true
+  # Podman needs to write metadata to delete an image, so on a truly full disk
+  # the prune deadlocks and reports one error per image. Removing the abandoned
+  # contexts first usually gives it the room it needs; run it twice, because the
+  # first pass frees the space the second one needs to finish.
+  for pass in 1 2; do
+    echo "-- prune pass $pass"
+    docker image prune -af 2>&1 | tail -3
+    docker builder prune -af 2>&1 | tail -3
+  done
+  after=$(df -Pm . | awk 'NR==2 {print $4}')
+  echo "Reclaimed $((after - before)) MB."
 fi
 
 avail_mb=$(df -Pm . | awk 'NR==2 {print $4}')
 echo "Free space here: ${avail_mb} MB ($(df -Ph . | awk 'NR==2 {print $5}') used)"
-if [ "${avail_mb:-0}" -lt 6000 ]; then
+if [ "$FORCE" = "1" ]; then
+  echo "--force given: building regardless of free space."
+elif [ "${avail_mb:-0}" -lt "$MIN_FREE_MB" ]; then
   echo
-  echo "FAIL: under 6 GB free. Rebuilding both images needs more than that, and a"
-  echo "      short build will fail halfway with 'no space left on device'."
+  echo "FAIL: ${avail_mb} MB free, and building '$SERVICES' wants ${MIN_FREE_MB} MB."
+  echo "      A short build fails halfway with 'no space left on device'."
+  echo
+  echo "      Building one service at a time needs much less:"
+  echo "        bash deploy/redeploy.sh --reclaim web"
   echo
   echo "      Reclaim space — none of this touches your database:"
   echo "        docker image prune -af        # images no container is using"
@@ -61,15 +95,16 @@ if [ "${avail_mb:-0}" -lt 6000 ]; then
   echo
   echo "      NEVER add --volumes to a prune. That deletes the postgres volume."
   echo
-  echo "      Or re-run this script as:  bash deploy/redeploy.sh --reclaim"
+  echo
+  echo "      Or override the check entirely:  bash deploy/redeploy.sh --force web"
   exit 1
 fi
 
 say "4/7  Building images (no cache)"
-$COMPOSE build --no-cache api web || { echo "build failed — read the error above."; exit 1; }
+$COMPOSE build --no-cache $SERVICES || { echo "build failed — read the error above."; exit 1; }
 
 say "5/7  Replacing containers"
-$COMPOSE up -d --force-recreate api web || { echo "up failed — read the error above."; exit 1; }
+$COMPOSE up -d --force-recreate $SERVICES || { echo "up failed — read the error above."; exit 1; }
 
 say "6/7  Waiting for the API to become healthy"
 for i in $(seq 1 40); do
