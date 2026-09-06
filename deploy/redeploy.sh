@@ -17,6 +17,8 @@
 set -uo pipefail
 
 COMPOSE="docker compose -f docker-compose.prod.yml"
+RECLAIM=0
+[ "${1:-}" = "--reclaim" ] && RECLAIM=1
 MARKER="Needs a decision or is overdue"   # only in the rebuilt dashboard
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
@@ -36,6 +38,14 @@ echo "OK: the new dashboard source is present."
 say "3/6  Checking disk space"
 # A full disk makes `build` fail deep inside the daemon with "no space left on
 # device", which reads like a build error and is not one. Catch it up front.
+if [ "$RECLAIM" = "1" ]; then
+  echo "Reclaiming space. This removes images, build cache and abandoned build"
+  echo "contexts. It does NOT touch volumes, so the database is untouched."
+  sudo rm -rf /var/tmp/libpod_builder* 2>/dev/null || true
+  docker image prune -af || true
+  docker builder prune -af || true
+fi
+
 avail_mb=$(df -Pm . | awk 'NR==2 {print $4}')
 echo "Free space here: ${avail_mb} MB ($(df -Ph . | awk 'NR==2 {print $5}') used)"
 if [ "${avail_mb:-0}" -lt 6000 ]; then
@@ -51,7 +61,7 @@ if [ "${avail_mb:-0}" -lt 6000 ]; then
   echo
   echo "      NEVER add --volumes to a prune. That deletes the postgres volume."
   echo
-  echo "      Then re-run this script."
+  echo "      Or re-run this script as:  bash deploy/redeploy.sh --reclaim"
   exit 1
 fi
 
