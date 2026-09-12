@@ -41,6 +41,7 @@ class RepairReport:
     classification_values_regraded: int = 0
     foreign_keys_matched: int = 0
     lookups_created: int = 0
+    operating_effectiveness_carried: int = 0
     indexes_skipped: list[str] = field(default_factory=list)
 
     def any(self) -> bool:
@@ -48,7 +49,8 @@ class RepairReport:
             self.widgets_removed or self.frameworks_merged or self.framework_kinds_set
             or self.control_test_dates_cleared or self.risks_flagged
             or self.classification_values_regraded or self.foreign_keys_matched
-            or self.lookups_created or self.indexes_skipped
+            or self.lookups_created or self.operating_effectiveness_carried
+            or self.indexes_skipped
         )
 
 
@@ -152,9 +154,29 @@ async def regrade_default_cia_axes(db) -> int:
     return renamed
 
 
+async def carry_effectiveness_to_operating(db) -> int:
+    """Phase 2 splits design and operating effectiveness. A control's existing rating came
+    from its tests of operation, so it becomes the operating rating where that is unset."""
+    from app.models.enums import ControlEffectiveness
+
+    rows = (
+        await db.scalars(
+            select(Control).where(
+                Control.deleted.is_(False),
+                Control.operating_effectiveness == ControlEffectiveness.not_assessed,
+                Control.effectiveness != ControlEffectiveness.not_assessed,
+            )
+        )
+    ).all()
+    for c in rows:
+        c.operating_effectiveness = c.effectiveness
+    return len(rows)
+
+
 async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
     from app.db.fk_backfill import backfill_foreign_keys
     from app.services import framework_library
+    from app.services.issue_closure import backfill_source_links
 
     report.widgets_removed += await dedupe_widgets(db)
     report.frameworks_merged += await framework_library.merge_duplicate_frameworks(db)
@@ -162,6 +184,8 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
     report.control_test_dates_cleared += await clear_untestable_control_dates(db)
     report.risks_flagged += await flag_residual_above_inherent(db)
     report.classification_values_regraded += await regrade_default_cia_axes(db)
+    report.operating_effectiveness_carried += await carry_effectiveness_to_operating(db)
+    await backfill_source_links(db)  # issues raised from a record get the typed link (2.3)
     if tenant_id is not None:
         # Lookup seeding (reference data) runs before this, so defined values match first.
         fk = await backfill_foreign_keys(db, tenant_id)

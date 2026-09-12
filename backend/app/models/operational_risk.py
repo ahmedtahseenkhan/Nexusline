@@ -12,7 +12,18 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Column, Date, ForeignKey, Integer, Numeric, String, Table, Text, Uuid
+from sqlalchemy import (
+    Column,
+    Date,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -143,6 +154,22 @@ loss_event_risks = Table(
 
 class KeyRiskIndicator(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "key_risk_indicators"
+    # Phase 2: definition and data lineage.
+    definition: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    numerator: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    denominator: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    data_source: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    data_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # who supplies the value
+    indicator_type: Mapped[str | None] = mapped_column(String(16), nullable=True)  # leading | lagging
+    lower_bound: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
+    upper_bound: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
+    appetite_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("risk_appetites.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # the board appetite this KRI measures
+    # SHA-256 of the token an integration uses to post measurements; never the token.
+    feed_token_hash: Mapped[str] = mapped_column(String(128), default="", nullable=False)
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -180,30 +207,89 @@ class KeyRiskIndicator(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflo
         back_populates="kri", cascade="all, delete-orphan", lazy="selectin",
         order_by="KriMeasurement.as_of_date",
     )
+    # Phase 2: who is told when it turns amber / red, and the appetite it measures.
+    escalations: Mapped[list["KriEscalation"]] = relationship(
+        back_populates="kri", cascade="all, delete-orphan", lazy="selectin",
+        order_by="KriEscalation.level",
+    )
+    appetite: Mapped["RiskAppetite | None"] = relationship(  # noqa: F821
+        "RiskAppetite", lazy="selectin",
+    )
+    # For CSV export only (read models use ``data_provider_ref``); never read in a handler.
+    data_provider: Mapped["User | None"] = relationship(  # noqa: F821
+        "User", foreign_keys=[data_provider_id], lazy="select",
+    )
 
     @property
     def status(self) -> KriStatus:
-        if self.current_value is None:
-            return KriStatus.no_data
-        cur = float(self.current_value)
-        warn = float(self.warning_threshold) if self.warning_threshold is not None else None
-        lim = float(self.limit_threshold) if self.limit_threshold is not None else None
-        if self.direction == KriDirection.higher_is_worse:
-            if lim is not None and cur >= lim:
-                return KriStatus.red
-            if warn is not None and cur >= warn:
-                return KriStatus.amber
+        return kri_status(
+            self.direction, self.current_value, self.warning_threshold, self.limit_threshold,
+            self.lower_bound, self.upper_bound,
+        )
+
+    @property
+    def is_breached(self) -> bool:
+        return self.status == KriStatus.red
+
+    @property
+    def has_feed_token(self) -> bool:
+        """Whether an integration token is live (the token itself is never stored)."""
+        return bool(self.feed_token_hash)
+
+
+def _num(value) -> float | None:
+    return float(value) if value is not None else None
+
+
+def band_distance(value: float, lower: float | None, upper: float | None) -> float:
+    """How far ``value`` lies outside ``[lower, upper]`` (0 inside it). Pure. A missing
+    bound leaves that side open."""
+    if lower is not None and value < lower:
+        return lower - value
+    if upper is not None and value > upper:
+        return value - upper
+    return 0.0
+
+
+def kri_status(direction, value, warning, limit, lower=None, upper=None) -> KriStatus:
+    """RAG status of a KRI reading. Pure.
+
+    * ``higher_is_worse`` — amber at or above the warning threshold, red at or above the
+      limit.
+    * ``lower_is_worse`` — amber at or below the warning threshold, red at or below the
+      limit.
+    * ``within_range`` — green inside ``[lower_bound, upper_bound]`` (the bounds count
+      as inside). Outside it the reading is amber until its distance from the nearer
+      bound reaches the **tolerance**, held in ``limit_threshold``; at or beyond
+      ``lower − tolerance`` / ``upper + tolerance`` it is red. With no tolerance any
+      reading outside the range is red. ``warning_threshold`` is not used (the API
+      refuses one).
+
+    A missing threshold simply removes that step: no warning means no amber zone, no
+    limit means the indicator never turns red.
+    """
+    if value is None:
+        return KriStatus.no_data
+    cur, warn, lim = float(value), _num(warning), _num(limit)
+    if direction == KriDirection.within_range:
+        distance = band_distance(cur, _num(lower), _num(upper))
+        if distance <= 0:
             return KriStatus.green
-        # lower_is_worse
+        if lim is None or distance >= lim:
+            return KriStatus.red
+        return KriStatus.amber
+    if direction == KriDirection.lower_is_worse:
         if lim is not None and cur <= lim:
             return KriStatus.red
         if warn is not None and cur <= warn:
             return KriStatus.amber
         return KriStatus.green
-
-    @property
-    def is_breached(self) -> bool:
-        return self.status == KriStatus.red
+    # higher_is_worse
+    if lim is not None and cur >= lim:
+        return KriStatus.red
+    if warn is not None and cur >= warn:
+        return KriStatus.amber
+    return KriStatus.green
 
 
 class KriMeasurement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
@@ -264,3 +350,22 @@ class LossEvent(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
     @property
     def net_loss(self) -> float:
         return float(self.gross_loss or 0) - float(self.recovery or 0)
+
+
+class KriEscalation(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 2: who is told, and what happens, when a KRI turns amber or red."""
+
+    __tablename__ = "kri_escalations"
+    __table_args__ = (UniqueConstraint("kri_id", "level", name="uq_kri_escalation_level"),)
+
+    kri_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("key_risk_indicators.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    level: Mapped[str] = mapped_column(String(8), nullable=False)  # amber | red
+    escalate_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # the person told
+    escalate_to_role: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    action: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    kri: Mapped[KeyRiskIndicator] = relationship(back_populates="escalations")

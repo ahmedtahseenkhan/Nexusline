@@ -356,6 +356,147 @@ def phase1_ddl_statements() -> list[str]:
     return statements
 
 
+# --- product review, phase 2: record depth -------------------------------------------
+# (table, column, DDL). Foreign keys use PHASE2_FK_COLUMNS below.
+PHASE2_COLUMNS: list[tuple[str, str, str]] = [
+    ("controls", "nature", "VARCHAR(16)"),
+    ("controls", "automation", "VARCHAR(24)"),
+    ("controls", "is_key", "BOOLEAN DEFAULT false NOT NULL"),
+    ("controls", "operating_frequency", "VARCHAR(16)"),
+    ("controls", "iso27002_attributes", "JSONB DEFAULT '{}'::jsonb NOT NULL"),
+    ("controls", "design_effectiveness", "control_effectiveness DEFAULT 'not_assessed' NOT NULL"),
+    ("controls", "operating_effectiveness", "control_effectiveness DEFAULT 'not_assessed' NOT NULL"),
+    ("controls", "effectiveness_override_reason", "TEXT DEFAULT '' NOT NULL"),
+    ("controls", "test_procedure", "TEXT DEFAULT '' NOT NULL"),
+    ("controls", "evidence_expected", "TEXT DEFAULT '' NOT NULL"),
+    ("control_audits", "test_type", "VARCHAR(16)"),
+    ("control_audits", "period_start", "DATE"),
+    ("control_audits", "period_end", "DATE"),
+    ("control_audits", "population_size", "INTEGER"),
+    ("control_audits", "sample_size", "INTEGER"),
+    ("control_audits", "sample_method", "VARCHAR(32) DEFAULT '' NOT NULL"),
+    ("control_audits", "exceptions_count", "INTEGER DEFAULT 0 NOT NULL"),
+    ("control_audits", "exceptions_detail", "TEXT DEFAULT '' NOT NULL"),
+    ("control_audits", "conclusion", "TEXT DEFAULT '' NOT NULL"),
+    # Tests recorded before reviews existed are "legacy", not "pending" (see below).
+    ("control_audits", "review_status", "VARCHAR(16) DEFAULT 'legacy' NOT NULL"),
+    ("control_audits", "reviewed_at", "TIMESTAMPTZ"),
+    ("control_audits", "review_note", "TEXT DEFAULT '' NOT NULL"),
+    ("issues", "validated_at", "TIMESTAMPTZ"),
+    ("issues", "validation_result", "VARCHAR(16)"),
+    ("issues", "validation_note", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "cause", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "event", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "consequence", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "risk_type", "VARCHAR(24)"),
+    ("risks", "velocity", "VARCHAR(16)"),
+    ("risks", "identified_date", "DATE"),
+    ("risks", "source", "VARCHAR(24)"),
+    ("risks", "target_likelihood", "INTEGER"),
+    ("risks", "target_impact", "INTEGER"),
+    ("risks", "assessment_rationale", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "last_assessed_at", "TIMESTAMPTZ"),
+    ("risk_settings", "severity_bands", "JSONB DEFAULT '{}'::jsonb NOT NULL"),
+    ("risk_settings", "matrix_cells", "JSONB DEFAULT '{}'::jsonb NOT NULL"),
+    ("risk_settings", "impact_mode", "VARCHAR(16) DEFAULT 'max' NOT NULL"),
+    ("incidents", "contained_at", "TIMESTAMPTZ"),
+    ("incidents", "customers_affected", "INTEGER"),
+    ("incidents", "records_affected", "INTEGER"),
+    ("incidents", "personal_data_breach", "BOOLEAN DEFAULT false NOT NULL"),
+    ("incidents", "near_miss", "BOOLEAN DEFAULT false NOT NULL"),
+    ("key_risk_indicators", "definition", "TEXT DEFAULT '' NOT NULL"),
+    ("key_risk_indicators", "numerator", "TEXT DEFAULT '' NOT NULL"),
+    ("key_risk_indicators", "denominator", "TEXT DEFAULT '' NOT NULL"),
+    ("key_risk_indicators", "data_source", "TEXT DEFAULT '' NOT NULL"),
+    ("key_risk_indicators", "indicator_type", "VARCHAR(16)"),
+    ("key_risk_indicators", "lower_bound", "NUMERIC(18,4)"),
+    ("key_risk_indicators", "upper_bound", "NUMERIC(18,4)"),
+    ("key_risk_indicators", "feed_token_hash", "VARCHAR(128) DEFAULT '' NOT NULL"),
+    ("policies", "effective_date", "DATE"),
+    ("vendors", "legal_name", "VARCHAR(255) DEFAULT '' NOT NULL"),
+    ("vendors", "registration_number", "VARCHAR(120) DEFAULT '' NOT NULL"),
+    ("vendors", "annual_spend", "NUMERIC(18,2)"),
+    ("vendors", "spend_currency", "VARCHAR(3) DEFAULT '' NOT NULL"),
+    ("vendors", "inherent_tier", "VARCHAR(16)"),
+    ("vendors", "tier_override_reason", "TEXT DEFAULT '' NOT NULL"),
+    ("service_contracts", "currency", "VARCHAR(3) DEFAULT '' NOT NULL"),
+]
+
+PHASE2_FK_COLUMNS: list[tuple[str, str, str]] = [
+    # (table, column, target table)
+    ("control_audits", "reviewed_by_id", "users"),
+    ("control_audits", "raised_issue_id", "issues"),
+    ("evidence", "control_audit_id", "control_audits"),
+    ("issues", "root_cause_category_id", "lookups"),
+    ("issues", "validated_by_id", "users"),
+    ("risks", "identified_by_id", "users"),
+    ("risks", "last_assessed_by_id", "users"),
+    ("regulatory_reports", "regulator_id", "lookups"),
+    ("key_risk_indicators", "data_provider_id", "users"),
+    ("key_risk_indicators", "appetite_id", "risk_appetites"),
+    ("policies", "approving_authority_id", "committees"),
+    ("policies", "supersedes_id", "policies"),
+    ("vendors", "relationship_owner_id", "users"),
+    ("vendors", "data_classification_id", "lookups"),
+    ("outsourcing_arrangements", "owner_id", "users"),
+    ("outsourcing_arrangements", "country_id", "lookups"),
+]
+
+#: Date columns that become timezone-aware timestamps: (table, column, time of day the
+#: stored date is taken to mean). A regulator's clock runs in hours, not days. Existing
+#: dates are read in Asia/Karachi, the default organisation timezone; a deadline keeps
+#: its whole day, so no deadline moves earlier.
+PHASE2_TIMESTAMP_COLUMNS: list[tuple[str, str, str]] = [
+    ("incidents", "occurred_at", "00:00"),
+    ("incidents", "detected_at", "00:00"),
+    ("incidents", "resolved_at", "00:00"),
+    ("regulatory_reports", "deadline", "23:59"),
+    ("regulatory_reports", "submitted_at", "00:00"),
+]
+
+#: New enum values: (type, value, position clause).
+PHASE2_ENUM_VALUES: list[tuple[str, str, str]] = [
+    ("test_result", "passed_with_exceptions", "AFTER 'passed'"),
+    ("review_frequency", "daily", "BEFORE 'fortnightly'"),
+    ("review_frequency", "weekly", "BEFORE 'fortnightly'"),
+    ("kri_direction", "within_range", ""),
+]
+
+
+def phase2_ddl_statements() -> list[str]:
+    """Idempotent DDL for phase 2 on pre-existing tables. New tables (link tables, risk
+    appetite/impact/actions, KRI escalations, vendor certifications, issue date changes)
+    come from ``create_all``."""
+    statements: list[str] = []
+    for type_name, value, position in PHASE2_ENUM_VALUES:
+        statements.append(
+            f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{value}' {position}".rstrip()
+        )
+    for table, col, ddl in PHASE2_COLUMNS:
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}")
+    # Existing tests were added as "legacy" above; tests recorded from now on need review.
+    statements.append("ALTER TABLE control_audits ALTER COLUMN review_status SET DEFAULT 'pending'")
+    for table, col, target in PHASE2_FK_COLUMNS:
+        name = f"fk_{table}_{col}"[:63]
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} UUID")
+        statements.append(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{name}') THEN ALTER TABLE {table} ADD CONSTRAINT {name} "
+            f"FOREIGN KEY ({col}) REFERENCES {target}(id) ON DELETE SET NULL NOT VALID; "
+            "END IF; END $$;"
+        )
+        statements.append(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table} ({col})")
+    for table, col, time_of_day in PHASE2_TIMESTAMP_COLUMNS:
+        statements.append(
+            "DO $$ BEGIN IF (SELECT data_type FROM information_schema.columns "
+            f"WHERE table_schema = 'public' AND table_name = '{table}' AND column_name = '{col}') = 'date' "
+            f"THEN ALTER TABLE {table} ALTER COLUMN {col} TYPE TIMESTAMPTZ USING "
+            f"(({col} + time '{time_of_day}')::timestamp AT TIME ZONE 'Asia/Karachi'); "
+            "END IF; END $$;"
+        )
+    return statements
+
+
 def asset_split_ddl_statements() -> list[str]:
     """Idempotent DDL: create the enum types, then add the new asset columns.
 

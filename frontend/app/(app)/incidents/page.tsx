@@ -5,7 +5,8 @@ import { Suspense, useCallback, useEffect, useState, type ReactNode } from "reac
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
-import { useFormat } from "@/lib/format";
+import { timezoneOffset, useFormat } from "@/lib/format";
+import { fromZonedInput, toZonedInput } from "@/lib/zonedInput";
 import { confirmDeleteWithImpact } from "@/lib/records";
 import type { LookupRef, UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
@@ -43,6 +44,8 @@ type RegReport = {
   id: string;
   incident_id: string;
   regulator: string;
+  regulator_id?: string | null;
+  regulator_ref?: LookupRef | null;
   report_type: string;
   deadline: string | null;
   status: string;
@@ -83,9 +86,29 @@ type IncidentFull = {
   root_cause: string;
   lessons_learned: string;
   cost: number | null;
+  /** Timestamps (ISO 8601 with offset) since phase 2 — shown with formatDateTime. */
   detected_at: string | null;
   occurred_at: string | null;
+  contained_at: string | null;
   resolved_at: string | null;
+  customers_affected: number | null;
+  records_affected: number | null;
+  /** Nothing was lost: no cost, left out of loss totals, no loss event. */
+  near_miss: boolean;
+  /** Flagging it opens (once) a linked data-breach record and notifies the DPO role. */
+  personal_data_breach: boolean;
+  /** Regulator-notification clock, read off the initial report. */
+  notification_deadline: string | null;
+  notified_at: string | null;
+  regulator_reference: string | null;
+  /** Hours to the deadline (to the submission once made); negative when late. */
+  hours_to_deadline: number | null;
+  notified_on_time: boolean | null;
+  mttd_hours: number | null;
+  mttc_hours: number | null;
+  mttr_hours: number | null;
+  loss_events: LossRef[];
+  data_breaches: Ref[];
   stage_count: number;
   completed_stages: number;
   lifecycle_complete: boolean;
@@ -101,6 +124,36 @@ type IncidentFull = {
   assets: Ref[];
   risks: Ref[];
   created_at: string;
+};
+
+type LossRef = {
+  id: string;
+  reference: string;
+  title: string;
+  status: string;
+  gross_loss: number;
+  recovery: number;
+  net_loss: number;
+  currency: string;
+  occurrence_date: string | null;
+};
+
+type IncidentSummary = {
+  total: number;
+  open: number;
+  reportable: number;
+  notifications_pending: number;
+  notifications_overdue: number;
+  notified_on_time: number;
+  notified_late: number;
+  near_misses: number;
+  personal_data_breaches: number;
+  total_cost: number;
+  response_times: {
+    mttd_hours: number | null; mttd_count: number;
+    mttc_hours: number | null; mttc_count: number;
+    mttr_hours: number | null; mttr_count: number;
+  };
 };
 
 // ----------------------------------------------------------------- option helpers
@@ -131,6 +184,48 @@ const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.title || x.na
 const personName = (u: UserRef | null, legacy: string) => u?.full_name || u?.email || legacy || "";
 const regulatorName = (i: IncidentFull) => i.regulator_ref?.label || i.regulator || "";
 
+/** "45 m", "5 h 12 m", "2 d 4 h" — a duration given in hours (sign ignored). */
+function duration(hours: number | null | undefined): string {
+  if (hours === null || hours === undefined || !Number.isFinite(hours)) return "—";
+  const mins = Math.round(Math.abs(hours) * 60);
+  if (mins < 60) return `${mins} m`;
+  const h = Math.floor(mins / 60);
+  if (h < 48) return `${h} h${mins % 60 ? ` ${mins % 60} m` : ""}`;
+  return `${Math.floor(h / 24)} d${h % 24 ? ` ${h % 24} h` : ""}`;
+}
+
+/** Hours between two ISO timestamps (null when either is blank or the order is wrong). */
+function hoursBetween(a: string | null, b: string | null): number | null {
+  if (!a || !b) return null;
+  const d = (new Date(b).getTime() - new Date(a).getTime()) / 3_600_000;
+  return Number.isFinite(d) && d >= 0 ? d : null;
+}
+
+/** Re-render every `ms` so a countdown stays live. */
+function useNow(ms = 30_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return now;
+}
+
+/** The regulator-notification position as a badge: live countdown while pending,
+ *  on time / late once notified. */
+function NotificationBadge({ i }: { i: IncidentFull }) {
+  const now = useNow();
+  if (!i.notification_deadline) return <span className="muted">—</span>;
+  if (i.notified_at) {
+    return i.notified_on_time
+      ? <Badge tone="low">Notified on time</Badge>
+      : <Badge tone="critical">Notified late · {duration(i.hours_to_deadline)}</Badge>;
+  }
+  const left = (new Date(i.notification_deadline).getTime() - now) / 3_600_000;
+  if (left < 0) return <Badge tone="critical">Overdue by {duration(left)}</Badge>;
+  return <Badge tone={left < 6 ? "high" : "medium"}>Due in {duration(left)}</Badge>;
+}
+
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
@@ -152,13 +247,21 @@ type FormState = {
   reported_by_id: string | null;
   is_reportable: boolean;
   regulator_id: string | null;
+  /** datetime-local values ("YYYY-MM-DDTHH:mm") in the organisation's timezone. */
   detected_at: string;
   occurred_at: string;
+  contained_at: string;
   resolved_at: string;
+  notified_at: string;
+  regulator_reference: string;
   impact: string;
   root_cause: string;
   lessons_learned: string;
   cost: number | "";
+  customers_affected: number | "";
+  records_affected: number | "";
+  near_miss: boolean;
+  personal_data_breach: boolean;
   control_ids: AsyncOption[];
   vendor_ids: AsyncOption[];
   asset_ids: AsyncOption[];
@@ -169,12 +272,14 @@ const BLANK: FormState = {
   title: "", description: "", category_id: null, classification_id: null,
   severity: "medium", status: "open",
   assignee_id: null, reported_by_id: null, is_reportable: false, regulator_id: null,
-  detected_at: "", occurred_at: "", resolved_at: "",
+  detected_at: "", occurred_at: "", contained_at: "", resolved_at: "",
+  notified_at: "", regulator_reference: "",
   impact: "", root_cause: "", lessons_learned: "", cost: "",
+  customers_affected: "", records_affected: "", near_miss: false, personal_data_breach: false,
   control_ids: [], vendor_ids: [], asset_ids: [], risk_ids: [],
 };
 
-function fromIncident(i: IncidentFull): FormState {
+function fromIncident(i: IncidentFull, tz: string): FormState {
   return {
     title: i.title,
     description: i.description || "",
@@ -186,13 +291,20 @@ function fromIncident(i: IncidentFull): FormState {
     reported_by_id: i.reported_by_id,
     is_reportable: !!i.is_reportable,
     regulator_id: i.regulator_id,
-    detected_at: i.detected_at || "",
-    occurred_at: i.occurred_at || "",
-    resolved_at: i.resolved_at || "",
+    detected_at: toZonedInput(i.detected_at, tz),
+    occurred_at: toZonedInput(i.occurred_at, tz),
+    contained_at: toZonedInput(i.contained_at, tz),
+    resolved_at: toZonedInput(i.resolved_at, tz),
+    notified_at: toZonedInput(i.notified_at, tz),
+    regulator_reference: i.regulator_reference || "",
     impact: i.impact || "",
     root_cause: i.root_cause || "",
     lessons_learned: i.lessons_learned || "",
     cost: i.cost ?? "",
+    customers_affected: i.customers_affected ?? "",
+    records_affected: i.records_affected ?? "",
+    near_miss: !!i.near_miss,
+    personal_data_breach: !!i.personal_data_breach,
     control_ids: i.controls.map(refToOpt),
     vendor_ids: i.vendors.map(refToOpt),
     asset_ids: i.assets.map(refToOpt),
@@ -200,9 +312,15 @@ function fromIncident(i: IncidentFull): FormState {
   };
 }
 
-/** Strip empty-string dates/cost to null so the backend's optional fields stay null. */
-function toPayload(f: FormState) {
+/** Strip empty strings to null so the backend's optional fields stay null; timestamps
+ *  go with the organisation's UTC offset. The notification lives on the initial report,
+ *  so it is only sent for a reportable incident. */
+function toPayload(f: FormState, tz: string) {
+  const notification = f.is_reportable
+    ? { notified_at: fromZonedInput(f.notified_at, tz), regulator_reference: f.regulator_reference.trim() }
+    : {};
   return {
+    ...notification,
     title: f.title,
     description: f.description,
     category_id: f.category_id,
@@ -213,13 +331,18 @@ function toPayload(f: FormState) {
     reported_by_id: f.reported_by_id,
     is_reportable: f.is_reportable,
     regulator_id: f.regulator_id,
-    detected_at: f.detected_at || null,
-    occurred_at: f.occurred_at || null,
-    resolved_at: f.resolved_at || null,
+    detected_at: fromZonedInput(f.detected_at, tz),
+    occurred_at: fromZonedInput(f.occurred_at, tz),
+    contained_at: fromZonedInput(f.contained_at, tz),
+    resolved_at: fromZonedInput(f.resolved_at, tz),
     impact: f.impact,
     root_cause: f.root_cause,
     lessons_learned: f.lessons_learned,
-    cost: f.cost === "" ? null : f.cost,
+    cost: f.near_miss || f.cost === "" ? null : f.cost,
+    customers_affected: f.customers_affected === "" ? null : f.customers_affected,
+    records_affected: f.records_affected === "" ? null : f.records_affected,
+    near_miss: f.near_miss,
+    personal_data_breach: f.personal_data_breach,
     control_ids: f.control_ids.map((o) => o.value),
     vendor_ids: f.vendor_ids.map((o) => o.value),
     asset_ids: f.asset_ids.map((o) => o.value),
@@ -229,7 +352,10 @@ function toPayload(f: FormState) {
 
 /* ================================================================ page ===== */
 function IncidentsInner() {
-  const { formatDate, formatMoney, currency } = useFormat();
+  const { formatDate, formatDateTime, formatMoney, currency, settings } = useFormat();
+  const tz = settings.timezone;
+  const tzLabel = `${tz.replace(/_/g, " ")}${timezoneOffset(tz) ? ` · ${timezoneOffset(tz)}` : ""}`;
+  const [summary, setSummary] = useState<IncidentSummary | null>(null);
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<IncidentFull | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -248,6 +374,9 @@ function IncidentsInner() {
   const [submitting, setSubmitting] = useState<{ id: string; reference: string; submitted_by_id: string | null } | null>(null);
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  useEffect(() => {
+    apiCall<IncidentSummary>("GET", "/incidents/summary").then(setSummary).catch(() => setSummary(null));
+  }, [refreshKey]);
   const fetchIncidents = useCallback((qs: string) => apiCall<PagedList<IncidentFull>>("GET", `/incidents?${qs}`), []);
   const loadDetail = useCallback((id: string) => {
     apiCall<IncidentFull>("GET", `/incidents/${id}`).then(setDetail).catch(() => setDetail(null));
@@ -261,15 +390,17 @@ function IncidentsInner() {
   const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string; classification: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.classification })));
 
   function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
-  function openEdit(i: IncidentFull) { setEditing(i); setF(fromIncident(i)); setError(null); setShowForm(true); }
+  function openEdit(i: IncidentFull) { setEditing(i); setF(fromIncident(i, tz)); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
-      const payload = toPayload(f);
+      const payload = toPayload(f, tz);
       if (editing) await apiCall<IncidentFull>("PATCH", `/incidents/${editing.id}`, payload);
       else await apiCall<IncidentFull>("POST", "/incidents", payload);
-      setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "Incident logged");
+      setShowForm(false); reload(); if (openId) loadDetail(openId);
+      toast(editing ? "Changes saved" : "Incident logged");
+      if (f.personal_data_breach && !editing?.personal_data_breach) toast("Personal data breach: a breach record was opened in Data Protection");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save incident"); }
     finally { setSaving(false); }
   }
@@ -325,6 +456,24 @@ function IncidentsInner() {
     regAction(apiCall("DELETE", `/regulatory-reports/${r.id}`));
   }
 
+  async function createLossEvent() {
+    if (!detail) return;
+    const ok = await confirmDialog({
+      title: `Record a loss event for ${detail.reference}?`,
+      message:
+        `A loss event is added to the operational loss database, pre-filled from this incident: ` +
+        `gross loss ${detail.cost != null ? formatMoney(detail.cost) : "0 (no cost recorded)"}, ` +
+        `occurrence and discovery dates, the handler, root cause and linked risks. Edit it under Operational Risk → Loss Database.`,
+      confirmLabel: "Create loss event",
+    });
+    if (!ok) return;
+    setError(null);
+    try {
+      await apiCall<IncidentFull>("POST", `/incidents/${detail.id}/loss-event`, {});
+      loadDetail(detail.id); reload(); toast("Loss event created");
+    } catch (e) { toast(errMsg(e, "Failed to create the loss event"), "error"); }
+  }
+
   const linkCount = (i: IncidentFull) =>
     i.controls.length + i.vendors.length + i.assets.length + i.risks.length;
 
@@ -350,11 +499,15 @@ function IncidentsInner() {
     { key: "status", header: "Status", sortable: true, render: (i) => <Badge tone={STATUS_TONE[i.status] || "neutral"}>{cap(i.status)}</Badge>, text: (i) => cap(i.status) },
     { key: "assignee", header: "Owner", render: (i) => <span className="muted"><UserName user={i.assignee_ref} fallback={i.assignee} /></span>, text: (i) => personName(i.assignee_ref, i.assignee) },
     { key: "reported_by", header: "Reported by", hidden: true, render: (i) => <span className="muted"><UserName user={i.reported_by_ref} fallback={i.reported_by} /></span>, text: (i) => personName(i.reported_by_ref, i.reported_by) },
-    { key: "detected_at", header: "Detected", sortable: true, render: (i) => <span className="muted">{formatDate(i.detected_at)}</span>, text: (i) => (i.detected_at ? formatDate(i.detected_at) : "") },
-    { key: "occurred_at", header: "Occurred", hidden: true, render: (i) => <span className="muted">{formatDate(i.occurred_at)}</span>, text: (i) => (i.occurred_at ? formatDate(i.occurred_at) : "") },
-    { key: "resolved_at", header: "Resolved", hidden: true, render: (i) => <span className="muted">{formatDate(i.resolved_at)}</span>, text: (i) => (i.resolved_at ? formatDate(i.resolved_at) : "") },
+    { key: "detected_at", header: "Detected", sortable: true, render: (i) => <span className="muted">{formatDateTime(i.detected_at)}</span>, text: (i) => (i.detected_at ? formatDateTime(i.detected_at) : "") },
+    { key: "occurred_at", header: "Occurred", sortable: true, hidden: true, render: (i) => <span className="muted">{formatDateTime(i.occurred_at)}</span>, text: (i) => (i.occurred_at ? formatDateTime(i.occurred_at) : "") },
+    { key: "contained_at", header: "Contained", hidden: true, render: (i) => <span className="muted">{formatDateTime(i.contained_at)}</span>, text: (i) => (i.contained_at ? formatDateTime(i.contained_at) : "") },
+    { key: "resolved_at", header: "Resolved", sortable: true, hidden: true, render: (i) => <span className="muted">{formatDateTime(i.resolved_at)}</span>, text: (i) => (i.resolved_at ? formatDateTime(i.resolved_at) : "") },
     { key: "is_reportable", header: "Reportable", hidden: true, render: (i) => (i.is_reportable ? <Badge tone="high">Reportable{regulatorName(i) ? ` · ${regulatorName(i)}` : ""}</Badge> : <span className="muted">—</span>), text: (i) => i.is_reportable ? `Yes${regulatorName(i) ? ` (${regulatorName(i)})` : ""}` : "No" },
-    { key: "cost", header: "Cost", hidden: true, align: "right", render: (i) => <span className="muted">{i.cost != null ? formatMoney(i.cost) : "—"}</span>, text: (i) => i.cost != null ? formatMoney(i.cost) : "" },
+    { key: "notification", header: "Regulator notification", render: (i) => <NotificationBadge i={i} />, text: (i) => i.notification_deadline ? (i.notified_at ? (i.notified_on_time ? "Notified on time" : "Notified late") : `Due ${formatDateTime(i.notification_deadline)}`) : "" },
+    { key: "flags", header: "Flags", hidden: true, render: (i) => (i.near_miss || i.personal_data_breach) ? <div className="chips">{i.near_miss && <Badge tone="info">Near miss</Badge>}{i.personal_data_breach && <Badge tone="high">Personal data</Badge>}</div> : <span className="muted">—</span>, text: (i) => [i.near_miss && "Near miss", i.personal_data_breach && "Personal data breach"].filter(Boolean).join(", ") },
+    { key: "customers_affected", header: "Customers affected", hidden: true, align: "right", render: (i) => <span className="muted">{i.customers_affected != null ? i.customers_affected.toLocaleString() : "—"}</span>, text: (i) => i.customers_affected != null ? String(i.customers_affected) : "" },
+    { key: "cost", header: "Cost", hidden: true, align: "right", render: (i) => <span className="muted">{i.near_miss ? "Near miss" : i.cost != null ? formatMoney(i.cost) : "—"}</span>, text: (i) => i.near_miss ? "Near miss" : i.cost != null ? formatMoney(i.cost) : "" },
     { key: "assets", header: "Assets", render: (i) => linkChips(i.assets, "/information-assets"), text: (i) => names(i.assets) },
     { key: "controls", header: "Controls", hidden: true, render: (i) => linkChips(i.controls, "/controls"), text: (i) => names(i.controls) },
     { key: "risks", header: "Risks", hidden: true, render: (i) => linkChips(i.risks, "/risks"), text: (i) => names(i.risks) },
@@ -464,11 +617,16 @@ function IncidentsInner() {
           />
         </Field>
       </div>
+    </>
+  );
+
+  const regulatoryTab = (
+    <>
       <div className="field-row">
-        <Field label="Reportable" help="Must be notified to a regulator (e.g. SBP) within its reporting deadlines.">
+        <Field label="Reportable" help="Owed to a regulator. Saving creates the initial and final reports, with deadlines counted from detection.">
           <Toggle checked={f.is_reportable} onChange={(v) => set("is_reportable", v)} label="Reportable to a regulator" />
         </Field>
-        <Field label="Regulator" help="Who the incident is reported to; the reporting panel generates their submissions.">
+        <Field label="Regulator" help="Who the incident is reported to. Left blank on a reportable incident, the default regulator (SBP) is used.">
           <LookupSelect
             lookupKey="regulator"
             value={f.regulator_id}
@@ -478,21 +636,69 @@ function IncidentsInner() {
           />
         </Field>
       </div>
+      {f.is_reportable && (
+        <>
+          <div style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 12, fontSize: 13 }}>
+            {editing?.notification_deadline ? (
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <span>Initial notification due <strong>{formatDateTime(editing.notification_deadline)}</strong></span>
+                <NotificationBadge i={editing} />
+              </div>
+            ) : (
+              <span className="muted">
+                The initial notification deadline is set on save: the detection time (or, if blank, when the incident
+                is logged) plus the regulator&apos;s reporting window. Changing the detection time moves pending deadlines.
+              </span>
+            )}
+          </div>
+          <div className="field-row">
+            <Field label="Notified at" help={`When the regulator was notified (${tzLabel}). Marks the initial report submitted.`}>
+              <TextInput type="datetime-local" value={f.notified_at} onChange={(v) => set("notified_at", v)} />
+            </Field>
+            <Field label="Regulator reference" help="The regulator's acknowledgement or case reference.">
+              <TextInput value={f.regulator_reference} onChange={(v) => set("regulator_reference", v)} placeholder="e.g. SBP/IR/2026/118" />
+            </Field>
+          </div>
+        </>
+      )}
     </>
   );
 
+  // Response times as the form stands, so the handler sees what the dates imply.
+  const formTimes = (() => {
+    const iso = (v: string) => fromZonedInput(v, tz);
+    return {
+      mttd: hoursBetween(iso(f.occurred_at), iso(f.detected_at)),
+      mttc: hoursBetween(iso(f.detected_at), iso(f.contained_at)),
+      mttr: hoursBetween(iso(f.detected_at), iso(f.resolved_at)),
+    };
+  })();
+
   const timelineTab = (
     <>
+      <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+        Times are in the organisation&apos;s timezone ({tzLabel}). They must run in order: occurred, detected, contained, resolved.
+      </p>
       <div className="field-row">
         <Field label="Occurred At" help="When the incident actually took place.">
-          <TextInput type="date" value={f.occurred_at} onChange={(v) => set("occurred_at", v)} />
+          <TextInput type="datetime-local" value={f.occurred_at} onChange={(v) => set("occurred_at", v)} />
         </Field>
-        <Field label="Detected At" help="When the incident was first discovered.">
-          <TextInput type="date" value={f.detected_at} onChange={(v) => set("detected_at", v)} />
+        <Field label="Detected At" help="When it was first discovered. Starts the regulator's clock.">
+          <TextInput type="datetime-local" value={f.detected_at} onChange={(v) => set("detected_at", v)} />
         </Field>
-        <Field label="Resolved At" help="When response work was completed.">
-          <TextInput type="date" value={f.resolved_at} onChange={(v) => set("resolved_at", v)} />
+      </div>
+      <div className="field-row">
+        <Field label="Contained At" help="When the spread was stopped. Filled in automatically when the status moves to Contained.">
+          <TextInput type="datetime-local" value={f.contained_at} onChange={(v) => set("contained_at", v)} />
         </Field>
+        <Field label="Resolved At" help="When response work was completed. Filled in automatically when the status moves to Resolved or Closed.">
+          <TextInput type="datetime-local" value={f.resolved_at} onChange={(v) => set("resolved_at", v)} />
+        </Field>
+      </div>
+      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 13 }}>
+        <span><span className="muted">Time to detect</span> <strong>{duration(formTimes.mttd)}</strong></span>
+        <span><span className="muted">Time to contain</span> <strong>{duration(formTimes.mttc)}</strong></span>
+        <span><span className="muted">Time to resolve</span> <strong>{duration(formTimes.mttr)}</strong></span>
       </div>
     </>
   );
@@ -502,9 +708,35 @@ function IncidentsInner() {
       <Field label="Impact" help="Business / operational impact of the incident.">
         <TextArea value={f.impact} onChange={(v) => set("impact", v)} rows={3} placeholder="Systems affected, data exposed, downtime, etc." />
       </Field>
-      <Field label={`Estimated Cost (${currency})`} help="Financial impact in the organisation's reporting currency.">
-        <NumberInput value={f.cost} onChange={(v) => set("cost", v)} min={0} step={100} placeholder="0" />
-      </Field>
+      <div className="field-row">
+        <Field label="Customers affected">
+          <NumberInput value={f.customers_affected} onChange={(v) => set("customers_affected", v)} min={0} step={1} placeholder="0" />
+        </Field>
+        <Field label="Records affected" help="Data records exposed, altered or lost.">
+          <NumberInput value={f.records_affected} onChange={(v) => set("records_affected", v)} min={0} step={1} placeholder="0" />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Near miss" help="It could have caused a loss but did not: no cost, left out of loss totals, no loss event.">
+          <Toggle checked={f.near_miss} onChange={(v) => { set("near_miss", v); if (v) set("cost", ""); }} label="Near miss — nothing was lost" />
+        </Field>
+        <Field label="Personal data breach" help="Personal data was exposed. Saving opens a linked breach record in Data Protection (once) and notifies the DPO role.">
+          <Toggle checked={f.personal_data_breach} onChange={(v) => set("personal_data_breach", v)} label="Personal data was breached" />
+          {editing && editing.data_breaches.length > 0 && (
+            <div style={{ marginTop: 6, fontSize: 12.5 }}>
+              Breach record:{" "}
+              {editing.data_breaches.map((b) => (
+                <Link key={b.id} className="chip" href={`/data-protection?section=breach&id=${b.id}`}>{b.reference || b.title}</Link>
+              ))}
+            </div>
+          )}
+        </Field>
+      </div>
+      {!f.near_miss && (
+        <Field label={`Estimated Cost (${currency})`} help="Financial impact in the organisation's reporting currency. Becomes the gross loss when you create a loss event.">
+          <NumberInput value={f.cost} onChange={(v) => set("cost", v)} min={0} step={100} placeholder="0" />
+        </Field>
+      )}
       <Field label="Root Cause">
         <RichText value={f.root_cause} onChange={(v) => set("root_cause", v)} placeholder="Describe the underlying cause…" />
       </Field>
@@ -547,6 +779,35 @@ function IncidentsInner() {
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
+
+      {summary && (
+        <div className="grid stat-grid" style={{ marginBottom: 16 }}>
+          <div className="card stat">
+            <div className="stat-top"><span className="n">{summary.open.toLocaleString()}</span></div>
+            <span className="l">Open incidents</span>
+          </div>
+          <div className="card stat">
+            <div className="stat-top"><span className="n">{summary.notifications_overdue.toLocaleString()}</span></div>
+            <span className="l">Regulator notifications overdue{summary.notifications_pending ? ` · ${summary.notifications_pending} pending` : ""}</span>
+          </div>
+          <div className="card stat">
+            <div className="stat-top"><span className="n">{duration(summary.response_times.mttd_hours)}</span></div>
+            <span className="l">Mean time to detect ({summary.response_times.mttd_count})</span>
+          </div>
+          <div className="card stat">
+            <div className="stat-top"><span className="n">{duration(summary.response_times.mttc_hours)}</span></div>
+            <span className="l">Mean time to contain ({summary.response_times.mttc_count})</span>
+          </div>
+          <div className="card stat">
+            <div className="stat-top"><span className="n">{duration(summary.response_times.mttr_hours)}</span></div>
+            <span className="l">Mean time to resolve ({summary.response_times.mttr_count})</span>
+          </div>
+          <div className="card stat">
+            <div className="stat-top"><span className="n">{formatMoney(summary.total_cost, null, { compact: "auto" })}</span></div>
+            <span className="l">Estimated cost{summary.near_misses ? ` · ${summary.near_misses} near miss${summary.near_misses === 1 ? "" : "es"} excluded` : ""}</span>
+          </div>
+        </div>
+      )}
 
       <DataTable<IncidentFull>
         tableKey="incidents"
@@ -598,6 +859,9 @@ function IncidentsInner() {
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
               <Severity value={detail.severity} />
               <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
+              {detail.near_miss && <Badge tone="info">Near miss</Badge>}
+              {detail.personal_data_breach && <Badge tone="high">Personal data breach</Badge>}
+              {detail.is_reportable && <Badge tone="high">Reportable{regulatorName(detail) ? ` · ${regulatorName(detail)}` : ""}</Badge>}
               {linkCount(detail) > 0 && <Badge tone="neutral" plain>{linkCount(detail)} links</Badge>}
             </div>
 
@@ -606,10 +870,29 @@ function IncidentsInner() {
               <Fact label="Classification">{detail.classification_ref?.label || detail.classification || <span className="muted">—</span>}</Fact>
               <Fact label="Owner / handler"><UserName user={detail.assignee_ref} fallback={detail.assignee} /></Fact>
               <Fact label="Reported by"><UserName user={detail.reported_by_ref} fallback={detail.reported_by} /></Fact>
-              <Fact label="Occurred">{formatDate(detail.occurred_at)}</Fact>
-              <Fact label="Detected">{formatDate(detail.detected_at)}</Fact>
-              <Fact label="Resolved">{formatDate(detail.resolved_at)}</Fact>
-              <Fact label="Estimated cost">{detail.cost != null ? formatMoney(detail.cost) : <span className="muted">—</span>}</Fact>
+              <Fact label="Occurred">{formatDateTime(detail.occurred_at)}</Fact>
+              <Fact label="Detected">{formatDateTime(detail.detected_at)}</Fact>
+              <Fact label="Contained">{formatDateTime(detail.contained_at)}</Fact>
+              <Fact label="Resolved">{formatDateTime(detail.resolved_at)}</Fact>
+              <Fact label="Customers affected">{detail.customers_affected != null ? detail.customers_affected.toLocaleString() : <span className="muted">—</span>}</Fact>
+              <Fact label="Records affected">{detail.records_affected != null ? detail.records_affected.toLocaleString() : <span className="muted">—</span>}</Fact>
+              <Fact label="Estimated cost">{detail.near_miss ? <span className="muted">Near miss — no loss</span> : detail.cost != null ? formatMoney(detail.cost) : <span className="muted">—</span>}</Fact>
+              {detail.personal_data_breach && (
+                <Fact label="Data breach record">
+                  {detail.data_breaches.length ? detail.data_breaches.map((b) => (
+                    <Link key={b.id} className="chip" href={`/data-protection?section=breach&id=${b.id}`}>{b.reference || b.title}</Link>
+                  )) : <span className="muted">Not created (Data Protection is not enabled)</span>}
+                </Fact>
+              )}
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Response times</h3><span className="sub">from the timeline</span></div>
+              <div className="card-pad" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+                <Fact label="MTTD — occurred to detected">{duration(detail.mttd_hours)}</Fact>
+                <Fact label="MTTC — detected to contained">{duration(detail.mttc_hours)}</Fact>
+                <Fact label="MTTR — detected to resolved">{duration(detail.mttr_hours)}</Fact>
+              </div>
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
@@ -651,10 +934,19 @@ function IncidentsInner() {
                 </span>
               </div>
               <div className="card-pad">
+                {detail.notification_deadline && (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 12 }}>
+                    <Fact label="Regulator">{regulatorName(detail) || <span className="muted">—</span>}</Fact>
+                    <Fact label="Notification deadline">{formatDateTime(detail.notification_deadline)}</Fact>
+                    <Fact label="Countdown"><NotificationBadge i={detail} /></Fact>
+                    <Fact label="Notified at">{detail.notified_at ? formatDateTime(detail.notified_at) : <span className="muted">Not yet</span>}</Fact>
+                    <Fact label="Regulator reference">{detail.regulator_reference || <span className="muted">—</span>}</Fact>
+                  </div>
+                )}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10 }}>
                   <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 460 }}>
-                    Generate the standard {regulatorName(detail) || "SBP"} submissions (initial notification + final report)
-                    with SLA deadlines computed from the detection date.
+                    Marking the incident reportable creates the {regulatorName(detail) || "SBP"} initial notification and final report,
+                    with deadlines counted from the detection time. Generate recreates any that were removed.
                   </p>
                   <button className="btn secondary sm" onClick={generateRegReports}>Generate {regulatorName(detail) || "SBP"} reports</button>
                 </div>
@@ -667,7 +959,7 @@ function IncidentsInner() {
                           <RegReportRow
                             key={r.id}
                             r={r}
-                            formatDate={formatDate}
+                            formatDate={formatDateTime}
                             submitting={submitting?.id === r.id ? submitting : null}
                             onStartSubmit={() => setSubmitting({ id: r.id, reference: r.reference || "", submitted_by_id: r.submitted_by_id })}
                             onChangeSubmit={(patch) => setSubmitting((p) => (p ? { ...p, ...patch } : p))}
@@ -685,6 +977,44 @@ function IncidentsInner() {
               </div>
             </div>
 
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head">
+                <h3>Loss events</h3>
+                <span className="sub">{detail.loss_events.length ? `${detail.loss_events.length} in the loss database` : "operational loss database"}</span>
+              </div>
+              <div className="card-pad">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10 }}>
+                  <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 460 }}>
+                    {detail.near_miss
+                      ? "A near miss has no loss to record."
+                      : "Record what this incident cost in the operational loss database, pre-filled from the incident."}
+                  </p>
+                  <button className="btn secondary sm" onClick={createLossEvent} disabled={detail.near_miss}>Create loss event</button>
+                </div>
+                {detail.loss_events.length > 0 ? (
+                  <div className="table-wrap">
+                    <table>
+                      <thead><tr><th>Ref</th><th>Title</th><th>Occurred</th><th style={{ textAlign: "right" }}>Gross</th><th style={{ textAlign: "right" }}>Net</th><th>Status</th></tr></thead>
+                      <tbody>
+                        {detail.loss_events.map((l) => (
+                          <tr key={l.id}>
+                            <td><Link className="ref" href="/operational-risk">{l.reference}</Link></td>
+                            <td className="cell-title">{l.title}</td>
+                            <td className="muted">{formatDate(l.occurrence_date)}</td>
+                            <td className="muted" style={{ textAlign: "right" }}>{formatMoney(l.gross_loss, l.currency)}</td>
+                            <td className="muted" style={{ textAlign: "right" }}>{formatMoney(l.net_loss, l.currency)}</td>
+                            <td><Badge tone={l.status === "closed" || l.status === "recovered" ? "low" : "medium"}>{cap(l.status)}</Badge></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <span className="muted" style={{ fontSize: 12.5 }}>No loss events yet.</span>
+                )}
+              </div>
+            </div>
+
           </>
         )}
       </RecordDrawer>
@@ -695,7 +1025,8 @@ function IncidentsInner() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "timeline", label: "Timeline", content: timelineTab },
-            { id: "analysis", label: "Analysis", content: analysisTab },
+            { id: "regulatory", label: "Regulatory", content: regulatoryTab },
+            { id: "analysis", label: "Impact & analysis", content: analysisTab },
             { id: "links", label: "Links & Relations", content: linksTab },
           ]}
           onClose={() => setShowForm(false)}
@@ -728,7 +1059,7 @@ function RegReportRow({
   onRemove,
 }: {
   r: RegReport;
-  formatDate: (v: string | null) => string;
+  formatDate: (v: string | null) => string; // formatDateTime: deadlines are timestamps
   submitting: { reference: string; submitted_by_id: string | null } | null;
   onStartSubmit: () => void;
   onChangeSubmit: (patch: { reference?: string; submitted_by_id?: string | null }) => void;
@@ -739,7 +1070,7 @@ function RegReportRow({
   return (
     <>
       <tr>
-        <td className="muted">{r.regulator}</td>
+        <td className="muted">{r.regulator_ref?.label || r.regulator}</td>
         <td className="cell-title">{cap(r.report_type)}</td>
         <td className="muted">
           {formatDate(r.deadline)}

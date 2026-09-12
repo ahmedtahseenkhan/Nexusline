@@ -35,11 +35,13 @@ from app.models.enums import (
     ApprovalStatus,
     DpiaStatus,
     ExceptionStatus,
+    KriDirection,
     KriStatus,
     NotificationCategory,
     ProjectStatus,
     RcsaStatus,
     SarStatus,
+    VendorStatus,
 )
 from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
@@ -54,11 +56,11 @@ from app.models.notification import EVENT_PREFIX, Notification
 from app.models.policy import Policy
 from app.models.privacy import ProcessingActivity
 from app.models.project import Project
-from app.models.risk import Risk, RiskAcceptance
-from app.models.vendor import Vendor
+from app.models.risk import Risk, RiskAcceptance, RiskTreatmentAction
+from app.models.vendor import CERT_EXPIRY_WARNING_DAYS, Vendor, VendorCertification, certification_expiry_state
 from app.services.risk_acceptance import EXPIRY_WARNING_DAYS
 from app.services.risk_scoring import effective_score
-from app.services.risk_settings import get_or_create_settings
+from app.services.risk_settings import get_or_create_settings, load_appetite_book
 
 _W = NotificationCategory.warning
 _C = NotificationCategory.critical
@@ -86,8 +88,14 @@ GROUPABLE_FAMILIES: dict[str, tuple[str, str, str, str]] = {
     "control-audit": ("control", "controls", "tests overdue", "/controls"),
     "control-maint": ("control", "controls", "maintenance overdue", "/controls"),
     "risk-review": ("risk", "risks", "reviews overdue", "/risks"),
+    # One per overdue open treatment action (phase 2), not one per risk deadline.
+    "risk-treatment": ("risk treatment action", "risk treatment actions", "past due", "/risks"),
     "policy-review": ("policy", "policies", "reviews overdue", "/policies"),
     "vendor-review": ("third party", "third parties", "reviews overdue", "/vendors"),
+    # Third-party certifications (phase 2), one alert per certificate: warned
+    # CERT_EXPIRY_WARNING_DAYS out, then flagged once lapsed.
+    "vendor-cert-expiring": ("third-party certification", "third-party certifications", "less than 60 days left", "/vendors"),
+    "vendor-cert-expired": ("third-party certification", "third-party certifications", "expired", "/vendors"),
     "goal-audit": ("goal", "goals", "audits overdue", "/goals"),
     "bcp-test": ("continuity plan", "continuity plans", "tests overdue", "/continuity"),
     "ar-overdue": ("access review", "access reviews", "past due", "/access-reviews"),
@@ -108,7 +116,7 @@ GROUPABLE_FAMILIES: dict[str, tuple[str, str, str, str]] = {
 #: * ``regreport-overdue`` / ``sar-overdue`` — regulator (SBP / FMU) filing deadlines.
 #: * ``screening-escalated`` — a sanctions match awaiting a decision.
 #: * ``exc-expired`` — an approved deviation has lapsed and is now unapproved.
-#: * ``kri-breach`` — an indicator past its limit.
+#: * ``kri-breach`` — an indicator past its limit (or outside its within-range band).
 #: * ``iafinding-overdue`` / ``snc-overdue`` — audit and Shariah findings past remediation date.
 #: * ``ropa-transfer`` / ``ropa-dpia`` — data-protection obligations under the law.
 #:
@@ -217,6 +225,145 @@ def keys_to_delete(
     return [k for k in existing_keys if not k.startswith(keep_prefix) and k not in current_keys]
 
 
+def certification_alert(cert: Any, vendor: Any, today: date) -> tuple | None:
+    """The ``add(...)`` arguments for one vendor certification, or None when it is
+    neither expiring nor expired. Pure (see ``models.vendor.certification_expiry_state``)."""
+    from app.schemas.vendor import CERT_TYPES
+
+    state = certification_expiry_state(cert.expires_on, today)
+    label = CERT_TYPES.get(cert.cert_type, cert.cert_type)
+    if state == "expiring":
+        days = (cert.expires_on - today).days
+        return (f"vendor-cert-expiring:{cert.id}", f"Certification expiring: {vendor.name} {label}",
+                f"{label} expires {cert.expires_on} ({days} day(s) left) — ask for the renewed certificate",
+                _W, "vendor", vendor.id, "/vendors")
+    if state == "expired":
+        crit = getattr(vendor.criticality, "value", vendor.criticality)
+        return (f"vendor-cert-expired:{cert.id}", f"Certification expired: {vendor.name} {label}",
+                f"{label} expired on {cert.expires_on} — obtain the renewal or record the gap",
+                _C if crit in ("high", "critical") else _W, "vendor", vendor.id, "/vendors")
+    return None
+
+
+# ------------------------------------------------------------------- KRIs ---
+# Phase 2: within-range KRIs and escalation. The live ``kri-breach`` alert (scanned) says
+# what is true now; the ``event:kri-escalation`` notification records the moment a
+# reading moved a KRI into amber or red, naming who it goes to and what they must do.
+# Notifications are organisation-wide, so the target is named in the text.
+def _kri_num(value: Any) -> str:
+    if value is None:
+        return "—"
+    v = float(value)
+    return str(int(v)) if v.is_integer() else f"{v:.4f}".rstrip("0").rstrip(".")
+
+
+def kri_threshold_text(kri: Any) -> str:
+    """What a KRI's reading is judged against, in words. Pure."""
+    unit = f" {kri.unit}" if getattr(kri, "unit", "") else ""
+    direction = getattr(kri.direction, "value", kri.direction)
+    if direction == "within_range":
+        band = f"range {_kri_num(kri.lower_bound)}–{_kri_num(kri.upper_bound)}{unit}"
+        if kri.limit_threshold is not None:
+            return f"{band}, tolerance {_kri_num(kri.limit_threshold)}"
+        return band
+    parts = []
+    if kri.warning_threshold is not None:
+        parts.append(f"warning {_kri_num(kri.warning_threshold)}")
+    if kri.limit_threshold is not None:
+        parts.append(f"limit {_kri_num(kri.limit_threshold)}")
+    return (", ".join(parts) + unit) if parts else "no thresholds"
+
+
+def escalation_target_text(escalation: Any, people: Mapping[Any, Any]) -> str:
+    """"Jane Doe and the CRO role" — who an escalation goes to. Pure."""
+    if escalation is None:
+        return ""
+    who = []
+    if escalation.escalate_to_id is not None:
+        person = people.get(escalation.escalate_to_id)
+        who.append((person.full_name or person.email) if person else "a user no longer on file")
+    if escalation.escalate_to_role:
+        who.append(f"the {escalation.escalate_to_role} role")
+    return " and ".join(who)
+
+
+def _escalation_for(kri: Any, level: str) -> Any:
+    return next((e for e in (getattr(kri, "escalations", None) or []) if e.level == level), None)
+
+
+def kri_breach_body(kri: Any, people: Mapping[Any, Any]) -> str:
+    """Body of the live ``kri-breach`` alert. Pure."""
+    unit = f" {kri.unit}" if getattr(kri, "unit", "") else ""
+    direction = getattr(kri.direction, "value", kri.direction)
+    what = "is outside its" if direction == "within_range" else "breached its"
+    body = f"{kri.name} — current {_kri_num(kri.current_value)}{unit} {what} {kri_threshold_text(kri)}"
+    escalation = _escalation_for(kri, "red")
+    target = escalation_target_text(escalation, people)
+    if target:
+        body += f". Escalate to {target}" + (f": {escalation.action}" if escalation.action else "")
+    return body
+
+
+def kri_escalation_event(
+    kri: Any, level: str, *, value: Any, as_of: Any, measurement_id: Any,
+    escalation: Any, target: str, owner: str,
+) -> dict:
+    """The event notification raised when a reading moves a KRI into amber or red. Pure.
+
+    One per reading (the dedup key carries the measurement), and an ``event:`` key so the
+    reconciler never sweeps it away once the KRI recovers."""
+    unit = f" {kri.unit}" if getattr(kri, "unit", "") else ""
+    label = f"{kri.reference} {kri.name}".strip()
+    reading = f"{_kri_num(value)}{unit}" + (f" as of {as_of}" if as_of else "")
+    if escalation is not None and target:
+        step = f"Escalate to {target}" + (f": {escalation.action}" if escalation.action else ".")
+    elif owner:
+        step = f"No {level} escalation is set for this KRI; its owner, {owner}, should act."
+    else:
+        step = f"No {level} escalation or owner is set for this KRI; name one on the KRI."
+    state = "red (limit breached)" if level == "red" else "amber (early warning)"
+    return {
+        "dedup_key": f"{EVENT_PREFIX}kri-escalation:{kri.id}:{measurement_id}",
+        "title": f"KRI {state}: {label}"[:255],
+        "body": f"Reading {reading} against {kri_threshold_text(kri)}. {step}",
+        "category": _C if level == "red" else _W,
+        "entity_type": "key_risk_indicator",
+        "entity_id": kri.id,
+        "link": "/operational-risk",
+    }
+
+
+async def _escalation_people(db: AsyncSession, kris: Iterable[Any], level: str) -> dict:
+    from app.services import master_data
+
+    ids = [e.escalate_to_id for k in kris for e in (k.escalations or []) if e.level == level]
+    return await master_data.users_by_id(db, ids)
+
+
+async def raise_kri_escalation(
+    db: AsyncSession, kri: Any, level: str, *, value: Any, as_of: Any, measurement_id: Any,
+) -> dict:
+    """Add the escalation event for a KRI that a reading just moved into ``level``.
+
+    Returns the notification fields plus ``target`` and ``action`` for the caller's audit
+    entry (the caller knows whether a person or the KRI feed recorded the reading)."""
+    from app.services import master_data
+
+    escalation = _escalation_for(kri, level)
+    people = await master_data.users_by_id(
+        db, [getattr(escalation, "escalate_to_id", None), kri.owner_id]
+    )
+    owner_ref = people.get(kri.owner_id) if kri.owner_id else None
+    owner = (owner_ref.full_name or owner_ref.email) if owner_ref else (kri.owner or "")
+    target = escalation_target_text(escalation, people)
+    fields = kri_escalation_event(
+        kri, level, value=value, as_of=as_of, measurement_id=measurement_id,
+        escalation=escalation, target=target, owner=owner,
+    )
+    db.add(Notification(tenant_id=kri.tenant_id, **fields))
+    return {**fields, "target": target or owner, "action": getattr(escalation, "action", "") or ""}
+
+
 async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
     today = date.today()
     alerts: list[dict] = []
@@ -239,19 +386,39 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
     # materialise a whole module's table into Python. Predicates mirror the model helpers
     # (`has_transfer_gap`, `is_breached`, `is_overdue`, `effective_score`) exactly.
     settings = await get_or_create_settings(db, tenant_id)
+    # Tolerance is the risk's top-level category's where one is set (RiskAppetite), else
+    # the organisation's; the SQL pre-filter uses the lowest tolerance anywhere.
+    book = await load_appetite_book(db, tenant_id, settings)
     _eff = func.coalesce(Risk.residual_score, Risk.inherent_score)
     _risk_stmt = select(Risk).where(
         Risk.deleted.is_(False),
-        or_(Risk.next_review_date < today, _eff > settings.tolerance_score),
+        or_(Risk.next_review_date < today, _eff > book.min_tolerance),
     )
     for r in (await db.scalars(_risk_stmt)).all():
         if r.next_review_date and r.next_review_date < today:
             add(f"risk-review:{r.id}", f"Risk review overdue: {r.reference}",
                 f"{r.title} — review was due {r.next_review_date}", _W, "risk", r.id, "/risks")
         eff = effective_score(r.inherent_score, r.residual_score)
-        if eff is not None and eff > settings.tolerance_score:
+        tolerance = book.tolerance_for(r.category_id)
+        if eff is not None and eff > tolerance:
             add(f"risk-breach:{r.id}", f"Risk above tolerance: {r.reference}",
-                f"{r.title} — score {eff} exceeds tolerance {settings.tolerance_score}", _C, "risk", r.id, "/risks")
+                f"{r.title} — score {eff} exceeds tolerance {tolerance}", _C, "risk", r.id, "/risks")
+
+    # Risk treatment is tracked per action: each open action past its due date raises
+    # its own alert (grouped with the rest of the housekeeping when there are many).
+    _action_stmt = (
+        select(RiskTreatmentAction, Risk)
+        .join(Risk, Risk.id == RiskTreatmentAction.risk_id)
+        .where(
+            Risk.deleted.is_(False),
+            RiskTreatmentAction.status.in_(("open", "in_progress")),
+            RiskTreatmentAction.due_date < today,
+        )
+    )
+    for action, risk in (await db.execute(_action_stmt)).all():
+        add(f"risk-treatment:{action.id}", f"Treatment action overdue: {risk.reference}",
+            f"{action.title} — was due {action.due_date} ({action.percent_complete}% done)",
+            _W, "risk", risk.id, "/risks")
 
     # An acceptance that lapses unnoticed puts the risk back in the register with nobody
     # expecting it, so the chase starts a month out — the shortest notice on which an
@@ -351,6 +518,23 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
         add(f"vendor-review:{v.id}", f"Third-party review overdue: {v.name}",
             f"Review was due {v.next_review_date}", _W, "vendor", v.id, "/vendors")
 
+    # Certifications of live third parties (not offboarded) expiring within the warning
+    # window or already lapsed. Expired certs of high/critical vendors are critical.
+    _cert_stmt = (
+        select(VendorCertification, Vendor)
+        .join(Vendor, Vendor.id == VendorCertification.vendor_id)
+        .where(
+            Vendor.deleted.is_(False),
+            Vendor.status != VendorStatus.offboarded,
+            VendorCertification.expires_on.is_not(None),
+            VendorCertification.expires_on <= today + timedelta(days=CERT_EXPIRY_WARNING_DAYS),
+        )
+    )
+    for cert, v in (await db.execute(_cert_stmt)).all():
+        alert = certification_alert(cert, v, today)
+        if alert is not None:
+            add(*alert)
+
     _aw_stmt = select(AwarenessProgram).where(
         AwarenessProgram.deleted.is_(False), AwarenessProgram.next_due_date < today
     )
@@ -430,17 +614,22 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
 
     # ``KeyRiskIndicator.status`` is a Python property (it depends on the direction), so
     # it can't be filtered in SQL — comparing it there compiled to ``WHERE false`` and no
-    # KRI breach alert ever fired. Narrow in SQL to KRIs that can breach, decide in Python.
+    # KRI breach alert ever fired. Narrow in SQL to KRIs that can breach (a limit, or a
+    # within-range band, which is red outside it even without a tolerance), decide in
+    # Python. The alert names who the red escalation goes to (phase 2).
     _kri_stmt = select(KeyRiskIndicator).where(
         KeyRiskIndicator.deleted.is_(False),
         KeyRiskIndicator.current_value.is_not(None),
-        KeyRiskIndicator.limit_threshold.is_not(None),
+        or_(
+            KeyRiskIndicator.limit_threshold.is_not(None),
+            KeyRiskIndicator.direction == KriDirection.within_range,
+        ),
     )
-    for kri in (await db.scalars(_kri_stmt)).all():
-        if kri.status != KriStatus.red:
-            continue
+    _kris = [k for k in (await db.scalars(_kri_stmt)).all() if k.status == KriStatus.red]
+    _kri_people = await _escalation_people(db, _kris, "red") if _kris else {}
+    for kri in _kris:
         add(f"kri-breach:{kri.id}", f"KRI breach: {kri.reference}",
-            f"{kri.name} — current {kri.current_value} breached its limit threshold",
+            kri_breach_body(kri, _kri_people),
             _C, "key_risk_indicator", kri.id, "/operational-risk")
 
     _rcsa_stmt = select(RcsaAssessment).where(
@@ -453,19 +642,26 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
             f"{rc.title} — due {rc.due_date} ({rc.business_unit or 'n/a'})",
             _W, "rcsa_assessment", rc.id, "/operational-risk")
 
+    # Regulator deadlines are timestamps (phase 2): overdue from the minute they pass,
+    # and the alert names the time in the organisation's timezone.
+    from app.services import incident_clock
+
     _rr_stmt = (
         select(RegulatoryReport)
         .join(Incident, Incident.id == RegulatoryReport.incident_id)
         .where(
             Incident.deleted.is_(False),
             RegulatoryReport.status == RegulatoryReportStatus.pending,
-            RegulatoryReport.deadline < today,
+            RegulatoryReport.deadline < incident_clock.now_utc(),
         )
     )
-    for rr in (await db.scalars(_rr_stmt)).all():
+    _rr_rows = (await db.scalars(_rr_stmt)).all()
+    _rr_tz = await incident_clock.tenant_zone(db, tenant_id) if _rr_rows else None
+    for rr in _rr_rows:
         add(f"regreport-overdue:{rr.id}",
             f"Regulatory report overdue: {rr.regulator} {rr.report_type.value.replace('_', ' ')}",
-            f"Submission was due {rr.deadline}", _C, "regulatory_report", rr.id, "/incidents")
+            f"Submission was due {incident_clock.local_text(rr.deadline, _rr_tz)}",
+            _C, "regulatory_report", rr.id, "/incidents")
 
     _sar_stmt = select(SuspiciousActivityReport).where(
         SuspiciousActivityReport.deleted.is_(False),

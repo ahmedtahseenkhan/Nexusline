@@ -17,6 +17,9 @@ import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/compo
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import UserPicker from "@/components/UserPicker";
+import LookupSelect from "@/components/LookupSelect";
+import type { LookupRef, UserRef } from "@/lib/masterData";
 import { titleCase } from "@/lib/text";
 
 // ------------------------------------------------------------------ local types
@@ -45,7 +48,10 @@ interface OutsourcingArrangement {
   is_cloud: boolean;
   cloud_model: string;
   data_offshored: boolean;
+  /** Legacy text (the picked country's name once `country_id` is set). */
   country: string;
+  country_id: string | null;
+  country_ref: LookupRef | null;
   sbp_approval_required: boolean;
   sbp_approval_status: string;
   sbp_approval_ref: string;
@@ -55,7 +61,10 @@ interface OutsourcingArrangement {
   exit_plan_tested: boolean;
   concentration_note: string;
   status: string;
+  /** Legacy text (the picked user's name once `owner_id` is set). */
   owner: string;
+  owner_id: string | null;
+  owner_ref: UserRef | null;
   /** Read-only: moved by the approval lifecycle (WorkflowFields). */
   workflow_status: string;
   review_count: number;
@@ -117,6 +126,9 @@ const REVIEW_STATUS_TONE: Record<string, Tone> = {
   completed: "low",
 };
 
+const ownerName = (a: OutsourcingArrangement) => a.owner_ref?.full_name || a.owner_ref?.email || a.owner || "";
+const countryName = (a: OutsourcingArrangement) => a.country_ref?.label || a.country || "";
+
 function cloudLabel(model: string): string {
   if (model === "iaas") return "IaaS";
   if (model === "paas") return "PaaS";
@@ -136,7 +148,7 @@ type ArrForm = {
   is_cloud: boolean;
   cloud_model: string;
   data_offshored: boolean;
-  country: string;
+  country_id: string | null;
   sbp_approval_required: boolean;
   sbp_approval_status: string;
   sbp_approval_ref: string;
@@ -146,7 +158,7 @@ type ArrForm = {
   exit_plan_tested: boolean;
   concentration_note: string;
   status: string;
-  owner: string;
+  owner_id: string | null;
 };
 const BLANK_ARR: ArrForm = {
   title: "",
@@ -159,7 +171,7 @@ const BLANK_ARR: ArrForm = {
   is_cloud: false,
   cloud_model: "not_applicable",
   data_offshored: false,
-  country: "",
+  country_id: null,
   sbp_approval_required: false,
   sbp_approval_status: "not_required",
   sbp_approval_ref: "",
@@ -169,7 +181,7 @@ const BLANK_ARR: ArrForm = {
   exit_plan_tested: false,
   concentration_note: "",
   status: "proposed",
-  owner: "",
+  owner_id: null,
 };
 function fromArr(a: OutsourcingArrangement): ArrForm {
   return {
@@ -183,7 +195,7 @@ function fromArr(a: OutsourcingArrangement): ArrForm {
     is_cloud: !!a.is_cloud,
     cloud_model: a.cloud_model || "not_applicable",
     data_offshored: !!a.data_offshored,
-    country: a.country || "",
+    country_id: a.country_id ?? null,
     sbp_approval_required: !!a.sbp_approval_required,
     sbp_approval_status: a.sbp_approval_status || "not_required",
     sbp_approval_ref: a.sbp_approval_ref || "",
@@ -193,7 +205,7 @@ function fromArr(a: OutsourcingArrangement): ArrForm {
     exit_plan_tested: !!a.exit_plan_tested,
     concentration_note: a.concentration_note || "",
     status: a.status || "proposed",
-    owner: a.owner || "",
+    owner_id: a.owner_id ?? null,
   };
 }
 function arrPayload(f: ArrForm): Record<string, unknown> {
@@ -208,7 +220,7 @@ function arrPayload(f: ArrForm): Record<string, unknown> {
     is_cloud: f.is_cloud,
     cloud_model: f.cloud_model,
     data_offshored: f.data_offshored,
-    country: f.country,
+    country_id: f.country_id,
     sbp_approval_required: f.sbp_approval_required,
     sbp_approval_status: f.sbp_approval_status,
     sbp_approval_ref: f.sbp_approval_ref,
@@ -218,7 +230,9 @@ function arrPayload(f: ArrForm): Record<string, unknown> {
     exit_plan_tested: f.exit_plan_tested,
     concentration_note: f.concentration_note,
     status: f.status,
-    owner: f.owner,
+    // Picked, not typed: the server writes the person's / country's name into the
+    // legacy `owner` / `country` text, which older rows keep until someone picks.
+    owner_id: f.owner_id,
   };
 }
 
@@ -404,7 +418,12 @@ function OutsourcingInner() {
         </Field>
       </div>
       <Field label="Owner" help="Accountable business / risk owner.">
-        <TextInput value={af.owner} onChange={(v) => setA("owner", v)} placeholder="Owner" />
+        <UserPicker
+          value={af.owner_id}
+          onChange={(id) => setA("owner_id", id)}
+          selected={editingArr?.owner_ref ?? null}
+          legacyText={editingArr && !editingArr.owner_id ? editingArr.owner : null}
+        />
       </Field>
     </>
   );
@@ -429,7 +448,13 @@ function OutsourcingInner() {
           <Toggle checked={af.data_offshored} onChange={(v) => setA("data_offshored", v)} label="Data offshored" />
         </Field>
         <Field label="Country" help="Country where data / processing is hosted.">
-          <TextInput value={af.country} onChange={(v) => setA("country", v)} placeholder="Pakistan" />
+          <LookupSelect
+            lookupKey="country"
+            value={af.country_id}
+            onChange={(id) => setA("country_id", id)}
+            placeholder="Choose a country…"
+            legacyText={editingArr && !editingArr.country_id ? editingArr.country : null}
+          />
         </Field>
       </div>
     </>
@@ -616,7 +641,8 @@ function OutsourcingInner() {
               <Badge tone={SBP_TONE[detail.sbp_approval_status] || "neutral"}>SBP: {cap(detail.sbp_approval_status)}</Badge>
               {detail.sbp_approval_required && <Badge tone="medium">Approval required</Badge>}
               {detail.is_cloud && <Badge tone="info">Cloud · {cloudLabel(detail.cloud_model)}</Badge>}
-              {detail.data_offshored && <Badge tone="high">Data offshored{detail.country ? " · " + detail.country : ""}</Badge>}
+              {detail.data_offshored && <Badge tone="high">Data offshored{countryName(detail) ? " · " + countryName(detail) : ""}</Badge>}
+              {!detail.data_offshored && countryName(detail) && <Badge tone="neutral">{countryName(detail)}</Badge>}
               <Badge tone={detail.exit_plan_tested ? "low" : "medium"}>Exit plan {detail.exit_plan_tested ? "tested" : "untested"}</Badge>
               {detail.is_contract_expiring && <Badge tone="high">Contract expiring ≤90d</Badge>}
             </div>
@@ -644,7 +670,7 @@ function OutsourcingInner() {
                 {detail.sbp_approval_ref ? `NOC ref ${detail.sbp_approval_ref} · ` : ""}
                 Contract {formatDate(detail.contract_start)} → {formatDate(detail.contract_end)}
                 {detail.vendor_id ? ` · linked vendor ${vendorName(detail.vendor_id)}` : ""}
-                {detail.owner ? ` · owner ${detail.owner}` : ""}
+                {ownerName(detail) ? ` · owner ${ownerName(detail)}` : ""}
               </div>
             </div>
 

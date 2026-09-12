@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import Link from "next/link";
 import {
   api,
   apiCall,
@@ -9,6 +10,7 @@ import {
   type KeyRiskIndicator,
   type LossEvent,
   type LossSummary,
+  type RiskAppetite,
 } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
@@ -33,6 +35,7 @@ import { Field, TextInput, TextArea, Select, type Option } from "@/components/fi
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import { KriBand, KriEscalations, KriFeed, kriThresholdText } from "@/components/KriPanels";
 import { titleCase } from "@/lib/text";
 
 // ------------------------------------------------------------------ helpers
@@ -106,8 +109,17 @@ const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toL
 
 // ------------------------------------------------------------------ enum lists
 const RCSA_STATUS = opts(["planned", "in_progress", "completed"]);
-const KRI_FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
-const KRI_DIRECTION = opts(["higher_is_worse", "lower_is_worse"]);
+const KRI_FREQ = opts(["daily", "weekly", "fortnightly", "monthly", "quarterly", "semiannual", "annual", "none"]);
+const KRI_DIRECTION: Option[] = [
+  { value: "higher_is_worse", label: "Higher is worse" },
+  { value: "lower_is_worse", label: "Lower is worse" },
+  { value: "within_range", label: "Within range" },
+];
+const DIRECTION_LABEL: Record<string, string> = Object.fromEntries(KRI_DIRECTION.map((o) => [o.value, o.label]));
+const INDICATOR_TYPES: Option[] = [
+  { value: "leading", label: "Leading — warns before the loss" },
+  { value: "lagging", label: "Lagging — confirms it after" },
+];
 const CONTROL_EFF = ["not_assessed", "ineffective", "partially_effective", "effective"];
 const LOSS_STATUS = opts(["open", "under_investigation", "recovered", "closed"]);
 const BASEL_TYPES = opts([
@@ -247,7 +259,16 @@ type KriForm = {
   direction: string;
   warning_threshold: string;
   limit_threshold: string;
+  lower_bound: string;
+  upper_bound: string;
   description: string;
+  definition: string;
+  numerator: string;
+  denominator: string;
+  data_source: string;
+  data_provider_id: string | null;
+  indicator_type: string;
+  appetite_id: string;
   risk_ids: AsyncOption[];
 };
 const BLANK_KRI: KriForm = {
@@ -260,9 +281,19 @@ const BLANK_KRI: KriForm = {
   direction: "higher_is_worse",
   warning_threshold: "",
   limit_threshold: "",
+  lower_bound: "",
+  upper_bound: "",
   description: "",
+  definition: "",
+  numerator: "",
+  denominator: "",
+  data_source: "",
+  data_provider_id: null,
+  indicator_type: "",
+  appetite_id: "",
   risk_ids: [],
 };
+const numText = (n: number | null | undefined) => (n != null ? String(n) : "");
 function fromKri(k: KriExt): KriForm {
   return {
     name: k.name,
@@ -272,13 +303,24 @@ function fromKri(k: KriExt): KriForm {
     unit: k.unit || "",
     frequency: k.frequency || "monthly",
     direction: k.direction || "higher_is_worse",
-    warning_threshold: k.warning_threshold != null ? String(k.warning_threshold) : "",
-    limit_threshold: k.limit_threshold != null ? String(k.limit_threshold) : "",
+    warning_threshold: numText(k.warning_threshold),
+    limit_threshold: numText(k.limit_threshold),
+    lower_bound: numText(k.lower_bound),
+    upper_bound: numText(k.upper_bound),
     description: k.description || "",
+    definition: k.definition || "",
+    numerator: k.numerator || "",
+    denominator: k.denominator || "",
+    data_source: k.data_source || "",
+    data_provider_id: k.data_provider_id ?? null,
+    indicator_type: k.indicator_type || "",
+    appetite_id: k.appetite_id || "",
     risk_ids: (k.risks || []).map(refToOpt),
   };
 }
+const numOrNull = (v: string) => (v.trim() === "" ? null : Number(v));
 function kriPayload(f: KriForm): Record<string, unknown> {
+  const range = f.direction === "within_range";
   return {
     name: f.name,
     category_id: f.category_id,
@@ -287,11 +329,43 @@ function kriPayload(f: KriForm): Record<string, unknown> {
     unit: f.unit,
     frequency: f.frequency,
     direction: f.direction,
-    warning_threshold: f.warning_threshold === "" ? null : Number(f.warning_threshold),
-    limit_threshold: f.limit_threshold === "" ? null : Number(f.limit_threshold),
+    // A within-range KRI has no warning (it is amber once outside the range); its limit
+    // is the tolerance beyond the range. Bounds belong to within-range KRIs only.
+    warning_threshold: range ? null : numOrNull(f.warning_threshold),
+    limit_threshold: numOrNull(f.limit_threshold),
+    lower_bound: range ? numOrNull(f.lower_bound) : null,
+    upper_bound: range ? numOrNull(f.upper_bound) : null,
     description: f.description,
+    definition: f.definition,
+    numerator: f.numerator,
+    denominator: f.denominator,
+    data_source: f.data_source,
+    data_provider_id: f.data_provider_id,
+    indicator_type: f.indicator_type || null,
+    appetite_id: f.appetite_id || null,
     risk_ids: f.risk_ids.map((o) => o.value),
   };
+}
+/** The server's threshold rules (api/v1/operational_risk.threshold_refusal), shown while
+ *  typing; the server has the final say. */
+function kriThresholdProblem(f: KriForm, hasValue: boolean): string | null {
+  const n = (v: string) => (v.trim() === "" ? null : Number(v));
+  const warn = n(f.warning_threshold);
+  const lim = n(f.limit_threshold);
+  if (f.direction === "within_range") {
+    const lo = n(f.lower_bound);
+    const hi = n(f.upper_bound);
+    if (lo == null || hi == null) return "A within-range KRI needs both a lower and an upper bound.";
+    if (lo >= hi) return "The lower bound must be below the upper bound.";
+    if (lim != null && lim < 0) return "The tolerance is a distance beyond the range; it can't be negative.";
+    return null;
+  }
+  if (warn == null && lim == null) return hasValue ? "This KRI has a value, so it needs a warning or a limit threshold." : null;
+  if (warn != null && lim != null) {
+    if (f.direction === "higher_is_worse" && !(warn < lim)) return "Higher is worse: the warning must be below the limit (amber comes before red as the value rises).";
+    if (f.direction === "lower_is_worse" && !(warn > lim)) return "Lower is worse: the warning must be above the limit (amber comes before red as the value falls).";
+  }
+  return null;
 }
 
 type MeasureDraft = {
@@ -413,6 +487,7 @@ function OperationalRiskInner() {
   const setK = <K extends keyof KriForm>(k: K, v: KriForm[K]) => setKf((p) => ({ ...p, [k]: v }));
 
   const [kriDetail, setKriDetail] = useState<KriExt | null>(null);
+  const [appetites, setAppetites] = useState<RiskAppetite[]>([]);
   const [md, setMd] = useState<MeasureDraft>(BLANK_MEASURE);
   const setMD = <K extends keyof MeasureDraft>(k: K, v: MeasureDraft[K]) => setMd((p) => ({ ...p, [k]: v }));
 
@@ -555,16 +630,22 @@ function OperationalRiskInner() {
   }
 
   // ------------------------------------------------------------- KRI CRUD
+  function loadAppetites() {
+    // Appetite per risk category (Risk register → Risk methodology); needs risk:read.
+    api.riskAppetites().then(setAppetites).catch(() => setAppetites([]));
+  }
   function openNewKri() {
     setEditingKri(null);
     setKf(BLANK_KRI);
     setError(null);
+    loadAppetites();
     setShowKriForm(true);
   }
   function openEditKri(k: KriExt) {
     setEditingKri(k);
     setKf(fromKri(k));
     setError(null);
+    loadAppetites();
     setShowKriForm(true);
   }
   async function saveKri() {
@@ -600,9 +681,13 @@ function OperationalRiskInner() {
   async function addMeasurement() {
     if (!kriDetail) return;
     setError(null);
+    if (md.value.trim() === "") {
+      setError("Enter the reading's value.");
+      return;
+    }
     try {
       const updated = await api.addKriMeasurement(kriDetail.id, {
-        value: md.value === "" ? 0 : Number(md.value),
+        value: Number(md.value),
         as_of_date: md.as_of_date || null,
         notes: md.notes,
       });
@@ -678,7 +763,9 @@ function OperationalRiskInner() {
     { key: "business_area", header: "Business unit", hidden: true, render: (k) => <span className="muted"><UnitName unit={k.business_unit_ref} fallback={k.business_area} /></span>, text: (k) => k.business_unit_ref?.name || k.business_area || "" },
     { key: "owner", header: "Owner", sortable: true, render: (k) => <span className="muted"><UserName user={k.owner_ref} fallback={k.owner} /></span>, text: (k) => k.owner_ref?.full_name || k.owner || "" },
     { key: "current_value", header: "Current", sortable: true, render: (k) => <span className="muted">{k.current_value != null ? `${num(k.current_value)}${k.unit ? " " + k.unit : ""}` : "—"}</span> },
-    { key: "thresholds", header: "Warn / Limit", render: (k) => <span className="muted">{num(k.warning_threshold)} / {num(k.limit_threshold)}</span> },
+    { key: "thresholds", header: "Thresholds", render: (k) => <span className="muted" style={{ fontSize: 12.5 }}>{kriThresholdText(k)}</span>, text: (k) => kriThresholdText(k) },
+    { key: "frequency", header: "Frequency", hidden: true, render: (k) => <span className="muted">{cap(k.frequency)}</span>, text: (k) => cap(k.frequency) },
+    { key: "indicator_type", header: "Type", hidden: true, render: (k) => <span className="muted">{k.indicator_type ? cap(k.indicator_type) : "—"}</span>, text: (k) => (k.indicator_type ? cap(k.indicator_type) : "") },
     { key: "status", header: "RAG status", render: (k) => (
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <Badge tone={RAG_TONE[k.status] || "neutral"}>{RAG_LABEL[k.status] || cap(k.status)}</Badge>
@@ -758,6 +845,16 @@ function OperationalRiskInner() {
   );
 
   // ------------------------------------------------------------- KRI form tabs
+  const kriHasValue = editingKri?.current_value != null;
+  const kriProblem = kriThresholdProblem(kf, kriHasValue);
+  const appetiteOptions: Option[] = appetites.map((a) => ({
+    value: a.id,
+    label: `${a.category_ref?.label || "Category"} — appetite ${a.appetite_score}, tolerance ${a.tolerance_score}`,
+  }));
+  if (kf.appetite_id && !appetiteOptions.some((o) => o.value === kf.appetite_id) && editingKri?.appetite_ref) {
+    const a = editingKri.appetite_ref;
+    appetiteOptions.push({ value: a.id, label: `${a.category_label || "Category"} — appetite ${a.appetite_score}, tolerance ${a.tolerance_score}` });
+  }
   const kriGeneral = (
     <>
       <Field label="Name" required help="For example: Failed wire transfers rate.">
@@ -795,27 +892,114 @@ function OperationalRiskInner() {
           <TextInput value={kf.unit} onChange={(v) => setK("unit", v)} placeholder="%" />
         </Field>
       </div>
-      <div className="field-row">
-        <Field label="Frequency" help="How often the indicator is measured.">
-          <Select value={kf.frequency} onChange={(v) => setK("frequency", v)} options={KRI_FREQ} />
-        </Field>
-        <Field label="Direction" help="Which way of the threshold is a breach.">
-          <Select value={kf.direction} onChange={(v) => setK("direction", v)} options={KRI_DIRECTION} />
-        </Field>
-      </div>
-      <div className="field-row">
-        <Field label="Warning threshold" help="Amber level.">
-          <TextInput type="number" value={kf.warning_threshold} onChange={(v) => setK("warning_threshold", v)} placeholder="0" />
-        </Field>
-        <Field label="Limit threshold" help="Red / breach level.">
-          <TextInput type="number" value={kf.limit_threshold} onChange={(v) => setK("limit_threshold", v)} placeholder="0" />
-        </Field>
-      </div>
       <Field label="Description">
-        <TextArea value={kf.description} onChange={(v) => setK("description", v)} rows={3} placeholder="What this indicator measures." />
+        <TextArea value={kf.description} onChange={(v) => setK("description", v)} rows={3} placeholder="What this indicator monitors, in a sentence." />
       </Field>
       <Field label="Indicates risks" help="Register risks this indicator monitors.">
         <AsyncMultiSelect search={linkSearch("risks")} value={kf.risk_ids} onChange={(v) => setK("risk_ids", v)} />
+      </Field>
+    </>
+  );
+
+  const kriDefinition = (
+    <>
+      <Field label="Definition" help="Exactly what is counted and why it signals the risk.">
+        <TextArea value={kf.definition} onChange={(v) => setK("definition", v)} rows={3} placeholder="Share of outgoing wire transfers rejected or returned in the period." />
+      </Field>
+      <div className="field-row">
+        <Field label="Numerator" help="The top of the formula.">
+          <TextInput value={kf.numerator} onChange={(v) => setK("numerator", v)} placeholder="Failed wire transfers in the period" />
+        </Field>
+        <Field label="Denominator" help="The bottom of the formula; leave empty for a count.">
+          <TextInput value={kf.denominator} onChange={(v) => setK("denominator", v)} placeholder="All wire transfers in the period" />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Data source" help="The system or report the value comes from.">
+          <TextInput value={kf.data_source} onChange={(v) => setK("data_source", v)} placeholder="Core banking payments report" />
+        </Field>
+        <Field label="Data provider" help="Who supplies the value each period.">
+          <UserPicker
+            value={kf.data_provider_id}
+            onChange={(id) => setK("data_provider_id", id)}
+            selected={editingKri?.data_provider_ref ?? null}
+            placeholder="Who reports the value…"
+          />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Indicator type" help="Leading indicators warn before a loss; lagging ones confirm it afterwards.">
+          <Select value={kf.indicator_type} onChange={(v) => setK("indicator_type", v)} options={INDICATOR_TYPES} placeholder="Not classified" />
+        </Field>
+        <Field label="Frequency" help="How often the indicator is measured.">
+          <Select value={kf.frequency} onChange={(v) => setK("frequency", v)} options={KRI_FREQ} />
+        </Field>
+      </div>
+    </>
+  );
+
+  const kriRange = kf.direction === "within_range";
+  const kriThresholds = (
+    <>
+      <Field
+        label="Direction"
+        help={
+          kriRange
+            ? "Green inside the range; amber once outside it; red once it is the tolerance or more beyond the nearer bound (or as soon as it leaves the range when no tolerance is set)."
+            : kf.direction === "lower_is_worse"
+              ? "Amber at or below the warning, red at or below the limit — so the warning sits above the limit."
+              : "Amber at or above the warning, red at or above the limit — so the warning sits below the limit."
+        }
+      >
+        <Select
+          value={kf.direction}
+          onChange={(v) => {
+            const next = v || "higher_is_worse";
+            // A limit means "red from here" one-sided but "tolerance beyond the range"
+            // within a range: don't carry a number across that change of meaning.
+            const flips = (next === "within_range") !== (kf.direction === "within_range");
+            setKf((p) => ({ ...p, direction: next, ...(flips ? { warning_threshold: "", limit_threshold: "" } : {}) }));
+          }}
+          options={KRI_DIRECTION}
+        />
+      </Field>
+      {kriRange ? (
+        <div className="field-row">
+          <Field label="Lower bound" required help="Lowest acceptable value.">
+            <TextInput type="number" value={kf.lower_bound} onChange={(v) => setK("lower_bound", v)} />
+          </Field>
+          <Field label="Upper bound" required help="Highest acceptable value.">
+            <TextInput type="number" value={kf.upper_bound} onChange={(v) => setK("upper_bound", v)} />
+          </Field>
+          <Field label="Tolerance" help="How far beyond the range before it turns red. Empty: red as soon as it leaves the range.">
+            <TextInput type="number" value={kf.limit_threshold} onChange={(v) => setK("limit_threshold", v)} />
+          </Field>
+        </div>
+      ) : (
+        <div className="field-row">
+          <Field label="Warning threshold" help="Amber from here.">
+            <TextInput type="number" value={kf.warning_threshold} onChange={(v) => setK("warning_threshold", v)} />
+          </Field>
+          <Field label="Limit threshold" help="Red (breach) from here.">
+            <TextInput type="number" value={kf.limit_threshold} onChange={(v) => setK("limit_threshold", v)} />
+          </Field>
+        </div>
+      )}
+      {kriProblem ? (
+        <div className="error" style={{ marginBottom: 12 }}>{kriProblem}</div>
+      ) : (
+        <p className="muted" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
+          {kriThresholdText({
+            direction: kf.direction, unit: kf.unit,
+            warning_threshold: kriRange ? null : numOrNull(kf.warning_threshold),
+            limit_threshold: numOrNull(kf.limit_threshold),
+            lower_bound: numOrNull(kf.lower_bound), upper_bound: numOrNull(kf.upper_bound),
+          })}
+          {!kriHasValue && " · Thresholds may stay empty until the first value is recorded."}
+        </p>
+      )}
+      <Field label="Risk appetite" help="The board appetite (per risk category) this indicator measures. Set appetites in Risk register → Risk methodology.">
+        <Select value={kf.appetite_id} onChange={(v) => setK("appetite_id", v)} options={appetiteOptions} placeholder="Not linked" />
       </Field>
     </>
   );
@@ -1194,7 +1378,7 @@ function OperationalRiskInner() {
         open={section === "kris" && !!openId && !!kriDetail}
         onClose={() => setOpenId(null)}
         title={kriDetail ? `${kriDetail.reference || ""} ${kriDetail.name}`.trim() : "…"}
-        subtitle={kriDetail ? `${RAG_LABEL[kriDetail.status] || cap(kriDetail.status)} · ${cap(kriDetail.direction)}${kriDetail.last_measured_date ? " · last measured " + formatDate(kriDetail.last_measured_date) : ""}` : ""}
+        subtitle={kriDetail ? `${RAG_LABEL[kriDetail.status] || cap(kriDetail.status)} · ${DIRECTION_LABEL[kriDetail.direction] || cap(kriDetail.direction)}${kriDetail.last_measured_date ? " · last measured " + formatDate(kriDetail.last_measured_date) : ""}` : ""}
         width={720}
         actions={kriDetail && (
           <>
@@ -1211,15 +1395,38 @@ function OperationalRiskInner() {
               <span className="muted" style={{ fontSize: 13 }}>
                 Current value: <strong>{kriDetail.current_value != null ? `${num(kriDetail.current_value)}${kriDetail.unit ? " " + kriDetail.unit : ""}` : "—"}</strong>
               </span>
+              <span className="muted" style={{ fontSize: 12.5 }}>· {kriThresholdText(kriDetail)}</span>
             </div>
+            <KriBand kri={kriDetail} />
+
+            {(kriDetail.definition || kriDetail.numerator || kriDetail.denominator) && (
+              <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16, fontSize: 13 }}>
+                {kriDetail.definition && <p style={{ margin: "0 0 8px" }}>{kriDetail.definition}</p>}
+                {(kriDetail.numerator || kriDetail.denominator) && (
+                  <div className="muted">
+                    Formula: <span style={{ color: "var(--text)" }}>{kriDetail.numerator || "—"}</span>
+                    {kriDetail.denominator ? <> ÷ <span style={{ color: "var(--text)" }}>{kriDetail.denominator}</span></> : null}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
               <Fact label="Owner"><UserName user={kriDetail.owner_ref} fallback={kriDetail.owner} /></Fact>
               <Fact label="Business unit"><UnitName unit={kriDetail.business_unit_ref} fallback={kriDetail.business_area} /></Fact>
               <Fact label="Category">{kriDetail.category_ref?.label || kriDetail.category || <span className="muted">—</span>}</Fact>
               <Fact label="Frequency">{cap(kriDetail.frequency)}</Fact>
-              <Fact label="Warn / limit">{num(kriDetail.warning_threshold)} / {num(kriDetail.limit_threshold)}{kriDetail.unit ? " " + kriDetail.unit : ""}</Fact>
+              <Fact label="Indicator type">{kriDetail.indicator_type ? cap(kriDetail.indicator_type) : <span className="muted">—</span>}</Fact>
               <Fact label="Last measured">{formatDate(kriDetail.last_measured_date)}</Fact>
+              <Fact label="Data source">{kriDetail.data_source || <span className="muted">—</span>}</Fact>
+              <Fact label="Data provider"><UserName user={kriDetail.data_provider_ref} /></Fact>
+              <Fact label="Risk appetite">
+                {kriDetail.appetite_ref ? (
+                  <Link href="/risks" className="chip chip-link" title={kriDetail.appetite_ref.statement || "Appetite / tolerance score"}>
+                    {kriDetail.appetite_ref.category_label || "Appetite"} · {kriDetail.appetite_ref.appetite_score}/{kriDetail.appetite_ref.tolerance_score}
+                  </Link>
+                ) : <span className="muted">—</span>}
+              </Fact>
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
@@ -1233,11 +1440,15 @@ function OperationalRiskInner() {
               <RelatedChips label="Risks" items={kriDetail.risks} href="/risks" />
             </div>
 
+            <KriEscalations kri={kriDetail} onChanged={() => loadKri(kriDetail.id)} />
+            <KriFeed kri={kriDetail} onChanged={() => loadKri(kriDetail.id)} />
+
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-pad">
                 <strong>Measurement history</strong>
                 <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                  Recorded values over time. RAG status recomputes from the latest value.
+                  Recorded values over time. RAG status recomputes from the latest value; an older date is kept in the history
+                  without changing it, and a reading can't be dated in the future.
                 </p>
                 <form
                   style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
@@ -1245,7 +1456,7 @@ function OperationalRiskInner() {
                 >
                   <div style={{ width: 160 }}>
                     <label className="label">Value{kriDetail.unit ? ` (${kriDetail.unit})` : ""}</label>
-                    <input className="input" type="number" value={md.value} onChange={(ev) => setMD("value", ev.target.value)} placeholder="0" required />
+                    <input className="input" type="number" step="any" value={md.value} onChange={(ev) => setMD("value", ev.target.value)} required />
                   </div>
                   <div style={{ width: 160 }}>
                     <label className="label">As of date</label>
@@ -1324,7 +1535,11 @@ function OperationalRiskInner() {
         <FormModal
           title={editingKri ? `Edit KRI — ${editingKri.reference || editingKri.name}` : "New KRI"}
           wide
-          tabs={[{ id: "general", label: "General", content: kriGeneral, required: true }]}
+          tabs={[
+            { id: "general", label: "General", content: kriGeneral, required: true },
+            { id: "definition", label: "Definition", content: kriDefinition },
+            { id: "thresholds", label: "Thresholds", content: kriThresholds },
+          ]}
           onClose={() => setShowKriForm(false)}
           onSave={saveKri}
           saving={savingKri}

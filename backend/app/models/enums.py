@@ -109,6 +109,9 @@ class ControlEffectiveness(str, enum.Enum):
 
 class ReviewFrequency(str, enum.Enum):
     none = "none"
+    #: Phase 2: many operational KRIs are measured daily or weekly.
+    daily = "daily"
+    weekly = "weekly"
     #: Two cycles a month. Banks that audit or test a critical unit fortnightly could
     #: previously only express "monthly" and then schedule the second pass by hand.
     fortnightly = "fortnightly"
@@ -248,6 +251,8 @@ class TestResult(str, enum.Enum):
 
     not_assessed = "not_assessed"
     passed = "passed"
+    #: Phase 2: the control worked, but the sample found exceptions — partially effective.
+    passed_with_exceptions = "passed_with_exceptions"
     failed = "failed"
 
 
@@ -482,6 +487,8 @@ class KriDirection(str, enum.Enum):
 
     higher_is_worse = "higher_is_worse"
     lower_is_worse = "lower_is_worse"
+    #: Phase 2: breaches outside a band (e.g. a liquidity ratio kept between two bounds).
+    within_range = "within_range"
 
 
 class BaselEventType(str, enum.Enum):

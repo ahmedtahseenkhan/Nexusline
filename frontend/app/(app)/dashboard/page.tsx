@@ -160,7 +160,8 @@ export default function DashboardPage() {
     return matrix.cells.map((cell) => {
       const count = heatMode === "residual" ? cell.residual_count : cell.inherent_count;
       if (!count) return null;
-      const band = bandFromScore(cell.score, matrix.bands);
+      // The server's cell band carries the organisation's cell-by-cell overrides.
+      const band = (cell.band as keyof typeof SEV | undefined) ?? bandFromScore(cell.score, matrix.bands);
       return {
         key: `${cell.likelihood}-${cell.impact}`, count,
         left: `${((cell.likelihood - 0.5) / matrix.size) * 100}%`, top: `${100 - ((cell.impact - 0.5) / matrix.size) * 100}%`,
@@ -328,7 +329,8 @@ export default function DashboardPage() {
                 const size = matrix?.size ?? 5;
                 const row = Math.floor(idx / size), col = idx % size;
                 const impact = size - row, likelihood = col + 1;
-                const band = bandFromScore(likelihood * impact, matrix?.bands);
+                const served = matrix?.cells.find((c) => c.likelihood === likelihood && c.impact === impact)?.band;
+                const band = (served as keyof typeof SEV | undefined) ?? bandFromScore(likelihood * impact, matrix?.bands);
                 const tint = { critical: "rgba(180,35,24,.12)", high: "rgba(194,98,45,.12)", medium: "rgba(184,137,42,.10)", low: "rgba(21,128,61,.08)" }[band];
                 return <div key={idx} style={{ background: tint, borderRadius: 8, border: "1px solid rgba(15,23,42,.05)" }} />;
               })}
@@ -342,8 +344,28 @@ export default function DashboardPage() {
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 22, ...SUB }}>
             <span style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>{(["critical", "high", "medium", "low"] as const).map((s) => <SevChip key={s} value={s} />)}</span>
-            {o && <span style={{ whiteSpace: "nowrap" }}>Appetite <b>{o.posture.appetite_score}</b> · tolerance <b>{o.posture.tolerance_score}</b> on a {matrix?.size ?? 5}×{matrix?.size ?? 5} matrix</span>}
+            {o && <span>Appetite <b>{o.posture.appetite_score}</b> · tolerance <b>{o.posture.tolerance_score}</b> on a {matrix?.size ?? 5}×{matrix?.size ?? 5} matrix{o.posture.by_category?.length ? " (organisation default)" : ""}</span>}
           </div>
+          {/* Tolerance per top-level category, where the methodology sets one. */}
+          {o && (o.posture.by_category?.length ?? 0) > 0 && (
+            <div style={{ marginTop: 14, borderTop: "1px solid #eef0f4", paddingTop: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Tolerance by category</div>
+              <table style={{ fontSize: 12.5, width: "100%" }}>
+                <thead><tr style={{ color: SLATE, textAlign: "left" }}><th style={{ fontWeight: 600 }}>Category</th><th style={{ fontWeight: 600 }}>Appetite · tolerance</th><th style={{ fontWeight: 600, textAlign: "right" }}>Over</th></tr></thead>
+                <tbody>
+                  {o.posture.by_category!.map((c) => (
+                    <tr key={c.category_id ?? "default"}>
+                      <td style={{ padding: "3px 0", color: c.category_id ? "#0f172a" : SLATE }}>{c.label}</td>
+                      <td style={{ color: SLATE, whiteSpace: "nowrap" }}>{c.appetite_score} · {c.tolerance_score}</td>
+                      <td style={{ textAlign: "right", whiteSpace: "nowrap", color: c.breach ? RED : SLATE, fontWeight: c.breach ? 700 : 400 }}>
+                        {c.breach} of {c.risks}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         <div style={{ ...CARD, padding: "20px 22px" }}>

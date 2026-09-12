@@ -25,7 +25,7 @@ from app.models.risk import Risk
 from app.models.tenant import Tenant
 from app.services import pdf_report
 from app.services.risk_scoring import max_score_for
-from app.services.risk_settings import get_or_create_settings
+from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
 router = APIRouter(prefix="/reports/pdf", tags=["reports"])
 
@@ -105,6 +105,8 @@ async def risk_register_report(
         ),
         owner_names=await _owner_names(db, risks),
         include_details=details,
+        book=await load_appetite_book(db, user.tenant_id, settings),
+        scale=scale_for(settings),
     )
     return _pdf(pdf_report.risk_register_pdf(risks, context), "risk-report.pdf")
 

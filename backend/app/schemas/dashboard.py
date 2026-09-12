@@ -74,6 +74,21 @@ class TopRisk(BaseModel):
     review_reason: str = ""
 
 
+class CategoryPosture(BaseModel):
+    """Appetite and tolerance for one top-level risk category (phase 2), with where its
+    risks stand against them. ``category_id`` None is the organisation-wide default,
+    covering every risk whose category has no appetite of its own."""
+
+    category_id: uuid.UUID | None = None
+    label: str
+    appetite_score: int
+    tolerance_score: int
+    risks: int = 0
+    within_appetite: int = 0
+    elevated: int = 0
+    breach: int = 0
+
+
 class Posture(BaseModel):
     total_risks: int
     appetite_score: int
@@ -84,6 +99,8 @@ class Posture(BaseModel):
     by_inherent_severity: dict[str, int]
     by_residual_severity: dict[str, int]
     top_risks: list[TopRisk]
+    #: Per-category appetite rows (only when some category has its own appetite).
+    by_category: list[CategoryPosture] = []
 
 
 class Assurance(BaseModel):

@@ -167,10 +167,46 @@ async def ensure_reference_data(db: AsyncSession, tenant_id: UUID) -> int:
     from app.db.lookup_seed import ensure_lookup_defaults
 
     added += await ensure_lookup_defaults(db, tenant_id)
+    added += await ensure_tiering_questionnaire(db, tenant_id)
 
     if added:
         await db.flush()
     return added
+
+
+async def ensure_tiering_questionnaire(db: AsyncSession, tenant_id: UUID) -> int:
+    """Seed the "Inherent risk tiering" questionnaire (services/vendor_tiering.py) if the
+    tenant has none by that name. Insert-only: a tenant's edits to its questions or
+    scores are never overwritten. Returns rows added (the questionnaire counts as one)."""
+    from app.models.assessment import Question, QuestionOption, Questionnaire
+    from app.services.vendor_tiering import (
+        TIERING_QUESTIONNAIRE_DESCRIPTION,
+        TIERING_QUESTIONNAIRE_NAME,
+        TIERING_QUESTIONS,
+    )
+
+    have = {
+        " ".join((n or "").split()).lower()
+        for n in (await db.scalars(select(Questionnaire.name))).all()
+    }
+    if TIERING_QUESTIONNAIRE_NAME.lower() in have:
+        return 0
+    q = Questionnaire(
+        tenant_id=tenant_id, name=TIERING_QUESTIONNAIRE_NAME, description=TIERING_QUESTIONNAIRE_DESCRIPTION
+    )
+    q.questions = [
+        Question(
+            tenant_id=tenant_id, text=text, guidance=guidance, order_index=i,
+            options=[
+                QuestionOption(tenant_id=tenant_id, label=label, score=score, order_index=j)
+                for j, (label, score) in enumerate(options)
+            ],
+        )
+        for i, (text, guidance, options) in enumerate(TIERING_QUESTIONS)
+    ]
+    db.add(q)
+    await db.flush()
+    return 1
 
 
 async def reconcile_reference_data() -> int:

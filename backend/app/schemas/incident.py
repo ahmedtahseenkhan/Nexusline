@@ -7,13 +7,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
 from app.models.enums import (
+    BaselEventType,
     IncidentStatus,
     RegulatoryReportStatus,
     RegulatoryReportType,
     Severity,
     StageStatus,
 )
-from app.schemas.common import LookupRef, UserRef
+from app.schemas.common import GraphRef, LookupRef, UserRef
 
 # Phase 1 picker fields: each ``<name>_id`` wins over the legacy ``<name>`` text when both
 # are sent. The text is still accepted this release (older clients, CSV import) and is
@@ -27,13 +28,27 @@ _CLASSIFICATION = "Value from the `incident_classification` lookup list; wins ov
 _REGULATOR = "Value from the `regulator` lookup list; wins over `regulator` text."
 _WF_OWNER = "User who owns the approval workflow. `workflow_status` changes only through the workflow endpoints."
 
+# Phase 2: the incident timeline and the regulator's clock are timestamps. Send ISO 8601
+# with an offset ("2026-09-01T14:30:00+05:00"); a value without one — including a bare
+# date ("2026-09-01", taken as 00:00) — is read in the organisation's timezone.
+_TS = "Timestamp (ISO 8601). Without an offset — or as a bare date, meaning 00:00 — it is read in the organisation's timezone."
+_OCCURRED = "When the incident happened. " + _TS
+_DETECTED = "When it was detected; starts the regulator's clock. " + _TS
+_CONTAINED = "When it was contained. Stamped automatically when the status moves to contained. " + _TS
+_RESOLVED = "When it was resolved. Stamped automatically when the status moves to resolved/closed. " + _TS
+_NEAR_MISS = "Nothing was lost: a near miss carries no cost and is left out of loss totals."
+_PDB = "Personal data was breached: the first time this is set a linked data-breach record is created and the DPO notified."
+_REPORTABLE = "Owed to a regulator: setting it creates the initial and final reports with deadlines from detection."
+_REPORT_REGULATOR = "Value from the `regulator` lookup list; wins over `regulator` text."
+
 
 class RegReportCreate(BaseModel):
     regulator: str = "SBP"
+    regulator_id: uuid.UUID | None = Field(default=None, description=_REPORT_REGULATOR)
     report_type: RegulatoryReportType = RegulatoryReportType.initial_notification
-    deadline: date | None = None
+    deadline: datetime | None = Field(default=None, description=_TS)
     status: RegulatoryReportStatus = RegulatoryReportStatus.pending
-    submitted_at: date | None = None
+    submitted_at: datetime | None = Field(default=None, description=_TS)
     reference: str = ""
     summary: str = ""
     submitted_by: str = ""
@@ -42,10 +57,11 @@ class RegReportCreate(BaseModel):
 
 class RegReportUpdate(BaseModel):
     regulator: str | None = None
+    regulator_id: uuid.UUID | None = Field(default=None, description=_REPORT_REGULATOR)
     report_type: RegulatoryReportType | None = None
-    deadline: date | None = None
+    deadline: datetime | None = Field(default=None, description=_TS)
     status: RegulatoryReportStatus | None = None
-    submitted_at: date | None = None
+    submitted_at: datetime | None = Field(default=None, description=_TS)
     reference: str | None = None
     summary: str | None = None
     submitted_by: str | None = None
@@ -57,10 +73,12 @@ class RegReportRead(BaseModel):
     id: uuid.UUID
     incident_id: uuid.UUID
     regulator: str
+    regulator_id: uuid.UUID | None = None
+    regulator_ref: LookupRef | None = None
     report_type: RegulatoryReportType
-    deadline: date | None
+    deadline: datetime | None
     status: RegulatoryReportStatus
-    submitted_at: date | None
+    submitted_at: datetime | None
     reference: str
     summary: str
     submitted_by: str
@@ -76,6 +94,21 @@ class IncRef(BaseModel):
     reference: str = ""
     title: str = ""
     name: str = ""
+
+
+class IncidentLossRef(BaseModel):
+    """A loss event raised from the incident (``Incident.loss_events``)."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    reference: str = ""
+    title: str = ""
+    status: str = ""
+    gross_loss: float = 0
+    recovery: float = 0
+    net_loss: float = 0
+    currency: str = ""
+    occurrence_date: date | None = None
 
 
 class StageCreate(BaseModel):
@@ -116,16 +149,28 @@ class IncidentBase(BaseModel):
     root_cause: str = ""
     lessons_learned: str = ""
     cost: float | None = Field(default=None, ge=0)
-    detected_at: date | None = None
-    occurred_at: date | None = None
-    resolved_at: date | None = None
-    is_reportable: bool = False
+    detected_at: datetime | None = Field(default=None, description=_DETECTED)
+    occurred_at: datetime | None = Field(default=None, description=_OCCURRED)
+    contained_at: datetime | None = Field(default=None, description=_CONTAINED)
+    resolved_at: datetime | None = Field(default=None, description=_RESOLVED)
+    customers_affected: int | None = Field(default=None, ge=0)
+    records_affected: int | None = Field(default=None, ge=0)
+    near_miss: bool = Field(default=False, description=_NEAR_MISS)
+    personal_data_breach: bool = Field(default=False, description=_PDB)
+    is_reportable: bool = Field(default=False, description=_REPORTABLE)
     regulator: str = ""
     regulator_id: uuid.UUID | None = Field(default=None, description=_REGULATOR)
     workflow_owner_id: uuid.UUID | None = Field(default=None, description=_WF_OWNER)
 
 
+_NOTIFIED = ("When the regulator was notified: the initial report's submission time (marks it submitted; "
+             "null reopens it). Needs a reportable incident. " + _TS)
+_REG_REF = "The regulator's acknowledgement reference, kept on the initial report."
+
+
 class IncidentCreate(IncidentBase):
+    notified_at: datetime | None = Field(default=None, description=_NOTIFIED)
+    regulator_reference: str | None = Field(default=None, max_length=120, description=_REG_REF)
     control_ids: list[uuid.UUID] = Field(default_factory=list)
     vendor_ids: list[uuid.UUID] = Field(default_factory=list)
     asset_ids: list[uuid.UUID] = Field(default_factory=list)
@@ -149,13 +194,20 @@ class IncidentUpdate(BaseModel):
     root_cause: str | None = None
     lessons_learned: str | None = None
     cost: float | None = Field(default=None, ge=0)
-    detected_at: date | None = None
-    occurred_at: date | None = None
-    resolved_at: date | None = None
-    is_reportable: bool | None = None
+    detected_at: datetime | None = Field(default=None, description=_DETECTED)
+    occurred_at: datetime | None = Field(default=None, description=_OCCURRED)
+    contained_at: datetime | None = Field(default=None, description=_CONTAINED)
+    resolved_at: datetime | None = Field(default=None, description=_RESOLVED)
+    customers_affected: int | None = Field(default=None, ge=0)
+    records_affected: int | None = Field(default=None, ge=0)
+    near_miss: bool | None = Field(default=None, description=_NEAR_MISS)
+    personal_data_breach: bool | None = Field(default=None, description=_PDB)
+    is_reportable: bool | None = Field(default=None, description=_REPORTABLE)
     regulator: str | None = None
     regulator_id: uuid.UUID | None = Field(default=None, description=_REGULATOR)
     workflow_owner_id: uuid.UUID | None = Field(default=None, description=_WF_OWNER)
+    notified_at: datetime | None = Field(default=None, description=_NOTIFIED)
+    regulator_reference: str | None = Field(default=None, max_length=120, description=_REG_REF)
     control_ids: list[uuid.UUID] | None = None
     vendor_ids: list[uuid.UUID] | None = None
     asset_ids: list[uuid.UUID] | None = None
@@ -184,4 +236,63 @@ class IncidentRead(IncidentBase):
     vendors: list[IncRef] = []
     assets: list[IncRef] = []
     risks: list[IncRef] = []
+    loss_events: list[IncidentLossRef] = []
+    data_breaches: list[GraphRef] = []
+    # Regulator-notification clock, read off the initial report (services.incident_clock).
+    notification_deadline: datetime | None = None
+    notified_at: datetime | None = None
+    regulator_reference: str | None = None
+    hours_to_deadline: float | None = Field(
+        default=None, description="Hours left to the notification deadline (to the submission once made); negative when late."
+    )
+    notified_on_time: bool | None = Field(
+        default=None, description="True/False once notified; False once the deadline passes unnotified; otherwise None."
+    )
+    # Response times in hours: detected − occurred, contained − detected, resolved − detected.
+    mttd_hours: float | None = None
+    mttc_hours: float | None = None
+    mttr_hours: float | None = None
     created_at: datetime
+
+
+class IncidentAverages(BaseModel):
+    """Mean response times in hours over the incidents that recorded both ends."""
+
+    mttd_hours: float | None = None
+    mttd_count: int = 0
+    mttc_hours: float | None = None
+    mttc_count: int = 0
+    mttr_hours: float | None = None
+    mttr_count: int = 0
+
+
+class IncidentSummary(BaseModel):
+    total: int
+    open: int
+    by_status: dict[str, int]
+    by_severity: dict[str, int]
+    reportable: int
+    notifications_pending: int
+    notifications_overdue: int
+    notified_on_time: int
+    notified_late: int
+    near_misses: int
+    personal_data_breaches: int
+    customers_affected: int
+    records_affected: int
+    #: Estimated cost of incidents, near misses excluded (they carry no loss).
+    total_cost: float
+    response_times: IncidentAverages
+
+
+class LossFromIncident(BaseModel):
+    """Optional overrides for ``POST /incidents/{id}/loss-event``; anything left out is
+    taken from the incident (title, cost, dates, owner, root cause) or, for the business
+    unit, from its linked assets/risks when they name exactly one."""
+
+    title: str | None = Field(default=None, max_length=255)
+    basel_event_type: BaselEventType | None = None
+    business_unit_id: uuid.UUID | None = None
+    gross_loss: float | None = Field(default=None, ge=0)
+    recovery: float | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, max_length=8)

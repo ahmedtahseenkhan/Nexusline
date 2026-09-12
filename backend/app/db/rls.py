@@ -18,6 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 # Tables carrying a tenant_id that must be isolated.
 TENANT_SCOPED_TABLES: list[str] = [
+    "issue_due_date_changes",
+    "risk_impact_dimensions",
+    "risk_appetites",
+    "risk_treatment_actions",
+    "kri_escalations",
+    "vendor_certifications",
     "tenant_settings",
     "lookups",
     "roles",

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
@@ -20,6 +21,11 @@ import { useFormat } from "@/lib/format";
 
 // ---- inline types (backend: app/schemas/evidence.py, app/schemas/control.py) ----
 type ControlRef = { id: string; name: string; reference: string };
+/** The control test an evidence item supports (backend: ControlTestRef). */
+type ControlTestRef = {
+  id: string; control_id: string; test_type: string | null; result: string;
+  conducted_date: string | null; review_status: string;
+};
 
 type Evidence = {
   id: string;
@@ -32,6 +38,8 @@ type Evidence = {
   collected_at: string | null;
   valid_until: string | null;
   control?: ControlRef | null;
+  control_audit_id?: string | null;
+  control_audit?: ControlTestRef | null;
   is_expired: boolean;
   display_status?: string;
   created_at: string;
@@ -57,6 +65,10 @@ function statusLabel(ev: Evidence) {
 }
 
 const TYPES = opts(["document", "screenshot", "log", "link", "configuration", "other"]);
+const RESULT_LABEL: Record<string, string> = {
+  passed: "passed", passed_with_exceptions: "passed with exceptions", failed: "failed", not_assessed: "not assessed",
+};
+const REVIEW_LABEL: Record<string, string> = { pending: "pending review", reviewed: "reviewed", returned: "returned", legacy: "before reviews" };
 const STATUS = opts(["pending", "valid", "expired"]);
 
 const STATUS_TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
@@ -212,6 +224,21 @@ function EvidenceInner() {
   }
 
   const controlLabel = (e: Evidence) => (e.control ? e.control.reference || e.control.name : "—");
+  /** "12/09/2026 operating test · failed · reviewed" — the test this evidence supports. */
+  const testLabel = (t: ControlTestRef) =>
+    [
+      `${t.conducted_date ? formatDate(t.conducted_date) + " " : ""}${t.test_type ? t.test_type + " " : ""}test`,
+      RESULT_LABEL[t.result] ?? t.result,
+      REVIEW_LABEL[t.review_status] ?? t.review_status,
+    ].join(" · ");
+  const testLink = (e: Evidence) =>
+    e.control_audit ? (
+      <Link href={`/controls?id=${e.control_audit.control_id}`} className="chip chip-link" onClick={(ev) => ev.stopPropagation()}>
+        {testLabel(e.control_audit)}
+      </Link>
+    ) : (
+      <span className="muted">Not attached to a test</span>
+    );
 
   // read-only helper for the view drawer
   const field = (label: string, value: React.ReactNode) => (
@@ -247,6 +274,7 @@ function EvidenceInner() {
       render: (ev) => statusBadge(ev),
     },
     { key: "control", header: "Control", render: (ev) => <span className="muted">{controlLabel(ev)}</span> },
+    { key: "control_audit", header: "Supports test", render: (ev) => testLink(ev), text: (ev) => (ev.control_audit ? testLabel(ev.control_audit) : "") },
     { key: "collected_at", header: "Collected", sortable: true, render: (ev) => <span className="muted">{ev.collected_at ? formatDate(ev.collected_at) : "Not collected"}</span> },
     {
       key: "valid_until",
@@ -368,6 +396,7 @@ function EvidenceInner() {
           <>
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Control", <span className="chip">{controlLabel(detail)}</span>)}
+              {field("Supports test", testLink(detail))}
               {field("Type", <Badge tone="info" plain>{cap(detail.evidence_type)}</Badge>)}
               {field("Status", statusBadge(detail))}
             </div>

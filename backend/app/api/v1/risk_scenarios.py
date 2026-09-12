@@ -477,6 +477,7 @@ async def commit(body: CommitRequest, db: DbSession, user: CurrentUser) -> Commi
                 inherent_likelihood=item.inherent_likelihood,
                 inherent_impact=item.inherent_impact,
                 treatment_description=item.treatment_description,
+                source="generated",
                 asset_ids=[item.asset_id],
                 control_ids=item.control_ids,
                 threat_ids=threat_ids,

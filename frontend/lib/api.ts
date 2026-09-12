@@ -354,6 +354,51 @@ export interface RiskSetting {
   appetite_score: number;
   tolerance_score: number;
   matrix_size: number;
+  /** How impact-dimension scores combine: the highest, or the average rounded up. */
+  impact_mode?: "max" | "average";
+}
+/** Configured band thresholds: the highest score that is low, medium and high. */
+export interface SeverityBands {
+  low_max: number;
+  medium_max: number;
+  high_max: number;
+}
+/** One matrix cell with its effective band (its override, or its score's band). */
+export interface MatrixCellBand {
+  likelihood: number;
+  impact: number;
+  score: number;
+  band: string;
+  overridden: boolean;
+}
+/** Appetite and tolerance for one top-level risk category. */
+export interface RiskAppetite {
+  id: string;
+  category_id: string;
+  category_ref: { id: string; key: string; value: string; label: string } | null;
+  appetite_score: number;
+  tolerance_score: number;
+  statement: string;
+  created_at: string;
+  updated_at: string;
+  risks: number;
+  breaches: number;
+}
+/** One action of a risk's treatment plan. */
+export interface TreatmentAction {
+  id: string;
+  risk_id: string;
+  title: string;
+  description: string;
+  owner_id: string | null;
+  owner_ref: { id: string; full_name: string; email: string } | null;
+  due_date: string | null;
+  status: "open" | "in_progress" | "done" | "cancelled";
+  percent_complete: number;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  overdue: boolean;
 }
 
 /** One rung of the likelihood or impact scale, in the organisation's own words. */
@@ -376,6 +421,13 @@ export interface RiskMatrixConfig {
   likelihood_levels: MatrixLevel[];
   impact_levels: MatrixLevel[];
   bands: MatrixBand[];
+  /** Configured thresholds; null = derived from the matrix size. */
+  severity_bands?: SeverityBands | null;
+  /** Per-cell overrides, keyed "likelihood,impact". */
+  matrix_cells?: Record<string, string>;
+  /** Every cell with its effective band. */
+  cells?: MatrixCellBand[];
+  impact_mode?: "max" | "average";
 }
 export interface ResidualPolicy {
   enabled: boolean;
@@ -648,6 +700,8 @@ export interface DashboardOverview {
   posture: {
     total_risks: number; appetite_score: number; tolerance_score: number; within_appetite: number; elevated: number;
     breach: number; by_inherent_severity: Record<string, number>; by_residual_severity: Record<string, number>; top_risks: TopRisk[];
+    /** Per top-level category appetite (present when any category has its own); the null row is the default. */
+    by_category?: { category_id: string | null; label: string; appetite_score: number; tolerance_score: number; risks: number; within_appetite: number; elevated: number; breach: number }[];
   };
   assurance: {
     total: number; effective: number; partially_effective: number; ineffective: number; not_assessed: number;
@@ -1272,6 +1326,48 @@ export interface KeyRiskIndicator {
   is_breached: boolean;
   created_at: string;
   measurements: KriMeasurement[];
+  // Phase 2 (F-14): definition, lineage, within-range band, appetite, escalation, feed.
+  definition?: string;
+  numerator?: string;
+  denominator?: string;
+  data_source?: string;
+  data_provider_id?: string | null;
+  data_provider_ref?: { id: string; full_name: string; email: string } | null;
+  indicator_type?: "leading" | "lagging" | null;
+  lower_bound?: number | null;
+  upper_bound?: number | null;
+  appetite_id?: string | null;
+  appetite_ref?: KriAppetiteRef | null;
+  escalations?: KriEscalation[];
+  has_feed_token?: boolean;
+}
+/** The risk appetite a KRI measures (per top-level risk category). */
+export interface KriAppetiteRef {
+  id: string;
+  category_id: string;
+  category_label: string;
+  appetite_score: number;
+  tolerance_score: number;
+  statement: string;
+}
+/** Who is told, and what they do, when a KRI turns amber or red. */
+export interface KriEscalation {
+  id: string;
+  kri_id: string;
+  level: "amber" | "red";
+  escalate_to_id: string | null;
+  escalate_to_ref: { id: string; full_name: string; email: string } | null;
+  escalate_to_role: string;
+  action: string;
+  created_at: string;
+}
+/** Returned once by POST /kris/{id}/feed-token; only a hash is kept server-side. */
+export interface KriFeedToken {
+  kri_id: string;
+  token: string;
+  endpoint: string;
+  header: string;
+  note: string;
 }
 export interface LossEvent {
   id: string;
@@ -1372,6 +1468,8 @@ export interface RiskMatrixCell {
   likelihood: number;
   impact: number;
   score: number;
+  /** The cell's band — its override, or its score's band. Colour from this. */
+  band?: string;
   inherent_count: number;
   residual_count: number;
   inherent_refs: string[];
@@ -1777,8 +1875,21 @@ export interface Incident {
   severity: string;
   status: string;
   assignee: string;
+  /** ISO 8601 timestamps with offset since phase 2 (were dates): use formatDateTime. */
   detected_at: string | null;
+  occurred_at?: string | null;
+  contained_at?: string | null;
   resolved_at: string | null;
+  near_miss?: boolean;
+  personal_data_breach?: boolean;
+  /** Regulator-notification clock (the initial report's deadline / submission). */
+  notification_deadline?: string | null;
+  notified_at?: string | null;
+  hours_to_deadline?: number | null;
+  notified_on_time?: boolean | null;
+  mttd_hours?: number | null;
+  mttc_hours?: number | null;
+  mttr_hours?: number | null;
   stage_count: number;
   completed_stages: number;
   lifecycle_complete: boolean;
@@ -1819,6 +1930,27 @@ export interface Policy {
   controls: PolicyLink[];
   requirements: PolicyLink[];
   risks: PolicyLink[];
+  // Phase 2: governance and applicability.
+  approving_authority_id?: string | null;
+  approving_authority_ref?: PolicyLink | null;
+  effective_date?: string | null;
+  supersedes_id?: string | null;
+  supersedes_ref?: PolicyLink | null;
+  superseded_by?: PolicyLink[];
+  business_units?: PolicyLink[];
+  roles?: PolicyLink[];
+}
+/** GET /policies/{id}/acknowledgement-status — who must acknowledge, and who has. */
+export interface PolicyAckStatus {
+  policy_id: string;
+  scope: "roles" | "everyone";
+  roles: string[];
+  note: string;
+  total: number;
+  acknowledged: number;
+  pending: number;
+  outside_scope: number;
+  users: { user_id: string; full_name: string; email: string; roles: string[]; acknowledged: boolean; acknowledged_at: string | null }[];
 }
 
 export interface Vendor {
@@ -2019,6 +2151,8 @@ export const api = {
     request<Incident>(`/incidents/${id}/stages/${stageId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   policies: () => request<Page<Policy>>("/policies?limit=200"),
   policy: (id: string) => request<Policy>(`/policies/${id}`),
+  policyOptions: () => request<{ committees: PolicyLink[]; roles: PolicyLink[] }>("/policies/options"),
+  policyAckStatus: (id: string) => request<PolicyAckStatus>(`/policies/${id}/acknowledgement-status`),
   createPolicy: (payload: Record<string, unknown>) =>
     request<Policy>("/policies", { method: "POST", body: JSON.stringify(payload) }),
   updatePolicy: (id: string, payload: Record<string, unknown>) =>
@@ -2044,7 +2178,27 @@ export const api = {
     size: number;
     likelihood_levels: MatrixLevel[];
     impact_levels: MatrixLevel[];
+    /** Omit to keep; null returns to the derived bands. */
+    severity_bands?: SeverityBands | null;
+    /** Omit to keep; {} removes every override. */
+    matrix_cells?: Record<string, string>;
+    impact_mode?: "max" | "average";
   }) => request<RiskMatrixConfig>("/risk-matrix-config", { method: "PUT", body: JSON.stringify(payload) }),
+  // Appetite per top-level risk category (the organisation's is the fallback).
+  riskAppetites: () => request<RiskAppetite[]>("/risk-appetites"),
+  createRiskAppetite: (payload: { category_id: string; appetite_score: number; tolerance_score: number; statement?: string }) =>
+    request<RiskAppetite>("/risk-appetites", { method: "POST", body: JSON.stringify(payload) }),
+  updateRiskAppetite: (id: string, payload: { appetite_score?: number; tolerance_score?: number; statement?: string }) =>
+    request<RiskAppetite>(`/risk-appetites/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteRiskAppetite: (id: string) => request<unknown>(`/risk-appetites/${id}`, { method: "DELETE" }),
+  // A risk's treatment actions.
+  treatmentActions: (riskId: string) => request<TreatmentAction[]>(`/risks/${riskId}/treatment-actions`),
+  createTreatmentAction: (riskId: string, payload: Partial<Pick<TreatmentAction, "title" | "description" | "owner_id" | "due_date" | "status" | "percent_complete">>) =>
+    request<TreatmentAction>(`/risks/${riskId}/treatment-actions`, { method: "POST", body: JSON.stringify(payload) }),
+  updateTreatmentAction: (riskId: string, actionId: string, payload: Partial<Pick<TreatmentAction, "title" | "description" | "owner_id" | "due_date" | "status" | "percent_complete">>) =>
+    request<TreatmentAction>(`/risks/${riskId}/treatment-actions/${actionId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteTreatmentAction: (riskId: string, actionId: string) =>
+    request<unknown>(`/risks/${riskId}/treatment-actions/${actionId}`, { method: "DELETE" }),
   residualPolicy: () => request<ResidualPolicy>("/residual-policy"),
   updateResidualPolicy: (payload: ResidualPolicy) =>
     request<ResidualPolicy>("/residual-policy", { method: "PUT", body: JSON.stringify(payload) }),
@@ -2139,6 +2293,15 @@ export const api = {
     request<RcsaRisk>(`/rcsa-risks/${lineId}`, { method: "PATCH", body: JSON.stringify(p) }),
   deleteRcsaRisk: (lineId: string) => request<void>(`/rcsa-risks/${lineId}`, { method: "DELETE" }),
   kris: () => request<Page<KeyRiskIndicator>>("/kris?limit=200"),
+  kriEscalationRoles: () => request<{ id: string; name: string }[]>("/kri-escalation-roles"),
+  createKriEscalation: (id: string, p: Record<string, unknown>) =>
+    request<KriEscalation>(`/kris/${id}/escalations`, { method: "POST", body: JSON.stringify(p) }),
+  updateKriEscalation: (id: string, escalationId: string, p: Record<string, unknown>) =>
+    request<KriEscalation>(`/kris/${id}/escalations/${escalationId}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteKriEscalation: (id: string, escalationId: string) =>
+    request<void>(`/kris/${id}/escalations/${escalationId}`, { method: "DELETE" }),
+  issueKriFeedToken: (id: string) => request<KriFeedToken>(`/kris/${id}/feed-token`, { method: "POST" }),
+  revokeKriFeedToken: (id: string) => request<void>(`/kris/${id}/feed-token`, { method: "DELETE" }),
   createKri: (p: Record<string, unknown>) =>
     request<KeyRiskIndicator>("/kris", { method: "POST", body: JSON.stringify(p) }),
   updateKri: (id: string, p: Record<string, unknown>) =>

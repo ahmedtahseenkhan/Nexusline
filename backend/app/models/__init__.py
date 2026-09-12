@@ -2,6 +2,7 @@
 from app.models.base import Base
 from app.models.tenant import Tenant
 from app.models.settings import TenantSettings
+from app.models.vendor import VendorCertification
 from app.models.lookup import Lookup
 from app.models.identity import Permission, Role, User, role_permissions, user_roles
 from app.models.audit import AuditLog
@@ -45,6 +46,9 @@ from app.models.continuity import ContinuityPlan, ContinuityTask, ContinuityTest
 from app.models.control import Control, ControlAudit, ControlMaintenance, control_policies
 from app.models.custom_field import CustomField, CustomFieldValue
 from app.models.risk import (
+    RiskAppetite,
+    RiskImpactDimension,
+    RiskTreatmentAction,
     ResidualPolicy,
     Risk,
     RiskAcceptance,
@@ -95,6 +99,7 @@ from app.models.shariah import (
     ShariahRuling,
 )
 from app.models.operational_risk import (
+    KriEscalation,
     KeyRiskIndicator,
     KriMeasurement,
     LossEvent,
@@ -130,7 +135,7 @@ from app.models.audit_plan import (
     AuditProgramStep,
 )
 # --- Banking-productionization modules (gap-analysis build) ---
-from app.models.issue import Issue, IssueAction, IssueUpdate
+from app.models.issue import Issue, IssueAction, IssueDueDateChange, IssueUpdate
 from app.models.regulatory_change import Obligation, RegulatoryChange, RegulatoryReturn
 from app.models.icfr import IcfrControl, IcfrDeficiency, IcfrProcess, IcfrTest
 from app.models.bia import BiaAssessment, BiaDependency
@@ -181,6 +186,12 @@ from app.models.webhook import Webhook, WebhookDelivery
 from app.models.widget import DashboardWidget
 
 __all__ = [
+    "IssueDueDateChange",
+    "RiskAppetite",
+    "RiskImpactDimension",
+    "RiskTreatmentAction",
+    "KriEscalation",
+    "VendorCertification",
     "TenantSettings",
     "Lookup",
     "Base",

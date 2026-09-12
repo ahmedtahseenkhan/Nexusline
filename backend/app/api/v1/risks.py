@@ -7,7 +7,7 @@ scheduling.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -25,7 +25,13 @@ from app.models.enums import (
     TreatmentStrategy,
 )
 from app.models.organization import BusinessUnit, Process
-from app.models.risk import Risk, RiskAcceptance, risk_assets
+from app.models.risk import (
+    Risk,
+    RiskAcceptance,
+    RiskImpactDimension,
+    RiskTreatmentAction,
+    risk_assets,
+)
 from app.services.risk_query import build_risk_query  # noqa: F401 - re-exported for callers
 from app.models.threat import Threat, Vulnerability
 from app.schemas.common import Page
@@ -38,16 +44,22 @@ from app.schemas.risk import (
     RiskAcceptanceCreate,
     RiskAcceptanceDecision,
     RiskAcceptanceRead,
+    ImpactDimensionRead,
     RiskAssessment,
     RiskCreate,
     RiskRead,
     RiskUpdate,
     SuggestedResidual,
+    TreatmentActionCreate,
+    TreatmentActionRead,
+    TreatmentActionUpdate,
+    TreatmentProgress,
 )
 from app.db.data_repairs import RESIDUAL_REVIEW_REASON
 from app.services.refs import next_reference
 from app.services import audit
 from app.services import delete_guard
+from app.services import master_data
 from app.services import dual_control
 from app.services import ref_fields
 from app.services import risk_integrity
@@ -55,9 +67,12 @@ from app.services.residual_engine import ControlInput, suggest_residual
 from app.services.risk_scoring import next_review_date
 from app.services.risk_settings import (
     get_matrix_size,
-    get_max_score,
+    get_max_score,  # noqa: F401 - kept for callers that import it from here
     get_or_create_residual_policy,
+    get_or_create_settings,
+    load_appetite_book,
     policy_spec,
+    scale_for,
 )
 
 router = APIRouter(prefix="/risks", tags=["risks"])
@@ -69,7 +84,16 @@ RISK_REFS: tuple[ref_fields.RefField, ...] = (
     ref_fields.user("treatment_owner_id", "treatment_owner"),
     ref_fields.lookup(Risk, "category_id", "category"),
     ref_fields.WORKFLOW_OWNER,
+    # Phase 2. ``last_assessed_by_id`` is never in a request (the server stamps it);
+    # it is declared so reads carry ``last_assessed_by_ref``.
+    ref_fields.user("identified_by_id", None),
+    ref_fields.user("last_assessed_by_id", None),
 )
+
+#: A treatment action's owner — picked, validated, read as ``owner_ref``.
+ACTION_REFS: tuple[ref_fields.RefField, ...] = (ref_fields.user("owner_id", None),)
+
+_DIMENSION_LIST = "impact_dimension"
 
 
 # --------------------------------------------------------------------------- helpers
@@ -117,6 +141,7 @@ async def _check_scale(db, user: CurrentUser, values: dict[str, object]) -> None
     size = await get_matrix_size(db, user.tenant_id)
     for name in (
         "inherent_likelihood", "inherent_impact", "residual_likelihood", "residual_impact",
+        "target_likelihood", "target_impact",
     ):
         value = values.get(name)
         if isinstance(value, int) and value > size:
@@ -127,6 +152,73 @@ async def _check_scale(db, user: CurrentUser, values: dict[str, object]) -> None
                     f"{size}x{size} risk matrix (1-{size})"
                 ),
             )
+    for row in values.get("impact_dimensions") or ():
+        score = row.get("score") if isinstance(row, dict) else getattr(row, "score", None)
+        if isinstance(score, int) and score > size:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"impact_dimensions: score {score} is outside this organisation's "
+                    f"{size}x{size} risk matrix (1-{size})"
+                ),
+            )
+
+
+def _enforce_target(values: dict[str, object]) -> None:
+    """Target <= residual <= inherent (422). ``values`` is the resulting state."""
+    detail = risk_integrity.target_rule_violation(
+        inherent=(values.get("inherent_likelihood"), values.get("inherent_impact")),
+        residual=(values.get("residual_likelihood"), values.get("residual_impact")),
+        target=(values.get("target_likelihood"), values.get("target_impact")),
+    )
+    if detail:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
+
+
+def _status_value(value) -> str | None:
+    return getattr(value, "value", value)
+
+
+async def _stored_dimensions(db, risk_id: uuid.UUID) -> list[RiskImpactDimension]:
+    return list(
+        (
+            await db.scalars(
+                select(RiskImpactDimension).where(RiskImpactDimension.risk_id == risk_id)
+            )
+        ).all()
+    )
+
+
+async def _apply_dimensions(
+    db,
+    user: CurrentUser,
+    rows: list[dict],
+    data: dict[str, object],
+    stored: Sequence[RiskImpactDimension] = (),
+) -> None:
+    """Validate the dimension rows and write each basis' derived impact into ``data``.
+
+    A dimension already scored on the risk is not re-checked, so a risk scored on a
+    dimension that has since been deactivated can still be saved.
+    """
+    known = {(r.dimension_id, r.basis) for r in stored}
+    for row in rows:
+        if (row["dimension_id"], row["basis"]) not in known:
+            await master_data.check_lookup(db, row["dimension_id"], _DIMENSION_LIST, "impact_dimensions")
+    settings = await get_or_create_settings(db, user.tenant_id)
+    data.update(
+        risk_integrity.derive_dimension_impacts(rows, data, settings.impact_mode or "max")
+    )
+
+
+def _dimension_rows(risk: Risk, rows: list[dict], tenant_id) -> list[RiskImpactDimension]:
+    return [
+        RiskImpactDimension(
+            tenant_id=tenant_id, risk_id=risk.id, dimension_id=r["dimension_id"],
+            basis=r["basis"], score=r["score"], rationale=(r.get("rationale") or "").strip(),
+        )
+        for r in rows
+    ]
 
 
 def _scoring_changed(risk: Risk | None, incoming: dict[str, object]) -> bool:
@@ -205,6 +297,11 @@ _RISK_SORTABLE = {
     "status": Risk.status,
     "inherent_score": Risk.inherent_score,
     "residual_score": Risk.residual_score,
+    # Unset targets sort as 0, so a descending sort starts with real targets.
+    "target_score": func.coalesce(Risk.target_likelihood * Risk.target_impact, 0),
+    "treatment_deadline": Risk.treatment_deadline,
+    "risk_type": Risk.risk_type,
+    "source": Risk.source,
     "next_review_date": Risk.next_review_date,
     "created_at": Risk.created_at,
 }
@@ -223,6 +320,8 @@ async def list_risks(
     treatment_owner_id: uuid.UUID | None = None,
     category_id: uuid.UUID | None = None,
     needs_review: bool | None = None,
+    risk_type: str | None = None,
+    source: str | None = None,
     search: str | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
@@ -242,6 +341,10 @@ async def list_risks(
     )
     if needs_review is not None:
         stmt = stmt.where(Risk.needs_review.is_(needs_review))
+    if risk_type:
+        stmt = stmt.where(Risk.risk_type == risk_type)
+    if source:
+        stmt = stmt.where(Risk.source == source)
 
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
@@ -250,9 +353,15 @@ async def list_risks(
     else:
         stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    context = {"max_score": await get_max_score(db, user.tenant_id)}
+    context = await _read_context(db, user)
     items = [RiskRead.model_validate(r, context=context) for r in rows]
     await ref_fields.fill_refs(db, list(zip(rows, items)), RISK_REFS)
+    today = date.today()
+    actions = await _actions_by_risk(db, [r.id for r in rows])
+    for row, item in zip(rows, items):
+        item.treatment_progress = TreatmentProgress(
+            **risk_integrity.treatment_progress(actions.get(row.id, []), today)
+        )
     return Page(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -263,21 +372,65 @@ async def list_risks(
     dependencies=[Depends(require("risk:write"))],
 )
 async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> RiskRead:
+    """Create a risk.
+
+    Phase 2 rules (``services.risk_integrity``): a blank title is composed from the
+    statement; dimension scores decide their basis' impact; target <= residual <=
+    inherent; scores given on create stamp the assessment trail, and a risk created
+    beyond draft needs chosen inherent scores and an ``assessment_rationale``.
+    """
     await _check_scale(db, user, body.model_dump())
-    _enforce_residual(
-        user,
-        inherent=(body.inherent_likelihood, body.inherent_impact),
-        residual=(body.residual_likelihood, body.residual_impact),
-        override_reason=body.residual_override_reason,
-    )
     data = body.model_dump(
         exclude={
             "business_unit_ids", "process_ids", "asset_ids", "control_ids",
             "threat_ids", "vulnerability_ids", "policy_ids", "incident_ids",
+            "impact_dimensions",
         }
     )
+    dimension_rows = [d.model_dump() for d in body.impact_dimensions]
+    if dimension_rows:
+        await _apply_dimensions(db, user, dimension_rows, data)
+    sends_inherent = data.get("inherent_likelihood") is not None and data.get("inherent_impact") is not None
+    # Scores not chosen yet are stored as 1 (the columns are NOT NULL) and the risk
+    # cannot leave draft until someone scores it.
+    inherent = (data.get("inherent_likelihood") or 1, data.get("inherent_impact") or 1)
+    _enforce_residual(
+        user,
+        inherent=inherent,
+        residual=(data.get("residual_likelihood"), data.get("residual_impact")),
+        override_reason=body.residual_override_reason,
+    )
+    _enforce_target({**data, "inherent_likelihood": inherent[0], "inherent_impact": inherent[1]})
+    decision = risk_integrity.assessment_decision(
+        creating=True,
+        changed=bool(risk_integrity.changed_scores(None, data)),
+        sends_inherent=sends_inherent,
+        rationale=data.get("assessment_rationale"),
+        stored_rationale="",
+        status_before=None,
+        status_after=_status_value(data.get("status") or RiskStatus.draft),
+        previously_assessed=False,
+    )
+    data["inherent_likelihood"], data["inherent_impact"] = inherent
+    data["assessment_rationale"] = decision.rationale or ""
+    for name in ("cause", "event", "consequence"):
+        data[name] = (data.get(name) or "").strip()
+    data["title"] = (data.get("title") or "").strip() or risk_integrity.compose_title(
+        data["cause"], data["event"], data["consequence"]
+    )
+    if not data["title"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=risk_integrity.TITLE_NEEDS_STATEMENT_DETAIL,
+        )
+
     await ref_fields.apply_refs(db, Risk, data, RISK_REFS)
     risk = Risk(tenant_id=user.tenant_id, **data)
+    if risk.identified_by_id is None:
+        risk.identified_by_id = user.id
+    if decision.stamp:
+        risk.last_assessed_at = datetime.now(timezone.utc)
+        risk.last_assessed_by_id = user.id
     risk.reference = await _next_reference(db)
     risk.business_units = await _resolve(db, BusinessUnit, body.business_unit_ids)
     risk.processes = await _resolve(db, Process, body.process_ids)
@@ -291,6 +444,10 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
 
     db.add(risk)
     await db.flush()
+    for row in _dimension_rows(risk, dimension_rows, user.tenant_id):
+        db.add(row)
+    if dimension_rows:
+        await db.flush()
     await audit.record(
         db,
         actor=user,
@@ -298,6 +455,11 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
         entity_type="risk",
         entity_id=risk.id,
         summary=f"Created risk {risk.reference}: {risk.title}",
+        changes={
+            "scores": f"{risk.inherent_likelihood}x{risk.inherent_impact}" if sends_inherent else "not scored",
+            **({"assessment_rationale": risk.assessment_rationale} if risk.assessment_rationale else {}),
+            **({"impact_dimensions": len(dimension_rows)} if dimension_rows else {}),
+        },
     )
     return await _read(db, risk.id, user)
 
@@ -452,7 +614,33 @@ async def update_risk(
 ) -> RiskRead:
     risk = await _load_risk(db, risk_id)
     data = body.model_dump(exclude_unset=True)
+    # A null inherent score means "not chosen": the stored value stands (NOT NULL).
+    for name in ("inherent_likelihood", "inherent_impact"):
+        if name in data and data[name] is None:
+            data.pop(name)
     await _check_scale(db, user, data)
+    dimension_rows = data.pop("impact_dimensions", None)
+    stored_dims: list[RiskImpactDimension] = []
+    if dimension_rows is not None:
+        stored_dims = await _stored_dimensions(db, risk.id)
+        await _apply_dimensions(db, user, dimension_rows, data, stored_dims)
+    else:
+        # An impact whose basis is scored by dimension moves only with its dimensions.
+        moved = [
+            b for b in ("inherent", "residual", "target")
+            if f"{b}_impact" in data and data[f"{b}_impact"] != getattr(risk, f"{b}_impact", None)
+        ]
+        if moved:
+            scored = {r.basis for r in await _stored_dimensions(db, risk.id)}
+            clash = [b for b in moved if b in scored]
+            if clash:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"The {clash[0]} impact is derived from its dimension scores; "
+                        "change the dimension scores instead."
+                    ),
+                )
     if "residual_override_reason" in data:
         data["residual_override_reason"] = (data["residual_override_reason"] or "").strip()
     # The rule is checked on the state the update would leave behind: a PATCH that only
@@ -465,6 +653,35 @@ async def update_risk(
         override_reason=merged["residual_override_reason"],
         changes_scoring=_scoring_changed(risk, data),
     )
+    _enforce_target({
+        **merged,
+        "target_likelihood": data.get("target_likelihood", getattr(risk, "target_likelihood", None)),
+        "target_impact": data.get("target_impact", getattr(risk, "target_impact", None)),
+    })
+    stored_scores = {name: getattr(risk, name) for name in risk_integrity.SCORE_FIELDS}
+    changed = risk_integrity.changed_scores(stored_scores, data)
+    decision = risk_integrity.assessment_decision(
+        creating=False,
+        changed=bool(changed),
+        sends_inherent="inherent_likelihood" in data and "inherent_impact" in data,
+        rationale=data.pop("assessment_rationale", None),
+        stored_rationale=getattr(risk, "assessment_rationale", ""),
+        status_before=_status_value(getattr(risk, "status", None)),
+        status_after=_status_value(data.get("status", getattr(risk, "status", None))),
+        previously_assessed=getattr(risk, "last_assessed_at", None) is not None,
+    )
+    if "treatment_deadline" in data and data["treatment_deadline"] != getattr(risk, "treatment_deadline", None):
+        if await _action_count(db, risk.id):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "The treatment deadline follows the treatment actions (the latest open "
+                    "action's due date); change an action's due date instead."
+                ),
+            )
+    for name in ("cause", "event", "consequence"):
+        if name in data:
+            data[name] = (data[name] or "").strip()
 
     await ref_fields.apply_refs(db, Risk, data, RISK_REFS, record=risk)
 
@@ -495,6 +712,18 @@ async def update_risk(
 
     for field, value in data.items():
         setattr(risk, field, value)
+    if decision.rationale is not None:
+        risk.assessment_rationale = decision.rationale
+    if decision.stamp:
+        risk.last_assessed_at = datetime.now(timezone.utc)
+        risk.last_assessed_by_id = user.id
+
+    if dimension_rows is not None:
+        for row in stored_dims:
+            await db.delete(row)
+        await db.flush()
+        for row in _dimension_rows(risk, dimension_rows, user.tenant_id):
+            db.add(row)
 
     if "review_frequency" in data:
         risk.next_review_date = next_review_date(
@@ -504,6 +733,14 @@ async def update_risk(
 
     await db.flush()
     changes = {k: str(v) for k, v in data.items()}
+    if decision.rationale:
+        changes["assessment_rationale"] = decision.rationale
+    if decision.stamp:
+        changes["assessed"] = ", ".join(changed) or "scores confirmed"
+    if dimension_rows is not None:
+        changes["impact_dimensions"] = "; ".join(
+            f"{r['basis']} {r['dimension_id']}={r['score']}" for r in dimension_rows
+        ) or "cleared"
     if cleared:
         changes["review_reason"] = "residual corrected; review flag cleared"
     await audit.record(
@@ -573,11 +810,23 @@ async def assess_risk(
         override_reason=reason,
         changes_scoring=_scoring_changed(risk, incoming),
     )
+    _enforce_target({
+        "inherent_likelihood": risk.inherent_likelihood, "inherent_impact": risk.inherent_impact,
+        "residual_likelihood": body.residual_likelihood, "residual_impact": body.residual_impact,
+        "target_likelihood": getattr(risk, "target_likelihood", None),
+        "target_impact": getattr(risk, "target_impact", None),
+    })
+    decision, advance = _residual_assessment(
+        risk,
+        {"residual_likelihood": body.residual_likelihood, "residual_impact": body.residual_impact},
+        body.assessment_rationale,
+    )
     risk.residual_likelihood = body.residual_likelihood
     risk.residual_impact = body.residual_impact
     if "residual_override_reason" in incoming:
         risk.residual_override_reason = incoming["residual_override_reason"]
-    if risk.status == RiskStatus.draft:
+    _record_assessment(risk, decision, user)
+    if advance:
         risk.status = RiskStatus.assessed
     cleared = risk_integrity.clear_residual_flag(risk, RESIDUAL_REVIEW_REASON)
     await db.flush()
@@ -593,9 +842,47 @@ async def assess_risk(
             "residual_likelihood": body.residual_likelihood,
             "residual_impact": body.residual_impact,
             "override_reason": risk.residual_override_reason,
+            **({"assessment_rationale": decision.rationale} if decision.rationale else {}),
         },
     )
     return await _read(db, risk.id, user)
+
+
+def _residual_assessment(
+    risk: Risk, incoming: dict[str, object], rationale: str | None
+) -> tuple[risk_integrity.Assessment, bool]:
+    """The assessment-trail decision for a residual-only write (assess, accept-residual).
+
+    A draft moves to assessed only when the assessment is complete — inherent scores
+    recorded by an earlier assessment and a rationale; otherwise the residual is kept as
+    a provisional draft score and the risk stays draft. Returns ``(decision, advance)``.
+    """
+    stored_scores = {name: getattr(risk, name) for name in risk_integrity.SCORE_FIELDS}
+    common = dict(
+        creating=False,
+        changed=bool(risk_integrity.changed_scores(stored_scores, incoming)),
+        sends_inherent=False,
+        rationale=rationale,
+        stored_rationale=getattr(risk, "assessment_rationale", ""),
+        status_before=_status_value(getattr(risk, "status", None)),
+        previously_assessed=getattr(risk, "last_assessed_at", None) is not None,
+    )
+    if getattr(risk, "status", None) == RiskStatus.draft:
+        try:
+            return risk_integrity.assessment_decision(status_after="assessed", **common), True
+        except HTTPException:
+            return risk_integrity.assessment_decision(status_after="draft", **common), False
+    return risk_integrity.assessment_decision(
+        status_after=_status_value(getattr(risk, "status", None)), **common
+    ), False
+
+
+def _record_assessment(risk: Risk, decision: risk_integrity.Assessment, user: CurrentUser) -> None:
+    if decision.rationale is not None:
+        risk.assessment_rationale = decision.rationale
+    if decision.stamp:
+        risk.last_assessed_at = datetime.now(timezone.utc)
+        risk.last_assessed_by_id = user.id
 
 
 @router.post(
@@ -751,6 +1038,24 @@ async def accept_residual(
         override_reason=body.override_reason if is_override else "",
     )
 
+    _enforce_target({
+        "inherent_likelihood": risk.inherent_likelihood, "inherent_impact": risk.inherent_impact,
+        "residual_likelihood": likelihood, "residual_impact": impact,
+        "target_likelihood": getattr(risk, "target_likelihood", None),
+        "target_impact": getattr(risk, "target_impact", None),
+    })
+    # The sign-off is the rationale: the owner's reason for an override, else the
+    # engine's reasoning they accepted.
+    rationale = (
+        f"Residual {likelihood}x{impact} recorded instead of the suggested "
+        f"{suggestion.likelihood}x{suggestion.impact}: {body.override_reason.strip()}"
+        if is_override
+        else f"Accepted the suggested residual {likelihood}x{impact}: "
+        + "; ".join(str(line) for line in suggestion.rationale)
+    )
+    decision, advance = _residual_assessment(
+        risk, {"residual_likelihood": likelihood, "residual_impact": impact}, rationale
+    )
     risk.residual_likelihood = likelihood
     risk.residual_impact = impact
     risk.suggested_residual_likelihood = suggestion.likelihood
@@ -759,7 +1064,8 @@ async def accept_residual(
     risk.residual_override_reason = body.override_reason.strip() if is_override else ""
     risk.residual_accepted_by = user.id
     risk.residual_accepted_at = date.today()
-    if risk.status == RiskStatus.draft:
+    _record_assessment(risk, decision, user)
+    if advance:
         risk.status = RiskStatus.assessed
     cleared = risk_integrity.clear_residual_flag(risk, RESIDUAL_REVIEW_REASON)
 
@@ -796,6 +1102,11 @@ async def request_acceptance(
     risk_id: uuid.UUID, body: RiskAcceptanceCreate, db: DbSession, user: CurrentUser
 ) -> RiskAcceptanceRead:
     risk = await _load_risk(db, risk_id)
+    refusal = risk_integrity.acceptance_refusal(
+        risk.status, risk.last_assessed_at, risk.assessment_rationale
+    )
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
     acceptance = RiskAcceptance(
         tenant_id=user.tenant_id,
         risk_id=risk.id,
@@ -860,6 +1171,12 @@ async def decide_acceptance(
         subject="risk acceptance",
     )
 
+    if body.approve:
+        refusal = risk_integrity.acceptance_refusal(
+            risk.status, risk.last_assessed_at, risk.assessment_rationale
+        )
+        if refusal:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
     acceptance.approver_id = user.id
     acceptance.decided_at = date.today()
     if body.approve:
@@ -885,14 +1202,221 @@ async def decide_acceptance(
     return RiskAcceptanceRead.model_validate(acceptance)
 
 
+async def _read_context(db, user: CurrentUser) -> dict:
+    """Validation context for ``RiskRead``: the tenant's banding (configured bands and
+    cell overrides) and per-category appetite, loaded once per request."""
+    settings = await get_or_create_settings(db, user.tenant_id)
+    scale = scale_for(settings)
+    return {
+        "max_score": scale.max_score,
+        "scale": scale,
+        "appetite": await load_appetite_book(db, user.tenant_id, settings),
+    }
+
+
+async def _actions_by_risk(db, risk_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, list[RiskTreatmentAction]]:
+    out: dict[uuid.UUID, list[RiskTreatmentAction]] = {rid: [] for rid in risk_ids}
+    if not risk_ids:
+        return out
+    rows = (
+        await db.scalars(
+            select(RiskTreatmentAction)
+            .where(RiskTreatmentAction.risk_id.in_(list(risk_ids)))
+            .order_by(
+                RiskTreatmentAction.due_date.asc().nulls_last(), RiskTreatmentAction.created_at
+            )
+        )
+    ).all()
+    for row in rows:
+        out.setdefault(row.risk_id, []).append(row)
+    return out
+
+
+async def _action_count(db, risk_id: uuid.UUID) -> int:
+    return int(
+        await db.scalar(
+            select(func.count()).select_from(RiskTreatmentAction)
+            .where(RiskTreatmentAction.risk_id == risk_id)
+        )
+        or 0
+    )
+
+
+async def _action_reads(db, actions: Sequence[RiskTreatmentAction]) -> list[TreatmentActionRead]:
+    today = date.today()
+    reads = []
+    for a in actions:
+        read = TreatmentActionRead.model_validate(a)
+        read.overdue = risk_integrity.action_is_overdue(a, today)
+        reads.append(read)
+    await ref_fields.fill_refs(db, list(zip(actions, reads)), ACTION_REFS)
+    return reads
+
+
 async def _read(db, risk_id: uuid.UUID, user: CurrentUser) -> RiskRead:
     """Reload a risk with relationships for serialization.
 
-    The tenant's matrix size travels as validation context so severity chips are banded
-    on the same scale the heat map uses — a 4x4 register must not be banded as 5x5.
+    The tenant's banding travels as validation context so severity chips are banded on
+    the same scale (and with the same cell overrides) the heat map uses — a 4x4 register
+    must not be banded as 5x5 — and each risk carries its category's appetite. The
+    record read also carries its impact dimensions and treatment actions.
     """
-    max_score = await get_max_score(db, user.tenant_id)
+    context = await _read_context(db, user)
     risk = await _load_risk(db, risk_id)
-    read = RiskRead.model_validate(risk, context={"max_score": max_score})
+    read = RiskRead.model_validate(risk, context=context)
     await ref_fields.fill_refs(db, [(risk, read)], RISK_REFS)
+    actions = (await _actions_by_risk(db, [risk.id]))[risk.id]
+    read.treatment_actions = await _action_reads(db, actions)
+    read.treatment_progress = TreatmentProgress(
+        **risk_integrity.treatment_progress(actions, date.today())
+    )
+    dims = await _stored_dimensions(db, risk.id)
+    labels = await master_data.lookups_by_id(db, [d.dimension_id for d in dims])
+    order = {"inherent": 0, "residual": 1, "target": 2}
+    read.impact_dimensions = [
+        ImpactDimensionRead(
+            id=d.id, dimension_id=d.dimension_id, dimension_ref=labels.get(d.dimension_id),
+            basis=d.basis, score=d.score, rationale=d.rationale or "",
+        )
+        for d in sorted(dims, key=lambda d: (order.get(d.basis, 9), str(d.dimension_id)))
+    ]
     return read
+
+
+# ------------------------------------------------------------ treatment actions
+# A treatment plan as actions with owners and dates. ``treatment_description`` stays as
+# the plan's summary; ``treatment_deadline`` follows the actions once there are any (the
+# latest open action's due date), and the overdue alert fires per action.
+async def _load_action(db, risk_id: uuid.UUID, action_id: uuid.UUID) -> RiskTreatmentAction:
+    action = await db.scalar(
+        select(RiskTreatmentAction).where(
+            RiskTreatmentAction.id == action_id, RiskTreatmentAction.risk_id == risk_id
+        )
+    )
+    if action is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Treatment action not found")
+    return action
+
+
+async def _sync_deadline(db, risk: Risk) -> date | None:
+    """Re-derive the risk's treatment deadline from its actions; returns the new value."""
+    actions = (await _actions_by_risk(db, [risk.id]))[risk.id]
+    if actions:
+        risk.treatment_deadline = risk_integrity.derive_treatment_deadline(actions)
+    return risk.treatment_deadline
+
+
+@router.get(
+    "/{risk_id}/treatment-actions",
+    response_model=list[TreatmentActionRead],
+    dependencies=[Depends(require("risk:read"))],
+    summary="The risk's treatment actions, earliest due first",
+)
+async def list_treatment_actions(risk_id: uuid.UUID, db: DbSession) -> list[TreatmentActionRead]:
+    risk = await _load_risk(db, risk_id)
+    return await _action_reads(db, (await _actions_by_risk(db, [risk.id]))[risk.id])
+
+
+@router.post(
+    "/{risk_id}/treatment-actions",
+    response_model=TreatmentActionRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require("risk:write"))],
+    summary="Add a treatment action (owner, due date, status, percent complete)",
+)
+async def create_treatment_action(
+    risk_id: uuid.UUID, body: TreatmentActionCreate, db: DbSession, user: CurrentUser
+) -> TreatmentActionRead:
+    risk = await _load_risk(db, risk_id)
+    data = body.model_dump()
+    await ref_fields.apply_refs(db, RiskTreatmentAction, data, ACTION_REFS)
+    status_value, percent = data.pop("status"), data.pop("percent_complete")
+    action = RiskTreatmentAction(tenant_id=user.tenant_id, risk_id=risk.id, **data)
+    action.title = action.title.strip()
+    action.completed_at = None
+    risk_integrity.apply_action_status(
+        action, status=status_value, percent=percent, now=datetime.now(timezone.utc)
+    )
+    db.add(action)
+    await db.flush()
+    deadline = await _sync_deadline(db, risk)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="add_treatment_action", entity_type="risk", entity_id=risk.id,
+        summary=f"Added treatment action to {risk.reference}: {action.title}",
+        changes={
+            "action_id": str(action.id), "title": action.title, "status": action.status,
+            "due_date": str(action.due_date or ""), "owner_id": str(action.owner_id or ""),
+            "treatment_deadline": str(deadline or ""),
+        },
+    )
+    return (await _action_reads(db, [action]))[0]
+
+
+@router.patch(
+    "/{risk_id}/treatment-actions/{action_id}",
+    response_model=TreatmentActionRead,
+    dependencies=[Depends(require("risk:write"))],
+    summary="Update a treatment action; done stamps completed_at",
+)
+async def update_treatment_action(
+    risk_id: uuid.UUID,
+    action_id: uuid.UUID,
+    body: TreatmentActionUpdate,
+    db: DbSession,
+    user: CurrentUser,
+) -> TreatmentActionRead:
+    risk = await _load_risk(db, risk_id)
+    action = await _load_action(db, risk.id, action_id)
+    data = body.model_dump(exclude_unset=True)
+    if "title" in data and data["title"] is None:
+        data.pop("title")
+    await ref_fields.apply_refs(db, RiskTreatmentAction, data, ACTION_REFS, record=action)
+    status_value, percent = data.pop("status", None), data.pop("percent_complete", None)
+    before = {"status": action.status, "due_date": action.due_date, "percent_complete": action.percent_complete}
+    for field, value in data.items():
+        setattr(action, field, value.strip() if field == "title" else value)
+    risk_integrity.apply_action_status(
+        action, status=status_value, percent=percent, now=datetime.now(timezone.utc)
+    )
+    await db.flush()
+    deadline = await _sync_deadline(db, risk)
+    await db.flush()
+    changes = {k: str(v) for k, v in data.items()}
+    for key, old in before.items():
+        new = getattr(action, key)
+        if new != old:
+            changes[key] = f"{old} -> {new}"
+    changes["treatment_deadline"] = str(deadline or "")
+    await audit.record(
+        db, actor=user, action="update_treatment_action", entity_type="risk", entity_id=risk.id,
+        summary=f"Updated treatment action on {risk.reference}: {action.title}",
+        changes={"action_id": str(action.id), **changes},
+    )
+    return (await _action_reads(db, [action]))[0]
+
+
+@router.delete(
+    "/{risk_id}/treatment-actions/{action_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require("risk:write"))],
+    summary="Remove a treatment action (audit-logged; cancel it instead to keep it on the plan)",
+)
+async def delete_treatment_action(
+    risk_id: uuid.UUID, action_id: uuid.UUID, db: DbSession, user: CurrentUser
+) -> None:
+    risk = await _load_risk(db, risk_id)
+    action = await _load_action(db, risk.id, action_id)
+    snapshot = {
+        "action_id": str(action.id), "title": action.title, "status": action.status,
+        "due_date": str(action.due_date or ""), "percent_complete": action.percent_complete,
+    }
+    await db.delete(action)
+    await db.flush()
+    deadline = await _sync_deadline(db, risk)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="delete_treatment_action", entity_type="risk", entity_id=risk.id,
+        summary=f"Removed treatment action from {risk.reference}: {snapshot['title']}",
+        changes={**snapshot, "treatment_deadline": str(deadline or "")},
+    )

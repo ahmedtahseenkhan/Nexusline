@@ -9,7 +9,8 @@ gauge with no explanation.
 The components follow what risk and compliance functions are actually judged on:
 
 * **Within tolerance** — the share of risks whose effective score is at or under the
-  organisation's tolerance. The board question: are we inside the boundary we set?
+  tolerance that applies to them: their top-level category's where one is set, else the
+  organisation's. The board question: are we inside the boundary we set?
 * **Control assurance** — the share of controls that are effective or partially
   effective. Mapped-but-untested does not count; a promise is not assurance.
 * **Compliance assured** — the share of applicable clauses backed by a working
@@ -82,7 +83,8 @@ def components(
             0.35, f"{risks_within_tolerance} of {risks_total} risks at or under tolerance",
             population=max(risks_total, 0),
             formula="Risks whose current score (residual if assessed, otherwise inherent) is at "
-                    "or under the tolerance score, as a share of all live risks.",
+                    "or under their tolerance — the top-level risk category's where one is set, "
+                    "otherwise the organisation's — as a share of all live risks.",
         ),
         Component(
             "assurance", "Control assurance",
@@ -107,7 +109,8 @@ def components(
             pct(deadlines_total - deadlines_overdue, deadlines_total),
             0.15, f"{deadlines_overdue} of {deadlines_total} tracked deadlines past due",
             population=max(deadlines_total, 0),
-            formula="Tracked deadlines (risk reviews, treatment deadlines, tests of operating "
+            formula="Tracked deadlines (risk reviews, open risk-treatment actions — or the "
+                    "treatment deadline of a risk with no actions — tests of operating "
                     "controls, policy reviews, issue and audit-finding due dates) that are not "
                     "yet past due, as a share of all of them.",
         ),

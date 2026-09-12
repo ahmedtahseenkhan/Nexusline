@@ -28,7 +28,7 @@ from app.schemas.common import Page
 from app.services import audit, pdf_report, report_export
 from app.services import report_builder as rb
 from app.services.risk_scoring import max_score_for
-from app.services.risk_settings import get_or_create_settings
+from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
 router = APIRouter(prefix="/report-builder", tags=["reports"])
 
@@ -146,6 +146,8 @@ async def _context(db, user, subject: rb.Subject, filters: dict) -> rb.ReportCon
         max_score=max_score_for(settings.matrix_size),
         matrix_size=settings.matrix_size,
         today=date.today(),
+        bands=scale_for(settings).bands,
+        book=await load_appetite_book(db, user.tenant_id, settings),
     )
     for _key, model, ident in rb.id_filter_models(subject, filters):
         obj = await db.get(model, ident)

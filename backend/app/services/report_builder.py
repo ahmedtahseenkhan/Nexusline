@@ -26,7 +26,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import Select, func, or_, select
@@ -68,6 +68,10 @@ class ReportContext:
     names: dict[str, str] = field(default_factory=dict)
     #: Per-subject prefetched extras (counts, lookups), keyed by the subject's choice.
     extra: dict[str, Any] = field(default_factory=dict)
+    #: Phase 2: configured severity thresholds (None = the matrix-derived fractions) and
+    #: per-category appetite (``risk_scoring.AppetiteBook``; None = the values above).
+    bands: tuple[int, int, int] | None = None
+    book: Any = None
 
 
 @dataclass(frozen=True)
@@ -196,11 +200,16 @@ def _enum(value) -> str:
     return value.value.replace("_", " ").title() if value is not None else ""
 
 
+def _words(value: str | None) -> str:
+    """A fixed-vocabulary string column (``risk_type``, ``source`` …) as words."""
+    return (value or "").replace("_", " ").title()
+
+
 def _money(value) -> str:
     return f"{value:,.2f}" if value not in (None, "") else ""
 
 
-def _score_bands(score_col, chosen: list[str], max_score: int):
+def _score_bands(score_col, chosen: list[str], max_score: int, bands=None):
     """OR of ``score BETWEEN low AND high`` for each chosen severity band.
 
     Bands are derived from the tenant's matrix, so "critical" means 15-25 on a 5x5 and
@@ -209,7 +218,7 @@ def _score_bands(score_col, chosen: list[str], max_score: int):
     wanted = {c for c in chosen}
     clauses = [
         score_col.between(low, high)
-        for low, high, sev in band_ranges(max_score)
+        for low, high, sev in band_ranges(max_score, bands)
         if sev.value in wanted
     ]
     return or_(*clauses) if clauses else None
@@ -245,22 +254,23 @@ def _risk_filters(stmt: Select, f: dict, ctx: ReportContext) -> Select:
     if owner is not None:
         stmt = stmt.where(Risk.owner_id == owner)
 
-    inh = _score_bands(Risk.inherent_score, _list(f.get("inherent_severity")), ctx.max_score)
+    inh = _score_bands(Risk.inherent_score, _list(f.get("inherent_severity")), ctx.max_score, ctx.bands)
     if inh is not None:
         stmt = stmt.where(inh)
-    res = _score_bands(Risk.residual_score, _list(f.get("residual_severity")), ctx.max_score)
+    res = _score_bands(Risk.residual_score, _list(f.get("residual_severity")), ctx.max_score, ctx.bands)
     if res is not None:
         stmt = stmt.where(res)
 
     appetite = _list(f.get("appetite_status"))
     if appetite:
+        app_expr, tol_expr = _threshold_exprs(ctx)
         clauses = []
         if "within_appetite" in appetite:
-            clauses.append(_RISK_EFFECTIVE <= ctx.appetite)
+            clauses.append(_RISK_EFFECTIVE <= app_expr)
         if "elevated" in appetite:
-            clauses.append((_RISK_EFFECTIVE > ctx.appetite) & (_RISK_EFFECTIVE <= ctx.tolerance))
+            clauses.append((_RISK_EFFECTIVE > app_expr) & (_RISK_EFFECTIVE <= tol_expr))
         if "breach" in appetite:
-            clauses.append(_RISK_EFFECTIVE > ctx.tolerance)
+            clauses.append(_RISK_EFFECTIVE > tol_expr)
         if clauses:
             stmt = stmt.where(or_(*clauses))
 
@@ -290,14 +300,53 @@ def _risk_filters(stmt: Select, f: dict, ctx: ReportContext) -> Select:
     return stmt
 
 
+def category_thresholds(book) -> dict[tuple[int, int], list]:
+    """Risk-category ids grouped by the (appetite, tolerance) they inherit. Pure.
+
+    Only categories whose thresholds differ from the organisation default are listed;
+    everything else (including risks with no category) takes the default."""
+    groups: dict[tuple[int, int], list] = {}
+    default = (book.appetite, book.tolerance)
+    for category_id in book.parents:
+        pair = book.thresholds(category_id)
+        if pair != default:
+            groups.setdefault(pair, []).append(category_id)
+    return groups
+
+
+def _threshold_exprs(ctx: ReportContext):
+    """SQL expressions for each risk's appetite and tolerance: its category's (Phase 2
+    per-category appetite), else the organisation default — so a report's "breach"
+    filter agrees with the dashboard."""
+    from sqlalchemy import case, literal
+
+    if ctx.book is None or not ctx.book.by_category:
+        return literal(ctx.appetite), literal(ctx.tolerance)
+    groups = category_thresholds(ctx.book)
+    if not groups:
+        return literal(ctx.book.appetite), literal(ctx.book.tolerance)
+    app_expr = case(
+        *[(Risk.category_id.in_(ids), a) for (a, _t), ids in groups.items()],
+        else_=ctx.book.appetite,
+    )
+    tol_expr = case(
+        *[(Risk.category_id.in_(ids), t) for (_a, t), ids in groups.items()],
+        else_=ctx.book.tolerance,
+    )
+    return app_expr, tol_expr
+
+
 def _risk_severity(score, ctx: ReportContext) -> str:
-    band = severity_for_score(score, ctx.max_score)
+    band = severity_for_score(score, ctx.max_score, ctx.bands)
     return band.value.title() if band else ""
 
 
 def _risk_appetite(risk, ctx: ReportContext) -> str:
     eff = risk.residual_score if risk.residual_score is not None else risk.inherent_score
-    status = appetite_status(eff, ctx.appetite, ctx.tolerance)
+    if ctx.book is not None:
+        status = ctx.book.status(eff, getattr(risk, "category_id", None))
+    else:
+        status = appetite_status(eff, ctx.appetite, ctx.tolerance)
     return {"within_appetite": "Within appetite", "elevated": "Elevated", "breach": "Breach"}.get(status or "", "")
 
 
@@ -357,7 +406,22 @@ RISKS = Subject(
                    Risk.residual_score),
         ColumnSpec("residual_severity", "Res. severity", True, 9,
                    lambda r, c: _risk_severity(r.residual_score, c), Risk.residual_score),
+        ColumnSpec("target", "Target", False, 9,
+                   lambda r, c: (f"{r.target_likelihood}x{r.target_impact}={r.target_likelihood * r.target_impact}"
+                                 if r.target_likelihood and r.target_impact else ""), None),
         ColumnSpec("appetite", "Appetite", True, 10, _risk_appetite),
+        ColumnSpec("risk_type", "Type", False, 9, lambda r, c: _words(r.risk_type), Risk.risk_type),
+        ColumnSpec("velocity", "Velocity", False, 8, lambda r, c: _words(r.velocity), Risk.velocity),
+        ColumnSpec("source", "Source", False, 9, lambda r, c: _words(r.source), Risk.source),
+        ColumnSpec("identified_date", "Identified", False, 9, lambda r, c: _d(r.identified_date),
+                   Risk.identified_date),
+        ColumnSpec("cause", "Cause", False, 20, lambda r, c: r.cause),
+        ColumnSpec("event", "Event", False, 20, lambda r, c: r.event),
+        ColumnSpec("consequence", "Consequence", False, 20, lambda r, c: r.consequence),
+        ColumnSpec("assessment_rationale", "Assessment rationale", False, 26, lambda r, c: r.assessment_rationale),
+        ColumnSpec("last_assessed_at", "Last assessed", False, 9,
+                   lambda r, c: _d(r.last_assessed_at.date() if r.last_assessed_at else None),
+                   Risk.last_assessed_at),
         ColumnSpec("treatment_strategy", "Treatment", False, 9, lambda r, c: _enum(r.treatment_strategy),
                    Risk.treatment_strategy),
         ColumnSpec("treatment_owner", "Treatment owner", False, 12, lambda r, c: r.treatment_owner),
@@ -575,12 +639,13 @@ def _incident_filters(stmt: Select, f: dict, ctx: ReportContext) -> Select:
     elif resolved is False:
         stmt = stmt.where(Incident.resolved_at.is_(None))
 
+    # occurred_at/detected_at are timestamps (phase 2): "to" a day includes all of it.
     for key, col in (("occurred", Incident.occurred_at), ("detected", Incident.detected_at)):
         lo, hi = _date(f.get(f"{key}_from")), _date(f.get(f"{key}_to"))
         if lo:
             stmt = stmt.where(col >= lo)
         if hi:
-            stmt = stmt.where(col <= hi)
+            stmt = stmt.where(col < hi + timedelta(days=1))
 
     asset_id = _uuid(f.get("asset_id"))
     if asset_id is not None:
@@ -604,6 +669,24 @@ def _incident_filters(stmt: Select, f: dict, ctx: ReportContext) -> Select:
         like = f"%{search}%"
         stmt = stmt.where(Incident.title.ilike(like) | Incident.reference.ilike(like))
     return stmt
+
+
+async def _incident_prefetch(db: AsyncSession, rows: list, ctx: ReportContext) -> None:
+    """The organisation's timezone, so incident timestamps print as its wall-clock time."""
+    from app.services.incident_clock import tenant_zone
+
+    ctx.extra["incident_tz"] = await tenant_zone(db, rows[0].tenant_id)
+
+
+def _ts(value, ctx: ReportContext) -> str:
+    """An incident timestamp as ``YYYY-MM-DD HH:MM`` in the organisation's timezone."""
+    from app.services.incident_clock import local_text, zone
+
+    return local_text(value, ctx.extra.get("incident_tz") or zone(None))
+
+
+def _incident_num(value) -> str:
+    return f"{value:,}" if value is not None else ""
 
 
 def _incident_summary(rows: list, ctx: ReportContext) -> dict[str, dict[str, int]]:
@@ -634,11 +717,19 @@ INCIDENTS = Subject(
         ColumnSpec("status", "Status", True, 9, lambda i, x: _enum(i.status), Incident.status),
         ColumnSpec("assignee", "Assignee", True, 11, lambda i, x: i.assignee, Incident.assignee),
         ColumnSpec("reported_by", "Reported by", False, 11, lambda i, x: i.reported_by),
-        ColumnSpec("occurred_at", "Occurred", True, 9, lambda i, x: _d(i.occurred_at), Incident.occurred_at),
-        ColumnSpec("detected_at", "Detected", False, 9, lambda i, x: _d(i.detected_at), Incident.detected_at),
-        ColumnSpec("resolved_at", "Resolved", True, 9, lambda i, x: _d(i.resolved_at), Incident.resolved_at),
+        ColumnSpec("occurred_at", "Occurred", True, 11, lambda i, x: _ts(i.occurred_at, x), Incident.occurred_at),
+        ColumnSpec("detected_at", "Detected", False, 11, lambda i, x: _ts(i.detected_at, x), Incident.detected_at),
+        ColumnSpec("contained_at", "Contained", False, 11, lambda i, x: _ts(i.contained_at, x), Incident.contained_at),
+        ColumnSpec("resolved_at", "Resolved", True, 11, lambda i, x: _ts(i.resolved_at, x), Incident.resolved_at),
         ColumnSpec("is_reportable", "Reportable", True, 8, lambda i, x: "Yes" if i.is_reportable else "No",
                    Incident.is_reportable),
+        ColumnSpec("near_miss", "Near miss", False, 7, lambda i, x: "Yes" if i.near_miss else "No", Incident.near_miss),
+        ColumnSpec("personal_data_breach", "Personal data breach", False, 8,
+                   lambda i, x: "Yes" if i.personal_data_breach else "No", Incident.personal_data_breach),
+        ColumnSpec("customers_affected", "Customers affected", False, 8, lambda i, x: _incident_num(i.customers_affected),
+                   Incident.customers_affected),
+        ColumnSpec("records_affected", "Records affected", False, 8, lambda i, x: _incident_num(i.records_affected),
+                   Incident.records_affected),
         ColumnSpec("regulator", "Regulator", False, 10, lambda i, x: i.regulator),
         ColumnSpec("cost", "Cost", False, 9, lambda i, x: _money(i.cost), Incident.cost),
         ColumnSpec("assets", "Assets", False, 16, lambda i, x: _names(i.assets)),
@@ -665,6 +756,7 @@ INCIDENTS = Subject(
     ],
     apply_filters=_incident_filters,
     summarize=_incident_summary,
+    prefetch=_incident_prefetch,
 )
 
 

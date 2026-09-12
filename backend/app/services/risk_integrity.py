@@ -13,6 +13,20 @@ Two rules live here so the API layer and the tests read the same code:
   for archiving. :data:`LINK_KINDS` lists every edge counted; :func:`is_orphaned` is the
   pure predicate.
 
+Phase 2 (risk v2, F-09) adds the record-depth rules, pure so they are unit-testable:
+
+* **The risk statement composes the title** when none is given
+  (:func:`compose_title`).
+* **Every score change carries a reason and a stamp** (:func:`assessment_decision`).
+  Changing an inherent or residual score needs a new ``assessment_rationale``; each
+  change stamps ``last_assessed_at``/``last_assessed_by_id``. A draft may carry
+  provisional scores without one. Leaving draft needs chosen inherent scores and a
+  rationale — the server side of "the form no longer pre-fills 3x3".
+* **Target never above residual, residual never above inherent**
+  (:func:`target_rule_violation`).
+* **Impact by dimension** decides the overall impact for its basis
+  (:func:`derive_dimension_impacts`).
+
 Needs-review reasons are stored one per line in ``Risk.review_reason`` so several can
 stand at once (an asset removed *and* a residual to correct) and each can be cleared on
 its own when the thing it describes is fixed.
@@ -22,9 +36,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 
 from fastapi import HTTPException, status
-from sqlalchemy import Select, and_, func, literal_column, select, union_all
+from sqlalchemy import Select, and_, func, literal_column, select, union, union_all
 
 # ----------------------------------------------------------------- residual rule
 RESIDUAL_ABOVE_INHERENT_DETAIL = (
@@ -96,6 +111,289 @@ def enforce_residual_rule(**kwargs) -> None:
 
 def can_accept_risk(user) -> bool:
     return ACCEPT_PERMISSION in set(getattr(user, "permission_codes", ()) or ())
+
+
+# ------------------------------------------------------------ risk statement
+TITLE_NEEDS_STATEMENT_DETAIL = (
+    "Give the risk a title, or describe the event — the title is then composed as "
+    "'<event>, caused by <cause>, resulting in <consequence>'."
+)
+_TITLE_LIMIT = 255
+
+
+def _clause(text: str | None) -> str:
+    return " ".join((text or "").split()).rstrip(" .;,")
+
+
+def _lower_first(text: str) -> str:
+    """'Phishing emails' -> 'phishing emails', but 'SWIFT outage' stays as typed."""
+    first = text.split(" ", 1)[0]
+    if len(first) > 1 and first[:2].isupper():
+        return text
+    return text[:1].lower() + text[1:]
+
+
+def compose_title(cause: str | None, event: str | None, consequence: str | None) -> str:
+    """"<Event>, caused by <cause>, resulting in <consequence>", trimmed to fit.
+
+    The event is the risk; without one there is nothing to name, so the result is ""
+    and the caller asks for a title. Cause and consequence are added when given.
+    """
+    event_text = _clause(event)
+    if not event_text:
+        return ""
+    parts = [event_text[:1].upper() + event_text[1:]]
+    if _clause(cause):
+        parts.append(f"caused by {_lower_first(_clause(cause))}")
+    if _clause(consequence):
+        parts.append(f"resulting in {_lower_first(_clause(consequence))}")
+    title = ", ".join(parts)
+    if len(title) > _TITLE_LIMIT:
+        title = title[: _TITLE_LIMIT - 1].rstrip(" ,") + "…"
+    return title
+
+
+# ------------------------------------------------------------ assessment trail
+#: The four scores whose change is an assessment.
+SCORE_FIELDS: tuple[str, ...] = (
+    "inherent_likelihood", "inherent_impact", "residual_likelihood", "residual_impact",
+)
+RATIONALE_REQUIRED_DETAIL = (
+    "The scores changed: write down why in the assessment rationale. Only a draft may "
+    "carry provisional scores without one."
+)
+LEAVE_DRAFT_DETAIL = (
+    "Before this risk leaves draft, choose its inherent likelihood and impact and write "
+    "the assessment rationale."
+)
+
+
+ACCEPT_UNASSESSED_DETAIL = (
+    "This risk hasn't been assessed yet. Score it and write the assessment rationale "
+    "before asking for — or granting — its acceptance."
+)
+
+
+def acceptance_refusal(status, last_assessed_at, rationale: str | None) -> str | None:
+    """Why a risk can't be accepted yet, or None. Pure.
+
+    Accepting a risk is a decision about an assessed exposure; a draft nobody has scored
+    has nothing to accept. The same gate as leaving draft: scores chosen and a rationale.
+    """
+    value = getattr(status, "value", status)
+    if value != "draft":
+        return None
+    if last_assessed_at is None or not (rationale or "").strip():
+        return ACCEPT_UNASSESSED_DETAIL
+    return None
+
+
+@dataclass(frozen=True)
+class Assessment:
+    """What a write does to the assessment trail."""
+
+    #: Stamp ``last_assessed_at`` / ``last_assessed_by_id``.
+    stamp: bool
+    #: The rationale to store; None leaves the stored one alone.
+    rationale: str | None
+
+
+def changed_scores(stored: Mapping | None, incoming: Mapping) -> list[str]:
+    """Score fields the request sets to a different value (all given ones on create).
+
+    The register form sends every field on each save, so presence is not a change.
+    """
+    out: list[str] = []
+    for name in SCORE_FIELDS:
+        if name not in incoming:
+            continue
+        new = incoming[name]
+        if stored is None:
+            if new is not None:
+                out.append(name)
+        elif new != stored.get(name):
+            out.append(name)
+    return out
+
+
+def assessment_decision(
+    *,
+    creating: bool,
+    changed: bool,
+    sends_inherent: bool,
+    rationale: str | None,
+    stored_rationale: str | None,
+    status_before: str | None,
+    status_after: str | None,
+    previously_assessed: bool,
+) -> Assessment:
+    """Apply the assessment-trail rule; raise 422 when the write breaks it.
+
+    * ``changed`` — an inherent or residual score moves. Unless the risk is a draft
+      after the write, that needs a *new* rationale (the old one described the old
+      scores): 422 :data:`RATIONALE_REQUIRED_DETAIL`.
+    * Leaving draft (creating in, or moving to, any other status) needs the inherent
+      scores chosen — sent with this request, or recorded by an earlier assessment
+      (``previously_assessed``) — and a rationale: 422 :data:`LEAVE_DRAFT_DETAIL`.
+    * Every score change is stamped. So is sending the inherent scores with a new
+      rationale (re-affirming the assessment, or confirming it on leaving draft).
+    * A draft's provisional score change without a rationale clears the stored one:
+      it described scores that no longer stand.
+    """
+    text = (rationale or "").strip()
+    stored = (stored_rationale or "").strip()
+    fresh = bool(text) and text != stored
+    draft_after = status_after == "draft"
+    leaving = not draft_after and (creating or status_before == "draft")
+
+    if leaving:
+        chosen = sends_inherent or previously_assessed
+        has_reason = bool(text) or (bool(stored) and not changed)
+        if not (chosen and has_reason):
+            raise HTTPException(status_code=422, detail=LEAVE_DRAFT_DETAIL)
+    if changed and not draft_after and not fresh:
+        raise HTTPException(status_code=422, detail=RATIONALE_REQUIRED_DETAIL)
+
+    confirmed = sends_inherent and bool(text) and (fresh or leaving)
+    if text and (fresh or creating):
+        new_rationale: str | None = text
+    elif changed and not text:
+        new_rationale = ""
+    else:
+        new_rationale = None
+    return Assessment(stamp=changed or confirmed, rationale=new_rationale)
+
+
+# ------------------------------------------------------------------ target rule
+TARGET_INCOMPLETE_DETAIL = "Give both the target likelihood and the target impact, or neither."
+TARGET_ABOVE_DETAIL = (
+    "Target risk {target} cannot be higher than {basis} risk {score}: treatment only "
+    "lowers a risk (target <= residual <= inherent)."
+)
+
+
+def target_rule_violation(
+    *,
+    inherent: tuple[int | None, int | None],
+    residual: tuple[int | None, int | None],
+    target: tuple[int | None, int | None],
+) -> str | None:
+    """The detail of a 422 when the target is incomplete or above residual/inherent."""
+    tl, ti = target
+    if tl is None and ti is None:
+        return None
+    if tl is None or ti is None:
+        return TARGET_INCOMPLETE_DETAIL
+    value = tl * ti
+    for basis, (lk, im) in (("residual", residual), ("inherent", inherent)):
+        if lk is not None and im is not None and value > lk * im:
+            return TARGET_ABOVE_DETAIL.format(target=value, basis=basis, score=lk * im)
+    return None
+
+
+# ------------------------------------------------------------- impact dimensions
+DIMENSION_DUPLICATE_DETAIL = "impact_dimensions: {dimension} is scored twice for the {basis} basis."
+DIMENSION_DISAGREES_DETAIL = (
+    "{basis_title} impact {explicit} disagrees with its dimension scores: the {mode} of "
+    "{scores} is {derived}. Send the derived impact, or leave it out."
+)
+
+
+def derive_dimension_impacts(
+    rows: Sequence[Mapping], incoming: Mapping, mode: str
+) -> dict[str, int]:
+    """The overall impact per basis the dimension rows decide.
+
+    ``rows`` are ``{dimension_id, basis, score}``. Returns ``{"inherent_impact": 4, …}``
+    for each basis that has rows. Raises 422 when a dimension repeats within a basis,
+    or when the request also sends that basis' impact and it disagrees.
+    """
+    from app.services.risk_scoring import impact_from_dimensions
+
+    by_basis: dict[str, list[int]] = {}
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        key = (str(row["dimension_id"]), row["basis"])
+        if key in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=DIMENSION_DUPLICATE_DETAIL.format(dimension=row["dimension_id"], basis=row["basis"]),
+            )
+        seen.add(key)
+        by_basis.setdefault(row["basis"], []).append(int(row["score"]))
+    out: dict[str, int] = {}
+    for basis, scores in by_basis.items():
+        derived = impact_from_dimensions(scores, mode)
+        field_name = f"{basis}_impact"
+        explicit = incoming.get(field_name)
+        if explicit is not None and explicit != derived:
+            raise HTTPException(
+                status_code=422,
+                detail=DIMENSION_DISAGREES_DETAIL.format(
+                    basis_title=basis.title(), explicit=explicit, mode=mode if mode == "average" else "highest",
+                    scores=", ".join(map(str, sorted(scores, reverse=True))), derived=derived,
+                ),
+            )
+        out[field_name] = derived  # type: ignore[assignment]
+    return out
+
+
+# ------------------------------------------------------------- treatment actions
+#: Action statuses that still need work.
+OPEN_ACTION_STATUSES: frozenset[str] = frozenset({"open", "in_progress"})
+
+
+def action_is_overdue(action, today) -> bool:
+    return (
+        getattr(action, "status", None) in OPEN_ACTION_STATUSES
+        and action.due_date is not None
+        and action.due_date < today
+    )
+
+
+def derive_treatment_deadline(actions: Sequence) -> "date | None":
+    """The risk's treatment deadline when it has actions: the latest due date among the
+    open actions — when the plan should be finished. Once every action is closed, the
+    latest due date of any action (when it was planned to finish). None when no action
+    has a date; the caller leaves a risk without actions alone."""
+    open_dates = [a.due_date for a in actions if a.status in OPEN_ACTION_STATUSES and a.due_date]
+    if open_dates:
+        return max(open_dates)
+    live = [a.due_date for a in actions if a.status != "cancelled" and a.due_date]
+    return max(live) if live else None
+
+
+def treatment_progress(actions: Sequence, today) -> dict[str, int]:
+    """``done`` of ``total`` (cancelled actions are not part of the plan), open and
+    overdue counts, and the percentage done."""
+    plan = [a for a in actions if a.status != "cancelled"]
+    done = sum(1 for a in plan if a.status == "done")
+    return {
+        "done": done,
+        "total": len(plan),
+        "open": sum(1 for a in plan if a.status in OPEN_ACTION_STATUSES),
+        "overdue": sum(1 for a in plan if action_is_overdue(a, today)),
+        "percent": round(100 * done / len(plan)) if plan else 0,
+    }
+
+
+def apply_action_status(action, *, status: str | None, percent: int | None, now) -> None:
+    """Move an action's status and percentage together.
+
+    ``done`` stamps ``completed_at`` (once) and makes it 100 %; leaving ``done`` clears
+    the stamp. A percentage sent alongside wins over the implied one, except that a done
+    action is always 100 %.
+    """
+    if status is not None:
+        action.status = status
+    if percent is not None:
+        action.percent_complete = percent
+    if action.status == "done":
+        action.percent_complete = 100
+        if action.completed_at is None:
+            action.completed_at = now
+    else:
+        action.completed_at = None
 
 
 # ------------------------------------------------------------- review reasons
@@ -298,11 +596,20 @@ def link_count_query(risk_ids: Sequence[uuid.UUID]):
         .where(RiskQuantification.risk_id.in_(ids), RiskQuantification.deleted.is_(False))
         .group_by(RiskQuantification.risk_id)
     )
+    # Issues point at a risk two ways: the legacy ``source_id`` and (phase 2) the typed
+    # ``issue_risks`` link. One row per risk, each issue counted once.
+    issue_risks = tables["issue_risks"]
+    by_issue = union(
+        select(Issue.id.label("issue_id"), Issue.source_id.label("risk_id"))
+        .where(Issue.source_id.in_(ids), Issue.deleted.is_(False)),
+        select(issue_risks.c.issue_id.label("issue_id"), issue_risks.c.risk_id.label("risk_id"))
+        .select_from(issue_risks.join(Issue, Issue.id == issue_risks.c.issue_id))
+        .where(issue_risks.c.risk_id.in_(ids), Issue.deleted.is_(False)),
+    ).subquery("issue_links")
     parts.append(
-        select(_kind("issues"), Issue.source_id.label("risk_id"),
-               func.count().label("n"))
-        .where(Issue.source_id.in_(ids), Issue.deleted.is_(False))
-        .group_by(Issue.source_id)
+        select(_kind("issues"), by_issue.c.risk_id.label("risk_id"),
+               func.count(func.distinct(by_issue.c.issue_id)).label("n"))
+        .group_by(by_issue.c.risk_id)
     )
     return union_all(*parts)
 
@@ -422,6 +729,23 @@ async def asset_impact(db, asset_id: uuid.UUID) -> dict[str, int]:
 
 
 __all__ = [
+    "Assessment",
+    "LEAVE_DRAFT_DETAIL",
+    "RATIONALE_REQUIRED_DETAIL",
+    "SCORE_FIELDS",
+    "TARGET_ABOVE_DETAIL",
+    "TARGET_INCOMPLETE_DETAIL",
+    "TITLE_NEEDS_STATEMENT_DETAIL",
+    "OPEN_ACTION_STATUSES",
+    "action_is_overdue",
+    "apply_action_status",
+    "assessment_decision",
+    "changed_scores",
+    "derive_treatment_deadline",
+    "treatment_progress",
+    "compose_title",
+    "derive_dimension_impacts",
+    "target_rule_violation",
     "ACCEPT_PERMISSION",
     "ASSET_REMOVED_REASON",
     "LINK_KINDS",

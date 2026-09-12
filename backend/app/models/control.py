@@ -4,9 +4,17 @@ upkeep). Each cycle produces dated pass/fail instances and reschedules the next 
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Column, Date, Enum as SAEnum
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Enum as SAEnum,
+    Integer,
+)
 from sqlalchemy import Float, ForeignKey, String, Table, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -46,8 +54,40 @@ control_assets = Table(
 )
 
 
+control_business_units = Table(
+    "control_business_units",
+    Base.metadata,
+    Column("control_id", Uuid, ForeignKey("controls.id", ondelete="CASCADE"), primary_key=True),
+    Column("business_unit_id", Uuid, ForeignKey("business_units.id", ondelete="CASCADE"), primary_key=True),
+)
+
+control_processes = Table(
+    "control_processes",
+    Base.metadata,
+    Column("control_id", Uuid, ForeignKey("controls.id", ondelete="CASCADE"), primary_key=True),
+    Column("process_id", Uuid, ForeignKey("processes.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
 class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "controls"
+    # Phase 2: control attributes (ISO 27002:2022, COSO). Values are validated in the API.
+    nature: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    automation: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    is_key: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    operating_frequency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    iso27002_attributes: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    design_effectiveness: Mapped[ControlEffectiveness] = mapped_column(
+        SAEnum(ControlEffectiveness, name="control_effectiveness"),
+        default=ControlEffectiveness.not_assessed, nullable=False,
+    )
+    operating_effectiveness: Mapped[ControlEffectiveness] = mapped_column(
+        SAEnum(ControlEffectiveness, name="control_effectiveness"),
+        default=ControlEffectiveness.not_assessed, nullable=False,
+    )
+    effectiveness_override_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    test_procedure: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    evidence_expected: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     reference: Mapped[str] = mapped_column(String(64), default="")  # e.g. "A.5.1" / "AC-2"
@@ -141,6 +181,13 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
         "Vendor", secondary="vendor_controls", lazy="selectin", viewonly=True,
     )
+    # Phase 2 scope: where the control operates.
+    business_units: Mapped[list["BusinessUnit"]] = relationship(  # noqa: F821
+        "BusinessUnit", secondary=control_business_units, lazy="selectin",
+    )
+    processes: Mapped[list["Process"]] = relationship(  # noqa: F821
+        "Process", secondary=control_processes, lazy="selectin",
+    )
 
     @staticmethod
     def _last_result(items) -> TestResult | None:
@@ -187,6 +234,26 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
 
 class ControlAudit(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Base):
     __tablename__ = "control_audits"
+    # Phase 2: the test workpaper.
+    test_type: Mapped[str | None] = mapped_column(String(16), nullable=True)  # design | operating
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    population_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sample_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sample_method: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    exceptions_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    exceptions_detail: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    conclusion: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # pending | reviewed | returned; "legacy" marks tests recorded before reviews existed.
+    review_status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # reviewer; must differ from the tester
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    raised_issue_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("issues.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # the issue a failed test opened
 
     control_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("controls.id", ondelete="CASCADE"), nullable=False, index=True

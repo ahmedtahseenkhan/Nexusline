@@ -19,6 +19,9 @@ from app.models.enums import EvidenceStatus, EvidenceType
 
 class Evidence(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     __tablename__ = "evidence"
+    control_audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("control_audits.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 2: the test this evidence supports
 
     control_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("controls.id", ondelete="CASCADE"), nullable=False, index=True

@@ -22,18 +22,24 @@ type Issue = {
 };
 type Page = { items: Issue[] };
 
+/** Record kinds an issue links to by a typed link (issue_risks, issue_controls …). */
+export type IssueLinkKind = "risk" | "control" | "requirement" | "asset" | "vendor";
+
 /** The "Issues raised against this record" surface — the connective tissue that lets any
- *  finding/gap be tracked against the record it concerns. Fetches issues by source_id and
- *  lets the user raise a new one inline (stamped with source_type + source_id), with an
- *  optional owner picked from the user directory. */
+ *  finding/gap be tracked against the record it concerns. Lists the issues linked to the
+ *  record (any typed link, or raised from it) and lets the user raise a new one inline,
+ *  stamped with source_type + source_id as provenance. The server also writes the typed
+ *  link for the record's kind; pass `entityKind` to send it explicitly. */
 export default function RecordIssues({
   entityId,
   entityRef,
   sourceType = "self_identified",
+  entityKind,
 }: {
   entityId: string;
   entityRef?: string;
   sourceType?: string;
+  entityKind?: IssueLinkKind;
 }) {
   const { formatDate } = useFormat();
   const [issues, setIssues] = useState<Issue[]>([]);
@@ -44,10 +50,11 @@ export default function RecordIssues({
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(() => {
-    apiCall<Page>("GET", `/issues?source_id=${entityId}&limit=50`)
+    const filter = entityKind ? `${entityKind}_id` : "linked_id";
+    apiCall<Page>("GET", `/issues?${filter}=${entityId}&limit=50`)
       .then((r) => setIssues(r.items))
       .catch(() => setIssues([]));
-  }, [entityId]);
+  }, [entityId, entityKind]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -62,6 +69,7 @@ export default function RecordIssues({
         source_id: entityId,
         source_reference: entityRef || "",
         owner_id: ownerId,
+        ...(entityKind ? { [`${entityKind}_ids`]: [entityId] } : {}),
       });
       setTitle("");
       setOwnerId(null);

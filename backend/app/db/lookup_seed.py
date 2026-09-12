@@ -112,6 +112,10 @@ DEFAULT_LOOKUPS: dict[str, list[SeedValue]] = {
     "incident_classification": _flat("Public", "Internal", "Confidential", "Restricted"),
     "issue_category": _flat("People", "Process", "Technology", "External"),
     "root_cause_category": _flat("People", "Process", "Technology", "External"),
+    # Phase 2: a risk's impact is scored on each dimension; the overall impact is the
+    # highest (RiskSetting.impact_mode). Banks commonly rate these five.
+    "impact_dimension": _flat("Financial", "Regulatory", "Reputational", "Customer", "Operational"),
+    "data_classification": _flat("Public", "Internal", "Confidential", "Restricted"),
     "regulator": _REGULATORS,
     "country": [SeedValue(code.lower(), name, code) for code, name in _COUNTRIES],
     "kri_category": _flat(

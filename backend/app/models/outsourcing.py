@@ -91,6 +91,12 @@ class OutsourcingArrangement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, W
     """An SBP outsourcing / cloud arrangement with materiality, approval and exit tracking."""
 
     __tablename__ = "outsourcing_arrangements"
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 2: accountable owner
+    country_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 2: country list; data location
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)

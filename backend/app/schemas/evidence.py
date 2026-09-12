@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import EvidenceStatus, EvidenceType
-from app.schemas.control import ControlRef
+from app.schemas.control import ControlRef, ControlTestRef
 
 
 NOT_COLLECTED_MESSAGE = (
@@ -38,6 +38,9 @@ class EvidenceBase(BaseModel):
 
 class EvidenceCreate(EvidenceBase):
     control_id: uuid.UUID
+    control_audit_id: uuid.UUID | None = Field(
+        default=None, description="The test of this control the evidence supports (optional)."
+    )
 
     @model_validator(mode="after")
     def _valid_needs_collection(self) -> "EvidenceCreate":
@@ -51,6 +54,9 @@ class EvidenceUpdate(BaseModel):
     """Partial update — every field optional; control can be re-pointed."""
 
     control_id: uuid.UUID | None = None
+    control_audit_id: uuid.UUID | None = Field(
+        default=None, description="The test of this control the evidence supports; null detaches it."
+    )
     title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     evidence_type: EvidenceType | None = None
@@ -65,6 +71,9 @@ class EvidenceRead(EvidenceBase):
     id: uuid.UUID
     control_id: uuid.UUID
     control: ControlRef | None = None
+    #: The control test this evidence supports, if any.
+    control_audit_id: uuid.UUID | None = None
+    control_audit: ControlTestRef | None = None
     is_expired: bool = False
     # What the register should show: "expired", "not_collected" (no collection date, so
     # nothing has been gathered whatever the stored status says), or the stored status.

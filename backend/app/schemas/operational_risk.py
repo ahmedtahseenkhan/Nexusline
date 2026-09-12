@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from typing import Literal
 
 from app.schemas.common import GraphRef, LookupRef, UnitRef, UserRef
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.base import WorkflowState
 from app.models.enums import (
@@ -31,6 +32,27 @@ _KRI_OWNER = "User who owns the indicator; wins over `owner` text."
 _KRI_UNIT = "Business unit the indicator measures; wins over `business_area` text."
 _KRI_CATEGORY = "Value from the `kri_category` lookup list; wins over `category` text."
 _LOSS_UNIT = "Business unit (line) that suffered the loss; wins over `business_line` text."
+# Phase 2 (F-14): what the indicator is, where its number comes from, how it is judged.
+_DEFINITION = "What the indicator measures and why it signals the risk."
+_NUMERATOR = "Numerator of the formula (e.g. 'failed wire transfers in the period')."
+_DENOMINATOR = "Denominator of the formula (e.g. 'wire transfers in the period'); empty for a count."
+_DATA_SOURCE = "System or report the value is taken from."
+_DATA_PROVIDER = "User who supplies the value each period."
+_INDICATOR_TYPE = "leading (warns before the loss) or lagging (confirms it after)."
+_DIRECTION = (
+    "higher_is_worse: amber at/above the warning, red at/above the limit (warning < limit). "
+    "lower_is_worse: amber at/below the warning, red at/below the limit (warning > limit). "
+    "within_range: green inside [lower_bound, upper_bound]; amber outside it; red once the "
+    "reading is `limit_threshold` (the tolerance) or more beyond the nearer bound, or as soon "
+    "as it leaves the range when no tolerance is set. `warning_threshold` stays empty."
+)
+_LOWER = "within_range only: lowest acceptable value (required, below upper_bound)."
+_UPPER = "within_range only: highest acceptable value (required, above lower_bound)."
+_WARNING = "Amber threshold (not used for within_range)."
+_LIMIT = "Red threshold; for within_range, the tolerance beyond the range before it turns red."
+_APPETITE = "Risk appetite (GET /risk-appetites) this indicator measures."
+IndicatorType = Literal["leading", "lagging"]
+EscalationLevel = Literal["amber", "red"]
 
 
 # ------------------------------------------------------------- RCSA risk lines ---
@@ -142,8 +164,89 @@ class RcsaRead(RcsaBase):
 # --------------------------------------------------------------- KRI measurements ---
 class MeasurementCreate(BaseModel):
     value: float
-    as_of_date: date | None = None
+    as_of_date: date | None = Field(default=None, description="Defaults to today; may not be in the future.")
     notes: str = ""
+
+
+class MeasurementFeed(BaseModel):
+    """One reading posted by an integration with the KRI's feed token."""
+
+    value: float
+    as_of_date: date | None = Field(default=None, description="Defaults to today; may not be in the future.")
+    notes: str = Field(default="", max_length=2000)
+
+
+class FeedTokenIssued(BaseModel):
+    """Returned once when a feed token is generated; only its SHA-256 is stored."""
+
+    kri_id: uuid.UUID
+    token: str
+    endpoint: str
+    header: str
+    note: str
+
+
+class FeedResult(BaseModel):
+    """What the feed endpoint tells an integration: no names, emails or history."""
+
+    kri_id: uuid.UUID
+    reference: str
+    measurement_id: uuid.UUID
+    status: KriStatus
+    current_value: float | None
+    last_measured_date: date | None
+    escalated: EscalationLevel | None = None
+
+
+# ------------------------------------------------------------------ KRI escalations ---
+_ESC_TO = "User told when the KRI reaches this level."
+_ESC_ROLE = "Role told when the KRI reaches this level (a role name, e.g. 'CRO')."
+_ESC_ACTION = "What the person or role must do."
+
+
+class KriEscalationCreate(BaseModel):
+    level: EscalationLevel
+    escalate_to_id: uuid.UUID | None = Field(default=None, description=_ESC_TO)
+    escalate_to_role: str = Field(default="", max_length=64, description=_ESC_ROLE)
+    action: str = Field(min_length=1, max_length=4000, description=_ESC_ACTION)
+
+    @model_validator(mode="after")
+    def _someone(self):
+        if self.escalate_to_id is None and not self.escalate_to_role.strip():
+            raise ValueError("Name a person (escalate_to_id) or a role (escalate_to_role) to escalate to.")
+        if not self.action.strip():
+            raise ValueError("action: say what must be done when the KRI reaches this level.")
+        return self
+
+
+class KriEscalationUpdate(BaseModel):
+    level: EscalationLevel | None = None
+    escalate_to_id: uuid.UUID | None = Field(default=None, description=_ESC_TO)
+    escalate_to_role: str | None = Field(default=None, max_length=64, description=_ESC_ROLE)
+    action: str | None = Field(default=None, max_length=4000, description=_ESC_ACTION)
+
+
+class KriEscalationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    kri_id: uuid.UUID
+    level: str
+    escalate_to_id: uuid.UUID | None = None
+    escalate_to_ref: UserRef | None = None
+    escalate_to_role: str = ""
+    action: str = ""
+    created_at: datetime
+
+
+class KriAppetiteRef(BaseModel):
+    """The risk appetite a KRI measures, with its category's label."""
+
+    id: uuid.UUID
+    category_id: uuid.UUID
+    category_label: str = ""
+    appetite_score: int
+    tolerance_score: int
+    statement: str = ""
 
 
 class MeasurementRead(BaseModel):
@@ -167,12 +270,21 @@ class KriBase(BaseModel):
     owner_id: uuid.UUID | None = Field(default=None, description=_KRI_OWNER)
     unit: str = ""
     frequency: ReviewFrequency = ReviewFrequency.monthly
-    direction: KriDirection = KriDirection.higher_is_worse
-    warning_threshold: float | None = None
-    limit_threshold: float | None = None
+    direction: KriDirection = Field(default=KriDirection.higher_is_worse, description=_DIRECTION)
+    warning_threshold: float | None = Field(default=None, description=_WARNING)
+    limit_threshold: float | None = Field(default=None, description=_LIMIT)
+    lower_bound: float | None = Field(default=None, description=_LOWER)
+    upper_bound: float | None = Field(default=None, description=_UPPER)
     current_value: float | None = None
     last_measured_date: date | None = None
     workflow_owner_id: uuid.UUID | None = Field(default=None, description=_WF_OWNER)
+    definition: str = Field(default="", description=_DEFINITION)
+    numerator: str = Field(default="", description=_NUMERATOR)
+    denominator: str = Field(default="", description=_DENOMINATOR)
+    data_source: str = Field(default="", description=_DATA_SOURCE)
+    data_provider_id: uuid.UUID | None = Field(default=None, description=_DATA_PROVIDER)
+    indicator_type: IndicatorType | None = Field(default=None, description=_INDICATOR_TYPE)
+    appetite_id: uuid.UUID | None = Field(default=None, description=_APPETITE)
 
 
 class KriCreate(KriBase):
@@ -190,12 +302,21 @@ class KriUpdate(BaseModel):
     owner_id: uuid.UUID | None = Field(default=None, description=_KRI_OWNER)
     unit: str | None = None
     frequency: ReviewFrequency | None = None
-    direction: KriDirection | None = None
-    warning_threshold: float | None = None
-    limit_threshold: float | None = None
+    direction: KriDirection | None = Field(default=None, description=_DIRECTION)
+    warning_threshold: float | None = Field(default=None, description=_WARNING)
+    limit_threshold: float | None = Field(default=None, description=_LIMIT)
+    lower_bound: float | None = Field(default=None, description=_LOWER)
+    upper_bound: float | None = Field(default=None, description=_UPPER)
     current_value: float | None = None
     last_measured_date: date | None = None
     workflow_owner_id: uuid.UUID | None = Field(default=None, description=_WF_OWNER)
+    definition: str | None = Field(default=None, description=_DEFINITION)
+    numerator: str | None = Field(default=None, description=_NUMERATOR)
+    denominator: str | None = Field(default=None, description=_DENOMINATOR)
+    data_source: str | None = Field(default=None, description=_DATA_SOURCE)
+    data_provider_id: uuid.UUID | None = Field(default=None, description=_DATA_PROVIDER)
+    indicator_type: IndicatorType | None = Field(default=None, description=_INDICATOR_TYPE)
+    appetite_id: uuid.UUID | None = Field(default=None, description=_APPETITE)
     risk_ids: list[uuid.UUID] | None = None
 
 
@@ -209,11 +330,15 @@ class KriRead(KriBase):
     business_unit_ref: UnitRef | None = None
     category_ref: LookupRef | None = None
     workflow_owner_ref: UserRef | None = None
+    data_provider_ref: UserRef | None = None
+    appetite_ref: KriAppetiteRef | None = None
     status: KriStatus
     is_breached: bool
+    has_feed_token: bool = False
     created_at: datetime
     risks: list[GraphRef] = []
     measurements: list[MeasurementRead] = []
+    escalations: list[KriEscalationRead] = []
 
 
 # ------------------------------------------------------------------ loss events ---

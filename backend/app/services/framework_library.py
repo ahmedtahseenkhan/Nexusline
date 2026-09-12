@@ -3208,6 +3208,151 @@ def _build(meta: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------- ISO/IEC 27002:2022 attributes
+# Each Annex A control's attribute values from ISO/IEC 27002:2022 (§4.2 and the control
+# pages; summarised in its Annex A, table A.1), in the standard's own hashtag spelling so
+# a row can be checked against the text at a glance. Normalised to the stored form
+# (lower case, no "#") by ``_iso_attrs``. Installed onto the controls an ISO 27001 pack
+# creates; a tenant's own edits are never overwritten.
+_CIA = "#Confidentiality #Integrity #Availability"
+_P, _D, _C = "#Preventive", "#Detective", "#Corrective"
+_GE, _PR, _DE, _RE = "#Governance_and_Ecosystem", "#Protection", "#Defence", "#Resilience"
+_IAM = "#Identity_and_access_management"
+_EVENTS = "#Information_security_event_management"
+_SUPPLIER = "#Supplier_relationships_security"
+_APPSYS = "#Application_security #System_and_network_security"
+
+_ISO_27002_RAW: dict[str, tuple[str, str, str, str, str]] = {
+    # ref: (control type, security properties, cybersecurity concepts,
+    #       operational capabilities, security domains)
+    "A.5.1": (_P, _CIA, "#Identify", "#Governance", f"{_GE} {_RE}"),
+    "A.5.2": (_P, _CIA, "#Identify", "#Governance", f"{_GE} {_PR} {_RE}"),
+    "A.5.3": (_P, _CIA, "#Protect", f"#Governance {_IAM}", _GE),
+    "A.5.4": (_P, _CIA, "#Identify", "#Governance", _GE),
+    "A.5.5": (f"{_P} {_C}", _CIA, "#Identify #Protect #Respond #Recover", "#Governance", f"{_DE} {_RE}"),
+    "A.5.6": (f"{_P} {_C}", _CIA, "#Protect #Respond #Recover", "#Governance", _DE),
+    "A.5.7": (f"{_P} {_D} {_C}", _CIA, "#Identify #Detect #Respond", "#Threat_and_vulnerability_management", f"{_DE} {_RE}"),
+    "A.5.8": (_P, _CIA, "#Identify #Protect", "#Governance", f"{_GE} {_PR}"),
+    "A.5.9": (_P, _CIA, "#Identify", "#Asset_management", f"{_GE} {_PR}"),
+    "A.5.10": (_P, _CIA, "#Protect", "#Asset_management #Information_protection", f"{_GE} {_PR}"),
+    "A.5.11": (_P, _CIA, "#Protect", "#Asset_management", _PR),
+    "A.5.12": (_P, _CIA, "#Identify", "#Information_protection", f"{_PR} {_DE}"),
+    "A.5.13": (_P, _CIA, "#Protect", "#Information_protection", f"{_DE} {_PR}"),
+    "A.5.14": (_P, _CIA, "#Protect", "#Asset_management #Information_protection", _PR),
+    "A.5.15": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.5.16": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.5.17": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.5.18": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.5.19": (_P, _CIA, "#Identify", _SUPPLIER, f"{_GE} {_PR}"),
+    "A.5.20": (_P, _CIA, "#Identify", _SUPPLIER, f"{_GE} {_PR}"),
+    "A.5.21": (_P, _CIA, "#Identify", _SUPPLIER, f"{_GE} {_PR}"),
+    "A.5.22": (_P, _CIA, "#Identify", f"{_SUPPLIER} #Information_security_assurance", f"{_GE} {_PR} {_DE}"),
+    "A.5.23": (_P, _CIA, "#Protect", _SUPPLIER, f"{_GE} {_PR}"),
+    "A.5.24": (_C, _CIA, "#Respond #Recover", f"#Governance {_EVENTS}", _DE),
+    "A.5.25": (_D, _CIA, "#Detect #Respond", _EVENTS, _DE),
+    "A.5.26": (_C, _CIA, "#Respond #Recover", _EVENTS, _DE),
+    "A.5.27": (_P, _CIA, "#Identify #Protect", _EVENTS, _DE),
+    "A.5.28": (_C, _CIA, "#Detect #Respond", _EVENTS, _DE),
+    "A.5.29": (f"{_P} {_C}", _CIA, "#Protect #Respond", "#Continuity", f"{_PR} {_RE}"),
+    "A.5.30": (_C, "#Availability", "#Respond", "#Continuity", _RE),
+    "A.5.31": (_P, _CIA, "#Identify", "#Legal_and_compliance", f"{_GE} {_PR}"),
+    "A.5.32": (_P, _CIA, "#Identify", "#Legal_and_compliance", _GE),
+    "A.5.33": (_P, _CIA, "#Identify #Protect", "#Legal_and_compliance #Asset_management #Information_protection", _DE),
+    "A.5.34": (_P, _CIA, "#Identify #Protect", "#Information_protection #Legal_and_compliance", _PR),
+    "A.5.35": (f"{_P} {_C}", _CIA, "#Identify #Protect", "#Information_security_assurance", _GE),
+    "A.5.36": (_P, _CIA, "#Identify #Protect", "#Legal_and_compliance #Information_security_assurance", _GE),
+    "A.5.37": (
+        f"{_P} {_C}", _CIA, "#Protect #Recover",
+        "#Asset_management #Physical_security #System_and_network_security #Application_security "
+        f"#Secure_configuration {_IAM} #Threat_and_vulnerability_management #Continuity {_EVENTS}",
+        f"{_GE} {_PR} {_DE}",
+    ),
+    "A.6.1": (_P, _CIA, "#Protect", "#Human_resource_security", _GE),
+    "A.6.2": (_P, _CIA, "#Protect", "#Human_resource_security", _GE),
+    "A.6.3": (_P, _CIA, "#Protect", "#Human_resource_security", _GE),
+    "A.6.4": (f"{_P} {_C}", _CIA, "#Protect #Respond", "#Human_resource_security", _GE),
+    "A.6.5": (_P, _CIA, "#Protect", "#Human_resource_security #Asset_management", _GE),
+    "A.6.6": (_P, "#Confidentiality", "#Protect", f"#Human_resource_security #Information_protection {_SUPPLIER}", _GE),
+    "A.6.7": (_P, _CIA, "#Protect", "#Asset_management #Information_protection #Physical_security #System_and_network_security", _PR),
+    "A.6.8": (_D, _CIA, "#Detect", _EVENTS, _DE),
+    "A.7.1": (_P, _CIA, "#Protect", "#Physical_security", _PR),
+    "A.7.2": (_P, _CIA, "#Protect", f"#Physical_security {_IAM}", _PR),
+    "A.7.3": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.7.4": (f"{_P} {_D}", _CIA, "#Protect #Detect", "#Physical_security", f"{_PR} {_DE}"),
+    "A.7.5": (_P, _CIA, "#Protect", "#Physical_security", _PR),
+    "A.7.6": (_P, _CIA, "#Protect", "#Physical_security", _PR),
+    "A.7.7": (_P, "#Confidentiality", "#Protect", "#Physical_security", _PR),
+    "A.7.8": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.7.9": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.7.10": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.7.11": (f"{_P} {_D}", "#Integrity #Availability", "#Protect #Detect", "#Physical_security", _PR),
+    "A.7.12": (_P, "#Confidentiality #Availability", "#Protect", "#Physical_security", _PR),
+    "A.7.13": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", f"{_PR} {_RE}"),
+    "A.7.14": (_P, "#Confidentiality", "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.8.1": (_P, _CIA, "#Protect", "#Asset_management #Information_protection", _PR),
+    "A.8.2": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.8.3": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.8.4": (_P, _CIA, "#Protect", f"{_IAM} #Application_security #Secure_configuration", _PR),
+    "A.8.5": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.8.6": (f"{_P} {_D}", "#Integrity #Availability", "#Identify #Protect #Detect", "#Continuity", f"{_GE} {_PR}"),
+    "A.8.7": (f"{_P} {_D} {_C}", _CIA, "#Protect #Detect", "#System_and_network_security #Information_protection", f"{_PR} {_DE}"),
+    "A.8.8": (_P, _CIA, "#Identify #Protect", "#Threat_and_vulnerability_management", f"{_GE} {_PR} {_DE}"),
+    "A.8.9": (_P, _CIA, "#Protect", "#Secure_configuration", _PR),
+    "A.8.10": (_P, "#Confidentiality", "#Protect", "#Information_protection #Legal_and_compliance", _PR),
+    "A.8.11": (_P, "#Confidentiality", "#Protect", "#Information_protection", _PR),
+    "A.8.12": (f"{_P} {_D}", "#Confidentiality", "#Protect #Detect", "#Information_protection", f"{_PR} {_DE}"),
+    "A.8.13": (_C, "#Integrity #Availability", "#Recover", "#Continuity", _PR),
+    "A.8.14": (_P, "#Availability", "#Protect", "#Continuity #Asset_management", f"{_PR} {_RE}"),
+    "A.8.15": (_D, _CIA, "#Detect", _EVENTS, f"{_PR} {_DE}"),
+    "A.8.16": (f"{_D} {_C}", _CIA, "#Detect #Respond", _EVENTS, _DE),
+    "A.8.17": (_D, "#Integrity", "#Protect #Detect", _EVENTS, f"{_PR} {_DE}"),
+    "A.8.18": (_P, _CIA, "#Protect", "#System_and_network_security #Secure_configuration #Application_security", _PR),
+    "A.8.19": (_P, _CIA, "#Protect", "#Secure_configuration #Application_security", _PR),
+    "A.8.20": (f"{_P} {_D}", _CIA, "#Protect #Detect", "#System_and_network_security", _PR),
+    "A.8.21": (_P, _CIA, "#Protect", "#System_and_network_security", _PR),
+    "A.8.22": (_P, _CIA, "#Protect", "#System_and_network_security", _PR),
+    "A.8.23": (_P, _CIA, "#Protect", "#System_and_network_security", _PR),
+    "A.8.24": (_P, _CIA, "#Protect", "#Secure_configuration", _PR),
+    "A.8.25": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.26": (_P, _CIA, "#Protect", _APPSYS, f"{_PR} {_DE}"),
+    "A.8.27": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.28": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.29": (_P, _CIA, "#Identify", "#Application_security #Information_security_assurance #System_and_network_security", _PR),
+    "A.8.30": (f"{_P} {_D}", _CIA, "#Identify #Protect #Detect", f"#System_and_network_security #Application_security {_SUPPLIER}", f"{_GE} {_PR}"),
+    "A.8.31": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.32": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.33": (_P, "#Confidentiality #Integrity", "#Protect", "#Information_protection", _PR),
+    "A.8.34": (_P, _CIA, "#Protect", "#System_and_network_security #Information_protection", f"{_GE} {_PR}"),
+}
+
+_ISO_27002_KEYS = (
+    "control_type", "security_properties", "cybersecurity_concepts",
+    "operational_capabilities", "security_domains",
+)
+
+
+def _iso_attrs(raw: tuple[str, ...]) -> dict[str, list[str]]:
+    """``("#Preventive", "#Confidentiality …", …)`` -> the stored attribute dict, checked
+    against the vocabulary (a typo here fails at import, not on a tenant's install)."""
+    from app.schemas.control import normalize_iso27002
+
+    return normalize_iso27002(dict(zip(_ISO_27002_KEYS, raw)))
+
+
+#: Annex A reference ("A.8.5") -> ISO 27002:2022 attributes, in the stored form.
+ISO27002_ATTRIBUTES: dict[str, dict[str, list[str]]] = {
+    ref: _iso_attrs(raw) for ref, raw in _ISO_27002_RAW.items()
+}
+
+
+def iso27002_attributes_for(template_key: str, reference: str) -> dict[str, list[str]]:
+    """The ISO 27002 attributes a template's clause carries (a copy), or ``{}``."""
+    if template_key != "iso-27001-2022":
+        return {}
+    attrs = ISO27002_ATTRIBUTES.get(reference)
+    return {k: list(v) for k, v in attrs.items()} if attrs else {}
+
+
 TEMPLATES: dict[str, dict] = {
     "iso-27005-2022": _build(_ISO_27005_2022),
     "iso-31000-2018": _build(_ISO_31000_2018),
@@ -3227,6 +3372,11 @@ TEMPLATES: dict[str, dict] = {
     "basel-operational-risk": _build(_BASEL_OPRISK_FW),
     "shariah-governance": _build(_SHARIAH_GOVERNANCE_FW),
 }
+
+# ISO 27001 Annex A rows carry their ISO 27002:2022 attributes.
+for _row in TEMPLATES["iso-27001-2022"]["requirements"]:
+    if _row["reference"] in ISO27002_ATTRIBUTES:
+        _row["iso27002_attributes"] = iso27002_attributes_for("iso-27001-2022", _row["reference"])
 
 #: Other names the SAME standard has been installed under: the retired shallow
 #: content-library packs, and earlier spellings of a template's own name. A framework
@@ -3965,11 +4115,18 @@ async def install_controls_pack(
                 control_type=ControlType.production,
                 status=ControlStatus.planned,
                 effectiveness=ControlEffectiveness.not_assessed,
+                iso27002_attributes=iso27002_attributes_for(key, step.requirement_ref),
             )
             db.add(control)
             created += 1
         else:
             linked += 1
+            # An existing control gains the clause's attributes only if it has none: a
+            # tenant's own classification is never overwritten.
+            if not (control.iso27002_attributes or {}):
+                attrs = iso27002_attributes_for(key, step.requirement_ref)
+                if attrs:
+                    control.iso27002_attributes = attrs
         requirement = requirements.get(normalize_reference(step.requirement_ref))
         if requirement is not None and control not in requirement.controls:
             requirement.controls.append(control)

@@ -36,6 +36,9 @@ LOOKUP_LISTS: dict[str, tuple[str, bool]] = {
     "vendor_category": ("Third-party category", True),
     "country": ("Country", False),
     "root_cause_category": ("Root-cause category", False),
+    # Phase 2
+    "impact_dimension": ("Impact dimension", False),
+    "data_classification": ("Data classification", False),
 }
 
 

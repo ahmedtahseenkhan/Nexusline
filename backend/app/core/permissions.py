@@ -13,6 +13,9 @@ PERMISSION_CATALOG: dict[str, str] = {
     "risk:accept": "Approve risk acceptances",
     "control:read": "View controls",
     "control:write": "Create and edit controls",
+    # Recording and reviewing control tests is assurance work, held apart from editing
+    # the control: a tester need not be able to rewrite the control they test.
+    "control:test": "Record control tests and review other people's tests",
     "compliance:read": "View frameworks and requirements",
     "compliance:write": "Manage frameworks, requirements and control mappings",
     "incident:read": "View incidents",
@@ -127,6 +130,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "risk:delete",
             "control:read",
             "control:write",
+            "control:test",
             "asset:read",
             "asset:write",
             "incident:read",
@@ -197,6 +201,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "compliance:write",
             "control:read",
             "control:write",
+            "control:test",
             "policy:read",
             "policy:write",
             "privacy:read",

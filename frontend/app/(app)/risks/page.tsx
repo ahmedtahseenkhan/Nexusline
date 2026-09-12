@@ -2,14 +2,14 @@
 
 import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, apiCall, type CustomField, type MatrixLevel, type RiskAcceptance, type RiskMatrixConfig, type RiskSetting } from "@/lib/api";
+import { api, apiCall, type CustomField, type MatrixLevel, type RiskAcceptance, type RiskMatrixConfig, type RiskSetting, type TreatmentAction } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
 import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
 import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
-import { cachedBusinessUnits, pickProcesses, type LookupRef, type UserRef } from "@/lib/masterData";
+import { cachedBusinessUnits, lookupValues, pickProcesses, type LookupRef, type LookupValue, type UserRef } from "@/lib/masterData";
 import UserPicker, { UserName } from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import BusinessUnitSelect from "@/components/BusinessUnitSelect";
@@ -23,6 +23,7 @@ import RecordPanels from "@/components/RecordPanels";
 import RecordIssues from "@/components/RecordIssues";
 import RelatedChips from "@/components/RelatedChips";
 import RiskAcceptancePanel from "@/components/RiskAcceptancePanel";
+import RiskTreatmentActions from "@/components/RiskTreatmentActions";
 import ResidualSuggestion from "@/components/ResidualSuggestion";
 import WorkflowStrip from "@/components/WorkflowStrip";
 import RiskMethodology from "@/components/RiskMethodology";
@@ -65,6 +66,32 @@ type RiskRow = {
   inherent_severity: string | null;
   residual_severity: string | null;
   residual_override_reason?: string;
+
+  // Phase 2: the risk statement, classification, target and assessment trail.
+  cause?: string;
+  event?: string;
+  consequence?: string;
+  risk_type?: string | null;
+  velocity?: string | null;
+  source?: string | null;
+  identified_date?: string | null;
+  identified_by_id?: string | null;
+  identified_by_ref?: UserRef | null;
+  target_likelihood?: number | null;
+  target_impact?: number | null;
+  target_score?: number | null;
+  target_severity?: string | null;
+  assessment_rationale?: string;
+  last_assessed_at?: string | null;
+  last_assessed_by_ref?: UserRef | null;
+  impact_dimensions?: { id: string; dimension_id: string; dimension_ref: LookupRef | null; basis: string; score: number; rationale: string }[];
+  treatment_actions?: TreatmentAction[];
+  treatment_progress?: { done: number; total: number; open: number; overdue: number; percent: number } | null;
+  /** The appetite that applies: the risk's top-level category's, else the organisation's. */
+  appetite_score?: number | null;
+  tolerance_score?: number | null;
+  appetite_status?: string | null;
+  appetite_category_id?: string | null;
 
   // Raised when something the risk depended on changed underneath it; one reason per line.
   needs_review?: boolean;
@@ -113,6 +140,7 @@ type RiskRow = {
   goals?: Ref[];
   processing_activities?: Ref[];
   audit_findings?: Ref[];
+  issues?: Ref[];
 };
 
 type Named = { id: string; name?: string; reference?: string; title?: string };
@@ -124,6 +152,45 @@ const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: c
 const STATUS = opts(["draft", "assessed", "treatment_planned", "treatment_in_progress", "accepted", "closed"]);
 const STRATEGY = opts(["mitigate", "accept", "transfer", "avoid"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
+/* Phase 2 fixed vocabularies — they mirror RISK_TYPES / RISK_VELOCITIES / RISK_SOURCES
+   on the server, which refuses anything else. */
+const RISK_TYPE = opts(["strategic", "operational", "financial", "compliance", "technology", "emerging"]);
+const VELOCITY: Option[] = [
+  { value: "immediate", label: "Immediate — within days" },
+  { value: "weeks", label: "Weeks" },
+  { value: "months", label: "Months" },
+  { value: "years", label: "Years" },
+];
+const SOURCE: Option[] = [
+  { value: "rcsa", label: "RCSA" },
+  { value: "audit", label: "Audit" },
+  { value: "incident", label: "Incident" },
+  { value: "regulatory", label: "Regulatory" },
+  { value: "self_identified", label: "Self-identified" },
+  { value: "generated", label: "Generated (scenario library)" },
+  { value: "other", label: "Other" },
+];
+const sourceLabel = (v: string | null | undefined) => SOURCE.find((o) => o.value === v)?.label ?? (v ? cap(v) : "");
+const velocityLabel = (v: string | null | undefined) => VELOCITY.find((o) => o.value === v)?.label ?? (v ? cap(v) : "");
+/** Mirrors risk_integrity.compose_title: "<Event>, caused by <cause>, resulting in <consequence>". */
+function composeTitle(cause: string, event: string, consequence: string): string {
+  const clean = (t: string) => t.split(/\s+/).filter(Boolean).join(" ").replace(/[ .;,]+$/, "");
+  const lower = (t: string) => (/^[A-Z]{2}/.test(t) ? t : t.charAt(0).toLowerCase() + t.slice(1));
+  const ev = clean(event);
+  if (!ev) return "";
+  const parts = [ev.charAt(0).toUpperCase() + ev.slice(1)];
+  if (clean(cause)) parts.push(`caused by ${lower(clean(cause))}`);
+  if (clean(consequence)) parts.push(`resulting in ${lower(clean(consequence))}`);
+  const title = parts.join(", ");
+  return title.length > 255 ? title.slice(0, 254) + "…" : title;
+}
+/** How impact-dimension scores combine (RiskSetting.impact_mode). */
+function combineImpact(scores: number[], mode: string | undefined): number | null {
+  if (!scores.length) return null;
+  if (mode === "average") return Math.ceil(scores.reduce((a, b) => a + b, 0) / scores.length);
+  return Math.max(...scores);
+}
+const DIM_BASES = ["inherent", "residual"] as const;
 /** Score options for the tenant's matrix — a 4x4 register must not offer a 5. */
 const scaleOptions = (size: number): Option[] =>
   Array.from({ length: size }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }));
@@ -148,13 +215,21 @@ function isOverdue(d: string | null): boolean {
   return new Date(d) < new Date(new Date().toDateString());
 }
 
+/** Where the risk stands against the appetite that applies to it — its top-level
+ *  category's where one is set (the server says which), else the organisation's. */
 function appetite(r: RiskRow, s: RiskSetting | null) {
-  if (!s) return null;
-  const score = r.residual_score ?? r.inherent_score;
-  if (score == null) return null;
-  if (score <= s.appetite_score) return { label: "within appetite", tone: "low" as const };
-  if (score <= s.tolerance_score) return { label: "elevated", tone: "medium" as const };
-  return { label: "breach", tone: "critical" as const };
+  const label = { within_appetite: "within appetite", elevated: "elevated", breach: "breach" } as const;
+  const tone = { within_appetite: "low", elevated: "medium", breach: "critical" } as const;
+  let status = r.appetite_status as keyof typeof label | null | undefined;
+  if (status === undefined) {
+    if (!s) return null;
+    const score = r.residual_score ?? r.inherent_score;
+    if (score == null) return null;
+    status = score <= s.appetite_score ? "within_appetite" : score <= s.tolerance_score ? "elevated" : "breach";
+  }
+  if (!status || !(status in label)) return null;
+  const thresholds = r.tolerance_score != null ? ` (appetite ${r.appetite_score}, tolerance ${r.tolerance_score}${r.appetite_category_id ? ", category's" : ""})` : "";
+  return { label: label[status], tone: tone[status], title: `${cap(label[status])}${thresholds}` };
 }
 
 // live rollup of the health of a record's mitigating controls
@@ -177,6 +252,14 @@ const REVIEW_FILTER: Option[] = [
 type FormState = {
   title: string;
   description: string;
+  cause: string;
+  event: string;
+  consequence: string;
+  risk_type: string;
+  velocity: string;
+  source: string;
+  identified_date: string;
+  identified_by_id: string | null;
   category_id: string | null;
   status: string;
   owner_id: string | null;
@@ -184,6 +267,11 @@ type FormState = {
   inherent_impact: number | "";
   residual_likelihood: string;
   residual_impact: string;
+  target_likelihood: string;
+  target_impact: string;
+  assessment_rationale: string;
+  /** Impact scored per dimension, keyed "basis:dimension_id" -> score ("" = not scored). */
+  dims: Record<string, string>;
   residual_override_reason: string;
   annual_loss_frequency: number | "";
   single_loss_expectancy: number | "";
@@ -208,10 +296,16 @@ const refToOpt = (x: Ref): AsyncOption => ({
   label: x.reference || x.title || x.name || x.id,
 });
 
+/* No pre-filled scores: an assessor chooses them (the old 3x3 default made unscored risks
+   look assessed). A draft may be saved unscored; it leaves draft once scored with a
+   rationale. */
 const BLANK: FormState = {
-  title: "", description: "", category_id: null, status: "draft", owner_id: null,
-  inherent_likelihood: 3, inherent_impact: 3,
-  residual_likelihood: "", residual_impact: "", residual_override_reason: "",
+  title: "", description: "", cause: "", event: "", consequence: "",
+  risk_type: "", velocity: "", source: "", identified_date: "", identified_by_id: null,
+  category_id: null, status: "draft", owner_id: null,
+  inherent_likelihood: "", inherent_impact: "",
+  residual_likelihood: "", residual_impact: "", target_likelihood: "", target_impact: "",
+  assessment_rationale: "", dims: {}, residual_override_reason: "",
   annual_loss_frequency: "", single_loss_expectancy: "",
   treatment_strategy: "", treatment_description: "", treatment_owner_id: null,
   treatment_deadline: "", treatment_cost: "", review_frequency: "annual",
@@ -220,16 +314,30 @@ const BLANK: FormState = {
 };
 
 function fromRisk(r: RiskRow): FormState {
+  // A draft never scored (no assessment stamp) shows blank scores, not the stored 1x1.
+  const unscored = r.status === "draft" && !r.last_assessed_at;
   return {
     title: r.title,
     description: r.description || "",
+    cause: r.cause || "",
+    event: r.event || "",
+    consequence: r.consequence || "",
+    risk_type: r.risk_type || "",
+    velocity: r.velocity || "",
+    source: r.source || "",
+    identified_date: r.identified_date || "",
+    identified_by_id: r.identified_by_id ?? null,
     category_id: r.category_id ?? null,
     status: r.status,
     owner_id: r.owner_id ?? null,
-    inherent_likelihood: r.inherent_likelihood,
-    inherent_impact: r.inherent_impact,
+    inherent_likelihood: unscored ? "" : r.inherent_likelihood,
+    inherent_impact: unscored ? "" : r.inherent_impact,
     residual_likelihood: r.residual_likelihood ? String(r.residual_likelihood) : "",
     residual_impact: r.residual_impact ? String(r.residual_impact) : "",
+    target_likelihood: r.target_likelihood ? String(r.target_likelihood) : "",
+    target_impact: r.target_impact ? String(r.target_impact) : "",
+    assessment_rationale: r.assessment_rationale || "",
+    dims: Object.fromEntries((r.impact_dimensions ?? []).map((d) => [`${d.basis}:${d.dimension_id}`, String(d.score)])),
     residual_override_reason: r.residual_override_reason || "",
     annual_loss_frequency: r.annual_loss_frequency ?? "",
     single_loss_expectancy: r.single_loss_expectancy ?? "",
@@ -253,16 +361,35 @@ function fromRisk(r: RiskRow): FormState {
 function toPayload(f: FormState): Record<string, unknown> {
   const num = (v: number | "") => (v === "" ? null : Number(v));
   const scale = (v: string) => (v === "" ? null : Number(v));
+  const dims = Object.entries(f.dims)
+    .filter(([, v]) => v !== "")
+    .map(([key, v]) => {
+      const [basis, dimension_id] = key.split(":");
+      return { basis, dimension_id, score: Number(v) };
+    });
   return {
-    title: f.title,
+    title: f.title.trim(),
     description: f.description,
+    cause: f.cause,
+    event: f.event,
+    consequence: f.consequence,
+    risk_type: f.risk_type || null,
+    velocity: f.velocity || null,
+    source: f.source || null,
+    identified_date: f.identified_date || null,
+    identified_by_id: f.identified_by_id,
     category_id: f.category_id,
     status: f.status,
     owner_id: f.owner_id,
-    inherent_likelihood: f.inherent_likelihood === "" ? 1 : Number(f.inherent_likelihood),
-    inherent_impact: f.inherent_impact === "" ? 1 : Number(f.inherent_impact),
+    // Blank = not chosen yet; the server keeps a draft unscored.
+    inherent_likelihood: f.inherent_likelihood === "" ? null : Number(f.inherent_likelihood),
+    inherent_impact: f.inherent_impact === "" ? null : Number(f.inherent_impact),
     residual_likelihood: scale(f.residual_likelihood),
     residual_impact: scale(f.residual_impact),
+    target_likelihood: scale(f.target_likelihood),
+    target_impact: scale(f.target_impact),
+    assessment_rationale: f.assessment_rationale.trim(),
+    impact_dimensions: dims,
     residual_override_reason: f.residual_override_reason.trim(),
     annual_loss_frequency: num(f.annual_loss_frequency),
     single_loss_expectancy: num(f.single_loss_expectancy),
@@ -289,7 +416,7 @@ function RisksPage() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [recordId, setRecordId] = useRecordParam("id");
-  const { currency, formatDate, formatMoney } = useFormat();
+  const { currency, formatDate, formatDateTime, formatMoney } = useFormat();
   /** Money in the organisation's currency, compact from a million up ("PKR 1.2M"). */
   const money = (n: number | null | undefined) => formatMoney(n, null, { compact: "auto" });
   // Read-only detail loaded for the view drawer (?id=). Edit is a separate action.
@@ -311,6 +438,8 @@ function RisksPage() {
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
+  // Impact dimensions (Settings → Lookups → Impact dimension), the grid's rows.
+  const [dimensions, setDimensions] = useState<LookupValue[]>([]);
 
   // Segment scope. A risk workshop convenes around one business unit or process, so the
   // register needs to narrow to that cut — and whatever is narrowed to here is what the
@@ -422,6 +551,7 @@ function RisksPage() {
     }).catch(() => {});
     api.customFields("risk").then((d) => setCfDefs(d.filter((x) => x.enabled))).catch(() => {});
     api.riskMatrixConfig().then(setMatrix).catch(() => {});
+    lookupValues("impact_dimension").then(setDimensions).catch(() => {});
   }, []);
 
   function openNew() {
@@ -457,8 +587,26 @@ function RisksPage() {
 
   async function save() {
     setError(null);
+    if (!f.title.trim() && !f.event.trim()) {
+      setError("Give the risk a title, or describe the event — the title is then composed from the statement.");
+      return;
+    }
     if (residualAbove && !f.residual_override_reason.trim()) {
       setError("Residual cannot exceed inherent without an override reason. Lower the residual, or write down why it is higher.");
+      return;
+    }
+    if (targetAbove) {
+      setError("The target cannot be higher than the residual (or inherent) risk — treatment only lowers a risk.");
+      return;
+    }
+    if (rationaleNeeded && !rationaleFresh) {
+      setError(leavingDraft
+        ? "Before this risk leaves draft, choose its inherent likelihood and impact and write the assessment rationale."
+        : "The scores changed: write down why in the assessment rationale.");
+      return;
+    }
+    if (leavingDraft && (f.inherent_likelihood === "" || f.inherent_impact === "")) {
+      setError("Choose the inherent likelihood and impact before moving the risk out of draft.");
       return;
     }
     setSaving(true);
@@ -542,6 +690,65 @@ function RisksPage() {
   // computed previews
   const inhScore = f.inherent_likelihood === "" || f.inherent_impact === "" ? null : Number(f.inherent_likelihood) * Number(f.inherent_impact);
   const resScore = f.residual_likelihood === "" || f.residual_impact === "" ? null : Number(f.residual_likelihood) * Number(f.residual_impact);
+  const tgtScore = f.target_likelihood === "" || f.target_impact === "" ? null : Number(f.target_likelihood) * Number(f.target_impact);
+  // Treatment only lowers a risk: target <= residual <= inherent.
+  const targetAbove = tgtScore != null && ((resScore != null && tgtScore > resScore) || (inhScore != null && tgtScore > inhScore));
+
+  /* The assessment trail. A score change needs a new rationale (a draft may keep
+     provisional scores without one); leaving draft needs chosen scores and a rationale.
+     The server enforces both — this only says so before the round trip. */
+  const storedScores = editing && !(editing.status === "draft" && !editing.last_assessed_at)
+    ? [editing.inherent_likelihood, editing.inherent_impact, editing.residual_likelihood ?? "", editing.residual_impact ?? ""].map(String)
+    : ["", "", "", ""];
+  const formScores = [f.inherent_likelihood, f.inherent_impact, f.residual_likelihood, f.residual_impact].map(String);
+  const scoresChanged = formScores.some((v, i) => v !== storedScores[i]);
+  const leavingDraft = f.status !== "draft" && (!editing || editing.status === "draft");
+  const rationaleNeeded = (scoresChanged && f.status !== "draft") || leavingDraft;
+  const rationaleFresh = Boolean(f.assessment_rationale.trim()) &&
+    (!scoresChanged || f.assessment_rationale.trim() !== (editing?.assessment_rationale ?? "").trim() || !editing);
+
+  /** Set a score; the first change clears a rationale that described the old scores. */
+  const setScore = (k: "inherent_likelihood" | "inherent_impact" | "residual_likelihood" | "residual_impact", v: string) =>
+    setF((p) => {
+      const next = { ...p, [k]: k.startsWith("inherent") ? (v === "" ? "" : Number(v)) : v } as FormState;
+      if (editing && p.assessment_rationale === (editing.assessment_rationale ?? "") && p.assessment_rationale) {
+        next.assessment_rationale = "";
+      }
+      return next;
+    });
+
+  /** Dimension rows: the active list, plus any dimension the risk is already scored on. */
+  const dimensionRows = useMemo(() => {
+    const rows = dimensions.map((d) => ({ id: d.id, label: d.label }));
+    for (const d of editing?.impact_dimensions ?? []) {
+      if (!rows.some((r) => r.id === d.dimension_id)) rows.push({ id: d.dimension_id, label: d.dimension_ref?.label ?? "Dimension" });
+    }
+    return rows;
+  }, [dimensions, editing]);
+  /** The overall impact a basis' dimension scores decide, or null when none is scored. */
+  const dimImpact = (dims: Record<string, string>, basis: string) =>
+    combineImpact(
+      Object.entries(dims).filter(([k, v]) => k.startsWith(`${basis}:`) && v !== "").map(([, v]) => Number(v)),
+      settings?.impact_mode,
+    );
+  const setDim = (basis: string, dimensionId: string, v: string) =>
+    setF((p) => {
+      const dims = { ...p.dims, [`${basis}:${dimensionId}`]: v };
+      const derived = dimImpact(dims, basis);
+      const next = { ...p, dims } as FormState;
+      if (derived != null) {
+        if (basis === "inherent") next.inherent_impact = derived;
+        else next.residual_impact = String(derived);
+      }
+      if (editing && p.assessment_rationale === (editing.assessment_rationale ?? "") && p.assessment_rationale) {
+        next.assessment_rationale = "";
+      }
+      return next;
+    });
+  const inherentByDims = dimImpact(f.dims, "inherent") != null;
+  const residualByDims = dimImpact(f.dims, "residual") != null;
+  const hasActions = (editing?.treatment_actions?.length ?? 0) > 0;
+  const composedTitle = composeTitle(f.cause, f.event, f.consequence);
   // Controls can only reduce a risk. A residual above inherent is refused by the server
   // unless an override reason is recorded by someone who can accept risk.
   const residualAbove = inhScore != null && resScore != null && resScore > inhScore;
@@ -560,8 +767,25 @@ function RisksPage() {
   // --------------------------------------------------------------- tabs
   const generalTab = (
     <>
-      <Field label="Title" required help="A short statement of the risk, e.g. 'Phishing leads to credential theft'.">
-        <TextInput value={f.title} onChange={(v) => set("title", v)} placeholder="Phishing leads to credential theft" required />
+      {/* The risk statement first: cause → event → consequence is what makes two people
+          describe the same risk the same way. The title is composed from it when blank. */}
+      <div className="field-row">
+        <Field label="Cause" help="What could make it happen.">
+          <TextArea value={f.cause} onChange={(v) => set("cause", v)} rows={2} placeholder="Phishing emails harvest staff credentials" />
+        </Field>
+        <Field label="Event" help="What could happen — the risk itself.">
+          <TextArea value={f.event} onChange={(v) => set("event", v)} rows={2} placeholder="Unauthorised access to customer accounts" />
+        </Field>
+        <Field label="Consequence" help="What it would lead to.">
+          <TextArea value={f.consequence} onChange={(v) => set("consequence", v)} rows={2} placeholder="Customer losses and an SBP enforcement action" />
+        </Field>
+      </div>
+      <Field
+        label="Title"
+        required={!f.event.trim()}
+        help={f.title.trim() || !composedTitle ? "A short name for the risk." : `Leave blank to use: “${composedTitle}”`}
+      >
+        <TextInput value={f.title} onChange={(v) => set("title", v)} placeholder={composedTitle || "Phishing leads to credential theft"} />
       </Field>
       <Field label="Description">
         <TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="Threat / vulnerability context and what could go wrong." />
@@ -587,7 +811,31 @@ function RisksPage() {
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Status" help="Where the risk is in assessment and treatment. Approval is separate: submit it for review from the risk's detail view.">
+        <Field label="Risk type" help="The top cut of the taxonomy; the category above is the finer one.">
+          <Select value={f.risk_type} onChange={(v) => set("risk_type", v)} options={RISK_TYPE} placeholder="Not classified" />
+        </Field>
+        <Field label="Velocity" help="How fast the impact is felt once the event happens.">
+          <Select value={f.velocity} onChange={(v) => set("velocity", v)} options={VELOCITY} placeholder="Not assessed" />
+        </Field>
+        <Field label="Source" help="Where the risk was identified.">
+          <Select value={f.source} onChange={(v) => set("source", v)} options={SOURCE} placeholder="Not recorded" />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Identified on">
+          <TextInput value={f.identified_date} onChange={(v) => set("identified_date", v)} type="date" />
+        </Field>
+        <Field label="Identified by" help="Defaults to you when left blank on a new risk.">
+          <UserPicker
+            value={f.identified_by_id}
+            onChange={(id) => set("identified_by_id", id)}
+            selected={editing?.identified_by_ref}
+            placeholder="Search people…"
+          />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Status" help="Where the risk is in assessment and treatment. A draft may be saved unscored; any other status needs the inherent scores and an assessment rationale. Approval is separate: submit it for review from the risk's detail view.">
           <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
         </Field>
       </div>
@@ -651,8 +899,17 @@ function RisksPage() {
 
       <Field label="Inherent Risk" help={`Likelihood × Impact before any controls are considered (1–${matrixSize} scale).`}>
         <div className="field-row">
-          <Select value={String(f.inherent_likelihood)} onChange={(v) => set("inherent_likelihood", v === "" ? "" : Number(v))} options={LIKELIHOOD} placeholder="Likelihood" />
-          <Select value={String(f.inherent_impact)} onChange={(v) => set("inherent_impact", v === "" ? "" : Number(v))} options={IMPACT} placeholder="Impact" />
+          <Select value={String(f.inherent_likelihood)} onChange={(v) => setScore("inherent_likelihood", v)} options={LIKELIHOOD} placeholder="Likelihood" />
+          {inherentByDims ? (
+            <div className="field" style={{ margin: 0 }}>
+              <label>Impact</label>
+              <div style={{ paddingTop: 4 }} title="Set by the dimension scores below">
+                <Badge tone="neutral" plain>{f.inherent_impact}</Badge> <span className="muted" style={{ fontSize: 12 }}>from dimensions</span>
+              </div>
+            </div>
+          ) : (
+            <Select value={String(f.inherent_impact)} onChange={(v) => setScore("inherent_impact", v)} options={IMPACT} placeholder="Impact" />
+          )}
           <div className="field" style={{ margin: 0 }}>
             <label>Score</label>
             <div style={{ paddingTop: 4 }}>
@@ -664,8 +921,17 @@ function RisksPage() {
       </Field>
       <Field label="Residual Risk" help="Likelihood × Impact after controls. Leave blank until assessed. Controls can only reduce a risk, so residual should not exceed inherent.">
         <div className="field-row">
-          <Select value={f.residual_likelihood} onChange={(v) => set("residual_likelihood", v)} options={markAbove(LIKELIHOOD, f.residual_impact)} placeholder="Likelihood" />
-          <Select value={f.residual_impact} onChange={(v) => set("residual_impact", v)} options={markAbove(IMPACT, f.residual_likelihood)} placeholder="Impact" />
+          <Select value={f.residual_likelihood} onChange={(v) => setScore("residual_likelihood", v)} options={markAbove(LIKELIHOOD, f.residual_impact)} placeholder="Likelihood" />
+          {residualByDims ? (
+            <div className="field" style={{ margin: 0 }}>
+              <label>Impact</label>
+              <div style={{ paddingTop: 4 }} title="Set by the dimension scores below">
+                <Badge tone="neutral" plain>{f.residual_impact}</Badge> <span className="muted" style={{ fontSize: 12 }}>from dimensions</span>
+              </div>
+            </div>
+          ) : (
+            <Select value={f.residual_impact} onChange={(v) => setScore("residual_impact", v)} options={markAbove(IMPACT, f.residual_likelihood)} placeholder="Impact" />
+          )}
           <div className="field" style={{ margin: 0 }}>
             <label>Score</label>
             <div style={{ paddingTop: 4 }}>
@@ -681,6 +947,93 @@ function RisksPage() {
           </div>
         )}
       </Field>
+      {/* Impact by dimension: rows are the organisation's impact dimensions, columns the
+          two assessments. Scoring any dimension sets that column's overall impact
+          (the highest, or the average rounded up — Risk methodology). */}
+      {dimensionRows.length > 0 && (
+        <Field
+          label="Impact by dimension"
+          help={`Optional. Score the dimensions that apply; the overall impact is the ${settings?.impact_mode === "average" ? "average (rounded up)" : "highest"} of them. Leave a column blank to set its impact directly.`}
+        >
+          <div className="table-wrap">
+            <table style={{ fontSize: 13 }}>
+              <thead>
+                <tr>
+                  <th>Dimension</th>
+                  {DIM_BASES.map((b) => <th key={b} style={{ width: 150, textTransform: "capitalize" }}>{b}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {dimensionRows.map((d) => (
+                  <tr key={d.id}>
+                    <td>{d.label}</td>
+                    {DIM_BASES.map((b) => (
+                      <td key={b}>
+                        <select
+                          className="select" aria-label={`${d.label} ${b} impact`}
+                          value={f.dims[`${b}:${d.id}`] ?? ""}
+                          onChange={(e) => setDim(b, d.id, e.target.value)}
+                        >
+                          <option value="">—</option>
+                          {IMPACT.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                <tr>
+                  <td className="muted" style={{ fontWeight: 600 }}>Overall impact</td>
+                  {DIM_BASES.map((b) => {
+                    const v = dimImpact(f.dims, b);
+                    return <td key={b}>{v != null ? <Badge tone="neutral" plain>{v}</Badge> : <span className="muted">set above</span>}</td>;
+                  })}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </Field>
+      )}
+
+      <Field label="Target Risk" help="Where treatment should take the risk. Optional; it cannot be higher than the residual (or inherent) risk.">
+        <div className="field-row">
+          <Select value={f.target_likelihood} onChange={(v) => set("target_likelihood", v)} options={LIKELIHOOD} placeholder="Likelihood" />
+          <Select value={f.target_impact} onChange={(v) => set("target_impact", v)} options={IMPACT} placeholder="Impact" />
+          <div className="field" style={{ margin: 0 }}>
+            <label>Score</label>
+            <div style={{ paddingTop: 4 }}>
+              {tgtScore != null ? <Badge tone={targetAbove ? "critical" : "neutral"} plain>{tgtScore}</Badge> : <span className="muted">—</span>}
+            </div>
+          </div>
+        </div>
+        {targetAbove && (
+          <div role="alert" style={{ marginTop: 8, fontSize: 12.5, color: "var(--red)" }}>
+            Target {tgtScore} is higher than the {resScore != null && tgtScore! > resScore ? `residual ${resScore}` : `inherent ${inhScore}`} — lower it.
+          </div>
+        )}
+      </Field>
+
+      <Field
+        label="Assessment rationale"
+        required={rationaleNeeded}
+        help={
+          editing?.last_assessed_at
+            ? `Why the scores are what they are. Last assessed ${formatDateTime(editing.last_assessed_at)}${editing.last_assessed_by_ref ? ` by ${editing.last_assessed_by_ref.full_name || editing.last_assessed_by_ref.email}` : ""}.`
+            : "Why the scores are what they are. Required whenever a score changes (a draft may keep provisional scores) and before the risk leaves draft."
+        }
+      >
+        {rationaleNeeded && !rationaleFresh && (
+          <div role="status" style={{ marginBottom: 6, padding: "6px 10px", borderRadius: 6, background: "var(--amber-bg)", fontSize: 12.5 }}>
+            {scoresChanged && editing ? "The scores changed — say why they moved." : "Say why the risk scores this way."}
+          </div>
+        )}
+        <TextArea
+          value={f.assessment_rationale}
+          onChange={(v) => set("assessment_rationale", v)}
+          rows={3}
+          placeholder="For example: two card-fraud losses this quarter and the 3-D Secure rollout slipped to Q1"
+        />
+      </Field>
+
       {residualAbove && (
         <Field
           label="Override reason"
@@ -730,15 +1083,22 @@ function RisksPage() {
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Treatment Deadline">
-          <TextInput value={f.treatment_deadline} onChange={(v) => set("treatment_deadline", v)} type="date" />
+        <Field
+          label="Treatment Deadline"
+          help={hasActions ? "Follows the treatment actions (the latest open action's due date) — change an action's due date in the risk's detail view." : "Once the plan has actions, this follows them."}
+        >
+          {hasActions ? (
+            <div style={{ paddingTop: 4 }}>{formatDate(editing?.treatment_deadline ?? null)}</div>
+          ) : (
+            <TextInput value={f.treatment_deadline} onChange={(v) => set("treatment_deadline", v)} type="date" />
+          )}
         </Field>
         <Field label={`Treatment Cost (${currency})`}>
           <NumberInput value={f.treatment_cost} onChange={(v) => set("treatment_cost", v)} min={0} step={1000} placeholder="50000" />
         </Field>
       </div>
-      <Field label="Treatment Plan">
-        <RichText value={f.treatment_description} onChange={(v) => set("treatment_description", v)} placeholder="Describe the treatment plan, mitigating actions and milestones…" />
+      <Field label="Treatment Plan" help="The plan's summary. Owned, dated actions are added from the risk's detail view.">
+        <RichText value={f.treatment_description} onChange={(v) => set("treatment_description", v)} placeholder="Summarise the treatment plan…" />
       </Field>
     </>
   );
@@ -850,7 +1210,12 @@ function RisksPage() {
     { key: "inherent_score", header: "Inherent", sortable: true, render: (r) => scoreCell(r.inherent_severity, r.inherent_score), text: (r) => `${r.inherent_score ?? ""} ${r.inherent_severity ?? ""}`.trim() },
     { key: "residual_classification", header: "Residual classification", hidden: true, render: (r) => classification(r.residual_likelihood, r.residual_impact), text: (r) => r.residual_likelihood ? `L${r.residual_likelihood} I${r.residual_impact}` : "" },
     { key: "residual_score", header: "Residual", sortable: true, render: (r) => scoreCell(r.residual_severity, r.residual_score), text: (r) => `${r.residual_score ?? ""} ${r.residual_severity ?? ""}`.trim() },
-    { key: "appetite", header: "Appetite", render: (r) => { const a = appetite(r, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; }, text: (r) => appetite(r, settings)?.label ?? "" },
+    { key: "target_score", header: "Target", hidden: true, sortable: true, render: (r) => (r.target_score ? scoreCell(r.target_severity ?? null, r.target_score) : <span className="muted">—</span>), text: (r) => (r.target_score ? `${r.target_score} ${r.target_severity ?? ""}`.trim() : "") },
+    { key: "appetite", header: "Appetite", render: (r) => { const a = appetite(r, settings); return a ? <span title={a.title}><Badge tone={a.tone}>{a.label}</Badge></span> : <span className="muted">—</span>; }, text: (r) => appetite(r, settings)?.label ?? "" },
+    { key: "risk_type", header: "Type", hidden: true, sortable: true, render: (r) => <span className="muted">{r.risk_type ? cap(r.risk_type) : "—"}</span>, text: (r) => (r.risk_type ? cap(r.risk_type) : "") },
+    { key: "velocity", header: "Velocity", hidden: true, render: (r) => <span className="muted">{velocityLabel(r.velocity) || "—"}</span>, text: (r) => velocityLabel(r.velocity) },
+    { key: "source", header: "Source", hidden: true, sortable: true, render: (r) => <span className="muted">{sourceLabel(r.source) || "—"}</span>, text: (r) => sourceLabel(r.source) },
+    { key: "treatment_progress", header: "Treatment actions", hidden: true, render: (r) => (r.treatment_progress?.total ? <span className="muted">{r.treatment_progress.done}/{r.treatment_progress.total}{r.treatment_progress.overdue ? <span style={{ color: "var(--red)" }}> · {r.treatment_progress.overdue} overdue</span> : null}</span> : <span className="muted">—</span>), text: (r) => (r.treatment_progress?.total ? `${r.treatment_progress.done}/${r.treatment_progress.total}` : "") },
     { key: "control_health", header: "Control health", render: (r) => controlHealth(r.control_health), text: (r) => r.control_health ?? "" },
     { key: "needs_review", header: "Review flag", render: (r) => (r.needs_review ? <span title={reviewReasons(r).join("\n")}><Badge tone="high">Needs review</Badge></span> : <span className="muted">—</span>), text: (r) => (r.needs_review ? `Needs review: ${reviewReasons(r).join("; ")}` : "") },
     { key: "treatment_strategy", header: "Treatment", hidden: true, render: (r) => <span className="muted">{r.treatment_strategy ? cap(r.treatment_strategy) : "—"}</span>, text: (r) => r.treatment_strategy ? cap(r.treatment_strategy) : "" },
@@ -1097,7 +1462,8 @@ function RisksPage() {
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-end", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Inherent</div><div style={{ marginTop: 4 }}><Severity value={detail.inherent_severity} /> <span className="muted">({detail.inherent_score ?? "—"})</span></div></div>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Residual</div><div style={{ marginTop: 4 }}><Severity value={detail.residual_severity} /> <span className="muted">({detail.residual_score ?? "—"})</span></div></div>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Appetite</div><div style={{ marginTop: 4 }}>{(() => { const a = appetite(detail, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; })()}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Target</div><div style={{ marginTop: 4 }}>{detail.target_score ? <><Severity value={detail.target_severity ?? null} /> <span className="muted">({detail.target_score})</span></> : <span className="muted">Not set</span>}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Appetite</div><div style={{ marginTop: 4 }}>{(() => { const a = appetite(detail, settings); return a ? <span title={a.title}><Badge tone={a.tone}>{a.label}</Badge></span> : <span className="muted">—</span>; })()}</div>{detail.tolerance_score != null && <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>{detail.appetite_category_id ? "Category" : "Organisation"}: {detail.appetite_score} · {detail.tolerance_score}</div>}</div>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Control health</div><div style={{ marginTop: 4 }}>{controlHealth(detail.control_health)}</div></div>
               <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Exposure (ALE)</div><div style={{ marginTop: 4 }}>{money(detail.annual_loss_expectancy)}</div></div>
             </div>
@@ -1129,11 +1495,63 @@ function RisksPage() {
               onChange={() => { reload(); loadDetail(detail.id); }}
             />
 
+            {(detail.cause || detail.event || detail.consequence) && (
+              <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16, display: "grid", gap: 8 }}>
+                <strong style={{ fontSize: 13 }}>Risk statement</strong>
+                {([["Cause", detail.cause], ["Event", detail.event], ["Consequence", detail.consequence]] as const).map(([label, text]) =>
+                  text ? (
+                    <div key={label} style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, fontSize: 13.5, lineHeight: 1.5 }}>
+                      <span className="muted" style={{ fontWeight: 600, fontSize: 12 }}>{label}</span>
+                      <span>{text}</span>
+                    </div>
+                  ) : null,
+                )}
+              </div>
+            )}
+
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Owner", <UserName user={detail.owner_ref} />)}
               {field("Category", categoryText(detail) || "—")}
               {field("Status", <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>)}
+              {field("Type", detail.risk_type ? cap(detail.risk_type) : "—")}
+              {field("Velocity", velocityLabel(detail.velocity) || "—")}
+              {field("Source", sourceLabel(detail.source) || "—")}
+              {field("Identified", detail.identified_date || detail.identified_by_ref
+                ? <>{detail.identified_date ? formatDate(detail.identified_date) : ""}{detail.identified_by_ref ? <> {detail.identified_date ? "· " : ""}<UserName user={detail.identified_by_ref} /></> : null}</>
+                : "—")}
             </div>
+
+            {(detail.assessment_rationale || detail.last_assessed_at) && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                  Assessment rationale
+                  {detail.last_assessed_at && <> · assessed {formatDateTime(detail.last_assessed_at)}{detail.last_assessed_by_ref ? <> by <UserName user={detail.last_assessed_by_ref} /></> : null}</>}
+                </div>
+                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.assessment_rationale || <span className="muted">No rationale recorded (provisional draft scores).</span>}</div>
+              </div>
+            )}
+
+            {(detail.impact_dimensions?.length ?? 0) > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Impact by dimension</div>
+                <div className="table-wrap">
+                  <table style={{ fontSize: 13 }}>
+                    <thead><tr><th>Dimension</th>{DIM_BASES.map((b) => <th key={b} style={{ width: 110, textTransform: "capitalize" }}>{b}</th>)}</tr></thead>
+                    <tbody>
+                      {Array.from(new Map((detail.impact_dimensions ?? []).map((d) => [d.dimension_id, d.dimension_ref?.label ?? "Dimension"])).entries()).map(([id, label]) => (
+                        <tr key={id}>
+                          <td>{label}</td>
+                          {DIM_BASES.map((b) => {
+                            const hit = detail.impact_dimensions?.find((d) => d.dimension_id === id && d.basis === b);
+                            return <td key={b}>{hit ? rungLabel("impact", hit.score) : <span className="muted">—</span>}</td>;
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             {detail.description && (
               <div style={{ marginBottom: 16 }}>
@@ -1147,12 +1565,18 @@ function RisksPage() {
               <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
                 {field("Strategy", detail.treatment_strategy ? cap(detail.treatment_strategy) : "—")}
                 {field("Owner", <UserName user={detail.treatment_owner_ref} fallback={detail.treatment_owner} />)}
-                {field("Deadline", formatDate(detail.treatment_deadline))}
+                {field(detail.treatment_actions?.length ? "Deadline (from actions)" : "Deadline", formatDate(detail.treatment_deadline))}
                 {field("Cost", money(detail.treatment_cost))}
               </div>
               {detail.treatment_description && (
                 <div style={{ fontSize: 13.5, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: detail.treatment_description }} />
               )}
+              <RiskTreatmentActions
+                riskId={detail.id}
+                actions={detail.treatment_actions ?? []}
+                progress={detail.treatment_progress}
+                onChange={() => { reload(); loadDetail(detail.id); }}
+              />
             </div>
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 18 }}>
@@ -1179,6 +1603,7 @@ function RisksPage() {
               <RelatedChips label="Goals" items={detail.goals} href="/goals" />
               <RelatedChips label="Processing activities" items={detail.processing_activities} href="/privacy" />
               <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
+              <RelatedChips label="Issues" items={detail.issues} href="/issues" />
             </div>
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>

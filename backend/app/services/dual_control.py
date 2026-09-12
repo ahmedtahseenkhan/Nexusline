@@ -22,11 +22,20 @@ module               action              decision that is gated
 risk                 accept              accepting a risk
 exception            approve             approving a risk exception
 control              audit               recording a control-audit result
+control              review_test         approving or returning a control test (the
+                                         tester, and whoever recorded or edited the
+                                         test, may not review it)
 policy               publish             publishing (approving) a policy
 aml                  file_sar            marking an STR/SAR as filed with the FMU
 shariah              charity_approved    approving a purification disbursement
 shariah              charity_disbursed   releasing a purification disbursement
 authority            update              amending an authority-matrix line
+issue                validate            validating an issue's remediation (not its
+                                         owner, not whoever raised it)
+issue                close               closing an issue (not whoever raised it)
+issue                extend_due_date     approving a later due date on a regulator-
+                                         related / high / critical issue (not whoever
+                                         asked for it)
 risk                 bulk_archive        archiving risks with no live links (an
                                          immediate action: refused while dual control
                                          applies — configure a rule to allow it)
@@ -205,6 +214,7 @@ async def enforce_record_maker_checker(
     checker_id: uuid.UUID | None,
     amount: float | None = None,
     subject: str = "request",
+    message: str | None = None,
     record: Any = None,
 ) -> DualControlRule | None:
     """Four-eyes for a decision taken *on an existing record*.
@@ -223,6 +233,7 @@ async def enforce_record_maker_checker(
         checker_id=checker_id,
         amount=amount,
         subject=subject,
+        message=message,
     )
 
 
@@ -235,18 +246,21 @@ async def enforce_maker_checker(
     checker_id: uuid.UUID | None,
     amount: float | None = None,
     subject: str = "request",
+    message: str | None = None,
 ) -> DualControlRule | None:
     """Raise 403 when four-eyes applies and the maker is trying to be their own checker.
 
     Returns the matched rule (or ``None``) so callers may log/inspect it. Safe to call on
-    every decision path: when the control does not apply it is a no-op."""
+    every decision path: when the control does not apply it is a no-op. ``message``
+    replaces the generic wording where "approve" is the wrong verb (recording a test of
+    a control you entered, say)."""
     required, rule = await dual_control_required(db, module, action, amount)
     if not required:
         return rule
     if maker_id is not None and checker_id is not None and maker_id == checker_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
+            detail=message or (
                 f"Segregation of duties: the maker of this {subject} cannot approve it — "
                 "an independent checker must decide."
             ),

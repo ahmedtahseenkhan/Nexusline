@@ -9,14 +9,16 @@ in the database.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
     Computed,
     Date,
+    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -128,6 +130,24 @@ RESIDUAL_NOT_ABOVE_INHERENT = (
 
 class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "risks"
+    # Phase 2: structured risk statement (bow-tie) and assessment trail.
+    cause: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    event: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    consequence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    risk_type: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    velocity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    identified_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    identified_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # who identified the risk
+    source: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    target_likelihood: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_impact: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    assessment_rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_assessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_assessed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # who last changed the scores
     __table_args__ = (
         CheckConstraint(f"inherent_likelihood {_SCALE}", name="ck_risk_inh_likelihood"),
         CheckConstraint(f"inherent_impact {_SCALE}", name="ck_risk_inh_impact"),
@@ -293,6 +313,12 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     loss_events: Mapped[list["LossEvent"]] = relationship(  # noqa: F821
         "LossEvent", secondary="loss_event_risks", lazy="selectin", viewonly=True,
     )
+    # Phase 2: issues raised against this risk (``issue_risks``, written from the issue
+    # side). Live issues only.
+    issues: Mapped[list["Issue"]] = relationship(  # noqa: F821
+        "Issue", secondary="issue_risks", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(issue_risks.c.issue_id == Issue.id, Issue.deleted == False)",
+    )
 
     acceptances: Mapped[list["RiskAcceptance"]] = relationship(
         back_populates="risk",
@@ -348,6 +374,11 @@ class RiskSetting(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     """Per-tenant risk appetite, tolerance and matrix size (single row per org)."""
 
     __tablename__ = "risk_settings"
+    # Phase 2: configurable severity bands and a cell-by-cell heat map; how impact
+    # dimensions combine ("max" = the highest dimension).
+    severity_bands: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    matrix_cells: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    impact_mode: Mapped[str] = mapped_column(String(16), default="max", nullable=False)
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_risk_settings_tenant"),)
 
     appetite_score: Mapped[int] = mapped_column(Integer, default=6, nullable=False)
@@ -404,3 +435,57 @@ class ResidualPolicy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     weight_not_assessed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     applies_to: Mapped[str] = mapped_column(String(16), default="likelihood", nullable=False)
     max_reduction: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+
+
+class RiskImpactDimension(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 2: impact scored per dimension (financial, regulatory, reputational,
+    customer, operational — the ``impact_dimension`` lookup list)."""
+
+    __tablename__ = "risk_impact_dimensions"
+    __table_args__ = (
+        UniqueConstraint("risk_id", "dimension_id", "basis", name="uq_risk_impact_dimension"),
+    )
+
+    risk_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    dimension_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="CASCADE"), nullable=False
+    )
+    basis: Mapped[str] = mapped_column(String(16), default="inherent", nullable=False)  # inherent|residual|target
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class RiskAppetite(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 2: appetite and tolerance per top-level risk category; the tenant-wide
+    ``RiskSetting`` values are the fallback for categories without one."""
+
+    __tablename__ = "risk_appetites"
+    __table_args__ = (UniqueConstraint("tenant_id", "category_id", name="uq_risk_appetite_category"),)
+
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="CASCADE"), nullable=False
+    )
+    appetite_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    tolerance_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    statement: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class RiskTreatmentAction(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 2: a treatment plan as actions with owners and dates, replacing one text blob."""
+
+    __tablename__ = "risk_treatment_actions"
+
+    risk_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # who does it
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", nullable=False)  # open|in_progress|done|cancelled
+    percent_complete: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

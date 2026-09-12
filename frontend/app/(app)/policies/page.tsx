@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { apiCall, type Policy as PolicyBase, type PolicyLink } from "@/lib/api";
+import { api, apiCall, type Policy as PolicyBase, type PolicyAckStatus, type PolicyLink } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
@@ -16,7 +16,7 @@ import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
-import { type Option as AsyncOption } from "@/components/AsyncSelect";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import RelatedChips from "@/components/RelatedChips";
 import FormModal from "@/components/FormModal";
@@ -88,6 +88,13 @@ type FormState = {
   summary: string;
   owner_id: string | null;
   category_id: string | null;
+  /** Phase 2: the approving committee, effective date, the policy this replaces, and
+   *  who it applies to. */
+  approving_authority_id: string;
+  effective_date: string;
+  supersedes: AsyncOption | null;
+  business_unit_ids: AsyncOption[];
+  role_ids: AsyncOption[];
   /** "draft" / "retired", or "" to keep a lifecycle status (under review, approved, published). */
   status: string;
   review_frequency: string;
@@ -104,6 +111,7 @@ type FormState = {
 
 const BLANK: FormState = {
   title: "", summary: "", owner_id: null, category_id: null,
+  approving_authority_id: "", effective_date: "", supersedes: null, business_unit_ids: [], role_ids: [],
   status: "draft", review_frequency: "annual",
   document_type: "policy", version: "1.0", use_attachments: false, url: "", body: "",
   related_ids: [], controls_ids: [], requirements_ids: [], risks_ids: [],
@@ -112,6 +120,11 @@ const BLANK: FormState = {
 function fromPolicy(p: Policy): FormState {
   return {
     title: p.title, summary: p.summary || "", owner_id: p.owner_id ?? null, category_id: p.category_id ?? null,
+    approving_authority_id: p.approving_authority_id || "",
+    effective_date: p.effective_date || "",
+    supersedes: p.supersedes_ref ? refToOpt(p.supersedes_ref) : null,
+    business_unit_ids: (p.business_units ?? []).map(refToOpt),
+    role_ids: (p.roles ?? []).map(refToOpt),
     status: isEditableStatus(p.status) ? p.status : "", review_frequency: p.review_frequency,
     document_type: p.document_type, version: p.version, use_attachments: p.use_attachments,
     url: p.url || "", body: p.body || "",
@@ -125,6 +138,11 @@ function fromPolicy(p: Policy): FormState {
 function toPayload(f: FormState): Record<string, unknown> {
   return {
     title: f.title, summary: f.summary, owner_id: f.owner_id, category_id: f.category_id,
+    approving_authority_id: f.approving_authority_id || null,
+    effective_date: f.effective_date || null,
+    supersedes_id: f.supersedes?.value ?? null,
+    business_unit_ids: f.business_unit_ids.map((o) => o.value),
+    role_ids: f.role_ids.map((o) => o.value),
     // Only draft / retired are ever sent; a lifecycle status is left as it is.
     ...(f.status ? { status: f.status } : {}),
     review_frequency: f.review_frequency,
@@ -155,6 +173,13 @@ function PoliciesInner() {
   const [reviewNote, setReviewNote] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
 
+  // Acknowledgement targeting of the open policy, and the committee / role choices.
+  const [ackStatus, setAckStatus] = useState<PolicyAckStatus | null>(null);
+  const [options, setOptions] = useState<{ committees: PolicyLink[]; roles: PolicyLink[] }>({ committees: [], roles: [] });
+  useEffect(() => {
+    api.policyOptions().then(setOptions).catch(() => {});
+  }, []);
+
   const [editing, setEditing] = useState<Policy | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -166,10 +191,11 @@ function PoliciesInner() {
   const loadDetail = useCallback((id: string) => {
     apiCall<PolicyDetail>("GET", `/policies/${id}`).then(setDetail).catch(() => setDetail(null));
     apiCall<PolicyReview[]>("GET", `/policies/${id}/reviews`).then(setReviews).catch(() => setReviews([]));
+    api.policyAckStatus(id).then(setAckStatus).catch(() => setAckStatus(null));
   }, []);
   useEffect(() => {
     setReviewDate(""); setReviewer(null); setReviewNote("");
-    if (openId) loadDetail(openId); else { setDetail(null); setReviews([]); }
+    if (openId) loadDetail(openId); else { setDetail(null); setReviews([]); setAckStatus(null); }
   }, [openId, loadDetail]);
 
   // server typeahead pickers
@@ -177,6 +203,16 @@ function PoliciesInner() {
   const searchControls = (q: string) => apiCall<PagedList<{ id: string; name: string; reference: string }>>("GET", `/controls?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((c) => ({ value: c.id, label: c.name, sub: c.reference })));
   const searchRequirements = (q: string) => apiCall<{ id: string; reference: string; title: string; framework: string }[]>("GET", `/requirements?search=${encodeURIComponent(q)}&limit=20`).then((rows) => rows.map((r) => ({ value: r.id, label: `${r.reference ? r.reference + " · " : ""}${r.title}`, sub: r.framework })));
   const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
+  // The unit picker feed needs only a sign-in (GET /business-units needs org:read).
+  const searchUnits = (q: string) => apiCall<{ id: string; name: string; path?: string }[]>("GET", `/pickers/business-units?search=${encodeURIComponent(q)}`).then((rows) => rows.slice(0, 30).map((x) => ({ value: x.id, label: x.name, sub: x.path && x.path !== x.name ? x.path : undefined })));
+  const searchRoles = (q: string) => Promise.resolve(
+    options.roles.filter((r) => (r.name || "").toLowerCase().includes(q.trim().toLowerCase())).map((r) => ({ value: r.id, label: r.name || r.id })),
+  );
+  const committeeOptions: Option[] = options.committees.map((c) => ({ value: c.id, label: c.reference ? `${c.name} (${c.reference})` : c.name || c.id }));
+  if (editing?.approving_authority_ref && !committeeOptions.some((o) => o.value === editing.approving_authority_ref?.id)) {
+    const c = editing.approving_authority_ref;
+    committeeOptions.push({ value: c.id, label: c.name || c.reference || c.id });
+  }
 
   function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
   function openEdit(p: Policy) { setEditing(p); setF(fromPolicy(p)); setError(null); setShowForm(true); }
@@ -270,6 +306,8 @@ function PoliciesInner() {
     { key: "category", header: "Category", sortable: true, render: (p) => <span className="muted">{categoryText(p) || "—"}</span>, text: (p) => categoryText(p) },
     { key: "links", header: "Links", align: "center", render: (p) => <span className="muted">{linkCount(p) || "—"}</span> },
     { key: "next_review_date", header: "Reviews", sortable: true, render: (p) => (p.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(p.next_review_date)}</span>), text: (p) => (p.next_review_date ? formatDate(p.next_review_date) : "") },
+    { key: "effective_date", header: "Effective", hidden: true, render: (p) => <span className="muted">{formatDate(p.effective_date)}</span>, text: (p) => (p.effective_date ? formatDate(p.effective_date) : "") },
+    { key: "approving_authority", header: "Approved by", hidden: true, render: (p) => <span className="muted">{p.approving_authority_ref?.name || "—"}</span>, text: (p) => p.approving_authority_ref?.name || "" },
     { key: "acks", header: "Acks", align: "center", render: (p) => <Badge tone="info" plain>{p.acknowledgment_count}</Badge> },
     { key: "actions", header: "", render: (p) => <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(p)}>Edit</button><button className="btn secondary sm" onClick={() => acknowledge(p)}><IconCheck width={14} height={14} /> Ack</button><button className="btn secondary sm" onClick={() => remove(p)}>Delete</button></div> },
   ];
@@ -356,9 +394,47 @@ function PoliciesInner() {
     </>
   );
 
+  const governanceTab = (
+    <>
+      <div className="field-row">
+        <Field label="Approving authority" help="The board or committee that approves this policy (Governance → committees).">
+          <Select
+            value={f.approving_authority_id}
+            onChange={(v) => set("approving_authority_id", v)}
+            options={committeeOptions}
+            placeholder={committeeOptions.length ? "Choose a committee…" : "No committees yet"}
+          />
+        </Field>
+        <Field label="Effective date" help="When it takes effect. Leave empty to use the publication date; it can't be earlier than the approval.">
+          <input className="input" type="date" value={f.effective_date} onChange={(e) => set("effective_date", e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Supersedes" help="The policy this one replaces. When this one is published, that one is retired automatically.">
+        <AsyncSelect
+          search={searchPolicies}
+          value={f.supersedes?.value ?? null}
+          selectedLabel={f.supersedes?.label}
+          onChange={(v, o) => set("supersedes", v ? { value: v, label: o?.label || f.supersedes?.label || v } : null)}
+          placeholder="Search policies…"
+        />
+      </Field>
+      {editing?.superseded_by?.length ? (
+        <div style={{ marginBottom: 12 }}>
+          <RelatedChips label="Superseded by" items={editing.superseded_by} href="/policies" />
+        </div>
+      ) : null}
+      <Field label="Applies to — business units" help="Recorded for reporting. People aren't linked to business units, so this doesn't change who is asked to acknowledge.">
+        <AsyncMultiSelect search={searchUnits} value={f.business_unit_ids} onChange={(v) => set("business_unit_ids", v)} />
+      </Field>
+      <Field label="Applies to — roles" help="Members of these roles are asked to acknowledge the policy. None: everyone is.">
+        <AsyncMultiSelect search={searchRoles} value={f.role_ids} onChange={(v) => set("role_ids", v)} placeholder="Search roles…" />
+      </Field>
+    </>
+  );
+
   const linksTab = (
     <>
-      <Field label="Related Policies" help="Cross-link policies that supersede, reference or depend on this one.">
+      <Field label="Related Policies" help="Cross-link policies that reference or depend on this one. A replacement goes under Governance → Supersedes.">
         <AsyncMultiSelect search={searchPolicies} value={f.related_ids} onChange={(v) => set("related_ids", v)} />
       </Field>
       <Field label="Related Controls" help="Controls that implement or enforce this policy.">
@@ -436,7 +512,23 @@ function PoliciesInner() {
               <div><div className="muted" style={{ fontSize: 12 }}>Next review</div><div style={{ marginTop: 4 }}>{formatDate(detail.next_review_date)}</div></div>
               <div><div className="muted" style={{ fontSize: 12 }}>Last review</div><div style={{ marginTop: 4 }}>{formatDate(detail.last_review_date)}</div></div>
               <div><div className="muted" style={{ fontSize: 12 }}>Published</div><div style={{ marginTop: 4 }}>{formatDate(detail.published_at)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Effective</div><div style={{ marginTop: 4 }}>{formatDate(detail.effective_date)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Approving authority</div><div style={{ marginTop: 4 }}>{detail.approving_authority_ref ? detail.approving_authority_ref.name || detail.approving_authority_ref.reference : "—"}</div></div>
             </div>
+
+            {(detail.supersedes_ref || (detail.superseded_by?.length ?? 0) > 0) && (
+              <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+                {detail.supersedes_ref && (
+                  <RelatedChips label="Supersedes" items={[detail.supersedes_ref]} href="/policies" />
+                )}
+                {(detail.superseded_by?.length ?? 0) > 0 && (
+                  <div>
+                    <RelatedChips label="Superseded by" items={detail.superseded_by} href="/policies" />
+                    {detail.status === "retired" && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>Retired when its successor was published.</div>}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
               <strong style={{ fontSize: 13, display: "block", marginBottom: 10 }}>Approval &amp; publication</strong>
@@ -514,6 +606,50 @@ function PoliciesInner() {
               ) : <span className="muted" style={{ fontSize: 12.5 }}>No reviews scheduled yet.</span>}
             </div>
 
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13 }}>Applicability &amp; acknowledgement</strong>
+              <div style={{ display: "flex", gap: 20, flexWrap: "wrap", margin: "10px 0" }}>
+                <RelatedChips label="Business units" items={detail.business_units} href="/business-units" />
+                <div style={{ minWidth: 140 }}>
+                  <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Roles</div>
+                  <div style={{ marginTop: 3, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {detail.roles?.length ? detail.roles.map((r) => <span key={r.id} className="chip">{r.name}</span>) : <span className="muted">— everyone</span>}
+                  </div>
+                </div>
+              </div>
+              {ackStatus ? (
+                <>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 13, marginBottom: 6 }}>
+                    <Badge tone={ackStatus.pending === 0 && ackStatus.total > 0 ? "low" : "info"}>
+                      {ackStatus.acknowledged} of {ackStatus.total} acknowledged
+                    </Badge>
+                    {ackStatus.outside_scope > 0 && (
+                      <span className="muted">+{ackStatus.outside_scope} from people outside the scope</span>
+                    )}
+                  </div>
+                  <p className="muted" style={{ fontSize: 12.5, margin: "0 0 10px" }}>{ackStatus.note}</p>
+                  {ackStatus.users.length ? (
+                    <div className="table-wrap" style={{ maxHeight: 280, overflowY: "auto" }}>
+                      <table>
+                        <thead>
+                          <tr><th>Person</th><th>Roles</th><th style={{ width: 150 }}>Acknowledged</th></tr>
+                        </thead>
+                        <tbody>
+                          {ackStatus.users.map((u) => (
+                            <tr key={u.user_id}>
+                              <td><span title={u.email}>{u.full_name || u.email}</span></td>
+                              <td className="muted" style={{ fontSize: 12.5 }}>{u.roles.join(", ") || "—"}</td>
+                              <td>{u.acknowledged ? <span><Badge tone="low">Yes</Badge> <span className="muted" style={{ fontSize: 12 }}>{formatDate(u.acknowledged_at)}</span></span> : <Badge tone="medium">Pending</Badge>}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : <span className="muted" style={{ fontSize: 12.5 }}>Nobody is in scope: the policy's roles have no active members.</span>}
+                </>
+              ) : <span className="muted" style={{ fontSize: 12.5 }}>Acknowledgement status unavailable.</span>}
+            </div>
+
             <strong style={{ fontSize: 13 }}>Related records</strong>
             <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 14 }}>
               <RelatedChips label="Controls" items={detail.controls} href="/controls" />
@@ -536,6 +672,7 @@ function PoliciesInner() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "content", label: "Policy Content", content: contentTab },
+            { id: "governance", label: "Governance & Applicability", content: governanceTab },
             { id: "links", label: "Links & Relations", content: linksTab },
           ]}
           onClose={() => setShowForm(false)}

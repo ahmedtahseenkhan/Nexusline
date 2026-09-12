@@ -278,7 +278,9 @@ async def test_update_rejects_lowering_inherent_below_a_stored_residual(stub_io,
 
 async def test_update_override_needs_risk_accept(stub_io, audit_log):
     stub_io["risk"] = _risk()
-    body = RiskUpdate(residual_likelihood=4, residual_impact=5, residual_override_reason="Control withdrawn")
+    # Phase 2: a score change also carries its assessment rationale.
+    body = RiskUpdate(residual_likelihood=4, residual_impact=5, residual_override_reason="Control withdrawn",
+                      assessment_rationale="Control withdrawn")
     with pytest.raises(HTTPException) as exc:
         await risks_api.update_risk(stub_io["risk"].id, body, FakeDB(), _user(WRITER))
     assert exc.value.status_code == 403
@@ -302,7 +304,10 @@ async def test_update_that_resends_unchanged_scores_passes_for_a_writer(stub_io,
 async def test_update_that_corrects_the_residual_clears_the_flag(stub_io, audit_log):
     stub_io["risk"] = _risk(residual_likelihood=4, residual_impact=5, needs_review=True,
                             review_reason=RESIDUAL_REVIEW_REASON)
-    await risks_api.update_risk(stub_io["risk"].id, RiskUpdate(residual_likelihood=2), FakeDB(), _user(WRITER))
+    await risks_api.update_risk(
+        stub_io["risk"].id, RiskUpdate(residual_likelihood=2, assessment_rationale="Lowered after review"),
+        FakeDB(), _user(WRITER),
+    )
     assert (stub_io["risk"].needs_review, stub_io["risk"].review_reason) == (False, "")
     assert "review flag cleared" in audit_log[0]["changes"]["review_reason"]
 
@@ -324,7 +329,8 @@ async def test_assess_path_enforces_the_rule(stub_io, audit_log):
     assert exc.value.status_code == 422
     await risks_api.assess_risk(
         stub_io["risk"].id,
-        RiskAssessment(residual_likelihood=4, residual_impact=5, residual_override_reason="Control withdrawn"),
+        RiskAssessment(residual_likelihood=4, residual_impact=5, residual_override_reason="Control withdrawn",
+                       assessment_rationale="Control withdrawn"),
         FakeDB(), _user(ACCEPTER),
     )
     assert stub_io["risk"].residual_override_reason == "Control withdrawn"

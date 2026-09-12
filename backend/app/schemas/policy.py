@@ -20,6 +20,18 @@ class PolicyRefItem(BaseModel):
 
 
 _LEGACY = "Legacy free text, accepted for one release; send the *_id instead. "
+_AUTHORITY = "Board or committee (Governance → committees) that approves the policy."
+_EFFECTIVE = (
+    "Date the policy takes effect. Left empty, publishing sets it to the publication date; "
+    "it can't be earlier than the date the policy was approved."
+)
+_SUPERSEDES = (
+    "The policy this one replaces (not itself, no cycles). Publishing this policy retires "
+    "the one it supersedes."
+)
+_REQUIREMENTS = "Framework requirements the policy addresses (written to requirement_policies)."
+_UNITS = "Business units the policy applies to (recorded and reported; users carry no unit)."
+_ROLES = "Roles the policy applies to: their members are the people asked to acknowledge it."
 
 
 class PolicyBase(BaseModel):
@@ -41,13 +53,19 @@ class PolicyBase(BaseModel):
     label_id: uuid.UUID | None = None
     use_attachments: bool = False
     review_frequency: ReviewFrequency = ReviewFrequency.annual
+    # Phase 2: document governance.
+    approving_authority_id: uuid.UUID | None = Field(default=None, description=_AUTHORITY)
+    effective_date: date | None = Field(default=None, description=_EFFECTIVE)
+    supersedes_id: uuid.UUID | None = Field(default=None, description=_SUPERSEDES)
 
 
 class PolicyCreate(PolicyBase):
     related_ids: list[uuid.UUID] = []
     controls_ids: list[uuid.UUID] = []
-    requirements_ids: list[uuid.UUID] = []
+    requirements_ids: list[uuid.UUID] = Field(default_factory=list, description=_REQUIREMENTS)
     risks_ids: list[uuid.UUID] = []
+    business_unit_ids: list[uuid.UUID] = Field(default_factory=list, description=_UNITS)
+    role_ids: list[uuid.UUID] = Field(default_factory=list, description=_ROLES)
 
 
 class PolicyUpdate(BaseModel):
@@ -66,10 +84,15 @@ class PolicyUpdate(BaseModel):
     label_id: uuid.UUID | None = None
     use_attachments: bool | None = None
     review_frequency: ReviewFrequency | None = None
+    approving_authority_id: uuid.UUID | None = Field(default=None, description=_AUTHORITY)
+    effective_date: date | None = Field(default=None, description=_EFFECTIVE)
+    supersedes_id: uuid.UUID | None = Field(default=None, description=_SUPERSEDES)
     related_ids: list[uuid.UUID] | None = None
     controls_ids: list[uuid.UUID] | None = None
-    requirements_ids: list[uuid.UUID] | None = None
+    requirements_ids: list[uuid.UUID] | None = Field(default=None, description=_REQUIREMENTS)
     risks_ids: list[uuid.UUID] | None = None
+    business_unit_ids: list[uuid.UUID] | None = Field(default=None, description=_UNITS)
+    role_ids: list[uuid.UUID] | None = Field(default=None, description=_ROLES)
 
 
 class PolicyReviewCreate(BaseModel):
@@ -121,6 +144,12 @@ class PolicyRead(PolicyBase):
     projects: list[GraphRef] = []
     goals: list[GraphRef] = []
     processing_activities: list[GraphRef] = []
+    # Phase 2: governance and applicability.
+    approving_authority_ref: GraphRef | None = None
+    supersedes_ref: GraphRef | None = None
+    superseded_by: list[GraphRef] = []
+    business_units: list[GraphRef] = []
+    roles: list[GraphRef] = []
     created_at: datetime
 
 
@@ -131,3 +160,36 @@ class PolicyAcknowledgmentRead(BaseModel):
     user_id: uuid.UUID
     user_email: str
     created_at: datetime
+
+
+class PolicyAckStatusRow(BaseModel):
+    user_id: uuid.UUID
+    full_name: str = ""
+    email: str = ""
+    roles: list[str] = []
+    acknowledged: bool
+    acknowledged_at: datetime | None = None
+
+
+class PolicyAckStatus(BaseModel):
+    """Who is asked to acknowledge a policy, and who has."""
+
+    policy_id: uuid.UUID
+    #: ``roles`` — members of the policy's roles; ``everyone`` — no roles are set, so every
+    #: active user is in scope.
+    scope: str
+    roles: list[str] = []
+    note: str = ""
+    total: int
+    acknowledged: int
+    pending: int
+    #: Acknowledgements from people outside the scope (kept, not counted above).
+    outside_scope: int = 0
+    users: list[PolicyAckStatusRow] = []
+
+
+class PolicyOptions(BaseModel):
+    """Choices for the policy form that need no other module's permission."""
+
+    committees: list[GraphRef] = []
+    roles: list[GraphRef] = []

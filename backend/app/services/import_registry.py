@@ -44,6 +44,8 @@ from app.models.outsourcing import (
     SbpApprovalStatus,
 )
 from app.models.policy import Policy
+from app.models.governance import Committee  # policies: approving authority
+from app.models.identity import Role, User  # policies: roles; KRIs: data provider
 from app.models.privacy import ProcessingActivity
 from app.models.project import Project
 from app.models.regulatory_change import (
@@ -114,7 +116,7 @@ from app.schemas.goal import GoalCreate
 from app.schemas.icfr import IcfrProcessCreate
 from app.schemas.incident import IncidentCreate
 from app.schemas.internal_audit import EngagementCreate, FindingCreate
-from app.schemas.issue import IssueCreate
+from app.schemas.issue import IssueImport
 from app.schemas.model_risk import ModelCreate
 from app.schemas.operational_risk import KriCreate, LossEventCreate, RcsaCreate
 from app.schemas.organization import BusinessUnitCreate, LegalCreate, ProcessCreate
@@ -123,7 +125,7 @@ from app.schemas.policy import PolicyCreate
 from app.schemas.privacy import RopaCreate
 from app.schemas.project import ProjectCreate
 from app.schemas.regulatory_change import ObligationCreate, RegulatoryChangeCreate
-from app.schemas.risk import RiskCreate
+from app.schemas.risk import RISK_SOURCES, RISK_TYPES, RISK_VELOCITIES, RiskCreate
 from app.schemas.risk_scenario import ScenarioCreate
 from app.schemas.threat import ThreatCreate, VulnerabilityCreate
 from app.schemas.vendor import VendorCreate
@@ -141,7 +143,7 @@ from app.api.v1.goals import create_goal
 from app.api.v1.icfr import create_process as create_icfr_process
 from app.api.v1.incidents import create_incident
 from app.api.v1.internal_audit import create_engagement, create_finding
-from app.api.v1.issues import create_issue
+from app.api.v1.issues import import_issue
 from app.api.v1.model_risk import create_model
 from app.api.v1.operational_risk import create_kri, create_loss_event, create_rcsa
 from app.api.v1.outsourcing import create_arrangement
@@ -440,6 +442,15 @@ _register(ResourceIO(
         link_col("requirements", "requirements_ids", Requirement, "requirements", match_field="title"),
         link_col("risks", "risks_ids", Risk, "risks", match_field="title"),
         link_col("related_policies", "related_ids", Policy, "related", match_field="title"),
+        # Phase 2: governance and applicability.
+        link_col("approving_authority", "approving_authority_id", Committee, "approving_authority",
+                 match_field="name", multi=False, help="Reference or name of a committee (Governance)"),
+        date_col("effective_date", help="Can't precede approval; empty = the publication date"),
+        link_col("supersedes", "supersedes_id", Policy, "supersedes", match_field="title", multi=False,
+                 help="Reference or title of the policy this one replaces (retired when this is published)"),
+        link_col("business_units", "business_unit_ids", BusinessUnit, "business_units", match_field="name"),
+        link_col("roles", "role_ids", Role, "roles", match_field="name",
+                 help="Comma-separated role names; their members are asked to acknowledge the policy"),
     ],
 ))
 
@@ -449,23 +460,39 @@ _register(ResourceIO(
     create_schema=RiskCreate, create_func=create_risk,
     read_perm="risk:read", write_perm="risk:write", importable=True,
     columns=[
-        text("title", required=True),
+        # Blank titles are composed from event / cause / consequence.
+        text("title", help="Optional when event is given: composed from event and cause"),
         text("description"),
+        text("cause", help="Risk statement: what could cause the event"),
+        text("event", help="Risk statement: what could happen"),
+        # No "consequence" column: in bank registers that header is the impact score
+        # (likelihood x consequence), and the mapper matches our field name first, so a
+        # statement column would swallow the scores. Add it in the form after import.
         text("category", help=_pick_help("risk category")),
-        enum_col("status", RiskStatus),
+        Column(header="risk_type", field="risk_type", kind="enum", enum_values=list(RISK_TYPES)),
+        Column(header="velocity", field="velocity", kind="enum", enum_values=list(RISK_VELOCITIES),
+               help="How fast the impact is felt once the event happens"),
+        Column(header="source", field="source", kind="enum", enum_values=list(RISK_SOURCES),
+               help="Where the risk was identified"),
+        date_col("identified_date"),
+        enum_col("status", RiskStatus,
+                 help="Any status beyond draft needs both inherent scores and an assessment_rationale"),
         # The scale is per-tenant (3x3 up to 10x10), so the help names the range the
         # organisation actually configured rather than a hard-coded 1-5.
         integer("inherent_likelihood", help="1 to your configured matrix size"),
         integer("inherent_impact", help="1 to your configured matrix size"),
         integer("residual_likelihood", help="1 to your configured matrix size (optional)"),
         integer("residual_impact", help="1 to your configured matrix size (optional)"),
+        integer("target_likelihood", help="Where treatment should take it (optional; not above residual)"),
+        integer("target_impact", help="Where treatment should take it (optional; not above residual)"),
+        text("assessment_rationale", help="Why the scores are what they are"),
         enum_col("treatment_strategy", TreatmentStrategy),
         text("treatment_description"),
         text("treatment_owner", help=_PERSON_HELP),
         date_col("treatment_deadline"),
         number("treatment_cost"),
         number("annual_loss_frequency", help="FAIR: events per year"),
-        number("single_loss_expectancy", help="FAIR: $ per event"),
+        number("single_loss_expectancy", help="FAIR: loss per event, in your organisation's currency"),
         enum_col("review_frequency", ReviewFrequency),
         # Segment scoping. A bank's existing register almost always has a department or
         # process column already, so importing it should land the segment too rather
@@ -498,7 +525,21 @@ _register(ResourceIO(
         text("classification", help=_pick_help("control classification")),
         text("documentation_url"),
         enum_col("status", ControlStatus),
-        enum_col("effectiveness", ControlEffectiveness),
+        # Phase 2 attributes.
+        Column(header="nature", field="nature", kind="enum",
+               enum_values=["preventive", "detective", "corrective", "directive"]),
+        Column(header="automation", field="automation", kind="enum",
+               enum_values=["manual", "it_dependent_manual", "automated"]),
+        boolean("is_key", help="Key control (true/false)"),
+        Column(header="operating_frequency", field="operating_frequency", kind="enum",
+               enum_values=["continuous", "daily", "weekly", "monthly", "quarterly", "semiannual",
+                            "annual", "per_event", "ad_hoc"]),
+        text("test_procedure"),
+        text("evidence_expected"),
+        enum_col("effectiveness", ControlEffectiveness,
+                 help="Leave blank to derive it from reviewed tests; a value is a manual override "
+                 "and needs effectiveness_override_reason"),
+        text("effectiveness_override_reason", help="Why the effectiveness is set by hand"),
         number("opex"),
         number("capex"),
         integer("resource_utilization", help="0-100"),
@@ -512,6 +553,8 @@ _register(ResourceIO(
         link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
         # Control has no ORM `risks` relationship (write-only via risk_controls join) -> import-only link.
         link_col("risks", "risk_ids", Risk, "risks", match_field="title", exportable=False),
+        link_col("business_units", "business_unit_ids", BusinessUnit, "business_units", match_field="name"),
+        link_col("processes", "process_ids", Process, "processes", match_field="name"),
     ],
 ))
 
@@ -597,6 +640,10 @@ _register(ResourceIO(
         text("name", required=True),
         text("description"),
         text("category", help=_pick_help("third-party category")),
+        text("legal_name", help="Registered legal name, if different from the trading name"),
+        text("registration_number", help="SECP / company registration number"),
+        number("annual_spend"),
+        text("spend_currency", help="ISO 4217 code such as PKR or USD; blank means the organisation's currency"),
         text("contact_name"),
         text("contact_email"),
         text("contact_phone"),
@@ -621,6 +668,10 @@ _register(ResourceIO(
 ))
 
 # ----- incidents -----------------------------------------------------------
+_INCIDENT_TS_HELP = (
+    "YYYY-MM-DD (taken as 00:00 in the organisation's timezone) or an ISO date-time, "
+    "e.g. 2026-09-01T14:30 or 2026-09-01T14:30:00+05:00"
+)
 _register(ResourceIO(
     resource="incidents", label="Incidents", model=Incident,
     create_schema=IncidentCreate, create_func=create_incident,
@@ -638,9 +689,18 @@ _register(ResourceIO(
         text("root_cause"),
         text("lessons_learned"),
         number("cost"),
-        date_col("detected_at"),
-        date_col("occurred_at"),
-        date_col("resolved_at"),
+        # Phase 2: timestamps. Text columns so a full ISO date-time reaches the schema
+        # intact; a bare date is 00:00 in the organisation's timezone (api.v1.incidents).
+        text("occurred_at", help=_INCIDENT_TS_HELP),
+        text("detected_at", help=_INCIDENT_TS_HELP),
+        text("contained_at", help=_INCIDENT_TS_HELP),
+        text("resolved_at", help=_INCIDENT_TS_HELP),
+        integer("customers_affected"),
+        integer("records_affected"),
+        boolean("near_miss", help="true when nothing was lost (leave cost blank)"),
+        boolean("personal_data_breach", help="true opens a linked data-breach record"),
+        boolean("is_reportable", help="true creates the regulator's initial and final reports"),
+        text("regulator", help=_pick_help("regulator")),
         link_col("controls", "control_ids", Control, "controls", match_field="name"),
         link_col("vendors", "vendor_ids", Vendor, "vendors", match_field="name"),
         link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
@@ -1016,7 +1076,7 @@ _register(ResourceIO(
 # ----- issues & actions (CAPA) ---------------------------------------------
 _register(ResourceIO(
     resource="issues", label="Issues & Actions", model=Issue,
-    create_schema=IssueCreate, create_func=create_issue,
+    create_schema=IssueImport, create_func=import_issue,
     read_perm="issue:read", write_perm="issue:write", importable=True,
     columns=[
         text("title", required=True),
@@ -1030,11 +1090,18 @@ _register(ResourceIO(
         text("business_unit", help=_UNIT_HELP),
         date_col("identified_date"),
         date_col("due_date"),
-        date_col("closed_date"),
+        # Import only: a closed row keeps its closed date (needs approval rights, see
+        # api.v1.issues.import_issue); in the app the server sets it on Close.
+        date_col("closed_date", help="Only for rows imported closed; set by the server otherwise"),
         text("root_cause"),
         text("management_response"),
         boolean("repeat_finding"),
         boolean("regulator_related"),
+        link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+        link_col("controls", "control_ids", Control, "controls", match_field="name"),
+        link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
+        link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
+        link_col("third_parties", "vendor_ids", Vendor, "vendors", match_field="name"),
     ],
 ))
 
@@ -1069,10 +1136,21 @@ _register(ResourceIO(
         text("unit", help="Unit of measure, e.g. %, count, PKR"),
         enum_col("frequency", ReviewFrequency),
         enum_col("direction", KriDirection),
-        number("warning_threshold"),
-        number("limit_threshold"),
+        number("warning_threshold", help="Amber; below the limit when higher is worse, above it when lower is worse; empty for within_range"),
+        number("limit_threshold", help="Red; for within_range, the tolerance beyond the range"),
+        # Phase 2 (F-14): definition, lineage and the within-range band.
+        number("lower_bound", help="within_range only: lowest acceptable value"),
+        number("upper_bound", help="within_range only: highest acceptable value"),
         number("current_value"),
         date_col("last_measured_date"),
+        text("definition"),
+        text("numerator"),
+        text("denominator"),
+        text("data_source"),
+        link_col("data_provider", "data_provider_id", User, "data_provider", match_field="email",
+                 multi=False, help="Email of the user who supplies the value"),
+        Column(header="indicator_type", field="indicator_type", kind="enum",
+               enum_values=["leading", "lagging"]),
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
     ],
 ))

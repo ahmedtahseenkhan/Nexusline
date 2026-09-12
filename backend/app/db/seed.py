@@ -562,6 +562,22 @@ async def _seed_sample_data(db: AsyncSession, tenant_id, admin: User) -> None:
             for i, name in enumerate(DEFAULT_STAGES)
         ]
 
+    # Incident timelines are timestamps (phase 2); demo times are Asia/Karachi wall clock,
+    # the default organisation timezone. INC-001 is owed to SBP, so it carries the
+    # regulator's clock (initial report due 24h after detection, final in 30 days).
+    from datetime import datetime, time, timedelta
+    from zoneinfo import ZoneInfo
+
+    from app.core.config import settings as app_settings
+    from app.models.enums import RegulatoryReportStatus, RegulatoryReportType
+    from app.models.incident import RegulatoryReport
+    from app.services.incident_clock import planned_deadlines
+
+    pkt = ZoneInfo("Asia/Karachi")
+
+    def _at(days_ago: int, hh: int, mm: int = 0) -> datetime:
+        return datetime.combine(today - timedelta(days=days_ago), time(hh, mm), tzinfo=pkt)
+
     inc1 = Incident(
         tenant_id=tenant_id,
         reference="INC-001",
@@ -570,9 +586,34 @@ async def _seed_sample_data(db: AsyncSession, tenant_id, admin: User) -> None:
         severity=Severity.high,
         status=IncidentStatus.contained,
         assignee="SOC Team",
-        detected_at=today,
+        occurred_at=_at(1, 8, 40),
+        detected_at=_at(1, 9, 15),
+        contained_at=_at(1, 13, 30),
+        customers_affected=0,
+        records_affected=0,
+        is_reportable=True,
+        regulator=app_settings.default_regulator,
     )
     inc1.stages = _stages(2)  # Identification + Containment done; on Eradication
+    due = planned_deadlines(
+        inc1.detected_at, app_settings.regulatory_initial_report_hours,
+        app_settings.regulatory_final_report_days,
+    )
+    inc1.regulatory_reports = [
+        RegulatoryReport(
+            tenant_id=tenant_id, regulator=app_settings.default_regulator,
+            report_type=RegulatoryReportType.initial_notification,
+            deadline=due[RegulatoryReportType.initial_notification],
+            status=RegulatoryReportStatus.submitted, submitted_at=_at(1, 18, 5),
+            reference="SBP-ACK-0001", submitted_by="CISO",
+        ),
+        RegulatoryReport(
+            tenant_id=tenant_id, regulator=app_settings.default_regulator,
+            report_type=RegulatoryReportType.final_report,
+            deadline=due[RegulatoryReportType.final_report],
+            status=RegulatoryReportStatus.pending,
+        ),
+    ]
     inc2 = Incident(
         tenant_id=tenant_id,
         reference="INC-002",
@@ -581,11 +622,29 @@ async def _seed_sample_data(db: AsyncSession, tenant_id, admin: User) -> None:
         severity=Severity.medium,
         status=IncidentStatus.resolved,
         assignee="Network Team",
-        detected_at=today,
-        resolved_at=today,
+        occurred_at=_at(3, 22, 10),
+        detected_at=_at(3, 22, 25),
+        contained_at=_at(3, 23, 5),
+        resolved_at=_at(2, 2, 0),
+        customers_affected=1200,
     )
     inc2.stages = _stages(5)  # all done -> lifecycle complete
-    db.add_all([inc1, inc2])
+    inc3 = Incident(
+        tenant_id=tenant_id,
+        reference="INC-003",
+        title="Wire transfer to a spoofed vendor account stopped at call-back",
+        category="Fraud",
+        severity=Severity.low,
+        status=IncidentStatus.closed,
+        assignee="Operations",
+        near_miss=True,
+        occurred_at=_at(6, 11, 0),
+        detected_at=_at(6, 11, 20),
+        contained_at=_at(6, 11, 20),
+        resolved_at=_at(5, 16, 0),
+    )
+    inc3.stages = _stages(5)
+    db.add_all([inc1, inc2, inc3])
 
     # --- Policies ---
     db.add_all(

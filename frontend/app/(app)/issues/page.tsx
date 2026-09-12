@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
-import { apiCall } from "@/lib/api";
+import { api, apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
@@ -14,6 +14,9 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
+import { useHasPermission } from "@/lib/tenantSettings";
 import UserPicker, { UserName } from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import BusinessUnitSelect, { UnitName } from "@/components/BusinessUnitSelect";
@@ -62,6 +65,25 @@ type IssueUpdate = {
   created_at?: string;
 };
 
+type DueDateChange = {
+  id: string;
+  issue_id: string;
+  old_due_date: string | null;
+  new_due_date: string | null;
+  reason: string;
+  /** pending | approved | rejected */
+  status: string;
+  requested_by_id: string | null;
+  requested_by_ref: UserRef | null;
+  /** Who decided it; empty when no approval was needed. */
+  approved_by_id: string | null;
+  approved_by_ref: UserRef | null;
+  approved_at: string | null;
+  created_at: string;
+};
+
+type AssetRef = GraphRef & { asset_class?: string };
+
 type Issue = {
   id: string;
   reference: string;
@@ -85,11 +107,27 @@ type Issue = {
   business_unit_ref: UnitRef | null;
   identified_date: string | null;
   due_date: string | null;
+  /** Set by the server when the issue closes; cleared on reopen. Read-only. */
   closed_date: string | null;
   root_cause: string;
+  root_cause_category_id: string | null;
+  root_cause_category_ref: LookupRef | null;
   management_response: string;
   repeat_finding: boolean;
   regulator_related: boolean;
+  validated_by_id: string | null;
+  validated_by_ref: UserRef | null;
+  validated_at: string | null;
+  /** effective | not_effective */
+  validation_result: string | null;
+  validation_note: string;
+  risks: GraphRef[];
+  controls: GraphRef[];
+  requirements: GraphRef[];
+  assets: AssetRef[];
+  vendors: GraphRef[];
+  due_date_changes: DueDateChange[];
+  due_date_moves: number;
   workflow_status: string;
   action_count: number;
   open_action_count: number;
@@ -108,6 +146,7 @@ type IssuesSummary = {
   overdue_count: number;
   repeat_finding_count: number;
   regulator_related_open: number;
+  due_date_changes_pending?: number;
 };
 
 // ------------------------------------------------------------------ enum lists
@@ -124,6 +163,11 @@ const SOURCE_TYPES = opts([
   "other",
 ]);
 const ISSUE_STATUS = opts(["open", "in_progress", "remediated", "closed", "risk_accepted"]);
+/** What the edit form may set; closing goes through Validate and Close. */
+const OPEN_STATUS = opts(["open", "in_progress"]);
+const CLOSE_STATUS = opts(["closed", "remediated", "risk_accepted"]);
+const CLOSED_STATES = new Set(["closed", "remediated", "risk_accepted"]);
+const isClosed = (status: string) => CLOSED_STATES.has(status);
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 const CAPA_TYPE = ["corrective", "preventive"];
 const ACTION_STATUS = ["open", "in_progress", "done", "cancelled"];
@@ -175,6 +219,25 @@ const SOURCE_SEARCH: Record<SourceKind, (q: string) => Promise<AsyncOption[]>> =
       `/requirements?search=${encodeURIComponent(q)}&limit=20`,
     ).then((rows) => rows.map((r) => ({ value: r.id, label: refLabel(r), sub: r.framework }))),
 };
+
+/* Typed links (issue_risks, issue_controls …): what the issue concerns, beside where it
+   came from (the source fields above). */
+type LinkKind = "risk" | "control" | "requirement" | "asset" | "vendor";
+type LinkField = "risk_ids" | "control_ids" | "requirement_ids" | "asset_ids" | "vendor_ids";
+const LINKS: { kind: LinkKind; field: LinkField; label: string; help: string; search: (q: string) => Promise<AsyncOption[]> }[] = [
+  { kind: "risk", field: "risk_ids", label: "Risks", help: "Risks this issue affects or evidences.", search: SOURCE_SEARCH.risk },
+  { kind: "control", field: "control_ids", label: "Controls", help: "Controls found deficient. While the issue is open it holds each control at partially effective.", search: SOURCE_SEARCH.control },
+  { kind: "requirement", field: "requirement_ids", label: "Compliance requirements", help: "Clauses the gap breaches.", search: SOURCE_SEARCH.requirement },
+  { kind: "asset", field: "asset_ids", label: "Assets", help: "IT or information assets involved.", search: pagedSearch("assets") },
+  { kind: "vendor", field: "vendor_ids", label: "Third parties", help: "Vendors or outsourcing providers involved.", search: pagedSearch("vendors") },
+];
+const LINK_FIELD_FOR_SOURCE: Partial<Record<SourceKind, LinkField>> = {
+  risk: "risk_ids",
+  control: "control_ids",
+  requirement: "requirement_ids",
+};
+const toOptions = (items: GraphRef[] | undefined): AsyncOption[] =>
+  (items ?? []).map((x) => ({ value: x.id, label: refLabel(x) }));
 
 type ResolvedSource = { kind: SourceKind | typeof OTHER_KIND; label: string };
 
@@ -244,12 +307,14 @@ type IssueForm = {
   business_unit_id: string | null;
   identified_date: string;
   due_date: string;
-  closed_date: string;
+  /** Required when an existing due date changes; logged with the change. */
+  due_date_reason: string;
   root_cause: string;
+  root_cause_category_id: string | null;
   management_response: string;
   repeat_finding: boolean;
   regulator_related: boolean;
-};
+} & Record<LinkField, AsyncOption[]>;
 const BLANK_ISSUE: IssueForm = {
   title: "",
   description: "",
@@ -265,11 +330,17 @@ const BLANK_ISSUE: IssueForm = {
   business_unit_id: null,
   identified_date: "",
   due_date: "",
-  closed_date: "",
+  due_date_reason: "",
   root_cause: "",
+  root_cause_category_id: null,
   management_response: "",
   repeat_finding: false,
   regulator_related: false,
+  risk_ids: [],
+  control_ids: [],
+  requirement_ids: [],
+  asset_ids: [],
+  vendor_ids: [],
 };
 function fromIssue(i: Issue): IssueForm {
   return {
@@ -288,15 +359,27 @@ function fromIssue(i: Issue): IssueForm {
     business_unit_id: i.business_unit_id,
     identified_date: i.identified_date || "",
     due_date: i.due_date || "",
-    closed_date: i.closed_date || "",
+    due_date_reason: "",
     root_cause: i.root_cause || "",
+    root_cause_category_id: i.root_cause_category_id ?? null,
     management_response: i.management_response || "",
     repeat_finding: !!i.repeat_finding,
     regulator_related: !!i.regulator_related,
+    risk_ids: toOptions(i.risks),
+    control_ids: toOptions(i.controls),
+    requirement_ids: toOptions(i.requirements),
+    asset_ids: toOptions(i.assets),
+    vendor_ids: toOptions(i.vendors),
   };
 }
-function issuePayload(f: IssueForm): Record<string, unknown> {
+/** Whether saving this form moves an agreed due date (which needs a reason). */
+const movesDueDate = (f: IssueForm, original: Issue | null) =>
+  !!original?.due_date && (f.due_date || "") !== original.due_date;
+function issuePayload(f: IssueForm, original: Issue | null): Record<string, unknown> {
   return {
+    ...(movesDueDate(f, original) ? { due_date_reason: f.due_date_reason } : {}),
+    root_cause_category_id: f.root_cause_category_id,
+    ...Object.fromEntries(LINKS.map((l) => [l.field, f[l.field].map((o) => o.value)])),
     title: f.title,
     description: f.description,
     source_type: f.source_type,
@@ -309,7 +392,6 @@ function issuePayload(f: IssueForm): Record<string, unknown> {
     business_unit_id: f.business_unit_id,
     identified_date: f.identified_date || null,
     due_date: f.due_date || null,
-    closed_date: f.closed_date || null,
     root_cause: f.root_cause,
     management_response: f.management_response,
     repeat_finding: f.repeat_finding,
@@ -341,21 +423,42 @@ type UpdateDraft = {
 };
 const BLANK_UPDATE: UpdateDraft = { note: "", author_id: null, update_date: "", status_change: "" };
 
+/** A lifecycle step taken from the drawer, each in its own small dialog. */
+type Step =
+  | { kind: "validate" }
+  | { kind: "close" }
+  | { kind: "decide"; change: DueDateChange; approve: boolean };
+
 /* ================================================================ page ===== */
 function IssuesInner() {
-  const { formatDate } = useFormat();
+  const { formatDate, formatDateTime } = useFormat();
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<Issue | null>(null);
   const [detailSource, setDetailSource] = useState<ResolvedSource | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<IssuesSummary | null>(null);
+  // Approving a later due date needs the issue approve-equivalent permission, and never
+  // the person who asked for it (the server enforces both; this only hides the buttons).
+  const canApprove = useHasPermission("workflow:approve");
+  const [meId, setMeId] = useState<string | null>(null);
+  useEffect(() => { api.me().then((m) => setMeId(m.id)).catch(() => {}); }, []);
 
   // ---- filters ----
   const [fStatus, setFStatus] = useState("");
   const [fSource, setFSource] = useState("");
   const [fOverdue, setFOverdue] = useState(false);
   const [fRegulator, setFRegulator] = useState(false);
+  const [fPending, setFPending] = useState(false);
+  const [fMoves, setFMoves] = useState("");
+
+  // ---- lifecycle step dialog (validate / close / decide a due-date change) ----
+  const [step, setStep] = useState<Step | null>(null);
+  const [stepResult, setStepResult] = useState("effective");
+  const [stepStatus, setStepStatus] = useState("closed");
+  const [stepNote, setStepNote] = useState("");
+  const [stepError, setStepError] = useState<string | null>(null);
+  const [stepSaving, setStepSaving] = useState(false);
 
   // ---- issue dialog ----
   const [editing, setEditing] = useState<Issue | null>(null);
@@ -411,13 +514,47 @@ function IssuesInner() {
   async function save() {
     setError(null); setSaving(true);
     try {
-      const payload = issuePayload(f);
-      if (editing) await apiCall<Issue>("PATCH", `/issues/${editing.id}`, payload);
-      else await apiCall<Issue>("POST", "/issues", payload);
+      const payload = issuePayload(f, editing);
+      let message = "Issue raised";
+      if (editing) {
+        const saved = await apiCall<Issue>("PATCH", `/issues/${editing.id}`, payload);
+        const waiting = movesDueDate(f, editing) && saved.due_date === editing.due_date
+          && saved.due_date_changes.some((c) => c.status === "pending");
+        message = waiting ? "Saved. The later due date is waiting for approval." : "Changes saved";
+      } else {
+        await apiCall<Issue>("POST", "/issues", payload);
+      }
       setShowForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
-      toast(editing ? "Changes saved" : "Issue raised");
+      toast(message);
     } catch (e) { setError(errMsg(e, "Failed to save issue")); }
     finally { setSaving(false); }
+  }
+
+  // ------------------------------------------------------------- validate / close / decide
+  function openStep(next: Step) {
+    setStep(next); setStepNote(""); setStepError(null); setStepResult("effective"); setStepStatus("closed");
+  }
+  async function submitStep() {
+    if (!detail || !step) return;
+    setStepSaving(true); setStepError(null);
+    try {
+      if (step.kind === "validate") {
+        await apiCall<Issue>("POST", `/issues/${detail.id}/validate`, { result: stepResult, note: stepNote });
+        toast(stepResult === "effective" ? "Validation recorded" : "Sent back to the owner (in progress)");
+      } else if (step.kind === "close") {
+        await apiCall<Issue>("POST", `/issues/${detail.id}/close`, { status: stepStatus, note: stepNote });
+        toast(`Closed as ${cap(stepStatus).toLowerCase()}`);
+      } else {
+        await apiCall<Issue>("POST", `/issues/${detail.id}/due-date-changes/${step.change.id}/decide`, {
+          approve: step.approve, note: stepNote,
+        });
+        toast(step.approve ? "New due date approved" : "Due-date change rejected");
+      }
+      setStep(null); loadDetail(detail.id); reload(); loadSummary();
+    } catch (e) {
+      // 409/403 bodies say exactly what is missing (open actions, evidence, validation, SoD).
+      setStepError(errMsg(e, "Could not complete this step"));
+    } finally { setStepSaving(false); }
   }
   async function remove(i: Issue) {
     const label = i.reference ? `${i.reference} ${i.title}` : i.title;
@@ -496,6 +633,8 @@ function IssuesInner() {
     { key: "status", header: "Status", sortable: true, render: (i) => <StatusBadge value={i.status} /> },
     { key: "actions_count", header: "Actions", align: "center", render: (i) => <span className="muted">{i.open_action_count}/{i.action_count}</span> },
     { key: "due_date", header: "Due", sortable: true, render: (i) => (i.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(i.due_date)}</span>), text: (i) => (i.due_date ? formatDate(i.due_date) : "") },
+    { key: "due_date_moves", header: "Date moved", sortable: true, align: "center", hidden: true, render: (i) => (i.due_date_moves ? <Badge tone={i.due_date_moves > 1 ? "high" : "medium"}>{i.due_date_moves}×</Badge> : <span className="muted">—</span>), text: (i) => String(i.due_date_moves || 0) },
+    { key: "closed_date", header: "Closed", sortable: true, hidden: true, render: (i) => <span className="muted">{formatDate(i.closed_date)}</span>, text: (i) => (i.closed_date ? formatDate(i.closed_date) : "") },
     { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button></div> },
   ];
 
@@ -504,6 +643,8 @@ function IssuesInner() {
     source_type: fSource || undefined,
     overdue: fOverdue || undefined,
     regulator_related: fRegulator || undefined,
+    due_date_change_pending: fPending || undefined,
+    min_due_date_moves: fMoves || undefined,
   };
 
   // ------------------------------------------------------------- source picker
@@ -516,8 +657,14 @@ function IssuesInner() {
       const kind = p.source_kind as SourceKind;
       const suggested = SOURCE_TYPE_FOR_KIND[kind];
       const reference = (opt?.label || "").split(" · ")[0];
+      // The record it was raised against is also linked (the server does the same).
+      const linkField = LINK_FIELD_FOR_SOURCE[kind];
+      const linked = linkField && !p[linkField].some((o) => o.value === id)
+        ? { [linkField]: [...p[linkField], { value: id, label: opt?.label || id }] }
+        : {};
       return {
         ...p,
+        ...linked,
         source_id: id,
         source_label: opt?.label || "",
         // A linked risk / requirement / incident says where the issue came from.
@@ -560,8 +707,19 @@ function IssuesInner() {
         <Field label="Severity">
           <Select value={f.severity} onChange={(v) => setFF("severity", v)} options={SEVERITY} />
         </Field>
-        <Field label="Status">
-          <Select value={f.status} onChange={(v) => setFF("status", v)} options={ISSUE_STATUS} />
+        <Field
+          label="Status"
+          help={editing && isClosed(editing.status)
+            ? "Choosing an open status reopens the issue and clears its validation."
+            : "Close an issue from its drawer with Validate and Close."}
+        >
+          <Select
+            value={f.status}
+            onChange={(v) => setFF("status", v)}
+            options={editing && isClosed(editing.status)
+              ? [{ value: editing.status, label: `${cap(editing.status)} (current)` }, ...OPEN_STATUS]
+              : OPEN_STATUS}
+          />
         </Field>
       </div>
     </>
@@ -619,18 +777,57 @@ function IssuesInner() {
       </div>
     </>
   );
+  const linksTab = (
+    <>
+      <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+        What this issue concerns. Each linked record lists the issue on its own page.
+      </p>
+      {LINKS.map((l) => (
+        <Field key={l.field} label={l.label} help={l.help}>
+          <AsyncMultiSelect search={l.search} value={f[l.field]} onChange={(v) => setFF(l.field, v)} />
+        </Field>
+      ))}
+    </>
+  );
+  const dueDateMoving = movesDueDate(f, editing);
   const remediationTab = (
     <>
       <div className="field-row">
         <Field label="Identified date">
           <TextInput type="date" value={f.identified_date} onChange={(v) => setFF("identified_date", v)} />
         </Field>
-        <Field label="Due date" help="Target remediation date — drives the overdue flag.">
+        <Field
+          label="Due date"
+          help={editing?.due_date
+            ? "Moving an agreed date needs a reason and is logged. A later date on a regulator-related, high or critical issue waits for approval."
+            : "Target remediation date — drives the overdue flag."}
+        >
           <TextInput type="date" value={f.due_date} onChange={(v) => setFF("due_date", v)} />
         </Field>
       </div>
-      <Field label="Closed date" help="Set automatically when the issue is closed / remediated / risk-accepted.">
-        <TextInput type="date" value={f.closed_date} onChange={(v) => setFF("closed_date", v)} />
+      {dueDateMoving && (
+        <Field label="Reason for the new due date" required help={`Currently ${formatDate(editing?.due_date ?? null)}. Kept in the issue's date history.`}>
+          <textarea
+            className="input"
+            rows={2}
+            required
+            value={f.due_date_reason}
+            onChange={(e) => setFF("due_date_reason", e.target.value)}
+            placeholder="Why the date is moving"
+          />
+        </Field>
+      )}
+      <Field label="Closed date" help="Set by the system on Close; cleared if the issue is reopened.">
+        <div style={{ fontSize: 13, padding: "6px 0" }}>
+          {editing?.closed_date ? formatDate(editing.closed_date) : <span className="muted">Not closed</span>}
+        </div>
+      </Field>
+      <Field label="Root cause category" help="From the root-cause category list; describe the detail below.">
+        <LookupSelect
+          lookupKey="root_cause_category"
+          value={f.root_cause_category_id}
+          onChange={(id) => setFF("root_cause_category_id", id)}
+        />
       </Field>
       <Field label="Root cause">
         <TextArea value={f.root_cause} onChange={(v) => setFF("root_cause", v)} rows={3} placeholder="Underlying cause." />
@@ -677,6 +874,10 @@ function IssuesInner() {
           <div className="stat-top"><span className="n">{summary ? summary.regulator_related_open.toLocaleString() : "—"}</span></div>
           <span className="l">Regulator-related open</span>
         </div>
+        <div className="card stat">
+          <div className="stat-top"><span className="n">{summary ? (summary.due_date_changes_pending ?? 0).toLocaleString() : "—"}</span></div>
+          <span className="l">Due-date extensions awaiting approval</span>
+        </div>
       </div>
 
       <DataTable<Issue>
@@ -704,6 +905,15 @@ function IssuesInner() {
             <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
               <input type="checkbox" checked={fRegulator} onChange={(e) => setFRegulator(e.target.checked)} /> Regulator
             </label>
+            <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+              <input type="checkbox" checked={fPending} onChange={(e) => setFPending(e.target.checked)} /> Extension pending
+            </label>
+            <select className="select" style={{ maxWidth: 170 }} value={fMoves} onChange={(e) => setFMoves(e.target.value)} aria-label="Due date moved">
+              <option value="">Any date history</option>
+              <option value="1">Date moved 1+ times</option>
+              <option value="2">Date moved 2+ times</option>
+              <option value="3">Date moved 3+ times</option>
+            </select>
             <ArchivedRecords entityType="issue" noun="issues" refreshKey={refreshKey} onRestored={() => { reload(); loadSummary(); }} />
           </>
         }
@@ -738,8 +948,16 @@ function IssuesInner() {
               <Fact label="Business unit"><UnitName unit={detail.business_unit_ref} fallback={detail.business_unit} /></Fact>
               <Fact label="Category">{detail.category_ref?.label || detail.category || <span className="muted">—</span>}</Fact>
               <Fact label="Identified">{formatDate(detail.identified_date)}</Fact>
-              <Fact label="Due">{formatDate(detail.due_date)}</Fact>
-              <Fact label="Closed">{formatDate(detail.closed_date)}</Fact>
+              <Fact label="Due">
+                {formatDate(detail.due_date)}
+                {detail.due_date_moves > 0 && (
+                  <div className="muted" style={{ fontSize: 11.5 }}>
+                    Date moved {detail.due_date_moves} {detail.due_date_moves === 1 ? "time" : "times"}
+                  </div>
+                )}
+              </Fact>
+              <Fact label="Closed">{detail.closed_date ? formatDate(detail.closed_date) : <span className="muted">—</span>}</Fact>
+              <Fact label="Root cause category">{detail.root_cause_category_ref?.label || <span className="muted">—</span>}</Fact>
               <Fact label="Source">
                 {cap(detail.source_type)}
                 {detail.source_reference ? <span className="muted"> · {detail.source_reference}</span> : null}
@@ -755,6 +973,122 @@ function IssuesInner() {
                   )}
                 </Fact>
               )}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, marginBottom: 16 }}>
+              <RelatedChips label="Risks" items={detail.risks} href="/risks" />
+              <RelatedChips label="Controls" items={detail.controls} href="/controls" />
+              <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
+              {detail.assets.some((a) => a.asset_class === "it_asset") && (
+                <RelatedChips label="IT assets" items={detail.assets.filter((a) => a.asset_class === "it_asset")} href="/it-assets" />
+              )}
+              <RelatedChips
+                label={detail.assets.some((a) => a.asset_class === "it_asset") ? "Information assets" : "Assets"}
+                items={detail.assets.filter((a) => a.asset_class !== "it_asset")}
+                href="/information-assets"
+              />
+              <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head row-between">
+                <h3>Validation &amp; closure</h3>
+                {!isClosed(detail.status) && (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button className="btn secondary sm" onClick={() => openStep({ kind: "validate" })}>Validate</button>
+                    <button className="btn sm" onClick={() => openStep({ kind: "close" })}>Close</button>
+                  </div>
+                )}
+              </div>
+              <div className="card-pad" style={{ fontSize: 13 }}>
+                {detail.validation_result ? (
+                  <div style={{ display: "grid", gap: 4 }}>
+                    <div>
+                      <Badge tone={detail.validation_result === "effective" ? "low" : "high"}>
+                        {detail.validation_result === "effective" ? "Validated effective" : "Validated not effective"}
+                      </Badge>{" "}
+                      <span className="muted">
+                        by <UserName user={detail.validated_by_ref} fallback="" /> · {formatDateTime(detail.validated_at)}
+                      </span>
+                    </div>
+                    {detail.validation_note && <div>{detail.validation_note}</div>}
+                  </div>
+                ) : (
+                  <span className="muted">Not validated yet.</span>
+                )}
+                {isClosed(detail.status) ? (
+                  <p className="muted" style={{ margin: "10px 0 0" }}>
+                    {cap(detail.status)} on {formatDate(detail.closed_date)}. To reopen, edit the issue and choose an open status — its validation is cleared.
+                  </p>
+                ) : (
+                  <p className="muted" style={{ margin: "10px 0 0" }}>
+                    To close: finish or cancel every action ({detail.open_action_count} open), attach closure evidence
+                    (Attachments / Files), and have someone other than the owner and the person who raised it record the fix as effective.
+                    Closing as risk accepted needs an approved acceptance on a linked risk instead, or an approver&apos;s note.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head row-between">
+                <h3>Due date history</h3>
+                <span className="muted" style={{ fontSize: 12.5 }}>
+                  {detail.due_date_moves
+                    ? `Date moved ${detail.due_date_moves} ${detail.due_date_moves === 1 ? "time" : "times"}`
+                    : "Date never moved"}
+                </span>
+              </div>
+              <div className="card-pad">
+                {detail.due_date_changes.length ? (
+                  <div className="table-wrap">
+                    <table>
+                      <thead><tr><th>Asked</th><th>From</th><th>To</th><th>Reason</th><th>Asked by</th><th>Status</th><th></th></tr></thead>
+                      <tbody>
+                        {[...detail.due_date_changes].reverse().map((c) => {
+                          const canDecide = c.status === "pending" && canApprove && !!meId && c.requested_by_id !== meId;
+                          return (
+                            <tr key={c.id}>
+                              <td className="muted">{formatDate(c.created_at)}</td>
+                              <td className="muted">{formatDate(c.old_due_date)}</td>
+                              <td>{c.new_due_date ? formatDate(c.new_due_date) : <span className="muted">No date</span>}</td>
+                              <td className="cell-title">{c.reason || "—"}</td>
+                              <td className="muted"><UserName user={c.requested_by_ref} fallback="" /></td>
+                              <td>
+                                <Badge tone={c.status === "approved" ? "low" : c.status === "rejected" ? "neutral" : "medium"}>
+                                  {c.status === "pending" ? "Awaiting approval" : cap(c.status)}
+                                </Badge>
+                                {c.approved_by_ref && (
+                                  <div className="muted" style={{ fontSize: 11.5 }}>
+                                    <UserName user={c.approved_by_ref} fallback="" /> · {formatDateTime(c.approved_at)}
+                                  </div>
+                                )}
+                              </td>
+                              <td style={{ whiteSpace: "nowrap" }}>
+                                {canDecide && (
+                                  <>
+                                    <button className="btn sm" onClick={() => openStep({ kind: "decide", change: c, approve: true })}>Approve</button>{" "}
+                                    <button className="btn secondary sm" onClick={() => openStep({ kind: "decide", change: c, approve: false })}>Reject</button>
+                                  </>
+                                )}
+                                {c.status === "pending" && !canDecide && (
+                                  <span className="muted" style={{ fontSize: 11.5 }}>
+                                    {c.requested_by_id === meId ? "Someone else must approve" : "Needs an approver"}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <span className="muted" style={{ fontSize: 13 }}>
+                    No changes. Editing the due date asks for a reason and records it here.
+                  </span>
+                )}
+              </div>
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
@@ -895,6 +1229,7 @@ function IssuesInner() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "classification", label: "Classification", content: classificationTab },
+            { id: "links", label: "Links", content: linksTab },
             { id: "remediation", label: "Remediation", content: remediationTab },
           ]}
           onClose={() => setShowForm(false)}
@@ -911,8 +1246,91 @@ function IssuesInner() {
           }
         />
       )}
+
+      {step && detail && (
+        <FormModal
+          title={
+            step.kind === "validate" ? `Validate ${detail.reference}`
+              : step.kind === "close" ? `Close ${detail.reference}`
+              : `${step.approve ? "Approve" : "Reject"} new due date — ${detail.reference}`
+          }
+          tabs={[{ id: "step", label: "Step", content: stepContent(step, detail) }]}
+          onClose={() => setStep(null)}
+          onSave={submitStep}
+          saving={stepSaving}
+          error={stepError}
+          saveLabel={
+            step.kind === "validate" ? "Record validation"
+              : step.kind === "close" ? "Close issue"
+              : step.approve ? "Approve" : "Reject"
+          }
+        />
+      )}
     </>
   );
+
+  function stepContent(s: Step, i: Issue) {
+    if (s.kind === "validate") {
+      return (
+        <>
+          <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+            You are certifying whether the remediation works. You must not be the issue&apos;s owner or the person who raised it.
+            Recording it as effective needs closure evidence attached to the issue; not effective sends it back to the owner.
+          </p>
+          <Field label="Result" required>
+            <Select value={stepResult} onChange={setStepResult} options={[
+              { value: "effective", label: "Effective — the fix works" },
+              { value: "not_effective", label: "Not effective — send back" },
+            ]} />
+          </Field>
+          <Field label="Validation note" required help="What you checked and what you found.">
+            <textarea className="input" rows={3} required value={stepNote} onChange={(e) => setStepNote(e.target.value)} />
+          </Field>
+        </>
+      );
+    }
+    if (s.kind === "close") {
+      const ready = [
+        { ok: i.open_action_count === 0, text: i.open_action_count ? `${i.open_action_count} action(s) still open` : "No open actions" },
+        { ok: i.validation_result === "effective", text: i.validation_result === "effective" ? "Validated effective" : "No effective validation yet" },
+      ];
+      return (
+        <>
+          <Field label="Close as" required>
+            <Select value={stepStatus} onChange={setStepStatus} options={CLOSE_STATUS} />
+          </Field>
+          <ul style={{ margin: "0 0 12px", paddingLeft: 18, fontSize: 13 }}>
+            {stepStatus === "risk_accepted" ? (
+              <>
+                <li className={i.open_action_count ? "" : "muted"}>{ready[0].text}</li>
+                <li className="muted">Needs an approved risk acceptance on a linked risk, or a note from someone who may approve issues.</li>
+              </>
+            ) : (
+              ready.map((r) => <li key={r.text} style={{ color: r.ok ? undefined : "var(--danger, #c0392b)" }}>{r.ok ? "✓ " : "✗ "}{r.text}</li>)
+            )}
+            <li className="muted">The person who raised the issue cannot close it.</li>
+          </ul>
+          <Field label="Closure note" required={stepStatus === "risk_accepted"} help="Kept in the progress log and the audit trail.">
+            <textarea className="input" rows={3} value={stepNote} onChange={(e) => setStepNote(e.target.value)} />
+          </Field>
+        </>
+      );
+    }
+    return (
+      <>
+        <p style={{ margin: "0 0 12px", fontSize: 13 }}>
+          Move the due date from <strong>{formatDate(s.change.old_due_date)}</strong> to{" "}
+          <strong>{s.change.new_due_date ? formatDate(s.change.new_due_date) : "no date"}</strong>.
+        </p>
+        <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+          Reason given by <UserName user={s.change.requested_by_ref} fallback="the requester" />: {s.change.reason || "—"}
+        </p>
+        <Field label="Note" help="Optional; kept in the progress log.">
+          <textarea className="input" rows={2} value={stepNote} onChange={(e) => setStepNote(e.target.value)} />
+        </Field>
+      </>
+    );
+  }
 }
 
 export default function IssuesPage() {

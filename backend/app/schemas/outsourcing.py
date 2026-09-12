@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
+from app.schemas.common import LookupRef, UserRef
 from app.models.outsourcing import (
     CloudModel,
     OutsourcingCategory,
@@ -48,6 +49,12 @@ class OutsourcingReviewRead(OutsourcingReviewBase):
 
 
 # ---------------------------------------------------- outsourcing arrangements ---
+_OWNER_ID = "Accountable owner (a user); wins over the legacy `owner` text. Read back as `owner_ref`."
+_OWNER = "Legacy free-text owner. Written with the picked user's name; text alone is matched to a user."
+_COUNTRY_ID = "Country where the data / service is located, from the `country` list. Read back as `country_ref`."
+_COUNTRY = "Legacy free-text country. Written with the picked country's name; text alone is matched to the list."
+
+
 class OutsourcingArrangementBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     service_provider: str = ""
@@ -59,7 +66,8 @@ class OutsourcingArrangementBase(BaseModel):
     is_cloud: bool = False
     cloud_model: CloudModel = CloudModel.not_applicable
     data_offshored: bool = False
-    country: str = ""
+    country: str = Field(default="", description=_COUNTRY)
+    country_id: uuid.UUID | None = Field(default=None, description=_COUNTRY_ID)
     sbp_approval_required: bool = False
     sbp_approval_status: SbpApprovalStatus = SbpApprovalStatus.not_required
     sbp_approval_ref: str = ""
@@ -69,7 +77,8 @@ class OutsourcingArrangementBase(BaseModel):
     exit_plan_tested: bool = False
     concentration_note: str = ""
     status: OutsourcingStatus = OutsourcingStatus.proposed
-    owner: str = ""
+    owner: str = Field(default="", description=_OWNER)
+    owner_id: uuid.UUID | None = Field(default=None, description=_OWNER_ID)
 
 
 class OutsourcingArrangementCreate(OutsourcingArrangementBase):
@@ -87,7 +96,8 @@ class OutsourcingArrangementUpdate(BaseModel):
     is_cloud: bool | None = None
     cloud_model: CloudModel | None = None
     data_offshored: bool | None = None
-    country: str | None = None
+    country: str | None = Field(default=None, description=_COUNTRY)
+    country_id: uuid.UUID | None = Field(default=None, description=_COUNTRY_ID)
     sbp_approval_required: bool | None = None
     sbp_approval_status: SbpApprovalStatus | None = None
     sbp_approval_ref: str | None = None
@@ -97,7 +107,8 @@ class OutsourcingArrangementUpdate(BaseModel):
     exit_plan_tested: bool | None = None
     concentration_note: str | None = None
     status: OutsourcingStatus | None = None
-    owner: str | None = None
+    owner: str | None = Field(default=None, description=_OWNER)
+    owner_id: uuid.UUID | None = Field(default=None, description=_OWNER_ID)
 
 
 class OutsourcingArrangementRead(OutsourcingArrangementBase):
@@ -110,3 +121,5 @@ class OutsourcingArrangementRead(OutsourcingArrangementBase):
     is_contract_expiring: bool
     created_at: datetime
     reviews: list[OutsourcingReviewRead] = []
+    owner_ref: UserRef | None = None
+    country_ref: LookupRef | None = None

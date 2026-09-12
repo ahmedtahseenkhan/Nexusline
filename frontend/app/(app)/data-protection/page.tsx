@@ -1,6 +1,8 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
@@ -785,6 +787,8 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
     { key: "breach_type", header: "Type", sortable: true, render: (b) => <Badge tone="info">{cap(b.breach_type)}</Badge> },
     { key: "severity", header: "Severity", sortable: true, render: (b) => <CritBadge value={b.severity} /> },
     { key: "records_affected", header: "Records", sortable: true, render: (b) => <span className="muted">{num(b.records_affected)}</span> },
+    // Breach ↔ incident hand-off: an incident flagged as a personal data breach opens its breach here.
+    { key: "incident", header: "Source incident", render: (b) => (b.incident ? <span onClick={(e) => e.stopPropagation()}><Link className="chip" href={`/incidents?id=${b.incident.id}`}>{refLabel(b.incident)}</Link></span> : <span className="muted">—</span>), text: (b) => (b.incident ? refLabel(b.incident) : "") },
     { key: "status", header: "Status", sortable: true, render: (b) => <Badge tone={BREACH_STATUS_TONE[b.status] || "neutral"}>{cap(b.status)}</Badge> },
     {
       key: "notification",
@@ -835,7 +839,7 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
           <TextInput value={bf.owner} onChange={(v) => setB("owner", v)} placeholder="Response owner" />
         </Field>
       </div>
-      <Field label="Related incident" help="Link this breach to a record in the incident register.">
+      <Field label="Source incident" help="The incident this breach came from. Linking it flags that incident as a personal data breach.">
         <AsyncSelect
           search={searchIncidents}
           value={bf.incident_id || null}
@@ -950,7 +954,12 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
               <p style={{ margin: "2px 0 0" }}>{detail.remediation || "—"}</p>
             </div>
             <div style={{ marginBottom: 16 }}>
-              <RelatedChips label="Related incident" items={detail.incident ? [detail.incident] : []} href="/incidents" />
+              <RelatedChips label="Source incident" items={detail.incident ? [detail.incident] : []} href="/incidents" />
+              {detail.incident && (
+                <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                  {detail.incident.title ? `${detail.incident.title}. ` : ""}Timeline, regulator clock and loss events are on the incident.
+                </div>
+              )}
             </div>
           </>
         )}
@@ -1138,7 +1147,12 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 ];
 
 function DataProtectionInner() {
-  const [section, setSection] = useState<SectionId>("dpia");
+  // `?section=breach` opens a section directly (links from an incident to its breach).
+  const params = useSearchParams();
+  const [section, setSection] = useState<SectionId>(() => {
+    const wanted = params.get("section");
+    return SECTIONS.some((s) => s.id === wanted) ? (wanted as SectionId) : "dpia";
+  });
   const [summary, setSummary] = useState<DpSummary | null>(null);
 
   const loadSummary = useCallback(() => {
