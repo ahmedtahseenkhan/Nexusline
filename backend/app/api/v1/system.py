@@ -78,9 +78,11 @@ async def system_status(user: CurrentUser) -> dict:
 
 @router.get("/modules")
 async def module_matrix(user: CurrentUser) -> list[dict]:
-    """Per-installation module entitlements. Auth-only (no admin permission):
-    every user's navigation is filtered by this, so all roles may read it."""
-    return module_service.module_states()
+    """Module entitlements for the caller's organisation (licence, deployment setting,
+    and the organisation's own choice). Auth-only (no admin permission): every user's
+    navigation is filtered by this, so all roles may read it."""
+    chosen = await module_service.organisation_choice(user.tenant_id)
+    return module_service.module_states(chosen)
 
 
 @router.get("/health", dependencies=[Depends(require("role:read"))])

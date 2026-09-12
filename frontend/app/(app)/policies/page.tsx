@@ -5,6 +5,7 @@ import { api, apiCall, type Policy as PolicyBase, type PolicyAckStatus, type Pol
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { useFilterParams, type FilterSpec } from "@/lib/useFilterParams";
 import { useFormat } from "@/lib/format";
 import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
 import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
@@ -14,6 +15,7 @@ import LookupSelect from "@/components/LookupSelect";
 import WorkflowFields from "@/components/WorkflowFields";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
+import BulkEditBar from "@/components/BulkEditBar";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -67,6 +69,10 @@ type PolicyReview = {
   comments: string;
   created_at: string;
 };
+
+/** Register filters, kept in the URL: the dashboard's "policy reviews overdue" opens
+ *  `/policies?review=overdue` (approved or published, next review passed). */
+const POLICY_FILTERS = { review: ["overdue"] } as const satisfies FilterSpec;
 
 const categoryText = (p: Pick<Policy, "category" | "category_ref">) =>
   p.category_ref ? p.category_ref.path || p.category_ref.label : p.category || "";
@@ -187,6 +193,7 @@ function PoliciesInner() {
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const filters = useFilterParams(POLICY_FILTERS);
   const fetchPolicies = useCallback((qs: string) => apiCall<PagedList<Policy>>("GET", `/policies?${qs}`), []);
   const loadDetail = useCallback((id: string) => {
     apiCall<PolicyDetail>("GET", `/policies/${id}`).then(setDetail).catch(() => setDetail(null));
@@ -469,8 +476,18 @@ function PoliciesInner() {
       <DataTable<Policy>
         toolbarRight={<ArchivedRecords entityType="policy" noun="policies" onRestored={reload} refreshKey={refreshKey} />}
         bulkActions={(rows, clear) => (
-          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          <>
+            <BulkEditBar entityType="policy" rows={rows} onDone={() => { clear(); reload(); }} />
+            <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          </>
         )}
+        filters={filters.values}
+        onApplyFilters={filters.replace}
+        toolbarLeft={
+          <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }} title="Approved or published, and the next review date has passed">
+            <input type="checkbox" checked={filters.values.review === "overdue"} onChange={(e) => filters.set("review", e.target.checked ? "overdue" : undefined)} /> Review overdue
+          </label>
+        }
         columns={columns}
         fetcher={fetchPolicies}
         rowKey={(p) => p.id}

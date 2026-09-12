@@ -12,6 +12,7 @@ import { ModulesProvider, buildModulesContext, moduleForRoute, routeDisabled } f
 import { FeedbackHost } from "@/lib/feedback";
 import { TenantSettingsProvider } from "@/lib/tenantSettings";
 import { useFormat } from "@/lib/format";
+import { landingPath, markLanded, needsLanding, rememberNext, safeNext, takeNext } from "@/lib/landing";
 
 function ModuleLocked({ module: mod }: { module?: ModuleState }) {
   return (
@@ -86,10 +87,21 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   const [modules, setModules] = useState<ModuleState[]>([]);
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [ready, setReady] = useState(false);
+  // The landing page this session is being sent to; the shell waits on "Loading…" until
+  // it is there, so the page the user was redirected away from never flashes.
+  const [landingTo, setLandingTo] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (landingTo && pathname === landingTo) setLandingTo(null);
+  }, [pathname, landingTo]);
 
   useEffect(() => {
     if (!getToken()) {
-      router.replace("/");
+      // Signed out: keep the page asked for (an e-mailed alert's link) for after sign-in.
+      const here = `${window.location.pathname}${window.location.search}`;
+      const next = safeNext(here);
+      if (next) rememberNext(next);
+      router.replace(next ? `/?next=${encodeURIComponent(next)}` : "/");
       return;
     }
     Promise.all([
@@ -97,11 +109,23 @@ export default function AppLayout({ children }: { children: ReactNode }) {
       // Fail open: on error the sidebar shows everything and the API still enforces.
       api.systemModules().catch(() => [] as ModuleState[]),
     ])
-      .then(([u, mods]) => {
+      .then(async ([u, mods]) => {
         if (u.mfa_enrolment_required) {
           // Grace period over: this session can only enrol in MFA.
           router.replace("/mfa-setup");
           return;
+        }
+        // First page of a new session that didn't come through the login form (SSO and
+        // two-factor enrolment return to /dashboard): open the remembered deep link, or
+        // this user's landing page — My Work unless they administer the organisation.
+        if (needsLanding()) {
+          markLanded();
+          const here = window.location.pathname;
+          const target = takeNext() ?? (here === "/dashboard" ? await landingPath(u) : null);
+          if (target && target !== `${here}${window.location.search}`) {
+            setLandingTo(target.split("?")[0]);
+            router.replace(target);
+          }
         }
         setUser(u);
         setModules(mods);
@@ -116,7 +140,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
 
   const ctx = useMemo(() => buildModulesContext(modules), [modules]);
 
-  if (!ready) {
+  if (!ready || (landingTo && pathname !== landingTo)) {
     return (
       <div style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
         <span className="muted">Loading…</span>

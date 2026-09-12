@@ -145,5 +145,5 @@ def test_version_history_never_holds_a_credential():
     from app.services.versioning import _SKIP
 
     for column in ("feed_token_hash", "access_hash", "hashed_password", "mfa_secret",
-                   "client_secret", "secret"):
+                   "client_secret", "secret", "ingest_token_hash", "token_hash"):
         assert column in _SKIP

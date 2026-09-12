@@ -97,6 +97,11 @@ class MeetingRead(MeetingBase):
 
 
 # ----------------------------------------------------------------- committees ---
+#: Longest lead time for an automatic board pack: a quarter is the longest sensible gap
+#: between a pack and the sitting it is for.
+MAX_BOARD_PACK_DAYS = 90
+
+
 class CommitteeBase(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     committee_type: CommitteeType = CommitteeType.board
@@ -106,6 +111,9 @@ class CommitteeBase(BaseModel):
     members: str = ""
     meeting_frequency: ReviewFrequency = ReviewFrequency.quarterly
     status: CommitteeStatus = CommitteeStatus.active
+    #: Phase 3: generate the board pack automatically this many days before each
+    #: scheduled meeting; None = generate it by hand.
+    board_pack_days_before: int | None = Field(default=None, ge=1, le=MAX_BOARD_PACK_DAYS)
 
 
 class CommitteeCreate(CommitteeBase):
@@ -121,6 +129,7 @@ class CommitteeUpdate(BaseModel):
     members: str | None = None
     meeting_frequency: ReviewFrequency | None = None
     status: CommitteeStatus | None = None
+    board_pack_days_before: int | None = Field(default=None, ge=1, le=MAX_BOARD_PACK_DAYS)
 
 
 class CommitteeRead(CommitteeBase):
@@ -143,3 +152,53 @@ class GovernanceSummary(BaseModel):
     meetings_scheduled: int
     open_actions: int
     overdue_actions: int
+
+
+# ---------------------------------------------------------------- board packs ---
+class BoardPackCreate(BaseModel):
+    """Generate a board pack. Every field is optional: with none, the pack covers the
+    fiscal quarter to date for the whole organisation, all sections."""
+
+    committee_id: uuid.UUID | None = None
+    meeting_id: uuid.UUID | None = None
+    period_start: date | None = None
+    period_end: date | None = None
+    #: Section keys (``services.board_pack.SECTION_KEYS``); None = all of them.
+    sections: list[str] | None = Field(default=None, max_length=20)
+    #: Defaults to one built from the committee, meeting and period.
+    title: str | None = Field(default=None, max_length=255)
+
+
+class BoardPackFile(BaseModel):
+    id: uuid.UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+
+
+class BoardPackRead(BaseModel):
+    id: uuid.UUID
+    committee_id: uuid.UUID | None = None
+    committee_name: str = ""
+    meeting_id: uuid.UUID | None = None
+    meeting_title: str = ""
+    meeting_date: date | None = None
+    title: str
+    period_start: date | None = None
+    period_end: date | None = None
+    sections: list[str] = []
+    #: ready | failed
+    status: str
+    error: str = ""
+    pdf: BoardPackFile | None = None
+    xlsx: BoardPackFile | None = None
+    generated_by_id: uuid.UUID | None = None
+    #: The person who generated it, or "Scheduler" for an automatic pack.
+    generated_by: str = ""
+    generated_at: datetime | None = None
+    created_at: datetime
+
+
+class BoardPackSection(BaseModel):
+    key: str
+    title: str

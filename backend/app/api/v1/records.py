@@ -12,6 +12,10 @@ these for free by being registered.
 * ``GET  /records/{type}/{id}/workflow``       lifecycle state, owner, actions, history
 * ``POST /records/{type}/{id}/workflow/{act}`` submit / approve / reject / revise / retire
 * ``PUT  /records/{type}/{id}/workflow/owner`` name the approval owner (a user)
+* ``GET  /records/{type}/bulk-fields``         what the register can set in bulk
+* ``PATCH /records/{type}/bulk``               set owner / review date / frequency /
+                                               category / status on many records
+                                               (rules: ``services/bulk_edit.py``)
 """
 from __future__ import annotations
 
@@ -25,9 +29,11 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.deps import CurrentUser, DbSession
+from app.schemas.bulk import BulkEditBody, BulkFieldsRead, BulkResult
 from app.schemas.common import UserRef
 from app.services import (
     audit,
+    bulk_edit,
     dual_control,
     entity_types,
     master_data,
@@ -291,6 +297,30 @@ async def restore_record(
         entity_type=entity_type, id=record.id,
         reference=record_registry.reference_of(record),
         title=record_registry.title_of(record), label=label,
+    )
+
+
+# ---------------------------------------------------------------- bulk edit ---
+@router.get("/{entity_type}/bulk-fields", response_model=BulkFieldsRead)
+async def bulk_fields(entity_type: str, user: CurrentUser) -> BulkFieldsRead:
+    """What this register can set on many records at once — the bulk-edit bar's menu,
+    with each field's picker, allowed values and the register rule to show before
+    confirming. Needs the module's read permission; ``can_edit`` says whether the user
+    holds its write permission."""
+    return bulk_edit.fields_for(user, entity_type)
+
+
+@router.patch("/{entity_type}/bulk", response_model=BulkResult)
+async def bulk_update(
+    entity_type: str, body: BulkEditBody, db: DbSession, user: CurrentUser
+) -> BulkResult:
+    """Set ``owner_id`` / ``next_review_date`` / ``review_frequency`` / ``category_id`` /
+    ``status`` on each of ``ids``. Needs the module's write permission. Values are
+    checked once; each live record of this organisation then goes through the
+    register's own rules, and is updated or skipped with its reason (archived, not
+    found, no change, or the rule). One audit entry per record, carrying the batch id."""
+    return await bulk_edit.run(
+        db, user, entity_type, body.ids, body.patch.model_dump(exclude_unset=True)
     )
 
 

@@ -517,6 +517,18 @@ export interface RiskProposal {
   control_labels: string[];
   /** Controls the scenario calls for that this catalogue does not have (by reference). */
   unmapped_references: string[];
+  /** Phase 3: pairs with the same key become one candidate (scenario + process + unit). */
+  dedupe_key: string;
+  /** The candidate's scope, e.g. "Payments · Retail Banking". */
+  scope_label: string;
+  /** The candidate's title when it covers several assets. */
+  group_title: string;
+  /** A pending candidate with this key is already in the queue; the pair joins it. */
+  queued_proposal_id: string | null;
+  queued_title: string;
+  /** The key's last candidate was rejected, and why. */
+  rejected_note: string;
+  rejected_at: string | null;
 }
 export interface GenerateRisksResponse {
   proposals: RiskProposal[];
@@ -524,9 +536,15 @@ export interface GenerateRisksResponse {
   scenarios_considered: number;
   duplicates_skipped: number;
   truncated: boolean;
+  /** Distinct candidates the proposals would make. */
+  candidates: number;
+  /** Proposals that would join a candidate already in the queue. */
+  queued: number;
 }
 export interface GeneratedRiskCommitItem {
   asset_id: string;
+  scenario_id?: string;
+  scenario_reference?: string;
   title: string;
   description: string;
   category: string;
@@ -537,11 +555,64 @@ export interface GeneratedRiskCommitItem {
   treatment_description: string;
   control_ids: string[];
 }
+/** Sending proposals to the risk candidate queue: every pair created a candidate, joined
+ *  one (merged — some into candidates already waiting), was skipped as already in the
+ *  register, or failed. */
 export interface GenerateRisksCommitResult {
+  run_id: string;
   created: number;
+  merged: number;
+  merged_into_existing: number;
   skipped: number;
-  references: string[];
+  proposals: string[];
+  skipped_items: { title: string; asset_name: string; risk_reference: string }[];
   errors: { title: string; message: string }[];
+}
+/** A risk candidate in the queue (/risk-proposals). */
+export interface RiskCandidate {
+  id: string;
+  run_id: string | null;
+  scenario_reference: string;
+  scenario_title: string;
+  scenario_category: string;
+  title: string;
+  description: string;
+  dedupe_key: string;
+  status: "pending" | "accepted" | "rejected" | "merged";
+  business_unit_id: string | null;
+  business_unit_ref: { id: string; name: string } | null;
+  process_id: string | null;
+  process_ref: { id: string; name: string } | null;
+  category_id: string | null;
+  category_ref: { id: string; key: string; value: string; label: string } | null;
+  inherent_likelihood: number | null;
+  inherent_impact: number | null;
+  inherent_score: number | null;
+  inherent_severity: string | null;
+  control_references: string[];
+  controls: { id: string; reference: string; name: string }[];
+  unmapped_references: string[];
+  assets: { id: string; name: string; asset_class: string }[];
+  archived_assets: number;
+  merged_into_id: string | null;
+  merged_into: { id: string; reference?: string; title?: string } | null;
+  promoted_risk_id: string | null;
+  promoted_risk: { id: string; reference?: string; title?: string } | null;
+  promoted_risk_archived: boolean;
+  created_by_ref: { id: string; full_name: string; email: string } | null;
+  decided_by_ref: { id: string; full_name: string; email: string } | null;
+  decided_at: string | null;
+  decision_note: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface RiskCandidatePage {
+  items: RiskCandidate[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** Candidates per status under the same filters (the status filter ignored). */
+  counts: Record<string, number>;
 }
 
 /** A live risk whose linked assets were all deleted and that has no other live link. */
@@ -990,10 +1061,19 @@ export interface Notification {
   link: string;
   created_at: string;
   seen: boolean;
+  /** Who it is addressed to: a person, a role, both, or neither (everyone). */
+  user_id?: string | null;
+  role_name?: string;
+  /** How it reached the signed-in user. */
+  audience?: "me" | "role" | "everyone";
 }
 export interface NotificationList {
   items: Notification[];
   unseen_count: number;
+  /** Of the unseen, how many are addressed to the user or one of their roles. */
+  unseen_mine?: number;
+  /** The feed was narrowed to alerts addressed to the user (`?mine=true`). */
+  mine?: boolean;
   /** Rows in the whole feed; `items` is one page of it. */
   total: number;
   limit: number;
@@ -2031,7 +2111,8 @@ export const api = {
   updateOrganization: (id: string, body: { name?: string; is_active?: boolean }) =>
     request<Organization>(`/platform/organizations/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   platformSummary: () => request<PlatformSummary>("/platform/summary"),
-  notifications: (limit = 100, offset = 0) => request<NotificationList>(`/notifications?limit=${limit}&offset=${offset}`),
+  /** `query` adds filters, e.g. "&mine=true" or "&fresh=false" (the bell). */
+  notifications: (limit = 100, offset = 0, query = "") => request<NotificationList>(`/notifications?limit=${limit}&offset=${offset}${query}`),
   markNotificationsSeen: () => request<void>("/notifications/seen", { method: "POST" }),
   approvals: () => request<Page<ApprovalRequest>>("/approvals?limit=200"),
   submitApproval: (payload: Record<string, unknown>) =>

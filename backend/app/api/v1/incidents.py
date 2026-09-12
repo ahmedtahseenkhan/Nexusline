@@ -42,7 +42,7 @@ from app.schemas.incident import (
     StageUpdate,
 )
 from app.services.refs import next_reference
-from app.services import audit, delete_guard
+from app.services import audit, delete_guard, drill_through
 from app.services import incident_clock as clock
 from app.services import ref_fields as rf
 from app.services.modules import is_enabled as module_enabled
@@ -293,9 +293,10 @@ async def _hand_off_breach(db, inc: Incident, user) -> tuple[DataBreach | None, 
     db.add(breach)
     await db.flush()
     dpo = await _dpo_roles(db, user.tenant_id)
-    if dpo:
+    for role_name in dpo:  # Phase 3: addressed to each DPO role, not the whole organisation
         db.add(Notification(
             tenant_id=user.tenant_id,
+            role_name=role_name[:64],
             title=f"Personal data breach: {breach.reference} from {inc.reference}",
             body=(
                 f"For {', '.join(dpo)}: {inc.reference} {inc.title} was flagged as a personal data "
@@ -306,11 +307,13 @@ async def _hand_off_breach(db, inc: Incident, user) -> tuple[DataBreach | None, 
             entity_type="data_breach",
             entity_id=breach.id,
             link="/data-protection",
-            dedup_key=f"{EVENT_PREFIX}personal-data-breach:{breach.id}",
+            dedup_key=f"{EVENT_PREFIX}personal-data-breach:{breach.id}:{role_name}"[:255],
         ))
-        note = f"DPO notified ({', '.join(dpo)})"
-    else:
-        note = "no DPO role configured; recorded in the audit trail only"
+    note = (
+        f"DPO notified ({', '.join(dpo)})"
+        if dpo
+        else "no DPO role configured; recorded in the audit trail only"
+    )
     await audit.record(
         db, actor=user, action="create", entity_type="data_breach", entity_id=breach.id,
         summary=f"Opened data breach {breach.reference} from incident {inc.reference} ({note})",
@@ -330,6 +333,13 @@ async def list_incidents(
     is_reportable: bool | None = None,
     near_miss: bool | None = None,
     personal_data_breach: bool | None = None,
+    open_only: Annotated[
+        bool | None,
+        Query(alias="open", description=(
+            "true: not resolved or closed (open, triage, investigating, contained) — the "
+            "dashboard's open incidents; false: resolved or closed"
+        )),
+    ] = None,
     search: str | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
@@ -339,6 +349,10 @@ async def list_incidents(
     stmt: Select = select(Incident).where(Incident.deleted.is_(False))
     if status_filter is not None:
         stmt = stmt.where(Incident.status == status_filter)
+    if open_only is not None:
+        # The dashboard counts open incidents with this same predicate.
+        is_open = drill_through.incident_open()
+        stmt = stmt.where(is_open if open_only else ~is_open)
     if severity is not None:
         stmt = stmt.where(Incident.severity == severity)
     if assignee_id is not None:

@@ -147,6 +147,9 @@ class TenantSettingsRead(BaseModel):
     retention_days: int
     updated_at: datetime | None = None
     id: uuid.UUID | None = None
+    # Phase 3: first-run setup and the organisation's module choice (None = all licensed).
+    onboarding_completed_at: datetime | None = None
+    enabled_modules: list[str] | None = None
 
 
 class TenantSettingsUpdate(BaseModel):

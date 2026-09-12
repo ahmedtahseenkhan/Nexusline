@@ -11,7 +11,8 @@ from datetime import date, datetime, timezone
 from typing import Annotated, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
+from sqlalchemy.orm import aliased
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
@@ -32,9 +33,9 @@ from app.models.risk import (
     RiskTreatmentAction,
     risk_assets,
 )
-from app.services.risk_query import build_risk_query  # noqa: F401 - re-exported for callers
+from app.services.risk_query import UNPLACED, build_risk_query  # noqa: F401 - re-exported for callers
 from app.models.threat import Threat, Vulnerability
-from app.schemas.common import Page
+from app.schemas.common import GraphRef, Page
 from app.schemas.risk import (
     OrphanedRisk,
     OrphanedRiskPage,
@@ -47,7 +48,10 @@ from app.schemas.risk import (
     ImpactDimensionRead,
     RiskAssessment,
     RiskCreate,
+    RiskHierarchy,
+    RiskHierarchyNode,
     RiskRead,
+    RiskRollup,
     RiskUpdate,
     SuggestedResidual,
     TreatmentActionCreate,
@@ -62,6 +66,7 @@ from app.services import delete_guard
 from app.services import master_data
 from app.services import dual_control
 from app.services import ref_fields
+from app.services import risk_hierarchy
 from app.services import risk_integrity
 from app.services.residual_engine import ControlInput, suggest_residual
 from app.services.risk_scoring import next_review_date
@@ -304,6 +309,8 @@ _RISK_SORTABLE = {
     "source": Risk.source,
     "next_review_date": Risk.next_review_date,
     "created_at": Risk.created_at,
+    # Phase 3: unplaced risks sort after level 3 ascending.
+    "level": func.coalesce(Risk.level, 9),
 }
 
 
@@ -323,11 +330,22 @@ async def list_risks(
     risk_type: str | None = None,
     source: str | None = None,
     search: str | None = None,
+    # Phase 3: hierarchy ("none" = not placed) and the dashboard's drill-through filters,
+    # defined in services.risk_query exactly as the dashboard counts them.
+    level: Annotated[str | None, Query(pattern="^(1|2|3|none)$")] = None,
+    max_level: Annotated[int | None, Query(ge=1, le=3)] = None,
+    parent_id: uuid.UUID | None = None,
+    roots_only: bool | None = None,
+    review: Annotated[str | None, Query(pattern="^(overdue|due_30d)$")] = None,
+    appetite: Annotated[str | None, Query(pattern="^(within|within_appetite|elevated|breach)$")] = None,
+    has_controls: bool | None = None,
+    treatment_overdue: bool | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[RiskRead]:
+    context = await _read_context(db, user)
     stmt: Select = build_risk_query(
         status=status_filter,
         category=category,
@@ -338,6 +356,15 @@ async def list_risks(
         owner_id=owner_id,
         treatment_owner_id=treatment_owner_id,
         category_id=category_id,
+        level=(UNPLACED if level == "none" else int(level)) if level else None,
+        max_level=max_level,
+        parent_id=parent_id,
+        roots_only=roots_only,
+        review=review,
+        appetite=appetite,
+        appetite_book=context["appetite"],
+        has_controls=has_controls,
+        treatment_overdue=treatment_overdue,
     )
     if needs_review is not None:
         stmt = stmt.where(Risk.needs_review.is_(needs_review))
@@ -353,9 +380,9 @@ async def list_risks(
     else:
         stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    context = await _read_context(db, user)
     items = [RiskRead.model_validate(r, context=context) for r in rows]
     await ref_fields.fill_refs(db, list(zip(rows, items)), RISK_REFS)
+    await _fill_hierarchy(db, list(zip(rows, items)))
     today = date.today()
     actions = await _actions_by_risk(db, [r.id for r in rows])
     for row, item in zip(rows, items):
@@ -390,6 +417,12 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
     dimension_rows = [d.model_dump() for d in body.impact_dimensions]
     if dimension_rows:
         await _apply_dimensions(db, user, dimension_rows, data)
+    # Phase 3: a parent must be live and above the risk; the level defaults from it.
+    if data.get("parent_id") is not None or data.get("level") is not None:
+        data["level"] = await _place(
+            db, risk_id=None, parent_id=data.get("parent_id"), level=data.get("level"),
+            level_given="level" in body.model_fields_set, current_level=None,
+        )
     sends_inherent = data.get("inherent_likelihood") is not None and data.get("inherent_impact") is not None
     # Scores not chosen yet are stored as 1 (the columns are NOT NULL) and the risk
     # cannot leave draft until someone scores it.
@@ -462,6 +495,183 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
         },
     )
     return await _read(db, risk.id, user)
+
+
+# ----------------------------------------------------------------- hierarchy (phase 3)
+# 1 enterprise → 2 category → 3 scenario. The placement rules live in
+# services.risk_hierarchy (pure); these helpers load the facts they need.
+async def _hierarchy_node(db, risk_id: uuid.UUID) -> risk_hierarchy.Node | None:
+    row = (
+        await db.execute(
+            select(Risk.id, Risk.reference, Risk.level, Risk.deleted).where(Risk.id == risk_id)
+        )
+    ).first()
+    if row is None:
+        return None
+    return risk_hierarchy.Node(row.id, row.reference or "", row.level, bool(row.deleted))
+
+
+async def _ancestor_ids(db, risk_id: uuid.UUID) -> list[uuid.UUID]:
+    """``risk_id`` and every risk above it, archived ones included (a loop through an
+    archived risk would come back on restore). UNION, not UNION ALL, so a loop already
+    in the data ends the walk instead of hanging it."""
+    above = aliased(Risk)
+    walk = select(Risk.id, Risk.parent_id).where(Risk.id == risk_id).cte("risk_ancestors", recursive=True)
+    walk = walk.union(select(above.id, above.parent_id).where(above.id == walk.c.parent_id))
+    return list((await db.scalars(select(walk.c.id))).all())
+
+
+async def _child_nodes(db, risk_id: uuid.UUID) -> list[risk_hierarchy.Node]:
+    rows = (
+        await db.execute(
+            select(Risk.id, Risk.reference, Risk.level)
+            .where(Risk.parent_id == risk_id, Risk.deleted.is_(False))
+            .order_by(Risk.reference)
+        )
+    ).all()
+    return [risk_hierarchy.Node(r.id, r.reference or "", r.level) for r in rows]
+
+
+async def _place(
+    db,
+    *,
+    risk_id: uuid.UUID | None,
+    parent_id: uuid.UUID | None,
+    level: int | None,
+    level_given: bool,
+    current_level: int | None,
+) -> int | None:
+    """Apply the hierarchy rules (422 with the rule's sentence) and return the level."""
+    parent = await _hierarchy_node(db, parent_id) if parent_id is not None else None
+    ancestors = (
+        await _ancestor_ids(db, parent_id)
+        if parent_id is not None and parent is not None and risk_id is not None
+        else []
+    )
+    children = await _child_nodes(db, risk_id) if risk_id is not None else []
+    try:
+        return risk_hierarchy.place(
+            risk_id=risk_id, parent_id=parent_id, parent=parent, level=level,
+            level_given=level_given, current_level=current_level,
+            ancestors_of_parent=ancestors, children=children,
+        )
+    except risk_hierarchy.HierarchyError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+async def _place_on_update(db, risk: Risk, data: dict[str, object]) -> None:
+    """Check a PATCH's ``parent_id``/``level`` against the rules, in place.
+
+    The form sends every field on each save, so an unchanged parent and level are
+    dropped rather than re-checked — a risk whose parent was later archived can still
+    have its title edited.
+    """
+    stored_parent, stored_level = getattr(risk, "parent_id", None), getattr(risk, "level", None)
+    parent_changed = "parent_id" in data and data["parent_id"] != stored_parent
+    level_changed = "level" in data and data["level"] != stored_level
+    if not (parent_changed or level_changed):
+        data.pop("parent_id", None)
+        data.pop("level", None)
+        return
+    parent_id = data["parent_id"] if "parent_id" in data else stored_parent
+    data["level"] = await _place(
+        db, risk_id=risk.id, parent_id=parent_id, level=data.get("level"),
+        level_given="level" in data, current_level=stored_level,
+    )
+    if "parent_id" not in data:
+        data["parent_id"] = parent_id
+
+
+async def _fill_hierarchy(db, pairs: Sequence[tuple[Risk, RiskRead]]) -> None:
+    """Set ``parent`` (live parents only) and ``children_count`` on read models — two
+    queries for the whole page."""
+    if not pairs:
+        return
+    parent_ids = {getattr(r, "parent_id", None) for r, _ in pairs} - {None}
+    parents: dict[uuid.UUID, GraphRef] = {}
+    if parent_ids:
+        for row in (
+            await db.execute(
+                select(Risk.id, Risk.reference, Risk.title)
+                .where(Risk.id.in_(parent_ids), Risk.deleted.is_(False))
+            )
+        ).all():
+            parents[row.id] = GraphRef(id=row.id, reference=row.reference or "", title=row.title or "")
+    counts = dict(
+        (
+            await db.execute(
+                select(Risk.parent_id, func.count())
+                .where(Risk.parent_id.in_([r.id for r, _ in pairs]), Risk.deleted.is_(False))
+                .group_by(Risk.parent_id)
+            )
+        ).all()
+    )
+    for risk, read in pairs:
+        read.parent = parents.get(getattr(risk, "parent_id", None))
+        read.children_count = int(counts.get(risk.id, 0))
+
+
+async def _hierarchy_facts(db) -> list[risk_hierarchy.RiskFacts]:
+    """Every live risk that is placed or has a parent — the population of the tree."""
+    rows = (
+        await db.execute(
+            select(
+                Risk.id, Risk.parent_id, Risk.level, Risk.reference, Risk.title, Risk.status,
+                Risk.category_id, Risk.inherent_likelihood, Risk.inherent_impact,
+                Risk.residual_likelihood, Risk.residual_impact,
+            ).where(Risk.deleted.is_(False), or_(Risk.parent_id.is_not(None), Risk.level.is_not(None)))
+        )
+    ).all()
+    return [_facts_of(r) for r in rows]
+
+
+def _facts_of(row) -> risk_hierarchy.RiskFacts:
+    return risk_hierarchy.RiskFacts(
+        id=row.id, parent_id=row.parent_id, level=row.level, reference=row.reference or "",
+        title=row.title or "", status=_status_value(row.status) or "", category_id=row.category_id,
+        inherent_likelihood=row.inherent_likelihood, inherent_impact=row.inherent_impact,
+        residual_likelihood=row.residual_likelihood, residual_impact=row.residual_impact,
+    )
+
+
+@router.get(
+    "/hierarchy",
+    response_model=RiskHierarchy,
+    dependencies=[Depends(require("risk:read"))],
+    summary="Board view: levels 1..max_level as a tree, with the worst exposure below each node",
+)
+async def get_risk_hierarchy(
+    db: DbSession,
+    user: CurrentUser,
+    max_level: Annotated[int, Query(ge=1, le=3)] = 2,
+) -> RiskHierarchy:
+    """The enterprise → category (→ scenario) tree. Each node carries its direct child
+    count, how many live risks sit anywhere below it, the worst exposure among them
+    (residual when assessed, else inherent — at any level, so a category shows its worst
+    scenario even when the tree stops at categories) and their severity counts."""
+    context = await _read_context(db, user)
+    facts = await _hierarchy_facts(db)
+    tree = risk_hierarchy.build_tree(
+        facts, max_level=max_level, scale=context["scale"], book=context["appetite"]
+    )
+    by_level = dict(
+        (
+            await db.execute(
+                select(Risk.level, func.count())
+                .where(Risk.deleted.is_(False), Risk.level.is_not(None))
+                .group_by(Risk.level)
+            )
+        ).all()
+    )
+    unplaced = await db.scalar(
+        select(func.count()).select_from(Risk).where(Risk.deleted.is_(False), Risk.level.is_(None))
+    ) or 0
+    return RiskHierarchy(
+        max_level=max_level,
+        roots=[RiskHierarchyNode.model_validate(node, from_attributes=True) for node in tree],
+        unplaced=int(unplaced),
+        by_level={str(k): int(v) for k, v in sorted(by_level.items())},
+    )
 
 
 # ------------------------------------------------------------------ orphan cleanup
@@ -606,6 +816,20 @@ async def get_risk(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> Risk
     return await _read(db, risk_id, user)
 
 
+@router.get(
+    "/{risk_id}/rollup",
+    response_model=RiskRollup,
+    dependencies=[Depends(require("risk:read"))],
+    summary="Children and descendants with their scores, the worst residual below, counts by severity",
+)
+async def get_risk_rollup(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> RiskRollup:
+    risk = await _load_risk(db, risk_id)
+    context = await _read_context(db, user)
+    index = risk_hierarchy.children_index(await _hierarchy_facts(db))
+    result = risk_hierarchy.rollup(_facts_of(risk), index, context["scale"], context["appetite"])
+    return RiskRollup.model_validate(result, from_attributes=True)
+
+
 @router.patch(
     "/{risk_id}", response_model=RiskRead, dependencies=[Depends(require("risk:write"))]
 )
@@ -682,6 +906,7 @@ async def update_risk(
     for name in ("cause", "event", "consequence"):
         if name in data:
             data[name] = (data[name] or "").strip()
+    await _place_on_update(db, risk, data)
 
     await ref_fields.apply_refs(db, Risk, data, RISK_REFS, record=risk)
 
@@ -1265,6 +1490,7 @@ async def _read(db, risk_id: uuid.UUID, user: CurrentUser) -> RiskRead:
     risk = await _load_risk(db, risk_id)
     read = RiskRead.model_validate(risk, context=context)
     await ref_fields.fill_refs(db, [(risk, read)], RISK_REFS)
+    await _fill_hierarchy(db, [(risk, read)])
     actions = (await _actions_by_risk(db, [risk.id]))[risk.id]
     read.treatment_actions = await _action_reads(db, actions)
     read.treatment_progress = TreatmentProgress(

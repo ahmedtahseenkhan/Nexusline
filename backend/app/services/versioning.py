@@ -73,6 +73,8 @@ _SKIP = {
     "mfa_secret",
     "client_secret",
     "secret",
+    "ingest_token_hash",
+    "token_hash",
 }
 
 

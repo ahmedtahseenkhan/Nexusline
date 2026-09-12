@@ -424,3 +424,19 @@ async def test_purge_with_nothing_orphaned_archives_nothing(monkeypatch, audit_l
     )
     assert (res.archived, res.skipped) == (0, 1)
     assert audit_log == []
+
+
+def test_a_risk_in_the_hierarchy_is_never_an_orphan():
+    # Phase 3: a risk with live children, or under a live parent, is in use.
+    import uuid as _uuid
+
+    from sqlalchemy.dialects import postgresql
+
+    from app.services import risk_integrity as ri
+
+    assert {"child_risks", "parent_risk"} <= set(ri.LINK_KEYS)
+    sql = str(ri.link_count_query([_uuid.uuid4()]).compile(dialect=postgresql.dialect()))
+    assert "'child_risks'" in sql and "'parent_risk'" in sql
+    counts = ri.empty_link_counts()
+    counts["child_risks"] = 2
+    assert not ri.is_orphaned(deleted_asset_links=1, live_links=counts)

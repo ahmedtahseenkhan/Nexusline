@@ -4,17 +4,26 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, type SearchHit } from "@/lib/api";
 import { routeDisabled, useModules } from "@/lib/modules";
-import { NAV } from "@/lib/nav";
+import { visibleNav, type NavAccess } from "@/lib/nav";
+import { useNavUser } from "@/lib/navPrefs";
+import { useTenantSettings } from "@/lib/tenantSettings";
 
 type NavRow = { kind: "nav"; href: string; label: string; section: string };
 type RecordRow = { kind: "record"; hit: SearchHit };
 type Row = NavRow | RecordRow;
 
 /** ⌘K / Ctrl-K command palette: fuzzy-jump to any licensed module and search records
- *  across every register from the keyboard. Mounted once in the app shell. */
+ *  across every register from the keyboard. Mounted once in the app shell. Offers
+ *  exactly the links the sidebar shows this user (licence + permission filter). */
 export default function CommandPalette() {
   const router = useRouter();
   const { disabledRoutes } = useModules();
+  const { permissions: shellPermissions } = useTenantSettings();
+  const me = useNavUser();
+  const access: NavAccess = useMemo(
+    () => ({ permissions: shellPermissions.length ? shellPermissions : me?.permissions ?? [], platformAdmin: !!me?.platformAdmin }),
+    [shellPermissions, me],
+  );
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -22,20 +31,17 @@ export default function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  // Flat list of navigable modules this installation has enabled — includes
+  // Flat list of navigable modules this user may open in this installation — includes
   // group-level single links (Dashboard, Shariah) and every submenu item.
   const navRows = useMemo<NavRow[]>(
     () =>
-      NAV.flatMap((s) => {
+      visibleNav(access, (href) => !routeDisabled(href, disabledRoutes)).flatMap((s) => {
         const rows: NavRow[] = [];
-        if (s.href && !routeDisabled(s.href, disabledRoutes))
-          rows.push({ kind: "nav", href: s.href, label: s.title, section: s.title });
-        for (const it of s.items)
-          if (!routeDisabled(it.href, disabledRoutes))
-            rows.push({ kind: "nav", href: it.href, label: it.label, section: s.title });
+        if (s.href) rows.push({ kind: "nav", href: s.href, label: s.title, section: s.title });
+        for (const it of s.items) rows.push({ kind: "nav", href: it.href, label: it.label, section: s.title });
         return rows;
       }),
-    [disabledRoutes]
+    [disabledRoutes, access]
   );
 
   const openPalette = useCallback(() => {

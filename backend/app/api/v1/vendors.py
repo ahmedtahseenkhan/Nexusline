@@ -11,7 +11,7 @@ risk tier derived from the "Inherent risk tiering" questionnaire
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from typing import Annotated
 
@@ -25,6 +25,7 @@ from app.models.asset import Asset
 from app.models.assessment import Questionnaire
 from app.models.compliance import Requirement
 from app.models.control import Control
+from app.models.enums import Criticality
 from app.models.lookup import Lookup
 from app.models.organization import Process
 from app.models.risk import Risk
@@ -46,7 +47,7 @@ from app.schemas.vendor import (
     VendorTypeUpdate,
     VendorUpdate,
 )
-from app.services import audit, delete_guard, master_data
+from app.services import audit, delete_guard, drill_through, master_data
 from app.services import ref_fields as rf
 from app.services import vendor_tiering as vt
 
@@ -291,12 +292,22 @@ async def list_vendors(
     search: str | None = None,
     category_id: uuid.UUID | None = None,
     country_id: uuid.UUID | None = None,
+    criticality: Annotated[Criticality | None, Query(description="low | medium | high | critical")] = None,
+    review: Annotated[
+        drill_through.ReviewFilter | None,
+        Query(description="overdue: the next review date has passed (the dashboard's reviews overdue)"),
+    ] = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[VendorRead]:
     stmt = select(Vendor).where(Vendor.deleted.is_(False))
+    if criticality is not None:
+        stmt = stmt.where(Vendor.criticality == criticality)
+    if review == "overdue":
+        # The dashboard's third-party line counts with this same predicate.
+        stmt = stmt.where(drill_through.vendor_review_overdue(date.today()))
     if search:
         like = f"%{search}%"
         stmt = stmt.where(

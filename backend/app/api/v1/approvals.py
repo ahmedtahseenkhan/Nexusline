@@ -263,6 +263,8 @@ async def decide_approval(
                     entity_type=instance.entity_type,
                     entity_id=instance.entity_id,
                     link=obj.link,
+                    # Phase 3: to the person who started the route (they asked to be told).
+                    user_id=instance.started_by,
                     dedup_key=f"{notifications_service.EVENT_PREFIX}workflow-done:{instance.id}",
                 )
             )
@@ -292,3 +294,132 @@ async def cancel_approval(approval_id: uuid.UUID, db: DbSession) -> ApprovalRead
 @router.delete("/{approval_id}", status_code=204, dependencies=[Depends(require("workflow:write"))])
 async def delete_approval(approval_id: uuid.UUID, db: DbSession) -> None:
     await db.delete(await _load(db, approval_id))
+
+
+# ========================================================== decide from an e-mail ===
+# Phase 3 (F-15). An approval request's e-mail carries Approve / Reject links with a
+# single-use token (``services/action_tokens.py``: SHA-256 stored, 72-hour expiry,
+# bound to one user, action and request, tenant id inside the token). Neither endpoint
+# takes a session — the token is the credential:
+#
+# * ``GET /actions/{token}`` says what the link would decide and whether it still can.
+#   It never decides: mail scanners and link previewers follow links.
+# * ``POST /actions/{token}/confirm`` validates the token (constant-time hash compare,
+#   unused, unexpired, its user still active and still able to decide), claims it and
+#   runs ``decide_approval`` above as that user — segregation of duties, one vote per
+#   checker, the reason a rejection needs, routes and the record's lifecycle all apply —
+#   then audits ``decide_by_email``. A refused decision rolls the claim back.
+#
+# ``email_router`` is mounted by ``api/v1/my_work.py`` so the phase-3 surface registers
+# with one line in ``router.py``.
+from datetime import datetime, timezone  # noqa: E402
+
+from app.core.database import tenant_session  # noqa: E402
+from app.models.settings import TenantSettings  # noqa: E402
+from app.schemas.my_work import (  # noqa: E402
+    EmailActionApproval,
+    EmailActionConfirm,
+    EmailActionPreview,
+    EmailActionResult,
+)
+from app.services import action_tokens  # noqa: E402
+
+email_router = APIRouter(prefix="/actions", tags=["approvals"])
+
+#: HTTP status for a token that opened but can't be used now.
+_TOKEN_STATE_STATUS = {
+    action_tokens.USED: status.HTTP_410_GONE,
+    action_tokens.EXPIRED: status.HTTP_410_GONE,
+    action_tokens.DECIDED: status.HTTP_409_CONFLICT,
+    action_tokens.NOT_ELIGIBLE: status.HTTP_403_FORBIDDEN,
+}
+
+
+def _link_denied() -> HTTPException:
+    """One answer for a malformed, unknown, other-organisation or wrong token."""
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="This link is not valid. Open NexusLine to find the request.",
+    )
+
+
+def _email_summary(obj: ApprovalRequest | None) -> EmailActionApproval | None:
+    if obj is None:
+        return None
+    return EmailActionApproval(
+        id=obj.id, reference=obj.reference or "", title=obj.title or "",
+        description=obj.description or "", entity_type=obj.entity_type or "",
+        entity_label=obj.entity_label or "", approver=obj.approver or "",
+        requested_by_email=obj.requested_by_email or "", due_date=obj.due_date,
+        required_approvals=obj.required_approvals or 1,
+        approvals_received=obj.approvals_received, created_at=obj.created_at,
+        status=getattr(obj.status, "value", str(obj.status)),
+    )
+
+
+@email_router.get(
+    "/{token}",
+    response_model=EmailActionPreview,
+    summary="What an e-mailed Approve / Reject link decides (read-only; never decides)",
+)
+async def preview_email_action(token: str) -> EmailActionPreview:
+    parsed = action_tokens.parse_token(token)
+    if parsed is None:
+        raise _link_denied()
+    async with tenant_session(parsed[0]) as db:
+        ctx = await action_tokens.open_token(db, token)
+        if ctx is None:
+            raise _link_denied()
+        state, message = action_tokens.token_state(
+            ctx.row, ctx.user, ctx.approval, datetime.now(timezone.utc)
+        )
+        locale = (await db.execute(select(TenantSettings.date_format, TenantSettings.timezone))).first()
+        return EmailActionPreview(
+            state=state, message=message, organisation=ctx.organisation,
+            user_name=(ctx.user.full_name or ctx.user.email) if ctx.user is not None else "",
+            expires_at=ctx.row.expires_at, approval=_email_summary(ctx.approval),
+            **({"date_format": locale[0], "timezone": locale[1]} if locale else {}),
+        )
+
+
+@email_router.post(
+    "/{token}/confirm",
+    response_model=EmailActionResult,
+    summary="Confirm an e-mailed approval decision (single-use token, no session)",
+)
+async def confirm_email_action(token: str, body: EmailActionConfirm) -> EmailActionResult:
+    parsed = action_tokens.parse_token(token)
+    if parsed is None:
+        raise _link_denied()
+    now = datetime.now(timezone.utc)
+    async with tenant_session(parsed[0]) as db:
+        ctx = await action_tokens.open_token(db, token)
+        if ctx is None:
+            raise _link_denied()
+        state, message = action_tokens.token_state(ctx.row, ctx.user, ctx.approval, now)
+        if state != action_tokens.READY:
+            raise HTTPException(status_code=_TOKEN_STATE_STATUS.get(state, 403), detail=message)
+        if not await action_tokens.claim(db, ctx.row, now):
+            raise HTTPException(status_code=status.HTTP_410_GONE, detail="This link has already been used.")
+        approve = body.decision == "approve"
+        read = await decide_approval(
+            ctx.approval.id, ApprovalDecision(approve=approve, comment=body.comment), db, ctx.user
+        )
+        verb = "approved" if approve else "rejected"
+        await audit.record(
+            db, actor=ctx.user, action="decide_by_email", entity_type="approval",
+            entity_id=ctx.approval.id,
+            summary=f"Decided by email: {verb} approval {read.reference}",
+            changes={"decision": body.decision, "via": "email link", "token_id": str(ctx.row.id),
+                     "status": read.status.value},
+        )
+        refreshed = await _load(db, ctx.approval.id)
+        outcome = (
+            f"Recorded your approval ({read.approvals_received} of {read.required_approvals})."
+            if approve and read.status == ApprovalStatus.pending
+            else f"The request is {read.status.value}."
+        )
+        return EmailActionResult(
+            decision=body.decision, message=f"You {verb} {read.reference}. {outcome}",
+            approval=_email_summary(refreshed),
+        )

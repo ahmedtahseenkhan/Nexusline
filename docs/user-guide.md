@@ -232,7 +232,7 @@ A risk now carries a structured statement, a scored and explained assessment, a 
 - **Band thresholds and cell-by-cell bands.** Risk methodology can now **Set our own band thresholds** (the highest score that is low, medium and high; everything above is critical) instead of bands that scale with the matrix size. **Matrix cells** shows the grid: click a cell to cycle its band (low, medium, high, critical, back to its score's band) — for example to rate rare-but-catastrophic as high. Cells set by hand are marked •. **Save scale** saves the size, wording, thresholds, cells and the impact rule together. The register's severity labels, the drawer and the dashboard (risk matrix, severity counts and top risks) use them. Shrinking the matrix keeps the cells that still fit and drops thresholds that no longer fit, and is still refused while any score — including a target or a dimension score — is above the new size.
 - **Importing.** A risk spreadsheet can carry *cause*, *event*, *risk_type*, *velocity*, *source*, *identified_date*, *target_likelihood*, *target_impact* and *assessment_rationale*. Rows with a status beyond draft need both inherent scores and an *assessment_rationale*; import them as drafts otherwise. There is no *consequence* column, because in most bank registers "Consequence" is the impact score; add it in the form after importing.
 - **Reports.** The report builder's risk report has optional *Target*, *Type*, *Velocity*, *Source*, *Identified*, *Cause*, *Event*, *Consequence*, *Assessment rationale* and *Last assessed* columns; the register PDF's detail pages show the statement, the target, the type, velocity and source, and the rationale.
-- **Known gaps.** The PDF register export, the report builder, the metrics catalogue and the turnaround-time clock still band severity on the derived bands and compare against the organisation's appetite, not the configured bands, cell overrides and category appetites. Treatment actions don't yet appear in My Work.
+- **Everywhere the same numbers.** The PDF register export, the report builder, the KPI metrics and the turnaround-time clock all use the configured bands, cell overrides and category appetites, so a report's "breach" matches the dashboard's. Overdue treatment actions appear in their owner's My Work.
 
 ### Third parties
 
@@ -280,7 +280,7 @@ A key risk indicator now says exactly what it measures, where its number comes f
   A save that breaks these rules is refused with the reason. Thresholds can stay empty only until the first value is recorded. After that, a KRI needs a warning or a limit, or a range if it is within-range. Switching a within-range KRI to another direction clears its bounds.
 - **Appetite.** **Risk appetite** links the KRI to a risk category's appetite (set under Risk register → More → *Risk methodology…*). The drawer shows it with its appetite and tolerance scores.
 - **Readings.** A reading can't be dated in the future. Only the latest-dated reading moves the current value and the status; an older reading goes into the history. A KRI without usable thresholds refuses readings until they are set. A within-range KRI shows its band under the value, with the reading marked on it.
-- **Escalation.** The drawer's **Escalation** card holds one line for amber and one for red. Each names a person and/or a role, and the action they must take. When a reading moves the KRI up into amber or red (green to amber, or anything to red), a notification names the target and the action, e.g. *Escalate to Jane Doe and the CRO role: freeze outbound wires above PKR 10m*. If no escalation is set for that level, the notification names the owner instead. A reading that improves from red to amber raises nothing. Notifications still go to the whole organisation, so the target is named in the text. Escalations, and every escalation raised, are recorded in the activity trail, and the live *KRI breach* alert names the red escalation.
+- **Escalation.** The drawer's **Escalation** card holds one line for amber and one for red. Each names a person and/or a role, and the action they must take. When a reading moves the KRI up into amber or red (green to amber, or anything to red), a notification names the target and the action, e.g. *Escalate to Jane Doe and the CRO role: freeze outbound wires above PKR 10m*. If no escalation is set for that level, the notification names the owner instead. A reading that improves from red to amber raises nothing. The notice goes to the escalation's person and role (see *My Work and alerts*). Escalations, and every escalation raised, are recorded in the activity trail, and the live *KRI breach* alert names the red escalation.
 - **Integration feed.** **Generate token** on the **Integration feed** card creates a token that a monitoring system or CCM connector uses to post readings without a user login. The token is shown once, so copy it then. Only a fingerprint of it (SHA-256) is kept, so it can't be shown again. **Replace token** issues a new token and stops the old one, and **Revoke** stops it. The integration sends:
 
   ```
@@ -307,6 +307,249 @@ A policy now records who approves it, when it takes effect, what it replaces and
 - **Requirements.** Requirements picked on the **Links & Relations** tab are saved as links between the requirement and the policy, so they show on the requirement too.
 - **Importing.** A policy spreadsheet can carry *approving_authority* (a committee's name or reference), *effective_date*, *supersedes* (a policy's reference or title), and *business_units* and *roles* (comma-separated names). Importing a policy that supersedes another doesn't retire it; publishing the new policy does.
 - **Known gaps.** Nobody is reminded to acknowledge a policy yet: the status list shows who is outstanding, but no campaign or reminder is sent.
+
+## 3g. Phase 3
+
+Added in September 2026: tools that help a bank use the platform day to day, not only record things in it.
+
+### Organisation setup and modules
+
+A new organisation starts at **Organisation setup** (`/onboarding`), which an administrator sees after signing in until it is finished. Five steps, each saved as you go:
+
+1. **Locale** — currency, timezone, date format and the month the financial year starts.
+2. **Frameworks** — install the standards you are examined or certified against. SBP ETGRM, SBP Cyber Security, SBP BCP, SBP Outsourcing and ISO 27001 are marked as recommended; control frameworks also create their controls.
+3. **Modules** — choose the specialist modules your teams use first. Eight are pre-selected for a Pakistani bank (operational risk, internal audit, business continuity, business impact analysis, outsourcing, regulatory change, board & committees, AML). Tick *We are an Islamic bank* to add Shariah Governance. The risk register, controls, compliance, policies, issues and incidents are always on.
+4. **Team** — invite the people who own records; segregation of duties means someone other than you must approve what you submit.
+5. **Finish** — opens the dashboard.
+
+A module that is switched off disappears from the sidebar and its pages and API refuse requests with *switched off for your organisation*. An administrator changes the choice at any time from **Settings → Organisation settings → Organisation setup & modules**. The choice works within the licence: a module the licence doesn't cover can't be switched on. Organisations that existed before September 2026 keep every licensed module until an administrator chooses otherwise.
+
+### Finding your way: navigation, drill-through and bulk edit
+
+**A sidebar for your job.** The sidebar, your favourites and recents, and the ⌘K / Ctrl-K palette show only pages you can open. Each link needs the permission its page reads with: the Risk Register needs *risk:read*, Users & Roles *user:read* or *role:read*, Organisation Settings *settings:manage*, and so on. A group with nothing you can open disappears. General Settings (where you set up two-factor authentication), Saved Filters and Import / Export stay for everyone. Hiding a link is not what protects the data: the server still refuses anything your roles don't allow.
+
+**Groups open for your role.** Which groups start open depends on the work your roles do:
+
+| You are | Recognised by | Opens |
+|---|---|---|
+| First line | a role named *first line*, *champion*, *owner*, *business*, *branch* or *operations*; or you can edit registers but hold none of *risk:write*, *risk:accept*, *compliance:write*, *control:write* | the groups holding the registers you can edit, and My Work |
+| Second line | a role named *admin*, *risk*, *compliance*, *GRC*, *CISO*, *CRO*, *CCO* or *second line*; or you hold one of those four permissions | Risk Management, Controls & Assurance, Compliance |
+| Internal audit | a role named *audit*; or you can edit internal audit and nothing second-line | Controls & Assurance, where Internal Audit is |
+| Board and viewers | a role named *board*, *viewer*, *director*, *executive* or *read only*; or you can only read | Program, where Reports & KPIs is. The Dashboard is always at the top |
+
+Role names are checked first, in that order (audit, first line, second line, board), then permissions. A group you open or close yourself stays that way. Your choices, favourites and recents are now kept per person on this browser. **Reset**, beside *Modules*, hands the choice back to your role. The group holding the page you are on always opens.
+
+**Every number opens its list.** On the dashboard, a count opens its register filtered to exactly those rows. The count and the list use the same rule, so the numbers match. For example:
+
+- *98 controls never tested* opens the Control Catalog filtered to *Never tested* (`/controls?assurance=not_assessed`). Tests overdue, due in 30 days and failed last test each open their own filter, and so does each part of the control-assurance bar.
+- *Risks above tolerance*, *risk reviews overdue* and *risks with treatment past due* open the risk register filtered (`/risks?appetite=breach`, `?review=overdue`, `?treatment_overdue=true`).
+- *Open incidents* opens every incident not yet resolved or closed, including those in triage, under investigation or contained. The severity counts and *regulator-reportable* narrow it further.
+- *Issues past due*, *policy reviews overdue*, *critical* third parties and third-party *reviews overdue* open their registers filtered.
+- A framework's name opens its compliance view. KRIs open the Operational Risk page; choose the KRIs tab there.
+
+The filters live in the address bar. When you change one, the link changes with it, so copying the link sends exactly what you are looking at, and saved views remember filters too. The same filters sit on the registers:
+
+- **Control Catalog:** *Assurance*, *Test status* and *Key controls*
+- **Incidents:** *Open — not resolved or closed*, and *Reportable*
+- **Policies:** *Review overdue*
+- **Third Parties:** *Review overdue* and *Criticality*
+
+Three dashboard figures changed so that each one matches its list:
+
+- An issue marked *remediated* no longer counts as open. The register never counted it as open.
+- The treatment line now counts risks, not treatment actions, because it opens the risk list.
+- The third-party figure is now labelled *reviews overdue*. It counts third parties whose next review date has passed.
+
+**Bulk edit.** Tick rows on the Control Catalog, Issues, Incidents, Policy Management, Third Parties, IT Assets or Information Assets, then choose **Edit N ▾**:
+
+- **Set owner.** On incidents this is the assignee, on third parties the relationship owner, and on assets the owning business unit.
+- **Set next review date.** On controls, the next test date.
+- **Set review frequency.** On controls, the test frequency.
+- **Set category.** Picked from the register's own list: on controls the classification, on incidents the incident type.
+- **Set status.** Controls, issues, incidents and third parties.
+
+Before anything changes you see a summary. Afterwards one message says what happened, such as *Updated 38; 2 skipped: archived*. A record is skipped whole, never half-changed, when it is archived, already has the value, or a rule says no:
+
+- A planned or retired control has no test clock, so it gets no next test date. A new test frequency re-derives the next test from the last one. Making a control implemented or operational starts its clocks, and retiring it stops them, just as when you edit one control.
+- An issue moves only between *Open* and *In progress*. Closing still takes **Validate** and **Close** on each issue, and a closed issue can only be reopened from the issue itself.
+- Moving incidents to *Contained* or *Resolved* records the current time where that time is blank. An incident whose timeline would then be out of order is skipped, with the reason.
+- A policy's status follows its approval lifecycle, so policies have no bulk status. A new review frequency sets a policy's next review from today; for risks, from the last review.
+- Approval state is never bulk-edited.
+
+You need permission to edit the register. Every record changed gets its own entry in the activity log, and all the entries from one run share a batch id.
+
+**Map to requirements.** On the Control Catalog, **Edit N ▾ → Map to requirements…** links every selected control to the framework clauses you pick. Links are only added, never removed, and a control already linked to all of them is skipped. Mapping is not assurance: a clause counts as assured only once a mapped control passes a reviewed test.
+
+### Risk candidates and hierarchy
+
+**Generating risks fills a queue, not the register.** *Generate risks from assets* (Risk Register → More, or the IT Assets and Information Assets pages) still pairs each asset with the scenarios that apply to it, but the preview now groups the pairs into **candidates**: one per scenario, process and business unit, carrying every asset it covers and scored at its most exposed asset. Forty servers that run Payments in Retail Banking make one candidate, *Ransomware encrypts Payments assets in Retail Banking*, not forty risks. Untick what does not apply, adjust a title or a score, and press **Send N proposals to the queue**. Nothing reaches the register until someone accepts it. The result says how many candidates were created, how many pairs were merged into a candidate (including ones already waiting from an earlier run), and how many were skipped because the register already covers them, with a link to the queue.
+
+**How pairs are grouped.** Two pairs are the same candidate when they share a scenario, a process and a business unit:
+
+- **Process**: the asset's linked process. When it has several, the first alphabetically.
+- **Business unit**: the asset's owning unit (*Owner* on the asset form). When it has none, the unit that runs its process.
+- An asset with neither is grouped by asset class, so unplaced IT assets make one candidate per scenario and unplaced information assets another. Give assets an owner and a process and the candidates follow your organisation.
+
+A pair is **skipped as already in the register** when a candidate with the same scenario, process and unit was accepted and its risk is still live; when a risk written by the old generator (one risk per asset, titled after the scenario and the asset) covers the same scenario, process and unit; or when a live risk has the same title. A pair **joins** a candidate still waiting with the same grouping: the candidate gains the asset and keeps the worse score. If the last candidate for that grouping was **rejected**, the preview shows the reason and leaves it unticked; tick it to send it again.
+
+**Risk candidates** (Risk Management → *Risk candidates*, `/risk-proposals`) lists candidates grouped by scenario, with their assets, inherent score, and the controls the scenario names that your catalogue has (and how many it does not). Tabs show how many are pending, accepted, rejected and merged; filter by scenario, business unit, text, or one generation run. Tick pending candidates, then:
+
+- **Accept** turns each one into a **draft** risk through the register's normal create path: source *Generated*, level 3 (scenario), linked to its live assets, its business unit and process, the assets' own controls plus the scenario's controls found in your catalogue, the scenario's threat and vulnerability, and the framework clauses those controls satisfy. Optionally pick a category, an owner and a **parent** (a level 1 or 2 risk) for all of them. The scores are provisional: as for any draft, an assessment rationale is needed before the risk leaves draft. A candidate whose assets were all deleted since cannot be accepted; reject it. When one candidate fails, the others are still accepted and the failure is listed with its reason.
+- **Merge** keeps the candidate you pick. The others' assets and control references move to it, it takes the worst of their scores, and they are marked merged. Later generation runs for their scope add to the one you kept, or are skipped once it is in the register.
+- **Reject** needs a reason. It is kept on the candidate and shown the next time the same scenario comes up for the same process and unit.
+
+Accepted candidates link to the risk they became; every candidate shows who decided, when, and the note. Each decision has its own entry in the activity log. Viewing needs *risk:read*; sending, accepting, merging and rejecting need *risk:write*.
+
+**The hierarchy.** A risk can sit at **level 1 (enterprise)**, what the board reads, **level 2 (category)**, or **level 3 (scenario)**, what practitioners assess and where accepted candidates land. The risk form's *General* tab has **Hierarchy level** and **Parent risk**; the parent search offers only risks at a higher level. The server refuses, with the reason:
+
+- a parent that is archived, is the risk itself, or sits below the risk (a loop);
+- a parent that is not above its child (level 1 is above 2, which is above 3), a parent that has no level yet, or a parent at level 3, since scenarios are the bottom of the hierarchy;
+- a parent for a level 1 risk;
+- a new level for a risk that would leave one of its children at or above it. Move or re-level the children first.
+
+With a parent and no level, a risk sits one level below its parent. If a risk's parent is archived later, the risk keeps the link and can still be edited; it shows *Its parent was archived* until you pick another parent or clear it.
+
+In the register, the **Level** column and filter (including *Not placed*) sit beside the others; *Parent* and *Below* columns are in the column chooser, and a *Below* count lists the risks directly under that risk. The record's **Hierarchy** card shows its level and parent, the risks directly below as chips, how many sit below it in all, the worst exposure below it (residual when assessed, otherwise inherent, as the dashboard ranks) and the worst residual, counts by severity, how many are above tolerance, and **List the risks directly below**. **List | Hierarchy** at the top of the register switches to a tree: **Board view (L1–L2)** shows enterprise and category risks, each with the number of risks below it and its worst exposure counted at every level, including scenarios the view does not show; **Full tree (L1–L3)** adds the scenarios. The count of risks not yet placed opens them in the list.
+
+**More register filters.** The toolbar also filters by **review date** (*overdue*, *due in 30 days*), **appetite** (*within appetite*, *elevated*, *above tolerance*, with each risk compared with its own top-level category's appetite, as on the dashboard), **controls** (*has controls* or *no controls*, counting live controls only) and **treatment overdue** (a risk that is not accepted or closed and has an open treatment action past its due date, or has no actions and a treatment deadline in the past). These are the filters the dashboard's counts open, and like the level and parent filters they live in the address bar.
+
+**Known gaps.** The register PDF does not apply the level, review, appetite, controls and treatment filters yet, so the export is the list without them. The delete confirmation does not list the risks below the one being deleted; they keep pointing at their archived parent. *Review risks with no live links* does not count a parent or child as a link. Risk spreadsheets cannot carry a level or parent yet, and the dashboard heat map does not switch between levels. Risks written by the old generator are recognised by their titles, so a renamed one is not recognised; reject or merge the candidate it causes. A candidate cannot be edited in the queue: adjust the title and scores in the preview before sending, or on the risk after accepting it.
+
+### Board packs
+
+A board pack is a committee's view of risk, assurance and compliance for a period, kept as the PDF and the spreadsheet the committee actually saw.
+
+- **Generate.** Open a committee under **Board & Committees** and, in its **Board packs** card, click **Generate pack**. You can pick the meeting it is for, a period (leave it blank for the financial quarter to date; quarters run from the month your financial year starts, under Settings → Organisation) and the sections. **Generate** builds it at once. You need *governance:write*.
+- **What it contains.** A cover (organisation, committee, meeting, period, when and by whom it was generated), then:
+  - *Executive summary*: the governance-health score and how much of it is scored, what the score is made of, and what needs a decision or is overdue.
+  - *Appetite by category*: within appetite, elevated and above tolerance for each risk category.
+  - *Top risks*: the highest current exposures, with their trend since the period began.
+  - *Risk movement*: risks added, closed and re-assessed in the period, and how many re-assessed risks moved up or down.
+  - *Control assurance*: effective, partially effective, ineffective and not tested; the reviewed tests that failed in the period, with the issue each raised; and how many failed tests still await review.
+  - *Compliance by framework*: compliance frameworks only.
+  - *Open issues* by severity, with how many are overdue and how many had their due date moved.
+  - *Incidents* detected in the period: the regulator-reportable ones, the share notified to the regulator on time, and mean time to detect and to resolve.
+  - *Key risk indicators* at red and amber.
+  - *Third parties* rated critical or high, and certifications expired or expiring within 60 days.
+- **The same numbers as the dashboard.** The health score, appetite, top risks, control assurance and compliance come from the dashboard itself. Those figures, and issues, KRIs and third parties, are as at the day the pack is generated. Risk movement, failed tests and incidents cover the period. The cover says so.
+- **Trend.** A top risk not re-scored since the period began reads *Unchanged*. One re-scored during the period is compared with its score when the period began, taken from the risk's history (*Up from 12*, *Down from 20*). A risk added in the period reads *New in period*, and one with no score recorded before the period reads *No earlier score*.
+- **Files.** Both files are stored with the meeting you picked, or with the committee when you picked no meeting (they then also appear under the committee's Files). **PDF** and **XLSX** on each pack download them. The PDF lists up to 50 rows per table; the spreadsheet has one sheet per section and lists every row.
+- **Automatically before each meeting.** On the committee form (**Edit**), *Generate the board pack automatically* takes a number of days, from 1 to 90. The scheduler then generates the pack for each **scheduled** meeting of an active committee once the meeting is that many days away, once per meeting. A pack generated before that window opened doesn't count, so a draft made weeks earlier is replaced by a fresh one. Automatic packs cover the financial quarter to date and name *Scheduler* as their author. Leave the field blank to generate packs by hand.
+- **When it fails.** A pack that can't be built stays in the list as *Failed*, with the reason, and leaves no files behind. Generate it again once the cause is fixed.
+- **Trail.** Every pack, by hand or automatic, is recorded in the committee's activity trail (automatic ones by the system), and so is a change to the automatic setting.
+- **Also fixed.** Editing a meeting, or adding a decision or action to one, failed with an error before this release.
+- **Known gaps.** A pack for a past period still shows the position figures as at the day it is generated; only movement, failed tests and incidents follow the period. A pack can't be deleted, because it is the record of what was presented. The pack doesn't include the committee's own decisions and actions.
+
+### Crosswalks
+
+A crosswalk records that two clauses of different frameworks ask for the same thing, for example ISO 27001 A.8.5 and PCI DSS 8.4. A control linked to one then suggests the other: **Suggested clauses** on a control follows crosswalks to the equivalent clauses.
+
+- **Crosswalk view.** On **Compliance**, pick a framework and open the **Crosswalk** tab, then choose the framework to crosswalk it with. **Recorded crosswalks** lists the pairs already linked. **Remove** unlinks a pair.
+- **Suggestions.** **Suggested crosswalks** lists candidate pairs, each with its reasons and a strength:
+  - **Same topic.** The topic table behind *Suggested clauses* lists, for each topic, the clauses each library framework has for it, main clause first. Two clauses listed for the same topic are suggested when at least one of them is its framework's main clause for that topic. The pair is *Strong* when both are (*Multi-factor authentication: A.8.5 ≡ PCI 8.4*) and *Likely* when one is. Two clauses that only touch a topic are never suggested.
+  - **Same control.** Two clauses implemented by the same control are suggested when that control is specific: linked to no more than two clauses in each framework. A control mapped to many clauses, such as an information-security policy, suggests nothing on its own. A topic match that a shared control confirms is *Strong*.
+  - Only clauses that exist in your installed copy of each framework are suggested. A framework you built yourself gets suggestions from shared controls only.
+- **Accept.** Strong suggestions start ticked. Tick or untick them, narrow the list with *Strong only*, then **Accept selected**. Nothing is linked until you accept. Each accepted crosswalk is recorded in the clause's activity trail, naming the clause it was linked to, and so is each removal. Accepting or removing needs *compliance:write*; seeing suggestions needs *compliance:read*.
+- Crosswalks can still be edited one requirement at a time, on its **Mappings & Crosswalks** tab.
+
+### Continuous monitoring feeds
+
+A monitoring tool, such as a SIEM, an identity platform or a script, can send the result of a control check to NexusLine through a connector, without a user login.
+
+- **Token.** On **Integrations & CCM**, open a connector. In its **Monitoring feed** card, **Generate token** creates the token and shows it once, with an example request, so copy it then. Only a fingerprint of it (SHA-256) is kept. **Replace token** issues a new token and stops the old one, and **Revoke** stops it. Setting the connector's status to *disabled* also stops the feed, and archiving the connector revokes its token. Issuing or revoking a token needs *ccm:write* or *integration:manage*.
+- **Sending a result.**
+
+  ```
+  POST <API address>/api/v1/connectors/ingest
+  Authorization: Bearer <token>
+  Content-Type: application/json
+
+  {"control_reference": "A.8.5", "result": "failed",
+   "observed_at": "2026-09-12T10:00:00+05:00",
+   "summary": "3 privileged accounts without MFA",
+   "details": {"accounts": ["svc-backup", "admin2", "ops-root"]},
+   "evidence": {"title": "MFA coverage report", "url": "https://siem.example/r/42", "valid_until": "2026-12-31"}}
+  ```
+
+  - `control_reference` (or `control_id`) names the control, and `result` is `passed`, `failed` or `passed_with_exceptions`.
+  - `observed_at` is when the check ran. A time with no offset is taken in your organisation's timezone. It can't be in the future; a clock two minutes fast is tolerated.
+  - `pass_rate` (0 to 100) is required with `passed_with_exceptions`. `test_reference` names the test to record the run on when several match. `details` (up to 50,000 characters of JSON) and `evidence` are optional.
+  - A missing, wrong or revoked token gets `401`, whatever the reason. An unknown control, a time in the future or a bad field gets `422` with the reason.
+- **What a result becomes.**
+  - **Evidence on the control.** It is collected on the day the check ran and marked valid, titled from the evidence you send or from the summary, with the details in its description. It shows in the control's evidence and the Evidence register, and a person can attach it to a test they record.
+  - **A run of the connector's test.** When this connector has exactly one active continuous control test whose *Control reference* matches the control (or the one `test_reference` names), the result is recorded as a run of it. The latest run rolls up onto the test's last result and pass rate. *Passed with exceptions* is recorded as a pass with its pass rate, and the findings say *Passed with exceptions*. With no such test, only the evidence is kept and the reply says why.
+  - **An alert when it failed.** *Continuous monitoring failed: A.8.5 Secure authentication* is critical for a key control and a warning otherwise, and names the control owner. A check that keeps failing raises one alert per control and connector per day.
+  - **Never a rating.** A result never changes the control's effectiveness. That still moves only when a person records a test and another person reviews it.
+- **Trail.** Every result is recorded in the activity trail as **Connector** followed by the connector's name: on the connector, the evidence, the control and the test. The **Monitoring feed** card shows when the last result arrived, how many arrived in the last 30 days, and the latest results with their control, result and test run. The connector's *Last sync* moves to the day of its latest result.
+- **Known gaps.** There is no rate limit beyond the token. The alert goes to the control's owner, or to the whole organisation when the control has none.
+
+### My Work and alerts
+
+Alerts now go to the person who has to act, every alert opens the record it is about, and **My Work** (`/my-work`) lists everything waiting for you in one place.
+
+**My Work.** It is the first link in the sidebar. Each kind of work has its own section with a count, overdue items first:
+
+- **Decisions waiting for you.**
+  - *Approval requests* you can decide. You hold *workflow:approve*, you didn't raise the request, you haven't decided it already, and it names you, one of your roles, or nobody in particular.
+  - *Records submitted for review* that you may approve. Records you entered or submitted aren't listed, and neither are records going through an approval route: their stages appear as approval requests.
+  - *Control tests to review* (*control:test*). Tests you performed, recorded or edited aren't listed.
+  - *Issue fixes to validate* (*issue:write*). Every action on the issue is done, and you neither own nor raised it.
+  - *Due-date extensions to approve* on serious issues. Extensions you asked for aren't listed.
+- **Things you own that are overdue or due in the next 14 days.**
+  - Risk treatment actions, issue actions and issues you own.
+  - Incidents assigned to you, dated by their turnaround-time deadline.
+  - Tests of controls you own or operate, and tests a reviewer returned to you.
+  - Reviews of risks, policies and third parties you own, and attestations due on other records you own.
+  - KRI readings you supply. You supply a KRI's readings when you are its data provider, or its owner when it names no provider. A reading is due one frequency after the last one and is listed from three days before.
+  - Actions on open RCSAs where you are the action owner.
+- **Policies to acknowledge.** Published policies that name one of your roles, or no role at all, and that you haven't acknowledged.
+
+Every row opens its record. Two things can be done from the row itself:
+
+- **Acknowledge** a policy. You confirm that you have read it.
+- **Mark done** a treatment action you own. Its completion date is today and the risk's treatment deadline is recalculated. The change appears in the risk's activity log. Someone who can edit risks can do this for any action.
+
+A section shows up to 50 rows and its count is the full number. KRIs and RCSA actions are listed only while Operational Risk is switched on.
+
+**Where you land.** After signing in, people who don't administer the organisation (no *settings:manage* and no *user:write*) land on My Work. Administrators land on the dashboard, or on Organisation setup until it is finished. A link you open while signed out, such as one in an alert e-mail, opens after you sign in, whether by password, two-factor authentication or single sign-on.
+
+**Who an alert goes to.**
+
+- **The record's accountable person, where one is on file:**
+  - a risk's owner, for reviews, tolerance breaches and acceptances running out;
+  - a treatment action's owner, else the risk's treatment owner, else the risk's owner;
+  - a control's owner and operator for an overdue test, and its owner for maintenance;
+  - an issue action's owner, else the issue's owner;
+  - an incident's assignee, for its regulatory reports;
+  - a KRI's owner, plus the person and role its red escalation names;
+  - a policy's owner, and a third party's relationship owner (reviews and certificates);
+  - an RCSA's assessor, and the owner of a record whose attestation is overdue.
+- **Registers that still hold the owner as text** (continuity plans, projects, access reviews, audit findings, AML cases). The alert goes to the user whose e-mail or full name matches that text, when exactly one does. Otherwise it goes to the record's approval owner.
+- **Approval requests.** The alert goes to the approver the request names, a person (by e-mail or full name) or a role. A request that names nobody in particular, or names the person who raised it, goes to every role that can approve requests. So does a request whose named person or role can't approve requests, as well as to them, so it never waits unseen.
+- **Turnaround time.** A turnaround-time breach goes to the record's owner and to the escalation role set for it under Turnaround Time.
+- **Data protection.** Gaps in a processing activity go to its approval owner, else the DPO role.
+- **KRI escalations.** An escalation notice goes to the escalation's person and role, or to the KRI's owner when no escalation is set.
+- **Two new alerts.** *Issue action overdue* goes to the action's owner. *Due-date extension awaiting approval* goes to the roles that may approve issues.
+- **Nobody on file.** An alert whose record names nobody who can be matched goes to everyone, as before, so nothing is lost.
+
+**The bell and the notifications page.** You see alerts addressed to you, to a role you hold, and to everyone. **Addressed to me** narrows the list to the first two. Each alert says how it reached you: *For you*, *Role: CRO* or *Everyone*. An alert that reaches you twice, for example as a risk's owner and through the escalation role, is shown once. The bell counts what you haven't seen, and turns red when some of it is addressed to you. Grouping (*12 controls have tests overdue*) now counts your own alerts, not the organisation's. **Open** on an alert opens the record itself, not just its register. When your organisation upgraded, alerts that everyone had already been shown were given to their owners without counting as new.
+
+**E-mail digests.** Each person is e-mailed only the alerts addressed to them, to their roles and to everyone, raised since their previous digest. Each alert links to its record. If there is nothing new, no e-mail is sent. The first digest after the upgrade covers only the last two scheduler runs, so alerts already e-mailed aren't sent again. Each digest is recorded in the activity log (*Emailed … a digest of 4 alert(s)*). A turnaround-time breach reaches the escalation role through its members' digests, and the subject says so. The separate turnaround-time escalation e-mail has been replaced by this.
+
+**Approve or reject from the e-mail.** When a request is waiting for your decision, the e-mail has **Approve** and **Reject** buttons. That is the digest, and, when outbound e-mail is set up, a *Decision needed* e-mail sent as soon as the request is raised. A button opens a page that shows the request. Nothing is decided until you press the button on that page, because mail scanners open links. A rejection needs a reason. The decision follows the same rules as on the Approvals page:
+
+- the person who raised the request can't decide it;
+- you can decide a request only once;
+- an approval route moves on to its next stage.
+
+The activity log records it as *Decided by email*. Each link is for you alone, works once and expires after 72 hours. A link that has been used or has expired, or whose request is already decided, says so on the page. Only a fingerprint (SHA-256) of each link's token is kept.
+
+**Known gaps.**
+
+- The personal-data-breach hand-off goes to the DPO role, a finished approval route to the person who started it, an expired risk acceptance to the risk owner, and a continuous-monitoring failure to the control owner. Each falls back to the whole organisation when nobody is named.
+- **Deciding from e-mail** skips two-factor authentication. Where policy requires 2FA for every approval, the administrator sets `EMAIL_ACTIONS_ENABLED=false`: no links are sent, and links already sent stop working.
+- KRI alerts open the Operational Risk page on its RCSA tab, so choose KRIs there. Approval alerts open the Approvals list rather than the single request.
+- Deciding from an e-mail relies on the mailbox and doesn't ask for two-factor authentication.
 
 ## 4. How the sidebar is organized
 
@@ -501,11 +744,11 @@ How the opening score is worked out:
 - **Impact comes from the asset.** Each scenario says which rating it should follow — the data's business value, the asset's overall criticality, the worst of its C/I/A ratings, or one specific property. A confidentiality scenario against a database rated *critical* for confidentiality opens at maximum impact; an availability scenario against the same database follows its availability rating instead. Ratings are mapped onto whatever matrix size you have configured.
 - **Likelihood comes from the scenario, not the asset.** How often a threat materialises is a property of the threat and the environment, not of how much the asset is worth. Deriving it from asset value would double-count criticality and push every important asset into the top-right corner of the heat map.
 
-**Nothing is written until you press Create.** The review table shows every proposal with its editable title and scores; untick what doesn't apply and adjust anything that looks wrong. What you commit becomes an ordinary risk — reference number, asset/threat/vulnerability links, treatment suggestion, audit-log entry — indistinguishable from one typed by hand. Each also arrives with its asset's existing controls already attached, so the suggested residual has evidence to work with immediately.
+**Nothing is written until you send the proposals, and nothing reaches the register until someone accepts them.** The review table groups the pairs into candidates — one per scenario, process and business unit — with an editable title and scores; untick what doesn't apply and adjust anything that looks wrong. **Send N proposals to the queue** puts them in **Risk candidates**, where each is accepted (it becomes an ordinary draft risk — reference number, asset/threat/vulnerability links, treatment suggestion, the assets' controls, audit-log entry), merged or rejected. See [Risk candidates and hierarchy](#risk-candidates-and-hierarchy).
 
 Two behaviours worth knowing:
 
-- **Re-running is safe.** Proposals are de-duplicated against the register by title, so after adding fifty assets you get fifty assets' worth of new proposals rather than a second copy of everything. The count of skipped duplicates is shown.
+- **Re-running is safe.** A pair already covered by the register — an accepted candidate for the same scenario, process and unit, a risk from an earlier run, or a risk with the same title — is skipped, and a pair whose candidate is still waiting joins it, so after adding fifty assets you get only what is new. The count of skipped duplicates is shown.
 - **Identically-named assets stay distinguishable.** If two different assets share a name — a pair of servers, one app in two environments — the colliding titles gain that asset's hostname (or serial, or a short id) so the resulting risks can be told apart and the next run de-duplicates correctly.
 
 Filters let you scope a run: only assets at or above a chosen criticality, and/or only one scenario category. A very large run is capped; narrow the filter and run again for the rest.

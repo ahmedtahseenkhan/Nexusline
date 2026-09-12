@@ -6,6 +6,7 @@ import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { useFilterParams, type FilterSpec } from "@/lib/useFilterParams";
 import { useFormat } from "@/lib/format";
 import { useHasPermission } from "@/lib/tenantSettings";
 import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
@@ -23,6 +24,7 @@ import RecordPanels from "@/components/RecordPanels";
 import RecordIssues from "@/components/RecordIssues";
 import RelatedChips from "@/components/RelatedChips";
 import SuggestedClauses, { BulkSuggestMappings } from "@/components/SuggestedClauses";
+import BulkEditBar from "@/components/BulkEditBar";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
@@ -161,6 +163,30 @@ const SAMPLE_METHOD = labelled({
 });
 const EVIDENCE_TYPES = opts(["document", "screenshot", "log", "link", "configuration", "other"]);
 const refToOpt = (x: LinkRef): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
+
+/* ------------------------------------------------------------- register filters */
+/** Filters in the URL, so the dashboard can open this list already filtered
+ *  (`/controls?assurance=not_assessed`, `?test=overdue`). Same predicates on the server
+ *  as the dashboard's counts (services/drill_through.py). */
+const CONTROL_FILTERS = {
+  assurance: ["assured", "effective", "partially_effective", "failing", "not_assessed", "not_operating", "unmapped"],
+  test: ["overdue", "due_30d", "failed"],
+  key: "boolean",
+} as const satisfies FilterSpec;
+const ASSURANCE_LABEL: Record<(typeof CONTROL_FILTERS.assurance)[number], string> = {
+  assured: "Assured (effective or partially)",
+  effective: "Effective",
+  partially_effective: "Partially effective",
+  failing: "Failing (ineffective)",
+  not_assessed: "Never tested",
+  not_operating: "Planned or retired",
+  unmapped: "Not mapped to any clause",
+};
+const TEST_LABEL: Record<(typeof CONTROL_FILTERS.test)[number], string> = {
+  overdue: "Test overdue",
+  due_30d: "Test due in 30 days",
+  failed: "Failed its last test",
+};
 
 /* ------------------------------------------------------------------- form state */
 type FormState = {
@@ -364,6 +390,7 @@ function ControlsInner() {
   const [maintTask, setMaintTask] = useState("");
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const filters = useFilterParams(CONTROL_FILTERS);
   // Register bulk action "Suggest mappings": the selected control ids under review.
   const [suggestFor, setSuggestFor] = useState<string[] | null>(null);
   const fetchControls = useCallback((qs: string) => apiCall<PagedList<Control>>("GET", `/controls?${qs}`), []);
@@ -748,10 +775,29 @@ function ControlsInner() {
         statusModel="control"
         bulkActions={(rows, clear) => (
           <>
+            <BulkEditBar entityType="control" rows={rows} onDone={() => { clear(); reload(); }} mapRequirements />
             <button className="btn secondary sm" onClick={() => { setSuggestFor(rows.map((r) => r.id)); clear(); }}>Suggest mappings</button>
             <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
           </>
         )}
+        filters={filters.values}
+        onApplyFilters={filters.replace}
+        toolbarLeft={
+          <>
+            <select className="select" style={{ maxWidth: 230 }} value={filters.values.assurance ?? ""} onChange={(e) => filters.set("assurance", (e.target.value || undefined) as typeof filters.values.assurance)} aria-label="Assurance">
+              <option value="">Any assurance</option>
+              {CONTROL_FILTERS.assurance.map((v) => <option key={v} value={v}>{ASSURANCE_LABEL[v]}</option>)}
+            </select>
+            <select className="select" style={{ maxWidth: 190 }} value={filters.values.test ?? ""} onChange={(e) => filters.set("test", (e.target.value || undefined) as typeof filters.values.test)} aria-label="Test cycle">
+              <option value="">Any test status</option>
+              {CONTROL_FILTERS.test.map((v) => <option key={v} value={v}>{TEST_LABEL[v]}</option>)}
+            </select>
+            <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+              <input type="checkbox" checked={filters.values.key === true} onChange={(e) => filters.set("key", e.target.checked || undefined)} /> Key controls
+            </label>
+            {filters.active > 0 && <button className="linklike" onClick={filters.clear}>Clear filters</button>}
+          </>
+        }
         columns={columns}
         fetcher={fetchControls}
         rowKey={(c) => c.id}

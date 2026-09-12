@@ -2,12 +2,23 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { useEffect, useMemo, useState } from "react";
 import { routeDisabled, useModules } from "@/lib/modules";
 import { useMobileNav } from "@/lib/mobileNav";
-import { NAV, navItemByHref, navItemFor, type NavItem, type NavSection } from "@/lib/nav";
-import { useNavPrefs } from "@/lib/navPrefs";
+import {
+  PRESET_LABEL,
+  canOpen,
+  navItemByHref,
+  navItemFor,
+  navPreset,
+  presetGroups,
+  visibleNav,
+  type NavAccess,
+  type NavItem,
+  type NavSection,
+} from "@/lib/nav";
+import { useNavPrefs, useNavUser } from "@/lib/navPrefs";
+import { useTenantSettings } from "@/lib/tenantSettings";
 import { IconNexus } from "./icons";
 
 function Chevron({ open }: { open: boolean }) {
@@ -26,28 +37,48 @@ function Chevron({ open }: { open: boolean }) {
 export default function Sidebar() {
   const pathname = usePathname();
   const { disabledRoutes } = useModules();
-  const { favorites, recents, isFavorite, toggleFavorite, recordVisit } = useNavPrefs();
+  const { favorites, recents, groups, isFavorite, toggleFavorite, recordVisit, setGroupOpen, resetGroups } = useNavPrefs();
   const { open, setOpen } = useMobileNav();
+  const me = useNavUser();
 
-  // Operator-only links are hidden from everyone else. This is presentation, not
-  // security: the endpoints behind them are guarded server-side regardless.
-  const [platformAdmin, setPlatformAdmin] = useState(false);
-  useEffect(() => {
-    api.me().then((m) => setPlatformAdmin(!!m.is_platform_admin)).catch(() => setPlatformAdmin(false));
-  }, []);
-
-  const visible = (it: NavItem) => !it.platformAdminOnly || platformAdmin;
+  // Links are filtered on the user's permission codes (the app shell loaded them with
+  // /auth/me) and on module licensing; a group left empty disappears. Operator-only
+  // links need is_platform_admin. Presentation, not security: the API refuses anyway.
+  const { permissions: shellPermissions } = useTenantSettings();
+  const access: NavAccess = useMemo(
+    () => ({ permissions: shellPermissions.length ? shellPermissions : me?.permissions ?? [], platformAdmin: !!me?.platformAdmin }),
+    [shellPermissions, me],
+  );
   const enabled = (href: string) => !routeDisabled(href, disabledRoutes);
+  const visible = (it: NavItem) => enabled(it.href) && canOpen(it, access);
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const nav = useMemo(() => visibleNav(access, enabled), [access, disabledRoutes]);
 
-  // eramba-style accordion: groups collapsed by default; the group holding the
-  // active route opens automatically; user toggles persist for the session.
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // Which groups are open: the one holding the page you are on (for this session),
+  // else your own choice for that group (remembered per user), else your role preset.
+  const preset = me ? navPreset(me.roles, access.permissions) : null;
+  const presetOpen = useMemo(
+    () => (preset ? presetGroups(preset, nav, access.permissions) : new Set<string>()),
+    [preset, nav, access.permissions],
+  );
+  const [sessionOpen, setSessionOpen] = useState<Record<string, boolean>>({});
   useEffect(() => {
-    const owner = NAV.find((s) => s.items.some((it) => isActive(it.href)));
-    if (owner) setExpanded((p) => (p[owner.title] ? p : { ...p, [owner.title]: true }));
+    const owner = nav.find((s) => s.items.some((it) => isActive(it.href)));
+    if (owner) setSessionOpen((p) => (p[owner.title] ? p : { ...p, [owner.title]: true }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname]);
+  }, [pathname, nav]);
+  const isOpen = (title: string) => sessionOpen[title] ?? groups[title] ?? presetOpen.has(title);
+  function toggleGroup(title: string) {
+    const next = !isOpen(title);
+    setSessionOpen((p) => {
+      const rest = { ...p };
+      delete rest[title];
+      return rest;
+    });
+    setGroupOpen(title, next);
+  }
+  const customised = Object.keys(groups).length > 0;
 
   // Remember the current module as recently-visited, close the mobile drawer on nav.
   useEffect(() => {
@@ -56,18 +87,12 @@ export default function Sidebar() {
     setOpen(false);
   }, [pathname, recordVisit, setOpen]);
 
-  // Licensing: drop disabled links; groups that empty out disappear entirely.
-  const nav = NAV.map((s) => ({
-    ...s,
-    items: s.items.filter((it) => enabled(it.href) && visible(it)),
-  })).filter((s) => (s.href ? enabled(s.href) : s.items.length > 0));
-
   const favItems = favorites
     .map(navItemByHref)
-    .filter((it): it is NavItem => !!it && enabled(it.href) && visible(it));
+    .filter((it): it is NavItem => !!it && visible(it));
   const recentItems = recents
     .map(navItemByHref)
-    .filter((it): it is NavItem => !!it && enabled(it.href) && visible(it) && !isFavorite(it.href))
+    .filter((it): it is NavItem => !!it && visible(it) && !isFavorite(it.href))
     .slice(0, 4);
 
   function leaf(it: NavItem, sub = false) {
@@ -113,21 +138,21 @@ export default function Sidebar() {
         </Link>
       );
     }
-    const isOpen = !!expanded[s.title];
+    const expanded = isOpen(s.title);
     const holdsActive = s.items.some((it) => isActive(it.href));
     return (
       <div key={s.title}>
         <button
           type="button"
-          className={`nav-item nav-group${holdsActive && !isOpen ? " active" : ""}`}
-          onClick={() => setExpanded((p) => ({ ...p, [s.title]: !isOpen }))}
-          aria-expanded={isOpen}
+          className={`nav-item nav-group${holdsActive && !expanded ? " active" : ""}`}
+          onClick={() => toggleGroup(s.title)}
+          aria-expanded={expanded}
         >
           {s.icon}
           {s.title}
-          <Chevron open={isOpen} />
+          <Chevron open={expanded} />
         </button>
-        {isOpen && <div className="nav-sub">{s.items.map((it) => leaf(it, true))}</div>}
+        {expanded && <div className="nav-sub">{s.items.map((it) => leaf(it, true))}</div>}
       </div>
     );
   }
@@ -155,7 +180,24 @@ export default function Sidebar() {
               {recentItems.map((it) => leaf(it))}
             </div>
           )}
-          <div className="nav-section">Modules</div>
+          <div
+            className="nav-section"
+            style={{ display: "flex", alignItems: "center", gap: 6 }}
+            title={preset ? `Groups open by default for your role: ${PRESET_LABEL[preset]}` : undefined}
+          >
+            Modules
+            {customised && (
+              <button
+                type="button"
+                className="linklike"
+                style={{ marginLeft: "auto", fontSize: 10.5, textTransform: "none", letterSpacing: 0, color: "inherit", opacity: 0.75 }}
+                onClick={() => { resetGroups(); setSessionOpen({}); }}
+                title="Forget which groups you opened or closed; open the ones for your role"
+              >
+                Reset
+              </button>
+            )}
+          </div>
           {nav.map(group)}
         </nav>
         <div className="sidebar-foot">NexusLine · Governance Intelligence · v1.0</div>

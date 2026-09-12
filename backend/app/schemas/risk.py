@@ -65,6 +65,11 @@ TREATMENT_ACTION_STATUSES: tuple[str, ...] = ("open", "in_progress", "done", "ca
 #: Statuses that still need work — what overdue tracking and the deadline read.
 OPEN_ACTION_STATUSES: tuple[str, ...] = ("open", "in_progress")
 
+#: Phase 3 hierarchy: 1 enterprise (what the board reads), 2 category, 3 scenario
+#: (what practitioners assess, and where generated risks land). None = not placed.
+RISK_LEVELS: dict[int, str] = {1: "enterprise", 2: "category", 3: "scenario"}
+_Level = Field(default=None, ge=1, le=3, description="1 enterprise, 2 category, 3 scenario; null = not placed.")
+
 RiskType = Literal["strategic", "operational", "financial", "compliance", "technology", "emerging"]
 RiskVelocity = Literal["immediate", "weeks", "months", "years"]
 RiskSource = Literal["rcsa", "audit", "incident", "generated", "regulatory", "self_identified", "other"]
@@ -160,6 +165,10 @@ class RiskCreate(RiskBase):
     policy_ids: list[uuid.UUID] = Field(default_factory=list)
     incident_ids: list[uuid.UUID] = Field(default_factory=list)
     impact_dimensions: list[ImpactDimensionIn] = Field(default_factory=list)
+    # Phase 3 hierarchy. The parent must be a live risk at a higher level (a lower
+    # number); the level defaults to the parent's + 1. See services.risk_hierarchy.
+    parent_id: uuid.UUID | None = None
+    level: int | None = _Level
 
 
 class RiskUpdate(BaseModel):
@@ -206,6 +215,9 @@ class RiskUpdate(BaseModel):
     vulnerability_ids: list[uuid.UUID] | None = None
     policy_ids: list[uuid.UUID] | None = None
     incident_ids: list[uuid.UUID] | None = None
+    # Phase 3 hierarchy: null parent_id detaches the risk; an omitted level is kept.
+    parent_id: uuid.UUID | None = None
+    level: int | None = _Level
 
 
 class RiskAssessment(BaseModel):
@@ -389,6 +401,13 @@ class RiskRead(BaseModel):
     # Live rollup: health of the mitigating controls (none | ok | issues).
     control_health: str = "none"
 
+    # Phase 3 hierarchy: where the risk sits, the live risk above it and how many live
+    # risks sit directly below it (``GET /risks/{id}/rollup`` lists them).
+    level: int | None = None
+    parent_id: uuid.UUID | None = None
+    parent: GraphRef | None = None
+    children_count: int = 0
+
     # Residual suggested by the control-effectiveness engine, and the sign-off trail.
     # A suggestion is never the assessed residual until someone accepts it.
     suggested_residual_likelihood: int | None = None
@@ -446,6 +465,63 @@ class RiskRead(BaseModel):
                 self.category_id,
             )
         return self
+
+
+class RiskRollupNode(BaseModel):
+    """One risk in a roll-up or the board tree. ``exposure`` is the residual score when
+    assessed, else the inherent score — what the dashboards rank by; ``severity`` its
+    band on the tenant's matrix (cell overrides included); ``depth`` 0 is the risk asked
+    about, 1 its children."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    reference: str = ""
+    title: str = ""
+    level: int | None = None
+    parent_id: uuid.UUID | None = None
+    depth: int = 0
+    status: str = ""
+    inherent_score: int | None = None
+    residual_score: int | None = None
+    exposure: int | None = None
+    severity: Severity | None = None
+    appetite_status: str | None = None
+
+
+class RiskRollup(BaseModel):
+    """Everything below one risk: its live children, every live descendant, the worst
+    residual (assessed descendants only) and worst exposure among them, and counts."""
+
+    model_config = ConfigDict(from_attributes=True)
+    risk: RiskRollupNode
+    children: list[RiskRollupNode] = []
+    descendants: list[RiskRollupNode] = []
+    worst_residual: RiskRollupNode | None = None
+    worst_exposure: RiskRollupNode | None = None
+    by_severity: dict[str, int] = Field(default_factory=dict)
+    breaches: int = 0
+    total: int = 0
+
+
+class RiskHierarchyNode(RiskRollupNode):
+    """A node of the board view. Counts and ``worst`` cover every live risk below the
+    node at any level, including levels the view does not show."""
+
+    children_count: int = 0
+    descendants_count: int = 0
+    worst: RiskRollupNode | None = None
+    by_severity: dict[str, int] = Field(default_factory=dict)
+    breaches: int = 0
+    children: list["RiskHierarchyNode"] = []
+
+
+class RiskHierarchy(BaseModel):
+    max_level: int
+    roots: list[RiskHierarchyNode] = []
+    #: Live risks with no level yet.
+    unplaced: int = 0
+    #: Live risks per level, as strings "1".."3".
+    by_level: dict[str, int] = Field(default_factory=dict)
 
 
 class RiskSettingRead(BaseModel):

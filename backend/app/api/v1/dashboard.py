@@ -113,20 +113,14 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
 # dashboard can never disagree with the page it links to.
 from datetime import timedelta  # noqa: E402
 
-from sqlalchemy import and_, or_  # noqa: E402
-
 from app.api.v1.compliance import _gap_reason  # noqa: E402
-from app.models.control import UNTESTABLE_CONTROL_STATUSES  # noqa: E402
 from app.models.compliance import Framework, Requirement  # noqa: E402
 from app.models.control import ControlAudit  # noqa: E402
 from app.models.enums import (  # noqa: E402
     AuditFindingStatus,
     ComplianceStatus,
-    ControlEffectiveness,
-    IncidentStatus,
-    PolicyStatus,
+    Criticality,
     RiskStatus,
-    TestResult,
 )
 from app.models.identity import User  # noqa: E402
 from app.models.incident import Incident  # noqa: E402
@@ -159,9 +153,13 @@ from app.models.lookup import Lookup  # noqa: E402
 from app.models.risk import RiskTreatmentAction  # noqa: E402
 from app.schemas.dashboard import CategoryPosture  # noqa: E402
 from app.services import control_assurance, governance_health  # noqa: E402
+from app.services import drill_through as dt  # noqa: E402
 
-_OPEN_INCIDENT = (IncidentStatus.resolved, IncidentStatus.closed)
-_CLOSED_ISSUE_WORDS = {"closed", "resolved", "risk_accepted", "withdrawn", "cancelled"}
+# "Open" issues, incidents and in-force policies, overdue tests and reviews: every
+# predicate behind a number that links to a list comes from services.drill_through, and
+# the list endpoints filter with the same functions — the count and the list it opens
+# cannot disagree. (Issues used to count "remediated" as open here while the register's
+# overdue filter did not.)
 _OPEN_FINDING = (AuditFindingStatus.open, AuditFindingStatus.in_progress)
 _SETTLED_RISK = (RiskStatus.accepted, RiskStatus.closed)
 #: Only compliance frameworks are obligations; maturity/guidance ones never add gaps.
@@ -170,6 +168,37 @@ _COMPLIANCE_KIND = "compliance"
 
 async def _count(db, stmt) -> int:
     return await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+
+
+#: The "Needs a decision or is overdue" queue, in priority order:
+#: (key, what is counted, the rest of the line, tone). Each key opens the list behind the
+#: number (``drill_through.ACTION_LINKS``) — a register filtered to exactly those rows.
+QUEUE: tuple[tuple[str, str, str, str], ...] = (
+    ("breach", "risk", "above tolerance", "critical"),
+    ("tat", "record", "past turnaround time", "critical"),
+    ("tests_failed", "control", "failed the last test", "critical"),
+    ("findings_overdue", "audit finding", "past due", "critical"),
+    ("issues_overdue", "issue", "past due", "warning"),
+    ("treatments_overdue", "risk", "with treatment past due", "warning"),
+    ("tests_overdue", "control test", "overdue", "warning"),
+    ("acceptances_expiring", "risk acceptance", "expiring within 30 days", "warning"),
+    ("reviews_overdue", "risk review", "overdue", "warning"),
+    ("policies_overdue", "policy review", "overdue", "warning"),
+    ("acceptances_pending", "risk acceptance", "awaiting a decision", "info"),
+    ("not_assessed", "control", "never tested", "info"),
+)
+
+
+def action_items(counts: dict[str, int]) -> list[ActionItem]:
+    """One queue line per non-zero count ("98 controls never tested"), each linking to
+    its filtered list. Pure."""
+    out: list[ActionItem] = []
+    for key, noun, rest, tone in QUEUE:
+        n = int(counts.get(key, 0) or 0)
+        if n > 0:
+            label = f"{n} {noun if n == 1 else noun + 's'} {rest}"
+            out.append(ActionItem(key=key, label=label, count=n, href=dt.ACTION_LINKS[key], tone=tone))
+    return out
 
 
 @router.get("/overview", response_model=DashboardOverview, dependencies=[Depends(require("risk:read"))])
@@ -287,7 +316,7 @@ async def get_overview(
     # anything to test, so neither counts as overdue, due, never tested or unassured.
     # They are reported once, as "not in operation", so the bar still adds up.
     live_ctl = Control.deleted.is_(False)
-    testable_ctl = live_ctl & Control.status.not_in(UNTESTABLE_CONTROL_STATUSES)
+    testable_ctl = live_ctl & dt.operating_control()
     by_eff: Counter[str] = Counter()
     for eff_val, n in (await db.execute(
         select(Control.effectiveness, func.count()).where(testable_ctl).group_by(Control.effectiveness)
@@ -295,26 +324,14 @@ async def get_overview(
         by_eff[eff_val.value] = n
     controls_operating = sum(by_eff.values())
     not_operating = await _count(db, select(Control.id).where(
-        live_ctl, Control.status.in_(UNTESTABLE_CONTROL_STATUSES)
+        live_ctl, dt.control_assurance_clause("not_operating")
     ))
     controls_total = controls_operating + not_operating
-    tests_overdue = await _count(db, select(Control.id).where(testable_ctl, Control.next_audit_date < today))
-    tests_due = await _count(db, select(Control.id).where(
-        testable_ctl, Control.next_audit_date >= today, Control.next_audit_date <= soon
-    ))
+    tests_overdue = await _count(db, select(Control.id).where(live_ctl, dt.control_test_clause("overdue", today)))
+    tests_due = await _count(db, select(Control.id).where(live_ctl, dt.control_test_clause("due_30d", today)))
     # Latest test per control that counts — reviewed, or recorded before reviews existed
     # (Phase 2: an unreviewed test changes nothing until a second person signs it off).
-    latest = (
-        select(ControlAudit.control_id, ControlAudit.result)
-        .where(ControlAudit.review_status.in_(("reviewed", "legacy")))
-        .distinct(ControlAudit.control_id)
-        .order_by(ControlAudit.control_id, ControlAudit.conducted_date.desc().nulls_last(), ControlAudit.created_at.desc())
-    ).subquery()
-    last_failed = await db.scalar(
-        select(func.count()).select_from(latest)
-        .join(Control, Control.id == latest.c.control_id)
-        .where(testable_ctl, latest.c.result == TestResult.failed)
-    ) or 0
+    last_failed = await _count(db, select(Control.id).where(live_ctl, dt.control_test_clause("failed", today)))
     tests_in_period = await _count(db, select(ControlAudit.id).where(ControlAudit.conducted_date >= start))
     assurance = Assurance(
         total=controls_total,
@@ -366,8 +383,11 @@ async def get_overview(
     )
 
     # ---------------------------------------------------------------- actions
-    open_issue = Issue.deleted.is_(False) & Issue.status.not_in([s for s in Issue.status.type.enum_class if s.value in _CLOSED_ISSUE_WORDS])  # type: ignore[attr-defined]
-    reviews_overdue = sum(1 for r in rows if r.next_review_date and r.next_review_date < today)
+    open_issue = Issue.deleted.is_(False) & dt.issue_open()
+    reviews_overdue = await _count(db, select(Risk.id).where(live, dt.risk_review_overdue(today)))
+    # The queue lists risks (it opens the risk register), so it counts risks whose
+    # treatment is late; the health measure below counts each late action as a deadline.
+    risks_treatment_overdue = await _count(db, select(Risk.id).where(live, dt.risk_treatment_overdue(today)))
     # Treatment is tracked per action: each open action past its due date is overdue.
     # A risk with no actions yet is still judged on its single treatment deadline.
     unsettled = {r.id for r in rows if r.status not in _SETTLED_RISK}
@@ -388,8 +408,7 @@ async def get_overview(
         1 for r in rows if r.id in unsettled and r.id not in with_actions and r.treatment_deadline
     )
     policies_overdue = await _count(db, select(Policy.id).where(
-        Policy.deleted.is_(False), Policy.next_review_date < today,
-        Policy.status.in_((PolicyStatus.approved, PolicyStatus.published)),
+        Policy.deleted.is_(False), dt.policy_review_overdue(today),
     ))
     acceptances_expiring = await _count(db, select(RiskAcceptance.id).join(Risk, Risk.id == RiskAcceptance.risk_id).where(
         live, RiskAcceptance.status == AcceptanceStatus.approved,
@@ -398,41 +417,30 @@ async def get_overview(
     acceptances_pending = await _count(db, select(RiskAcceptance.id).join(Risk, Risk.id == RiskAcceptance.risk_id).where(
         live, RiskAcceptance.status == AcceptanceStatus.pending,
     ))
-    issues_open = await _count(db, select(Issue.id).where(open_issue))
-    issues_overdue = await _count(db, select(Issue.id).where(open_issue, Issue.due_date < today))
+    issues_overdue = await _count(db, select(Issue.id).where(Issue.deleted.is_(False), dt.issue_overdue(today)))
     findings_overdue = await _count(db, select(AuditFinding.id).where(
         AuditFinding.status.in_(_OPEN_FINDING), AuditFinding.due_date < today
     ))
-    incidents_open_stmt = select(Incident.id).where(Incident.deleted.is_(False), Incident.status.not_in(_OPEN_INCIDENT))
+    incidents_open_stmt = select(Incident.id).where(Incident.deleted.is_(False), dt.incident_open())
     tat_breached = (
         await _count(db, select(Risk.id).where(live, Risk.tat_breached_at.is_not(None), Risk.status.not_in(_SETTLED_RISK)))
         + await _count(db, select(Issue.id).where(open_issue, Issue.tat_breached_at.is_not(None)))
         + await _count(db, incidents_open_stmt.where(Incident.tat_breached_at.is_not(None)))
         + await _count(db, select(AuditFinding.id).where(AuditFinding.status.in_(_OPEN_FINDING), AuditFinding.tat_breached_at.is_not(None)))
     )
-    def n_(count: int, singular: str, plural: str | None = None) -> str:
-        return f"{count} {singular if count == 1 else (plural or singular + 's')}"
-
-    candidates = [
-        ("breach", n_(appetite_counts["breach"], "risk") + " above tolerance", appetite_counts["breach"], "/risks", "critical"),
-        ("tat", n_(tat_breached, "record") + " past turnaround time", tat_breached, "/sla-policies", "critical"),
-        ("tests_failed", n_(last_failed, "control") + " failed the last test", last_failed, "/controls", "critical"),
-        ("findings_overdue", n_(findings_overdue, "audit finding") + " past due", findings_overdue, "/internal-audit", "critical"),
-        ("issues_overdue", n_(issues_overdue, "issue") + " past due", issues_overdue, "/issues", "warning"),
-        ("treatments_overdue", n_(treatments_overdue, "risk treatment action") + " past due", treatments_overdue, "/risks", "warning"),
-        ("tests_overdue", n_(tests_overdue, "control test") + " overdue", tests_overdue, "/controls", "warning"),
-        ("acceptances_expiring", n_(acceptances_expiring, "risk acceptance") + " expiring within 30 days", acceptances_expiring, "/risks", "warning"),
-        ("reviews_overdue", n_(reviews_overdue, "risk review") + " overdue", reviews_overdue, "/risks", "warning"),
-        ("policies_overdue", n_(policies_overdue, "policy review") + " overdue", policies_overdue, "/policies", "warning"),
-        ("acceptances_pending", n_(acceptances_pending, "risk acceptance") + " awaiting a decision", acceptances_pending, "/approvals", "info"),
-        ("not_assessed", n_(assurance.not_assessed, "control") + " never tested", assurance.not_assessed, "/controls", "info"),
-    ]
-    actions = [ActionItem(key=k, label=l, count=n, href=h, tone=t) for k, l, n, h, t in candidates if n > 0]
+    actions = action_items({
+        "breach": appetite_counts["breach"], "tat": tat_breached, "tests_failed": last_failed,
+        "findings_overdue": findings_overdue, "issues_overdue": issues_overdue,
+        "treatments_overdue": risks_treatment_overdue, "tests_overdue": tests_overdue,
+        "acceptances_expiring": acceptances_expiring, "reviews_overdue": reviews_overdue,
+        "policies_overdue": policies_overdue, "acceptances_pending": acceptances_pending,
+        "not_assessed": assurance.not_assessed,
+    })
 
     # -------------------------------------------------------------- incidents
     open_by_sev: Counter[str] = Counter()
     for sev_val, n in (await db.execute(
-        select(Incident.severity, func.count()).where(Incident.deleted.is_(False), Incident.status.not_in(_OPEN_INCIDENT))
+        select(Incident.severity, func.count()).where(Incident.deleted.is_(False), dt.incident_open())
         .group_by(Incident.severity)
     )).all():
         open_by_sev[sev_val.value] = n
@@ -464,16 +472,17 @@ async def get_overview(
     )
 
     # ---------------------------------------------------------- third parties
+    # Counted with the same predicates GET /vendors filters on (?criticality=critical,
+    # ?review=overdue), so each number opens exactly its list.
+    live_vendor = Vendor.deleted.is_(False)
     by_rating: Counter[str] = Counter()
-    vendors_total = critical_vendors = vendors_overdue = 0
-    for v in (await db.scalars(select(Vendor).where(Vendor.deleted.is_(False)))).all():
-        vendors_total += 1
-        rating = getattr(v.risk_rating, "value", v.risk_rating) or "unrated"
-        by_rating[str(rating)] += 1
-        if getattr(v.criticality, "value", v.criticality) == "critical":
-            critical_vendors += 1
-        if v.next_review_date and v.next_review_date < today:
-            vendors_overdue += 1
+    for rating, n in (await db.execute(
+        select(Vendor.risk_rating, func.count()).where(live_vendor).group_by(Vendor.risk_rating)
+    )).all():
+        by_rating[str(getattr(rating, "value", rating) or "unrated")] += n
+    vendors_total = sum(by_rating.values())
+    critical_vendors = await _count(db, select(Vendor.id).where(live_vendor, Vendor.criticality == Criticality.critical))
+    vendors_overdue = await _count(db, select(Vendor.id).where(live_vendor, dt.vendor_review_overdue(today)))
     third_parties = ThirdParties(
         total=vendors_total, by_rating=dict(by_rating), assessments_overdue=vendors_overdue, critical=critical_vendors,
     )
@@ -517,7 +526,7 @@ async def get_overview(
         + treatment_deadlines
         + await _count(db, select(Control.id).where(testable_ctl, Control.next_audit_date.is_not(None)))
         + await _count(db, select(Policy.id).where(Policy.deleted.is_(False), Policy.next_review_date.is_not(None),
-                                                  Policy.status.in_((PolicyStatus.approved, PolicyStatus.published))))
+                                                  Policy.status.in_(dt.POLICY_IN_FORCE)))
         + await _count(db, select(Issue.id).where(open_issue, Issue.due_date.is_not(None)))
         + await _count(db, select(AuditFinding.id).where(AuditFinding.status.in_(_OPEN_FINDING), AuditFinding.due_date.is_not(None)))
     )

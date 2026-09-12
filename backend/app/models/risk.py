@@ -130,6 +130,12 @@ RESIDUAL_NOT_ABOVE_INHERENT = (
 
 class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "risks"
+    # Phase 3: risk hierarchy — 1 enterprise, 2 category, 3 scenario. The board reads the
+    # top two levels; practitioners work at the scenario level. NULL = not yet placed.
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    level: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # Phase 2: structured risk statement (bow-tie) and assessment trail.
     cause: Mapped[str] = mapped_column(Text, default="", nullable=False)
     event: Mapped[str] = mapped_column(Text, default="", nullable=False)

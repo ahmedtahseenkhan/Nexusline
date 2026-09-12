@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     mfa_required: bool = False
     mfa_required_roles: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["admin"])
     mfa_grace_days: int = 7
+    # Approve / Reject links in e-mail (phase 3). Deciding from an e-mail skips two-factor
+    # authentication, so a bank whose policy requires 2FA for every approval sets this to
+    # false: no links are issued, and links already sent stop working.
+    email_actions_enabled: bool = True
     # LDAP / Active Directory (per-tenant config in DB; this only gates the feature)
     ldap_enabled: bool = False
 

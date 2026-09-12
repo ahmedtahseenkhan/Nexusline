@@ -136,7 +136,9 @@ async def expire_lapsed(db: AsyncSession, tenant_id: uuid.UUID, today: date | No
                 category=NotificationCategory.critical if reopened else NotificationCategory.warning,
                 entity_type="risk",
                 entity_id=risk.id,
-                link="/risks",
+                link=f"/risks?id={risk.id}",
+                # Phase 3: to the risk owner; nobody named = the whole organisation.
+                user_id=risk.owner_id,
                 dedup_key=f"{EVENT_PREFIX}acceptance-expired:{acceptance.id}",
             )
         )

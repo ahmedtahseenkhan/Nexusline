@@ -59,6 +59,7 @@ from app.schemas.issue import (
 from app.services.refs import next_reference
 from app.services import audit as audit_log
 from app.services import delete_guard
+from app.services import drill_through
 from app.services import dual_control
 from app.services import issue_closure as ic
 from app.services import record_workflow
@@ -335,11 +336,8 @@ async def list_issues(
         )
         stmt = stmt.where(pending if due_date_change_pending else ~pending)
     if overdue:
-        stmt = stmt.where(
-            Issue.due_date.is_not(None),
-            Issue.due_date < date.today(),
-            Issue.status.notin_(_CLOSED_STATES),
-        )
+        # The dashboard's "issues past due" counts with this same predicate.
+        stmt = stmt.where(drill_through.issue_overdue(date.today()))
 
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:

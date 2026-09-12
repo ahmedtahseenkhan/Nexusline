@@ -46,6 +46,31 @@ const SUB: React.CSSProperties = { fontSize: 12.5, color: "#64748b" };
 
 type Range = "30d" | "quarter" | "ytd";
 
+/* Where each number opens: the list behind it, already filtered. The list endpoints
+   apply the same predicates the dashboard counts with (backend services/drill_through.py),
+   so "98 never tested" opens exactly 98 controls. The queue's links come from the
+   server (ActionItem.href). backend/tests/test_drill_through.py checks every literal
+   link here against the parameters its list endpoint declares. */
+const DRILL = {
+  breach: "/risks?appetite=breach",
+  assured: "/controls?assurance=assured",
+  effective: "/controls?assurance=effective",
+  partial: "/controls?assurance=partially_effective",
+  failing: "/controls?assurance=failing",
+  neverTested: "/controls?assurance=not_assessed",
+  notOperating: "/controls?assurance=not_operating",
+  testsOverdue: "/controls?test=overdue",
+  testsFailed: "/controls?test=failed",
+  testsDue: "/controls?test=due_30d",
+  openIncidents: "/incidents?open=true",
+  reportableIncidents: "/incidents?open=true&is_reportable=true",
+  criticalVendors: "/vendors?criticality=critical",
+  vendorReviewsOverdue: "/vendors?review=overdue",
+  // The operational-risk page has no tab parameter yet, so KRIs open the page itself.
+  kris: "/operational-risk",
+} as const;
+const incidentsBySeverity = (s: string) => `/incidents?open=true&severity=${s}`;
+
 function bandFromScore(score: number | null, bands?: MatrixBand[]): keyof typeof SEV {
   if (!score) return "low";
   if (bands?.length) {
@@ -100,22 +125,32 @@ function Stat({ label, value, sub, tone, href }: { label: string; value: React.R
 }
 
 /** A stacked bar with a legend — the shape eramba uses for "why is this package not
- *  compliant", applied to assurance: what fraction is proven, untested, failing, absent. */
-function Stack({ parts, total }: { parts: { label: string; value: number; color: string }[]; total: number }) {
+ *  compliant", applied to assurance: what fraction is proven, untested, failing, absent.
+ *  A part with an `href` opens the list behind it (from its legend entry and its bar). */
+function Stack({ parts, total }: { parts: { label: string; value: number; color: string; href?: string }[]; total: number }) {
   return (
     <div>
       <div style={{ display: "flex", height: 12, borderRadius: 6, overflow: "hidden", background: "#eef1f5" }}>
-        {parts.filter((p) => p.value > 0).map((p) => (
-          <div key={p.label} title={`${p.label}: ${p.value}`} style={{ width: `${(100 * p.value) / Math.max(total, 1)}%`, background: p.color }} />
-        ))}
+        {parts.filter((p) => p.value > 0).map((p) => {
+          const bar = { width: `${(100 * p.value) / Math.max(total, 1)}%`, background: p.color, display: "block" } as const;
+          return p.href
+            ? <Link key={p.label} href={p.href} title={`${p.label}: ${p.value} — open the list`} style={bar} />
+            : <div key={p.label} title={`${p.label}: ${p.value}`} style={bar} />;
+        })}
       </div>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 6, fontSize: 11.5, color: "#64748b" }}>
-        {parts.map((p) => (
-          <span key={p.label} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color, display: "inline-block" }} />
-            {p.label} <b style={{ color: "#0f172a" }}>{p.value}</b>
-          </span>
-        ))}
+        {parts.map((p) => {
+          const body = (
+            <>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color, display: "inline-block" }} />
+              {p.label} <b style={{ color: "#0f172a" }}>{p.value}</b>
+            </>
+          );
+          const style = { display: "inline-flex", alignItems: "center", gap: 5, color: "inherit", textDecoration: "none" } as const;
+          return p.href
+            ? <Link key={p.label} href={p.href} style={style}>{body}</Link>
+            : <span key={p.label} style={style}>{body}</span>;
+        })}
       </div>
     </div>
   );
@@ -300,12 +335,12 @@ export default function DashboardPage() {
       {/* ---------------------------------------------------------- KPI strip */}
       {o && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12 }}>
-          <Stat label="Above tolerance" value={o.posture.breach} sub={`${o.posture.elevated} elevated · ${o.posture.within_appetite} within appetite`} tone={o.posture.breach ? "danger" : "ok"} href="/risks" />
-          <Stat label="Control assurance" value={`${assuredPct}%`} sub={`${a!.effective + a!.partially_effective} of ${operating} operating controls proven working`} tone={assuredPct >= 70 ? "ok" : assuredPct >= 40 ? "warn" : "danger"} href="/controls" />
+          <Stat label="Above tolerance" value={o.posture.breach} sub={`${o.posture.elevated} elevated · ${o.posture.within_appetite} within appetite`} tone={o.posture.breach ? "danger" : "ok"} href={DRILL.breach} />
+          <Stat label="Control assurance" value={`${assuredPct}%`} sub={`${a!.effective + a!.partially_effective} of ${operating} operating controls proven working`} tone={assuredPct >= 70 ? "ok" : assuredPct >= 40 ? "warn" : "danger"} href={DRILL.assured} />
           <Stat label="Compliance assured" value={`${o.compliance.overall_assured_pct}%`} sub={`${o.compliance.frameworks.length} frameworks · ${o.compliance.frameworks.reduce((n, f) => n + f.gaps, 0)} open gaps`} tone={o.compliance.overall_assured_pct >= 70 ? "ok" : o.compliance.overall_assured_pct >= 40 ? "warn" : "danger"} href="/compliance" />
-          <Stat label="Open incidents" value={o.incidents.open} sub={`${o.incidents.reportable_open} reportable · ${incidentDelta >= 0 ? "+" : ""}${incidentDelta} vs prior ${o.period_days}d`} tone={o.incidents.reportable_open ? "danger" : o.incidents.open ? "warn" : "ok"} href="/incidents" />
-          <Stat label="KRIs breaching" value={o.kris.red} sub={`${o.kris.amber} amber · ${o.kris.green} green · ${o.kris.no_data} no data`} tone={o.kris.red ? "danger" : o.kris.amber ? "warn" : "ok"} href="/operational-risk" />
-          <Stat label="Tests overdue" value={a!.tests_overdue} sub={`${a!.last_test_failed} failed last test · ${a!.tests_due_30d} due in 30d`} tone={a!.last_test_failed ? "danger" : a!.tests_overdue ? "warn" : "ok"} href="/controls" />
+          <Stat label="Open incidents" value={o.incidents.open} sub={`${o.incidents.reportable_open} reportable · ${incidentDelta >= 0 ? "+" : ""}${incidentDelta} vs prior ${o.period_days}d`} tone={o.incidents.reportable_open ? "danger" : o.incidents.open ? "warn" : "ok"} href={DRILL.openIncidents} />
+          <Stat label="KRIs breaching" value={o.kris.red} sub={`${o.kris.amber} amber · ${o.kris.green} green · ${o.kris.no_data} no data`} tone={o.kris.red ? "danger" : o.kris.amber ? "warn" : "ok"} href={DRILL.kris} />
+          <Stat label="Tests overdue" value={a!.tests_overdue} sub={`${a!.last_test_failed} failed last test · ${a!.tests_due_30d} due in 30d`} tone={a!.last_test_failed ? "danger" : a!.tests_overdue ? "warn" : "ok"} href={DRILL.testsOverdue} />
         </div>
       )}
 
@@ -429,23 +464,29 @@ export default function DashboardPage() {
                 <span style={SUB}>of {operating} operating controls effective or partially effective</span>
               </div>
               <Stack total={a.total} parts={[
-                { label: "Effective", value: a.effective, color: "#15803d" },
-                { label: "Partially", value: a.partially_effective, color: "#65a30d" },
-                { label: "Ineffective", value: a.ineffective, color: RED },
-                { label: "Never tested", value: a.not_assessed, color: "#cbd5e1" },
-                ...((a.not_operating ?? 0) > 0 ? [{ label: "Planned or retired", value: a.not_operating ?? 0, color: "#e2e8f0" }] : []),
+                { label: "Effective", value: a.effective, color: "#15803d", href: DRILL.effective },
+                { label: "Partially", value: a.partially_effective, color: "#65a30d", href: DRILL.partial },
+                { label: "Ineffective", value: a.ineffective, color: RED, href: DRILL.failing },
+                { label: "Never tested", value: a.not_assessed, color: "#cbd5e1", href: DRILL.neverTested },
+                ...((a.not_operating ?? 0) > 0 ? [{ label: "Planned or retired", value: a.not_operating ?? 0, color: "#e2e8f0", href: DRILL.notOperating }] : []),
               ]} />
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginTop: 16 }}>
-                {[
-                  ["Tests overdue", a.tests_overdue, a.tests_overdue ? AMBER : "#0f172a"],
-                  ["Failed last test", a.last_test_failed, a.last_test_failed ? RED : "#0f172a"],
-                  [`Tested last ${o!.period_days}d`, a.tests_in_period, "#0f172a"],
-                ].map(([l, v, c]) => (
-                  <div key={String(l)} style={{ background: "#f8fafc", borderRadius: 10, padding: "10px 12px" }}>
-                    <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 700, color: String(c) }}>{v as number}</div>
-                    <div style={{ fontSize: 11.5, color: "#64748b" }}>{l as string}</div>
-                  </div>
-                ))}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginTop: 16 }}>
+                {([
+                  ["Tests overdue", a.tests_overdue, a.tests_overdue ? AMBER : "#0f172a", DRILL.testsOverdue],
+                  ["Failed last test", a.last_test_failed, a.last_test_failed ? RED : "#0f172a", DRILL.testsFailed],
+                  ["Due in 30 days", a.tests_due_30d, "#0f172a", DRILL.testsDue],
+                  [`Tested last ${o!.period_days}d`, a.tests_in_period, "#0f172a", null],
+                ] as [string, number, string, string | null][]).map(([l, v, c, href]) => {
+                  const tile = (
+                    <div style={{ background: "#f8fafc", borderRadius: 10, padding: "10px 12px", height: "100%" }}>
+                      <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 700, color: c }}>{v}</div>
+                      <div style={{ fontSize: 11.5, color: "#64748b" }}>{l}</div>
+                    </div>
+                  );
+                  return href
+                    ? <Link key={l} href={href} style={{ textDecoration: "none", color: "inherit" }} title="Open the list">{tile}</Link>
+                    : <div key={l} title="Tests recorded in the period (a count of tests, not of controls)">{tile}</div>;
+                })}
               </div>
               {a.not_assessed > 0 && a.not_assessed >= operating / 2 && (
                 <div style={{ marginTop: 12, fontSize: 12.5, color: AMBER }}>
@@ -508,12 +549,12 @@ export default function DashboardPage() {
           {o && (
             <>
               <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
-                <span style={{ fontFamily: FONT_MONO, fontSize: 30, fontWeight: 700, color: o.incidents.open ? AMBER : "#15803d" }}>{o.incidents.open}</span>
-                <span style={SUB}>open · {o.incidents.reportable_open} regulator-reportable · {o.incidents.tat_breached} past TAT</span>
+                <Link href={DRILL.openIncidents} style={{ fontFamily: FONT_MONO, fontSize: 30, fontWeight: 700, color: o.incidents.open ? AMBER : "#15803d", textDecoration: "none" }} title="Open incidents — not resolved or closed">{o.incidents.open}</Link>
+                <span style={SUB}>open · <Link href={DRILL.reportableIncidents} style={{ color: "inherit" }}>{o.incidents.reportable_open} regulator-reportable</Link> · {o.incidents.tat_breached} past TAT</span>
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", margin: "8px 0 14px" }}>
                 {(["critical", "high", "medium", "low"] as const).map((s) => (
-                  <span key={s} style={{ fontSize: 12.5 }}><SevChip value={s} /> <b>{o.incidents.open_by_severity[s] ?? 0}</b></span>
+                  <Link key={s} href={incidentsBySeverity(s)} style={{ fontSize: 12.5, color: "inherit", textDecoration: "none" }}><SevChip value={s} /> <b>{o.incidents.open_by_severity[s] ?? 0}</b></Link>
                 ))}
               </div>
               <div style={{ fontSize: 12.5, color: "#64748b", marginBottom: 12 }}>
@@ -522,7 +563,7 @@ export default function DashboardPage() {
               <div style={{ borderTop: "1px solid #eef1f5", paddingTop: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                   <span style={{ fontSize: 13, fontWeight: 700 }}>Key risk indicators</span>
-                  <Link href="/operational-risk" style={{ fontSize: 12 }}>All KRIs →</Link>
+                  <Link href={DRILL.kris} style={{ fontSize: 12 }}>All KRIs →</Link>
                 </div>
                 <div style={{ display: "flex", gap: 12, fontSize: 12.5 }}>
                   <span><b style={{ color: RED }}>{o.kris.red}</b> red</span>
@@ -566,8 +607,9 @@ export default function DashboardPage() {
             <div style={{ borderTop: "1px solid #eef1f5", marginTop: 12, paddingTop: 12 }}>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Third parties</div>
               <div style={{ fontSize: 12.5, color: "#64748b" }}>
-                {o.third_parties.total} vendors · <b style={{ color: o.third_parties.critical ? "#0f172a" : "#64748b" }}>{o.third_parties.critical}</b> critical ·{" "}
-                <b style={{ color: o.third_parties.assessments_overdue ? RED : "#64748b" }}>{o.third_parties.assessments_overdue}</b> assessments overdue
+                <Link href="/vendors" style={{ color: "inherit" }}>{o.third_parties.total} vendors</Link> ·{" "}
+                <Link href={DRILL.criticalVendors} style={{ color: "inherit" }}><b style={{ color: o.third_parties.critical ? "#0f172a" : "#64748b" }}>{o.third_parties.critical}</b> critical</Link> ·{" "}
+                <Link href={DRILL.vendorReviewsOverdue} style={{ color: "inherit" }}><b style={{ color: o.third_parties.assessments_overdue ? RED : "#64748b" }}>{o.third_parties.assessments_overdue}</b> reviews overdue</Link>
                 {Object.keys(o.third_parties.by_rating).length > 0 && (
                   <> · rated {Object.entries(o.third_parties.by_rating).map(([k, v]) => `${v} ${k}`).join(", ")}</>
                 )}

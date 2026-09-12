@@ -21,6 +21,7 @@ import { IconCompliance, IconPlus, IconCheck } from "@/components/icons";
 import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
 import StatementOfApplicability from "@/components/StatementOfApplicability";
+import FrameworkCrosswalk from "@/components/FrameworkCrosswalk";
 
 /* ------------------------------------------------------------------ types */
 type Framework = {
@@ -407,9 +408,9 @@ function ComplianceInner() {
      framework record, not to the requirements list — collapsed so they stop competing
      with the table for the top of the page. */
   const [showFrameworkPanels, setShowFrameworkPanels] = useState(false);
-  /* The framework view has two tabs: the requirements register and, for compliance
-     frameworks, the Statement of Applicability. */
-  const [fwTab, setFwTab] = useState<"requirements" | "soa">("requirements");
+  /* The framework view has tabs: the requirements register, for compliance frameworks
+     the Statement of Applicability, and the crosswalk with another framework. */
+  const [fwTab, setFwTab] = useState<"requirements" | "soa" | "crosswalk">("requirements");
 
   const fetchRequirements = useCallback(
     (qs: string): Promise<PagedList<Requirement>> => {
@@ -907,18 +908,25 @@ function ComplianceInner() {
         </div>
       )}
 
-      {selectedFw && !isSelfAssessed(selectedFw.kind) && (
+      {selectedFw && (
         <div className="seg" style={{ marginBottom: 12 }} role="tablist" aria-label="Framework view">
           <button type="button" role="tab" aria-selected={fwTab === "requirements"} className={fwTab === "requirements" ? "on" : ""} onClick={() => setFwTab("requirements")}>
             Requirements
           </button>
-          <button type="button" role="tab" aria-selected={fwTab === "soa"} className={fwTab === "soa" ? "on" : ""} onClick={() => setFwTab("soa")}>
-            Statement of Applicability
+          {!isSelfAssessed(selectedFw.kind) && (
+            <button type="button" role="tab" aria-selected={fwTab === "soa"} className={fwTab === "soa" ? "on" : ""} onClick={() => setFwTab("soa")}>
+              Statement of Applicability
+            </button>
+          )}
+          <button type="button" role="tab" aria-selected={fwTab === "crosswalk"} className={fwTab === "crosswalk" ? "on" : ""} onClick={() => setFwTab("crosswalk")}>
+            Crosswalk
           </button>
         </div>
       )}
 
-      {selectedFw && fwTab === "soa" && !isSelfAssessed(selectedFw.kind) ? (
+      {selectedFw && fwTab === "crosswalk" ? (
+        <FrameworkCrosswalk key={selectedFw.id} framework={selectedFw} frameworks={frameworks} />
+      ) : selectedFw && fwTab === "soa" && !isSelfAssessed(selectedFw.kind) ? (
         <StatementOfApplicability key={selectedFw.id} frameworkId={selectedFw.id} frameworkName={selectedFw.name} onChanged={reload} />
       ) : selected ? (
         <DataTable<Requirement>

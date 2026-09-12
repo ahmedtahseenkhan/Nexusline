@@ -96,6 +96,9 @@ services:
       # --- identity / governance controls (banking baseline) ---
       LDAP_ENABLED: ${LDAP_ENABLED:-false}
       MFA_REQUIRED: ${MFA_REQUIRED:-false}
+      # Approve / Reject links in e-mail skip two-factor authentication; set false where
+      # policy requires 2FA for every approval.
+      EMAIL_ACTIONS_ENABLED: ${EMAIL_ACTIONS_ENABLED:-true}
       ENFORCE_SEGREGATION_OF_DUTIES: ${ENFORCE_SEGREGATION_OF_DUTIES:-true}
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
       # --- first-run seeding ---

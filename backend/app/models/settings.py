@@ -7,7 +7,10 @@ how long an archived record is kept before it is purged.
 """
 from __future__ import annotations
 
-from sqlalchemy import Integer, String, UniqueConstraint
+from datetime import datetime
+
+from sqlalchemy import DateTime, Integer, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -28,3 +31,7 @@ class TenantSettings(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     phone_country: Mapped[str] = mapped_column(String(2), default="PK", nullable=False)
     # Days an archived record is kept before the scheduler purges it for good.
     retention_days: Mapped[int] = mapped_column(Integer, default=90, nullable=False)
+    # Phase 3: the modules this organisation has switched on, within its licence. NULL =
+    # every licensed module (organisations that predate the choice keep everything).
+    enabled_modules: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

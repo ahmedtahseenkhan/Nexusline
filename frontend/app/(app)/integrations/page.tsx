@@ -13,6 +13,7 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import ConnectorFeed from "@/components/ConnectorFeed";
 import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
 
@@ -33,6 +34,8 @@ interface Connector {
   workflow_status: string;
   is_stale: boolean;
   created_at: string;
+  /** A monitoring-feed token is live (the token itself is never returned). */
+  has_ingest_token?: boolean;
 }
 interface ControlTestRun {
   id: string;
@@ -575,6 +578,7 @@ function IntegrationsInner() {
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <Badge tone={CONNECTOR_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge>
         {c.is_stale && <Badge tone="high">Stale</Badge>}
+        {c.has_ingest_token && <Badge tone="info" plain>Feed</Badge>}
       </div>
     ) },
     { key: "last_sync", header: "Last sync", sortable: true, render: (c) => <span className="muted">{c.last_sync ? formatDate(c.last_sync) : "never"}</span> },
@@ -744,6 +748,8 @@ function IntegrationsInner() {
               {field("Created", formatDateTime(detail.created_at))}
             </div>
 
+            <ConnectorFeed connectorId={detail.id} onChanged={() => { reloadConnectors(); loadConnectorDetail(detail.id); }} />
+
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
             </div>
           </>
@@ -754,7 +760,7 @@ function IntegrationsInner() {
       {section === "ccm" && (
         <>
           <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
-            Runtime execution is manual for now — click a row to record a run; its outcome rolls up onto the test&apos;s last result and pass-rate.
+            Click a row to record a run by hand, or let a connector&apos;s monitoring feed record runs for the test whose control and connector match (Connectors → open the connector → Monitoring feed). The latest run rolls up onto the test&apos;s last result and pass-rate.
           </p>
           <DataTable<AutomatedControlTest>
             columns={testColumns}

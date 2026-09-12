@@ -126,6 +126,11 @@ export default function OrganisationSettingsPage() {
             records are kept.
           </p>
         </div>
+        {canEdit && (
+          <a className="btn secondary" href="/onboarding" title="Frameworks in scope, the modules your teams use, and the team">
+            Organisation setup &amp; modules
+          </a>
+        )}
       </div>
 
       {!canEdit && (

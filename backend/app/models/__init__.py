@@ -2,6 +2,9 @@
 from app.models.base import Base
 from app.models.tenant import Tenant
 from app.models.settings import TenantSettings
+from app.models.risk_scenario import RiskProposal
+from app.models.notification import ActionToken
+from app.models.governance import BoardPack
 from app.models.vendor import VendorCertification
 from app.models.lookup import Lookup
 from app.models.identity import Permission, Role, User, role_permissions, user_roles
@@ -186,6 +189,9 @@ from app.models.webhook import Webhook, WebhookDelivery
 from app.models.widget import DashboardWidget
 
 __all__ = [
+    "RiskProposal",
+    "ActionToken",
+    "BoardPack",
     "IssueDueDateChange",
     "RiskAppetite",
     "RiskImpactDimension",

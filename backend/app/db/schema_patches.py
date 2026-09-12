@@ -497,6 +497,43 @@ def phase2_ddl_statements() -> list[str]:
     return statements
 
 
+# --- product review, phase 3: differentiate -------------------------------------------
+PHASE3_COLUMNS: list[tuple[str, str, str]] = [
+    ("risks", "level", "INTEGER"),
+    ("notifications", "role_name", "VARCHAR(64) DEFAULT '' NOT NULL"),
+    ("tenant_settings", "enabled_modules", "JSONB"),
+    ("tenant_settings", "onboarding_completed_at", "TIMESTAMPTZ"),
+    ("committees", "board_pack_days_before", "INTEGER"),
+    ("connectors", "ingest_token_hash", "VARCHAR(128) DEFAULT '' NOT NULL"),
+]
+
+PHASE3_FK_COLUMNS: list[tuple[str, str, str, str]] = [
+    # (table, column, target, on delete)
+    ("risks", "parent_id", "risks", "SET NULL"),
+    ("notifications", "user_id", "users", "CASCADE"),
+]
+
+
+def phase3_ddl_statements() -> list[str]:
+    """Idempotent DDL for phase 3 on pre-existing tables; new tables (risk proposals,
+    action tokens, board packs) come from ``create_all``."""
+    statements: list[str] = []
+    for table, col, ddl in PHASE3_COLUMNS:
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}")
+    for table, col, target, on_delete in PHASE3_FK_COLUMNS:
+        name = f"fk_{table}_{col}"[:63]
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} UUID")
+        statements.append(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{name}') THEN ALTER TABLE {table} ADD CONSTRAINT {name} "
+            f"FOREIGN KEY ({col}) REFERENCES {target}(id) ON DELETE {on_delete} NOT VALID; "
+            "END IF; END $$;"
+        )
+        statements.append(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table} ({col})")
+    statements.append("CREATE INDEX IF NOT EXISTS ix_risks_level ON risks (level)")
+    return statements
+
+
 def asset_split_ddl_statements() -> list[str]:
     """Idempotent DDL: create the enum types, then add the new asset columns.
 

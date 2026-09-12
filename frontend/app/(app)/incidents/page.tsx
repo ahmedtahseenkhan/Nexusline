@@ -10,7 +10,9 @@ import { fromZonedInput, toZonedInput } from "@/lib/zonedInput";
 import { confirmDeleteWithImpact } from "@/lib/records";
 import type { LookupRef, UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { useFilterParams, type FilterSpec } from "@/lib/useFilterParams";
 import DataTable, { type Column } from "@/components/DataTable";
+import BulkEditBar from "@/components/BulkEditBar";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -162,6 +164,16 @@ const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: c
 
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 const STATUS = opts(["open", "triage", "investigating", "contained", "resolved", "closed"]);
+/** Register filters, kept in the URL so a link can open the list already filtered.
+ *  `open=true` is every incident not resolved or closed — the dashboard's "open
+ *  incidents"; `status=open` is the literal Open status. */
+const INCIDENT_FILTERS = {
+  status: ["open", "triage", "investigating", "contained", "resolved", "closed"],
+  open: "boolean",
+  severity: ["low", "medium", "high", "critical"],
+  is_reportable: "boolean",
+} as const satisfies FilterSpec;
+const ALL_OPEN = "__open";
 const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 /** The server's four-eyes refusal of a delete ("Segregation of duties: you entered …"). */
 const isSodRefusal = (e: unknown) => e instanceof Error && /^segregation of duties/i.test(e.message);
@@ -361,9 +373,9 @@ function IncidentsInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // filters
-  const [fStatus, setFStatus] = useState("");
-  const [fSeverity, setFSeverity] = useState("");
+  // filters (in the URL: see INCIDENT_FILTERS)
+  const filterParams = useFilterParams(INCIDENT_FILTERS);
+  const fv = filterParams.values;
 
   const [editing, setEditing] = useState<IncidentFull | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -558,7 +570,7 @@ function IncidentsInner() {
     toast(parts.join("; "), refused || failures.length ? "error" : "success");
   }
 
-  const filters = { status: fStatus || undefined, severity: fSeverity || undefined };
+  const filters = filterParams.values;
 
   // ------------------------------------------------------------- tabs
   const generalTab = (
@@ -813,8 +825,12 @@ function IncidentsInner() {
         tableKey="incidents"
         statusModel="incident"
         bulkActions={(rows, clear) => (
-          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          <>
+            <BulkEditBar entityType="incident" rows={rows} onDone={() => { clear(); reload(); }} />
+            <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          </>
         )}
+        onApplyFilters={filterParams.replace}
         columns={columns}
         fetcher={fetchIncidents}
         rowKey={(i) => i.id}
@@ -825,14 +841,29 @@ function IncidentsInner() {
         filters={filters}
         toolbarRight={
           <>
-            <select className="select" style={{ maxWidth: 170 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
+            <select
+              className="select"
+              style={{ maxWidth: 200 }}
+              value={fv.open === true ? ALL_OPEN : fv.status ?? ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                filterParams.update(v === ALL_OPEN
+                  ? { open: true, status: undefined }
+                  : { open: undefined, status: (v || undefined) as typeof fv.status });
+              }}
+              aria-label="Status"
+            >
               <option value="">All statuses</option>
+              <option value={ALL_OPEN}>Open — not resolved or closed</option>
               {STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
-            <select className="select" style={{ maxWidth: 150 }} value={fSeverity} onChange={(e) => setFSeverity(e.target.value)}>
+            <select className="select" style={{ maxWidth: 150 }} value={fv.severity ?? ""} onChange={(e) => filterParams.set("severity", (e.target.value || undefined) as typeof fv.severity)} aria-label="Severity">
               <option value="">All severities</option>
               {SEVERITY.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
+            <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+              <input type="checkbox" checked={fv.is_reportable === true} onChange={(e) => filterParams.set("is_reportable", e.target.checked || undefined)} /> Reportable
+            </label>
             <ArchivedRecords entityType="incident" noun="incidents" refreshKey={refreshKey} onRestored={reload} />
           </>
         }

@@ -40,6 +40,10 @@ import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/
 import { Badge, Severity } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
+import { useFilterParams, type FilterSpec, type FilterValues } from "@/lib/useFilterParams";
+import { useRouter } from "next/navigation";
+import RiskHierarchyTree, { LevelBadge, LEVEL_LABEL } from "@/components/RiskHierarchyTree";
+import BulkEditBar from "@/components/BulkEditBar";
 
 // --------------------------------------------------------------- inline types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -97,6 +101,14 @@ type RiskRow = {
   needs_review?: boolean;
   review_reason?: string;
 
+  // Phase 3 hierarchy: 1 enterprise, 2 category, 3 scenario (null = not placed).
+  level?: number | null;
+  parent_id?: string | null;
+  /** The live parent; null when there is none or it was archived. */
+  parent?: Ref | null;
+  /** Live risks directly below. */
+  children_count?: number;
+
   annual_loss_frequency: number | null;
   single_loss_expectancy: number | null;
   annual_loss_expectancy: number | null;
@@ -144,6 +156,16 @@ type RiskRow = {
 };
 
 type Named = { id: string; name?: string; reference?: string; title?: string };
+
+/** GET /risks/{id}/rollup — everything below a risk in the hierarchy. */
+type RollupNode = {
+  id: string; reference: string; title: string; level: number | null; depth: number;
+  exposure: number | null; residual_score: number | null; severity: string | null; appetite_status: string | null;
+};
+type RiskRollupView = {
+  children: RollupNode[]; descendants: RollupNode[]; worst_residual: RollupNode | null;
+  worst_exposure: RollupNode | null; by_severity: Record<string, number>; breaches: number; total: number;
+};
 
 // --------------------------------------------------------------- option helpers
 const cap = titleCase;
@@ -248,6 +270,50 @@ const REVIEW_FILTER: Option[] = [
   { value: "false", label: "No review needed" },
 ];
 
+/* Phase 3: filters that live in the URL, so the dashboard's numbers open the risks behind
+   them (/risks?review=overdue, ?appetite=breach, ?treatment_overdue=true …) and one branch
+   of the hierarchy is a link (?parent_id=…). The server defines each exactly as the
+   dashboard counts it (services/risk_query.py). Booleans are declared as values because
+   the table leaves `false` out of its query. `view=tree` shows the hierarchy. */
+const RISK_URL_FILTERS = {
+  // The dashboard's "By segment" rows open /risks?business_unit_id=…
+  business_unit_id: "string",
+  level: ["1", "2", "3", "none"],
+  parent_id: "string",
+  roots_only: ["true"],
+  review: ["overdue", "due_30d"],
+  appetite: ["within", "elevated", "breach"],
+  has_controls: ["true", "false"],
+  treatment_overdue: ["true"],
+  view: ["tree"],
+} as const satisfies FilterSpec;
+
+const LEVEL_FILTER: Option[] = [
+  { value: "1", label: "L1 · Enterprise" },
+  { value: "2", label: "L2 · Category" },
+  { value: "3", label: "L3 · Scenario" },
+  { value: "none", label: "Not placed" },
+];
+const LEVEL_OPTIONS: Option[] = [
+  { value: "1", label: "1 — Enterprise (what the board reads)" },
+  { value: "2", label: "2 — Category" },
+  { value: "3", label: "3 — Scenario (what practitioners assess)" },
+];
+const DUE_FILTER: Option[] = [
+  { value: "overdue", label: "Review overdue" },
+  { value: "due_30d", label: "Review due in 30 days" },
+];
+const APPETITE_FILTER: Option[] = [
+  { value: "within", label: "Within appetite" },
+  { value: "elevated", label: "Elevated" },
+  { value: "breach", label: "Above tolerance" },
+];
+const CONTROLS_FILTER: Option[] = [
+  { value: "true", label: "Has controls" },
+  { value: "false", label: "No controls" },
+];
+const TREATMENT_FILTER: Option[] = [{ value: "true", label: "Treatment overdue" }];
+
 // --------------------------------------------------------------- form state
 type FormState = {
   title: string;
@@ -289,6 +355,9 @@ type FormState = {
   vulnerability_ids: AsyncOption[];
   policy_ids: AsyncOption[];
   incident_ids: AsyncOption[];
+  /** Hierarchy: "" = not placed (or: follows the parent's level + 1 when a parent is set). */
+  level: string;
+  parent: { id: string; label: string } | null;
 };
 
 const refToOpt = (x: Ref): AsyncOption => ({
@@ -311,6 +380,7 @@ const BLANK: FormState = {
   treatment_deadline: "", treatment_cost: "", review_frequency: "annual",
   business_unit_ids: [], process_ids: [],
   asset_ids: [], control_ids: [], threat_ids: [], vulnerability_ids: [], policy_ids: [], incident_ids: [],
+  level: "", parent: null,
 };
 
 function fromRisk(r: RiskRow): FormState {
@@ -355,6 +425,11 @@ function fromRisk(r: RiskRow): FormState {
     vulnerability_ids: r.vulnerabilities.map(refToOpt),
     policy_ids: r.policies.map(refToOpt),
     incident_ids: r.incidents.map(refToOpt),
+    level: r.level ? String(r.level) : "",
+    // An archived parent stays linked (unchanged, it is not re-checked on save).
+    parent: r.parent
+      ? { id: r.parent.id, label: `${r.parent.reference ?? ""} — ${r.parent.title ?? ""}` }
+      : r.parent_id ? { id: r.parent_id, label: "Archived parent" } : null,
   };
 }
 
@@ -407,6 +482,9 @@ function toPayload(f: FormState): Record<string, unknown> {
     vulnerability_ids: f.vulnerability_ids.map((o) => o.value),
     policy_ids: f.policy_ids.map((o) => o.value),
     incident_ids: f.incident_ids.map((o) => o.value),
+    // With a parent and no level the server places the risk one level below it.
+    level: f.level === "" ? null : Number(f.level),
+    parent_id: f.level === "1" ? null : f.parent?.id ?? null,
   };
 }
 
@@ -416,6 +494,11 @@ function RisksPage() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [recordId, setRecordId] = useRecordParam("id");
+  // Hierarchy and drill-through filters, read from and written to the URL.
+  const urlFilters = useFilterParams(RISK_URL_FILTERS);
+  const treeView = urlFilters.values.view === "tree";
+  const [rollup, setRollup] = useState<RiskRollupView | null>(null);
+  const [parentFilterLabel, setParentFilterLabel] = useState("");
   const { currency, formatDate, formatDateTime, formatMoney } = useFormat();
   /** Money in the organisation's currency, compact from a million up ("PKR 1.2M"). */
   const money = (n: number | null | undefined) => formatMoney(n, null, { compact: "auto" });
@@ -450,7 +533,28 @@ function RisksPage() {
   const [matrix, setMatrix] = useState<RiskMatrixConfig | null>(null);
   const [showScale, setShowScale] = useState(false);
 
-  const [scopeUnit, setScopeUnit] = useState<{ id: string; name: string } | null>(null);
+  // The business-unit scope lives in the URL (see RISK_URL_FILTERS); its name is looked
+  // up for the scope label and the PDF cover.
+  const [scopeUnitName, setScopeUnitName] = useState("");
+  const scopeUnitId = urlFilters.values.business_unit_id ?? null;
+  const scopeUnit = useMemo(
+    () => (scopeUnitId ? { id: scopeUnitId, name: scopeUnitName } : null),
+    [scopeUnitId, scopeUnitName],
+  );
+  const updateUrlFilters = urlFilters.update;
+  const setScopeUnit = useCallback(
+    (next: { id: string; name: string } | null) => {
+      setScopeUnitName(next?.name ?? "");
+      updateUrlFilters({ business_unit_id: next?.id || undefined });
+    },
+    [updateUrlFilters],
+  );
+  useEffect(() => {
+    if (!scopeUnitId) return;
+    cachedBusinessUnits()
+      .then((all) => { const unit = all.find((x) => x.id === scopeUnitId); if (unit) setScopeUnitName(unit.name); })
+      .catch(() => {});
+  }, [scopeUnitId]);
   const [scopeProcess, setScopeProcess] = useState<{ id: string; name: string } | null>(null);
   const [scopeStatus, setScopeStatus] = useState("");
   const [scopeReview, setScopeReview] = useState("");
@@ -523,10 +627,52 @@ function RisksPage() {
     }),
     [scopeUnit, scopeProcess, scopeAsset, scopeStatus],
   );
+  // The phase-3 URL filters narrow the table only, like the review flag: the register
+  // PDF endpoint does not forward them yet (services/risk_query.py already supports them).
+  const u = urlFilters.values;
   const tableFilters = useMemo(
-    () => ({ ...scopeFilters, needs_review: scopeReview || undefined }),
-    [scopeFilters, scopeReview],
+    () => ({
+      ...scopeFilters,
+      needs_review: scopeReview || undefined,
+      level: u.level, parent_id: u.parent_id, roots_only: u.roots_only, review: u.review,
+      appetite: u.appetite, has_controls: u.has_controls, treatment_overdue: u.treatment_overdue,
+    }),
+    [scopeFilters, scopeReview, u.level, u.parent_id, u.roots_only, u.review, u.appetite, u.has_controls, u.treatment_overdue],
   );
+  // The parent a "risks below" link narrowed to, by reference.
+  useEffect(() => {
+    if (!u.parent_id) { setParentFilterLabel(""); return; }
+    apiCall<RiskRow>("GET", `/risks/${u.parent_id}`)
+      .then((r) => setParentFilterLabel(`${r.reference} — ${r.title}`))
+      .catch(() => setParentFilterLabel("an archived risk"));
+  }, [u.parent_id]);
+  const router = useRouter();
+  const setUrlFilter = (key: keyof typeof RISK_URL_FILTERS & string, value: string) =>
+    urlFilters.update({ [key]: value || undefined } as FilterValues<typeof RISK_URL_FILTERS>);
+  const urlFiltered = Boolean(u.level || u.parent_id || u.roots_only || u.review || u.appetite || u.has_controls || u.treatment_overdue);
+  const clearUrlFilters = () =>
+    urlFilters.update({
+      level: undefined, parent_id: undefined, roots_only: undefined, review: undefined,
+      appetite: undefined, has_controls: undefined, treatment_overdue: undefined,
+    });
+  /** Close the open record and list the risks directly below it — one URL change, so
+   *  the record param and the filter cannot overwrite each other. */
+  const showBelow = (id: string) => {
+    const next = new URLSearchParams(window.location.search);
+    next.delete("id");
+    next.delete("view");
+    next.set("parent_id", id);
+    router.replace(`/risks?${next.toString()}`, { scroll: false });
+  };
+  /** Parents a risk can sit under: live risks at a higher level (a lower number). */
+  const parentSearch = (q: string) => {
+    const max = f.level ? Math.max(Number(f.level) - 1, 1) : 2;
+    return apiCall<PagedList<RiskRow>>("GET", `/risks?max_level=${max}&limit=20&search=${encodeURIComponent(q)}`).then((r) =>
+      r.items
+        .filter((x) => x.id !== editing?.id)
+        .map((x) => ({ value: x.id, label: `${x.reference} — ${x.title}`, sub: x.level ? `L${x.level} · ${LEVEL_LABEL[x.level]}` : undefined })),
+    );
+  };
   const scopeLabel = useMemo(() => {
     const parts = [
       scopeUnit?.name,
@@ -584,6 +730,11 @@ function RisksPage() {
     if (recordId) loadDetail(recordId);
     else setDetail(null);
   }, [recordId, loadDetail]);
+  // What sits below the open risk in the hierarchy.
+  useEffect(() => {
+    if (!detail?.children_count) { setRollup(null); return; }
+    apiCall<RiskRollupView>("GET", `/risks/${detail.id}/rollup`).then(setRollup).catch(() => setRollup(null));
+  }, [detail?.id, detail?.children_count]);
 
   async function save() {
     setError(null);
@@ -837,6 +988,34 @@ function RisksPage() {
       <div className="field-row">
         <Field label="Status" help="Where the risk is in assessment and treatment. A draft may be saved unscored; any other status needs the inherent scores and an assessment rationale. Approval is separate: submit it for review from the risk's detail view.">
           <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
+        </Field>
+      </div>
+      {/* Phase 3 hierarchy: enterprise → category → scenario. The server checks the parent
+          is live, above this risk and not below it. */}
+      <div className="field-row">
+        <Field
+          label="Hierarchy level"
+          help={f.level === "" && f.parent ? "Left blank, the risk sits one level below its parent." : "Level 1 risks are what the board reads; level 3 scenarios are what practitioners assess."}
+        >
+          <Select
+            value={f.level}
+            onChange={(v) => setF((p) => ({ ...p, level: v, parent: v === "1" ? null : p.parent }))}
+            options={LEVEL_OPTIONS}
+            placeholder="Not placed"
+          />
+        </Field>
+        <Field
+          label="Parent risk"
+          help={f.level === "1" ? "An enterprise (level 1) risk sits at the top: it has no parent." : "A live risk at a higher level (a lower number)."}
+        >
+          <AsyncSelect
+            search={parentSearch}
+            value={f.parent?.id ?? null}
+            selectedLabel={f.parent?.label}
+            onChange={(id, opt) => set("parent", id ? { id, label: opt?.label ?? "" } : null)}
+            placeholder={f.level === "1" ? "No parent at level 1" : "No parent — search risks…"}
+            disabled={f.level === "1"}
+          />
         </Field>
       </div>
     </>
@@ -1197,6 +1376,9 @@ function RisksPage() {
     { key: "title", header: "Title", sortable: true, locked: true, render: (r) => <span className="cell-title">{r.title}</span> },
     { key: "category", header: "Category", sortable: true, render: (r) => <span className="muted">{categoryText(r) || "—"}</span>, text: (r) => categoryText(r) },
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge>, text: (r) => cap(r.status) },
+    { key: "level", header: "Level", sortable: true, render: (r) => <LevelBadge level={r.level} />, text: (r) => (r.level ? `L${r.level} ${LEVEL_LABEL[r.level]}` : "") },
+    { key: "parent", header: "Parent", hidden: true, render: (r) => (r.parent ? <button type="button" className="chip" title={r.parent.title} onClick={(e) => { e.stopPropagation(); setRecordId(r.parent!.id); }}>{r.parent.reference}</button> : <span className="muted">—</span>), text: (r) => r.parent?.reference ?? "" },
+    { key: "children_count", header: "Below", hidden: true, render: (r) => (r.children_count ? <button type="button" className="linklike" title="List the risks directly below" onClick={(e) => { e.stopPropagation(); setUrlFilter("parent_id", r.id); }}>{r.children_count}</button> : <span className="muted">—</span>), text: (r) => (r.children_count ? String(r.children_count) : "") },
     { key: "owner", header: "Owner", render: (r) => <span className="muted"><UserName user={r.owner_ref} /></span>, text: (r) => personText(r.owner_ref) },
     { key: "business_units", header: "Business units", render: (r) => linkChips(r.business_units, "/business-units"), text: (r) => names(r.business_units) },
     { key: "processes", header: "Processes", hidden: true, render: (r) => linkChips(r.processes, "/processes"), text: (r) => names(r.processes) },
@@ -1247,6 +1429,7 @@ function RisksPage() {
 
   /** A saved view restoring its filters into the page's own scope state. */
   const applyScope = (f: Record<string, string | number | boolean | undefined>) => {
+    urlFilters.replace(f);
     const unitId = typeof f.business_unit_id === "string" ? f.business_unit_id : "";
     setScopeUnit(unitId ? { id: unitId, name: "" } : null);
     if (unitId) {
@@ -1277,7 +1460,11 @@ function RisksPage() {
           <h1>Risk Register</h1>
           <p>Qualitative ({matrixSize}×{matrixSize}) and quantitative (FAIR) risks, with controls, threats and review cycles.</p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div className="seg" role="tablist" aria-label="Register view">
+            <button className={!treeView ? "on" : ""} onClick={() => setUrlFilter("view", "")} role="tab" aria-selected={!treeView}>List</button>
+            <button className={treeView ? "on" : ""} onClick={() => setUrlFilter("view", "tree")} role="tab" aria-selected={treeView}>Hierarchy</button>
+          </div>
           <Menu
             label="Export"
             items={[
@@ -1299,7 +1486,8 @@ function RisksPage() {
               /* The answer to "one control applies to four assets — shouldn't each get its
                  own rating?": one proposed risk per asset, impact from that asset's own
                  criticality, rather than one rating stretched across four assets. */
-              { label: "Generate risks from assets…", hint: "One proposed risk per asset, from the scenario library", onClick: () => gen.current?.open() },
+              { label: "Generate risks from assets…", hint: "Proposals go to the risk candidates queue, not the register", onClick: () => gen.current?.open() },
+              { label: "Risk candidates…", hint: "Accept, merge or reject generated risks", onClick: () => router.push("/risk-proposals") },
               { label: "Review risks with no live links…", hint: "Risks whose assets were deleted and that link to nothing else", onClick: () => orphans.current?.open() },
               "divider",
               {
@@ -1323,6 +1511,13 @@ function RisksPage() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
+      {treeView ? (
+        <RiskHierarchyTree
+          onOpen={(id) => setRecordId(id)}
+          onShowUnplaced={() => urlFilters.update({ view: undefined, level: "none" })}
+          refreshKey={refreshKey}
+        />
+      ) : (
       <DataTable<RiskRow>
         toolbarLeft={
           /* The segment scope. Sits beside the search box rather than in a card of its
@@ -1359,8 +1554,35 @@ function RisksPage() {
             <div style={{ width: 160 }}>
               <Select value={scopeReview} onChange={setScopeReview} options={REVIEW_FILTER} placeholder="Any review flag" />
             </div>
-            {(scopeUnit || scopeProcess || scopeAsset || scopeStatus || scopeReview) && (
-              <button className="btn secondary sm" onClick={() => { setScopeUnit(null); setScopeProcess(null); setScopeAsset(null); setScopeStatus(""); setScopeReview(""); }}>
+            <div style={{ width: 140 }}>
+              <Select value={u.level ?? ""} onChange={(v) => setUrlFilter("level", v)} options={LEVEL_FILTER} placeholder="Any level" />
+            </div>
+            <div style={{ width: 175 }}>
+              <Select value={u.review ?? ""} onChange={(v) => setUrlFilter("review", v)} options={DUE_FILTER} placeholder="Any review date" />
+            </div>
+            <div style={{ width: 160 }}>
+              <Select value={u.appetite ?? ""} onChange={(v) => setUrlFilter("appetite", v)} options={APPETITE_FILTER} placeholder="Any appetite" />
+            </div>
+            <div style={{ width: 145 }}>
+              <Select value={u.has_controls ?? ""} onChange={(v) => setUrlFilter("has_controls", v)} options={CONTROLS_FILTER} placeholder="Any controls" />
+            </div>
+            <div style={{ width: 165 }}>
+              <Select value={u.treatment_overdue ?? ""} onChange={(v) => setUrlFilter("treatment_overdue", v)} options={TREATMENT_FILTER} placeholder="Any treatment" />
+            </div>
+            {u.parent_id && (
+              <span className="chip">
+                Directly below {parentFilterLabel || "…"}
+                <button className="chip-x" onClick={() => setUrlFilter("parent_id", "")} aria-label="Show risks at every place in the hierarchy">✕</button>
+              </span>
+            )}
+            {u.roots_only && (
+              <span className="chip">
+                Top of the hierarchy only
+                <button className="chip-x" onClick={() => setUrlFilter("roots_only", "")} aria-label="Show every risk">✕</button>
+              </span>
+            )}
+            {(scopeUnit || scopeProcess || scopeAsset || scopeStatus || scopeReview || urlFiltered) && (
+              <button className="btn secondary sm" onClick={() => { setScopeUnit(null); setScopeProcess(null); setScopeAsset(null); setScopeStatus(""); setScopeReview(""); clearUrlFilters(); }}>
                 Clear
               </button>
             )}
@@ -1387,7 +1609,10 @@ function RisksPage() {
         filters={tableFilters}
         onApplyFilters={applyScope}
         bulkActions={(rows, clear) => (
-          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          <>
+            <BulkEditBar entityType="risk" rows={rows} onDone={() => { clear(); reload(); }} />
+            <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          </>
         )}
         rowKey={(r) => r.id}
         onRowClick={(r) => setRecordId(r.id)}
@@ -1397,6 +1622,7 @@ function RisksPage() {
         emptyMessage="No risks yet. Create your first risk to start building the register."
         refreshKey={refreshKey}
       />
+      )}
 
       {/* Appetite, tolerance and the matrix — the organisation's methodology. A side
           panel rather than a card above the register: it is edited once a year and
@@ -1466,6 +1692,61 @@ function RisksPage() {
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Appetite</div><div style={{ marginTop: 4 }}>{(() => { const a = appetite(detail, settings); return a ? <span title={a.title}><Badge tone={a.tone}>{a.label}</Badge></span> : <span className="muted">—</span>; })()}</div>{detail.tolerance_score != null && <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>{detail.appetite_category_id ? "Category" : "Organisation"}: {detail.appetite_score} · {detail.tolerance_score}</div>}</div>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Control health</div><div style={{ marginTop: 4 }}>{controlHealth(detail.control_health)}</div></div>
               <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Exposure (ALE)</div><div style={{ marginTop: 4 }}>{money(detail.annual_loss_expectancy)}</div></div>
+            </div>
+
+            {/* Phase 3: where the risk sits — its parent, and everything below it. */}
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <strong style={{ fontSize: 13 }}>Hierarchy</strong>
+                <LevelBadge level={detail.level} />
+                {detail.parent ? (
+                  <span style={{ fontSize: 13 }}>
+                    under{" "}
+                    <button type="button" className="chip" title={detail.parent.title} onClick={() => setRecordId(detail.parent!.id)}>
+                      {detail.parent.reference}
+                    </button>{" "}
+                    <span className="muted">{detail.parent.title}</span>
+                  </span>
+                ) : (
+                  <span className="muted" style={{ fontSize: 13 }}>{detail.parent_id ? "Its parent was archived" : "No parent"}</span>
+                )}
+              </div>
+              {rollup && rollup.total > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+                    Directly below ({rollup.children.length})
+                  </div>
+                  <div className="chips">
+                    {rollup.children.map((c) => (
+                      <button key={c.id} type="button" className="chip" title={c.title} onClick={() => setRecordId(c.id)}>
+                        {c.reference} <Severity value={c.severity} />
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center", marginTop: 10, fontSize: 12.5 }}>
+                    <span>{rollup.total} below in all</span>
+                    {rollup.worst_exposure && (
+                      <span>
+                        worst exposure{" "}
+                        <button type="button" className="linklike" onClick={() => setRecordId(rollup.worst_exposure!.id)}>{rollup.worst_exposure.reference}</button>{" "}
+                        <Severity value={rollup.worst_exposure.severity} /> <span className="muted">({rollup.worst_exposure.exposure ?? "—"})</span>
+                      </span>
+                    )}
+                    {rollup.worst_residual && (
+                      <span>
+                        worst residual{" "}
+                        <button type="button" className="linklike" onClick={() => setRecordId(rollup.worst_residual!.id)}>{rollup.worst_residual.reference}</button>{" "}
+                        <span className="muted">({rollup.worst_residual.residual_score})</span>
+                      </span>
+                    )}
+                    <span className="muted">
+                      {(["critical", "high", "medium", "low"] as const).map((b) => `${rollup.by_severity[b] ?? 0} ${b}`).join(" · ")}
+                    </span>
+                    {rollup.breaches > 0 && <Badge tone="critical">{rollup.breaches} above tolerance</Badge>}
+                    <button type="button" className="linklike" onClick={() => showBelow(detail.id)}>List the risks directly below</button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>

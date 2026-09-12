@@ -512,7 +512,10 @@ async def test_a_personal_data_breach_opens_a_breach_and_tells_the_dpo(breach_en
     # 20:00 UTC on 9 Sep is 01:00 on 10 Sep in Karachi: the register's date is the local one.
     assert breach.occurred_date == date(2026, 9, 10) and breach.discovered_date == date(2026, 9, 10)
     notes = [o for o in db.added if isinstance(o, Notification)]
-    assert len(notes) == 1 and notes[0].dedup_key == f"{EVENT_PREFIX}personal-data-breach:{breach.id}"
+    # Phase 3: addressed to the DPO role (one alert per DPO role), not the whole organisation.
+    assert len(notes) == 1
+    assert notes[0].dedup_key.startswith(f"{EVENT_PREFIX}personal-data-breach:{breach.id}:")
+    assert notes[0].role_name and notes[0].dedup_key.endswith(notes[0].role_name)
     assert "Data Protection Officer" in notes[0].body and "DPO notified" in note
     assert breach_env[-1]["entity_type"] == "data_breach" and breach_env[-1]["action"] == "create"
 

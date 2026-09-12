@@ -762,3 +762,272 @@ async def link(db, pairs: Iterable[tuple[uuid.UUID, uuid.UUID]]) -> list[tuple[o
             written.append((control, requirement))
     await db.flush()
     return written
+
+
+# ---------------------------------------------------------------------------
+# Crosswalk suggestions between two installed frameworks (phase 3)
+# ---------------------------------------------------------------------------
+# A crosswalk says two clauses of different frameworks ask for the same thing (ISO
+# A.8.5 ≡ PCI DSS 8.4), so a control that satisfies one is evidence for the other and
+# the clause suggestions above can propagate across them. Two signals propose one,
+# conservatively; a person accepts it (``POST /compliance/crosswalks/accept``). Nothing
+# here writes a crosswalk.
+#
+# 1. **The synonym table.** A topic lists, per framework, the clauses that address it,
+#    strongest first. Two clauses listed for the same topic in the two frameworks are a
+#    candidate — but only when at least one of them is its framework's *primary*
+#    (first-listed) clause for the topic: primary ≡ primary is a strong match, primary ≡
+#    secondary a likely one, and secondary ≡ secondary is never proposed (two clauses
+#    that each only touch a topic need not be equivalent). Every reference must resolve
+#    to a live clause of the installed framework, so a tenant on an older, shallower
+#    copy simply gets fewer candidates.
+# 2. **A shared control.** Two clauses implemented by the same control are a candidate,
+#    weighted by how specific the control is: a control linked to one clause in each
+#    framework supports that pair fully; one linked to many clauses supports each pair
+#    thinly, and support below :data:`CW_CONTROL_MIN_SUPPORT` is not proposed on its own.
+#
+# Both signals on one pair make it stronger. Pairs already crosswalked (either way) are
+# never suggested again.
+CW_BOTH_PRIMARY = 0.85
+CW_ONE_PRIMARY = 0.6
+#: Each further topic that pairs the same two clauses.
+CW_EXTRA_TOPIC = 0.05
+#: Shared-control confidence: base + span x support (support capped at 1).
+CW_CONTROL_BASE = 0.5
+CW_CONTROL_SPAN = 0.25
+#: A pair needs at least this much control support to be proposed on controls alone:
+#: one control linked to at most two clauses on each side (1 / (2 x 2)).
+CW_CONTROL_MIN_SUPPORT = 0.25
+#: A topic match that a shared control confirms.
+CW_BOTH_SIGNALS_BONUS = 0.1
+CW_MAX = 0.95
+#: Confidence at or above which a suggestion is "high" (and pre-ticked in the UI).
+CW_HIGH = 0.75
+
+
+@dataclass(frozen=True)
+class CrosswalkClause:
+    requirement_id: object
+    framework_id: object
+    reference: str
+    title: str
+
+
+@dataclass
+class CrosswalkSuggestion:
+    requirement_id: object
+    reference: str
+    title: str
+    framework_id: object
+    related_requirement_id: object
+    related_reference: str
+    related_title: str
+    related_framework_id: object
+    confidence: float
+    strength: str
+    reasons: list[str] = field(default_factory=list)
+    #: "topic" and/or "control" — which signals proposed it.
+    sources: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return dict(self.__dict__)
+
+
+def topic_crosswalk_pairs(from_key: str, to_key: str) -> dict[tuple[str, str], dict[str, int]]:
+    """(from ref, to ref) -> {topic label: rank} from the synonym table, for two library
+    templates. Rank 2 = the primary clause of the topic in both; 1 = primary in one.
+    Secondary-to-secondary pairs are left out. Pure."""
+    out: dict[tuple[str, str], dict[str, int]] = {}
+    if not from_key or not to_key or from_key == to_key:
+        return out
+    for topic in TOPICS:
+        a_refs, b_refs = topic.refs.get(from_key, ()), topic.refs.get(to_key, ())
+        for i, a in enumerate(a_refs):
+            for j, b in enumerate(b_refs):
+                rank = int(i == 0) + int(j == 0)
+                if rank == 0:
+                    continue
+                hits = out.setdefault((a, b), {})
+                hits[topic.label] = max(hits.get(topic.label, 0), rank)
+    return out
+
+
+def _cw_strength(confidence: float) -> str:
+    return "high" if confidence >= CW_HIGH else "medium"
+
+
+def suggest_crosswalks(
+    from_clauses: Iterable[CrosswalkClause],
+    to_clauses: Iterable[CrosswalkClause],
+    *,
+    from_template: str | None,
+    to_template: str | None,
+    control_links: dict | None = None,
+    existing: Iterable[frozenset] = (),
+) -> list[CrosswalkSuggestion]:
+    """Candidate crosswalks from one framework's clauses to another's. Pure and
+    deterministic. ``control_links`` maps a control id to ``(label, requirement ids it
+    implements)``; ``existing`` holds the pairs already crosswalked (as frozensets)."""
+    from_clauses, to_clauses = list(from_clauses), list(to_clauses)
+    by_id = {c.requirement_id: c for c in from_clauses + to_clauses}
+    from_ids = {c.requirement_id for c in from_clauses}
+    to_ids = {c.requirement_id for c in to_clauses}
+    done = {frozenset(p) for p in existing}
+
+    def index(clauses):
+        out: dict[str, list[CrosswalkClause]] = {}
+        for c in clauses:
+            out.setdefault(_norm_ref(c.reference), []).append(c)
+        return out
+
+    from_by_ref, to_by_ref = index(from_clauses), index(to_clauses)
+    found: dict[tuple, dict] = {}
+
+    def entry(a, b) -> dict:
+        return found.setdefault((a, b), {"topics": {}, "controls": []})
+
+    if from_template and to_template:
+        for (a_ref, b_ref), hits in topic_crosswalk_pairs(from_template, to_template).items():
+            for a in from_by_ref.get(_norm_ref(a_ref), []):
+                for b in to_by_ref.get(_norm_ref(b_ref), []):
+                    topics = entry(a.requirement_id, b.requirement_id)["topics"]
+                    for label, rank in hits.items():
+                        topics[label] = max(topics.get(label, 0), rank)
+
+    for _cid, (label, reqs) in sorted((control_links or {}).items(), key=lambda kv: str(kv[1][0]) + str(kv[0])):
+        mine = [r for r in reqs if r in from_ids]
+        theirs = [r for r in reqs if r in to_ids]
+        if not mine or not theirs:
+            continue
+        weight = 1.0 / (len(mine) * len(theirs))
+        for a in mine:
+            for b in theirs:
+                entry(a, b)["controls"].append((label, weight))
+
+    out: list[CrosswalkSuggestion] = []
+    for (a, b), e in found.items():
+        if a == b or frozenset((a, b)) in done:
+            continue
+        topic_score = None
+        if e["topics"]:
+            best = max(e["topics"].values())
+            topic_score = min(CW_MAX, (CW_BOTH_PRIMARY if best >= 2 else CW_ONE_PRIMARY)
+                              + CW_EXTRA_TOPIC * (len(e["topics"]) - 1))
+        support = sum(w for _, w in e["controls"])
+        control_score = (CW_CONTROL_BASE + CW_CONTROL_SPAN * min(1.0, support)
+                         if e["controls"] and support >= CW_CONTROL_MIN_SUPPORT else None)
+        if topic_score is None and control_score is None:
+            continue
+        if topic_score is not None and e["controls"]:
+            confidence = min(CW_MAX, max(topic_score, control_score or 0.0) + CW_BOTH_SIGNALS_BONUS)
+        else:
+            confidence = topic_score if topic_score is not None else control_score
+        reasons, sources = [], []
+        for label, rank in sorted(e["topics"].items(), key=lambda kv: (-kv[1], kv[0])):
+            reasons.append(f"Same topic: {label}" + (" (the primary clause in both frameworks)" if rank >= 2 else ""))
+        if e["topics"]:
+            sources.append("topic")
+        if e["controls"]:
+            labels = sorted({label for label, _ in e["controls"]})
+            more = f" and {len(labels) - 3} more" if len(labels) > 3 else ""
+            reasons.append(f"Implemented by the same control: {', '.join(labels[:3])}{more}")
+            sources.append("control")
+        ca, cb = by_id[a], by_id[b]
+        out.append(CrosswalkSuggestion(
+            requirement_id=a, reference=ca.reference, title=ca.title, framework_id=ca.framework_id,
+            related_requirement_id=b, related_reference=cb.reference, related_title=cb.title,
+            related_framework_id=cb.framework_id, confidence=round(float(confidence), 3),
+            strength=_cw_strength(float(confidence)), reasons=reasons, sources=sources,
+        ))
+    out.sort(key=lambda s: (-s.confidence, natural_key(s.reference), natural_key(s.related_reference),
+                            str(s.requirement_id), str(s.related_requirement_id)))
+    return out
+
+
+@dataclass
+class CrosswalkContext:
+    """The two frameworks and what is loaded about them, for the API."""
+
+    from_framework: object
+    to_framework: object
+    from_template: str | None
+    to_template: str | None
+    from_clauses: list[CrosswalkClause]
+    to_clauses: list[CrosswalkClause]
+    existing: set[frozenset]
+
+
+async def load_crosswalk_context(db, from_framework_id, to_framework_id) -> CrosswalkContext:
+    """Both frameworks (live), their live clauses and the crosswalks already between them.
+    Raises 404 for a missing framework and 422 when the two are the same."""
+    from fastapi import HTTPException, status
+    from sqlalchemy import select
+
+    from app.models.compliance import Framework, Requirement, requirement_crosswalks
+
+    if from_framework_id == to_framework_id:
+        raise HTTPException(status_code=422,
+                            detail="Pick two different frameworks to crosswalk.")
+    frameworks = {
+        f.id: f for f in (await db.scalars(
+            select(Framework).where(Framework.id.in_([from_framework_id, to_framework_id]),
+                                    Framework.deleted.is_(False))
+        )).all()
+    }
+    for fid in (from_framework_id, to_framework_id):
+        if fid not in frameworks:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Framework not found")
+
+    async def clauses(fid) -> list[CrosswalkClause]:
+        rows = (await db.execute(
+            select(Requirement.id, Requirement.reference, Requirement.title)
+            .where(Requirement.framework_id == fid, Requirement.deleted.is_(False))
+        )).all()
+        return [CrosswalkClause(rid, fid, ref or "", title or "") for rid, ref, title in rows]
+
+    a, b = await clauses(from_framework_id), await clauses(to_framework_id)
+    a_ids, b_ids = {c.requirement_id for c in a}, {c.requirement_id for c in b}
+    existing: set[frozenset] = set()
+    if a_ids and b_ids:
+        for x, y in (await db.execute(
+            select(requirement_crosswalks.c.requirement_id, requirement_crosswalks.c.related_requirement_id)
+            .where(requirement_crosswalks.c.requirement_id.in_(a_ids | b_ids),
+                   requirement_crosswalks.c.related_requirement_id.in_(a_ids | b_ids))
+        )).all():
+            if (x in a_ids and y in b_ids) or (x in b_ids and y in a_ids):
+                existing.add(frozenset((x, y)))
+    fa, fb = frameworks[from_framework_id], frameworks[to_framework_id]
+    return CrosswalkContext(fa, fb, template_key_for_name(fa.name), template_key_for_name(fb.name), a, b, existing)
+
+
+async def crosswalk_control_links(db, requirement_ids: Iterable) -> dict:
+    """control id -> (label, requirement ids it implements), over live controls linked
+    to any of ``requirement_ids``."""
+    from sqlalchemy import select
+
+    from app.models.compliance import requirement_controls
+    from app.models.control import Control
+
+    ids = list(requirement_ids)
+    out: dict = {}
+    if not ids:
+        return out
+    for cid, rid, ref, name in (await db.execute(
+        select(requirement_controls.c.control_id, requirement_controls.c.requirement_id, Control.reference, Control.name)
+        .join(Control, Control.id == requirement_controls.c.control_id)
+        .where(requirement_controls.c.requirement_id.in_(ids), Control.deleted.is_(False))
+    )).all():
+        label = " ".join(p for p in (ref or "", name or "") if p) or str(cid)
+        out.setdefault(cid, (label, set()))[1].add(rid)
+    return out
+
+
+async def crosswalk_suggestions_for(db, from_framework_id, to_framework_id) -> tuple[CrosswalkContext, list[CrosswalkSuggestion]]:
+    ctx = await load_crosswalk_context(db, from_framework_id, to_framework_id)
+    links = await crosswalk_control_links(
+        db, [c.requirement_id for c in ctx.from_clauses] + [c.requirement_id for c in ctx.to_clauses]
+    )
+    return ctx, suggest_crosswalks(
+        ctx.from_clauses, ctx.to_clauses, from_template=ctx.from_template, to_template=ctx.to_template,
+        control_links=links, existing=ctx.existing,
+    )

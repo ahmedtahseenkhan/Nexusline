@@ -243,19 +243,25 @@ export default function DataTable<T>({
 
   // ---------------------------------------------------------- dynamic status
   const [statuses, setStatuses] = useState<Record<string, StatusLabel[]>>({});
+  // Pages pass `rowKey` inline, so its identity changes on every parent render. Held in a
+  // ref so the loader below doesn't change with it: otherwise a page whose fetcher sets
+  // its own state (counts, say) re-renders, hands in a new rowKey, re-creates the loader,
+  // refetches, and loops — the risk-candidates page fired ~160 requests a second.
+  const rowKeyRef = useRef(rowKey);
+  rowKeyRef.current = rowKey;
   const loadStatuses = useCallback(
     async (items: T[]) => {
       if (!statusModel || items.length === 0) return;
       try {
         const res = await apiCall<Record<string, StatusLabel[]>>(
-          "POST", `/status-rules/evaluate/${statusModel}`, { ids: items.map(rowKey) },
+          "POST", `/status-rules/evaluate/${statusModel}`, { ids: items.map((r) => rowKeyRef.current(r)) },
         );
         setStatuses(res || {});
       } catch {
         setStatuses({});
       }
     },
-    [statusModel, rowKey],
+    [statusModel],
   );
 
   const load = useCallback(async () => {

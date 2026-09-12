@@ -85,6 +85,9 @@ class CcmStatus(str, enum.Enum):
 # ================================================================ connectors ===
 class Connector(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "connectors"
+    # Phase 3: SHA-256 of the token a monitoring tool uses to push evidence and test
+    # results for this connector; never the token itself.
+    ingest_token_hash: Mapped[str] = mapped_column(String(128), default="", nullable=False)
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -110,6 +113,11 @@ class Connector(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
     @property
     def is_stale(self) -> bool:
         return self.last_sync is None or self.last_sync < (date.today() - timedelta(days=STALE_AFTER_DAYS))
+
+    @property
+    def has_ingest_token(self) -> bool:
+        """Whether a monitoring-feed token is live (the token itself is never stored)."""
+        return bool(self.ingest_token_hash)
 
 
 # =============================================== automated control tests (CCM) ===

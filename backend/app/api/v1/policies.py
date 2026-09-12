@@ -57,6 +57,7 @@ from app.schemas.policy import (
 from app.services.refs import next_reference
 from app.services import audit
 from app.services import delete_guard
+from app.services import drill_through
 from app.services import dual_control
 from app.services import ref_fields
 from app.services.risk_scoring import next_review_date
@@ -411,12 +412,21 @@ async def list_policies(
     search: str | None = None,
     owner_id: uuid.UUID | None = None,
     category_id: uuid.UUID | None = None,
+    review: Annotated[
+        drill_through.ReviewFilter | None,
+        Query(description=(
+            "overdue: approved or published, and the next review date has passed (the "
+            "dashboard's policy reviews overdue)"
+        )),
+    ] = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[PolicyRead]:
     stmt = select(Policy).where(Policy.deleted.is_(False))
+    if review == "overdue":
+        stmt = stmt.where(drill_through.policy_review_overdue(date.today()))
     if search:
         stmt = stmt.where(Policy.title.ilike(f"%{search}%") | Policy.reference.ilike(f"%{search}%"))
     if owner_id is not None:

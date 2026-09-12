@@ -9,7 +9,9 @@ import { useFormat } from "@/lib/format";
 import { confirmDeleteWithImpact, records } from "@/lib/records";
 import type { LookupRef, UnitRef, UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { useFilterParams, type FilterSpec } from "@/lib/useFilterParams";
 import DataTable, { type Column } from "@/components/DataTable";
+import BulkEditBar from "@/components/BulkEditBar";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
@@ -170,6 +172,19 @@ const CLOSED_STATES = new Set(["closed", "remediated", "risk_accepted"]);
 const isClosed = (status: string) => CLOSED_STATES.has(status);
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 const CAPA_TYPE = ["corrective", "preventive"];
+/** Register filters, kept in the URL so a link can open the list already filtered
+ *  (the dashboard's "issues past due" → `/issues?overdue=true`). */
+const ISSUE_FILTERS = {
+  status: ["open", "in_progress", "remediated", "closed", "risk_accepted"],
+  source_type: [
+    "internal_audit", "compliance", "rcsa", "shariah", "assessment", "incident",
+    "external_inspection", "risk_assessment", "self_identified", "other",
+  ],
+  overdue: "boolean",
+  regulator_related: "boolean",
+  due_date_change_pending: "boolean",
+  min_due_date_moves: ["1", "2", "3"],
+} as const satisfies FilterSpec;
 const ACTION_STATUS = ["open", "in_progress", "done", "cancelled"];
 
 // ------------------------------------------------------------------ source record link
@@ -444,13 +459,9 @@ function IssuesInner() {
   const [meId, setMeId] = useState<string | null>(null);
   useEffect(() => { api.me().then((m) => setMeId(m.id)).catch(() => {}); }, []);
 
-  // ---- filters ----
-  const [fStatus, setFStatus] = useState("");
-  const [fSource, setFSource] = useState("");
-  const [fOverdue, setFOverdue] = useState(false);
-  const [fRegulator, setFRegulator] = useState(false);
-  const [fPending, setFPending] = useState(false);
-  const [fMoves, setFMoves] = useState("");
+  // ---- filters (in the URL: see ISSUE_FILTERS) ----
+  const filterParams = useFilterParams(ISSUE_FILTERS);
+  const fv = filterParams.values;
 
   // ---- lifecycle step dialog (validate / close / decide a due-date change) ----
   const [step, setStep] = useState<Step | null>(null);
@@ -638,14 +649,7 @@ function IssuesInner() {
     { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button></div> },
   ];
 
-  const filters = {
-    status: fStatus || undefined,
-    source_type: fSource || undefined,
-    overdue: fOverdue || undefined,
-    regulator_related: fRegulator || undefined,
-    due_date_change_pending: fPending || undefined,
-    min_due_date_moves: fMoves || undefined,
-  };
+  const filters = filterParams.values;
 
   // ------------------------------------------------------------- source picker
   function pickSourceKind(kind: string) {
@@ -889,26 +893,30 @@ function IssuesInner() {
         searchPlaceholder="Search title, reference, owner…"
         defaultSort={{ by: "created_at", dir: "desc" }}
         filters={filters}
+        onApplyFilters={filterParams.replace}
+        bulkActions={(rows, clear) => (
+          <BulkEditBar entityType="issue" rows={rows} onDone={() => { clear(); reload(); loadSummary(); }} />
+        )}
         toolbarRight={
           <>
-            <select className="select" style={{ maxWidth: 170 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
+            <select className="select" style={{ maxWidth: 170 }} value={fv.status ?? ""} onChange={(e) => filterParams.set("status", (e.target.value || undefined) as typeof fv.status)}>
               <option value="">All statuses</option>
               {ISSUE_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
-            <select className="select" style={{ maxWidth: 190 }} value={fSource} onChange={(e) => setFSource(e.target.value)}>
+            <select className="select" style={{ maxWidth: 190 }} value={fv.source_type ?? ""} onChange={(e) => filterParams.set("source_type", (e.target.value || undefined) as typeof fv.source_type)}>
               <option value="">All sources</option>
               {SOURCE_TYPES.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
             <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-              <input type="checkbox" checked={fOverdue} onChange={(e) => setFOverdue(e.target.checked)} /> Overdue
+              <input type="checkbox" checked={fv.overdue === true} onChange={(e) => filterParams.set("overdue", e.target.checked || undefined)} /> Overdue
             </label>
             <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-              <input type="checkbox" checked={fRegulator} onChange={(e) => setFRegulator(e.target.checked)} /> Regulator
+              <input type="checkbox" checked={fv.regulator_related === true} onChange={(e) => filterParams.set("regulator_related", e.target.checked || undefined)} /> Regulator
             </label>
             <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-              <input type="checkbox" checked={fPending} onChange={(e) => setFPending(e.target.checked)} /> Extension pending
+              <input type="checkbox" checked={fv.due_date_change_pending === true} onChange={(e) => filterParams.set("due_date_change_pending", e.target.checked || undefined)} /> Extension pending
             </label>
-            <select className="select" style={{ maxWidth: 170 }} value={fMoves} onChange={(e) => setFMoves(e.target.value)} aria-label="Due date moved">
+            <select className="select" style={{ maxWidth: 170 }} value={fv.min_due_date_moves ?? ""} onChange={(e) => filterParams.set("min_due_date_moves", (e.target.value || undefined) as typeof fv.min_due_date_moves)} aria-label="Due date moved">
               <option value="">Any date history</option>
               <option value="1">Date moved 1+ times</option>
               <option value="2">Date moved 2+ times</option>

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date, datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.base import WorkflowState
 from app.models.enums import ReviewFrequency
@@ -118,3 +120,93 @@ class ConnectorRead(ConnectorBase):
     reference: str
     is_stale: bool
     created_at: datetime
+    #: Phase 3: a monitoring-feed token is live (never the token or its hash).
+    has_ingest_token: bool = False
+
+
+# ------------------------------------------------------ monitoring feed (phase 3) ---
+#: Largest ``details`` object a monitoring tool may send with one result, as JSON text.
+MAX_DETAILS_CHARS = 50_000
+
+
+class IngestTokenIssued(BaseModel):
+    """Returned once when a feed token is generated; only its SHA-256 is stored."""
+
+    connector_id: uuid.UUID
+    token: str
+    endpoint: str
+    header: str
+    note: str
+
+
+class IngestEvidence(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    #: Where the evidence lives: a URL, a ticket, a log location.
+    reference: str = Field(default="", max_length=500)
+    url: str = Field(default="", max_length=500)
+    valid_until: date | None = None
+
+
+class IngestBody(BaseModel):
+    """One control-monitoring result pushed by a monitoring tool."""
+
+    control_reference: str | None = Field(default=None, max_length=64)
+    control_id: uuid.UUID | None = None
+    #: The monitoring test (``CCM-…``) to record the run on, when this connector has more
+    #: than one test for the control.
+    test_reference: str | None = Field(default=None, max_length=32)
+    result: Literal["passed", "failed", "passed_with_exceptions"]
+    #: When the check ran. A date alone, or a time without an offset, is taken in the
+    #: organisation's timezone. Can't be in the future.
+    observed_at: datetime
+    summary: str = Field(min_length=1, max_length=2000)
+    details: dict[str, Any] | list[Any] | None = None
+    #: Share of items that passed (0-100). Defaults to 100 for passed and 0 for failed;
+    #: required for passed_with_exceptions.
+    pass_rate: float | None = Field(default=None, ge=0, le=100)
+    evidence: IngestEvidence | None = None
+
+    @model_validator(mode="after")
+    def _control_and_details(self) -> "IngestBody":
+        if self.control_id is None and not (self.control_reference or "").strip():
+            raise ValueError("Send control_reference or control_id.")
+        if self.details is not None and len(json.dumps(self.details, default=str)) > MAX_DETAILS_CHARS:
+            raise ValueError(f"details is larger than {MAX_DETAILS_CHARS} characters of JSON; send a summary and a link.")
+        if self.result == "passed_with_exceptions" and self.pass_rate is None:
+            raise ValueError("pass_rate: say what share of items passed (0-100) for a result with exceptions.")
+        return self
+
+
+class IngestResult(BaseModel):
+    """What the feed tells the monitoring tool: what was recorded, no names or history."""
+
+    connector_reference: str
+    control_id: uuid.UUID
+    control_reference: str
+    evidence_id: uuid.UUID
+    run_id: uuid.UUID | None = None
+    test_reference: str | None = None
+    alert_raised: bool = False
+    note: str = ""
+
+
+class IngestLogItem(BaseModel):
+    at: datetime
+    result: str
+    control_id: uuid.UUID | None = None
+    control_reference: str = ""
+    summary: str = ""
+    observed_at: str = ""
+    evidence_id: uuid.UUID | None = None
+    run_id: uuid.UUID | None = None
+    test_reference: str | None = None
+    alert_raised: bool = False
+
+
+class ConnectorFeedRead(BaseModel):
+    connector_id: uuid.UUID
+    has_token: bool
+    endpoint: str
+    last_ingest_at: datetime | None = None
+    ingests_last_30_days: int = 0
+    recent: list[IngestLogItem] = []

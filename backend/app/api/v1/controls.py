@@ -27,6 +27,7 @@ from app.models.identity import User
 from app.models.issue import Issue, IssueSource, IssueStatus2, issue_controls
 from app.models.organization import BusinessUnit, Process
 from app.models.risk import Risk, risk_controls
+from app.schemas.bulk import BulkMapRequirementsBody, BulkResult, BulkResultItem
 from app.schemas.common import GraphRef, Page
 from app.schemas.control import (
     CONCLUSIVE_RESULTS,
@@ -45,7 +46,10 @@ from app.schemas.control import (
     EffectivenessOverride,
     workpaper_problems,
 )
+from app.services import bulk_edit
+from app.services import clause_suggestions
 from app.services import control_assurance
+from app.services import drill_through
 from app.services import audit as audit_log
 from app.services import delete_guard
 from app.services import dual_control
@@ -312,12 +316,35 @@ async def list_controls(
     is_key: bool | None = None,
     business_unit_id: uuid.UUID | None = None,
     process_id: uuid.UUID | None = None,
+    assurance: Annotated[
+        drill_through.AssuranceFilter | None,
+        Query(description=(
+            "assured | effective | partially_effective | failing | not_assessed (operating "
+            "controls with that rating) · not_operating (planned or retired) · unmapped "
+            "(implements no live clause) — the dashboard's control-assurance numbers"
+        )),
+    ] = None,
+    test: Annotated[
+        drill_through.TestFilter | None,
+        Query(description=(
+            "overdue | due_30d | failed (the latest reviewed or pre-review test failed) — "
+            "operating controls only, as the dashboard counts them"
+        )),
+    ] = None,
+    key: Annotated[bool | None, Query(description="Key controls only (true) or the rest (false); same as is_key")] = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[ControlRead]:
     stmt = select(Control).where(Control.deleted.is_(False))
+    if is_key is None:
+        is_key = key
+    # Drill-through filters: the same predicates the dashboard counts with.
+    if assurance:
+        stmt = stmt.where(drill_through.control_assurance_clause(assurance))
+    if test:
+        stmt = stmt.where(drill_through.control_test_clause(test, date.today()))
     if nature:
         stmt = stmt.where(Control.nature == nature)
     if automation:
@@ -350,6 +377,81 @@ async def list_controls(
     rows = (await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))).all()
     await _attach_risks_bulk(db, rows)
     return Page(items=await _reads(db, rows), total=total, limit=limit, offset=offset)
+
+
+def _clause_label(requirement) -> str:
+    fw = requirement.framework.name if getattr(requirement, "framework", None) else ""
+    return f"{requirement.reference or requirement.title}" + (f" ({fw})" if fw else "")
+
+
+@router.post(
+    "/bulk/map-requirements",
+    response_model=BulkResult,
+    dependencies=[Depends(require("control:write"))],
+    summary="Map many controls to the same requirements",
+)
+async def bulk_map_requirements(
+    body: BulkMapRequirementsBody, db: DbSession, user: CurrentUser
+) -> BulkResult:
+    """Link every listed control to every listed requirement ("Map to requirements" on
+    the register). Links are added, never removed. The requirements are checked once —
+    an unknown or archived one is a 422 naming it; a control that is archived or not
+    found is skipped, and one already linked to all of them is skipped as "already
+    mapped". Links go through the clause-suggestion writer (``clause_suggestions.link``)
+    and need ``control:write``, as accepting a suggestion does. One audit entry per
+    control that gained a link, each carrying the batch id."""
+    batch = bulk_edit.new_batch_id()
+    requirement_ids = list(dict.fromkeys(body.requirement_ids))
+    requirements = (
+        await db.scalars(
+            select(Requirement)
+            .options(selectinload(Requirement.framework))
+            .where(Requirement.id.in_(requirement_ids), Requirement.deleted.is_(False))
+        )
+    ).all()
+    missing = sorted(str(i) for i in set(requirement_ids) - {r.id for r in requirements})
+    if missing:
+        raise _unprocessable(f"requirement_ids: unknown or archived requirement(s): {', '.join(missing)}")
+    control_ids = list(dict.fromkeys(body.control_ids))
+    found = {
+        c.id: c for c in (await db.scalars(select(Control).where(Control.id.in_(control_ids)))).all()
+        if c.tenant_id == user.tenant_id
+    }
+    live = [found[cid] for cid in control_ids if cid in found and not found[cid].deleted]
+    written = await clause_suggestions.link(db, [(c.id, r.id) for c in live for r in requirements])
+    gained: dict = {}
+    for control, requirement in written:
+        gained.setdefault(control.id, []).append(requirement)
+
+    results: list[BulkResultItem] = []
+    for cid in control_ids:
+        control = found.get(cid)
+        if control is None:
+            results.append(BulkResultItem(id=cid, outcome="skipped", reason=bulk_edit.NOT_FOUND))
+            continue
+        ref, label = control.reference or "", " ".join(p for p in (control.reference, control.name) if p)
+        if control.deleted:
+            results.append(BulkResultItem(id=cid, reference=ref, label=label, outcome="skipped", reason=bulk_edit.ARCHIVED))
+            continue
+        new = gained.get(cid, [])
+        if not new:
+            results.append(BulkResultItem(id=cid, reference=ref, label=label, outcome="skipped", reason="already mapped"))
+            continue
+        shown = ", ".join(_clause_label(r) for r in new[:8]) + (f" and {len(new) - 8} more" if len(new) > 8 else "")
+        await audit_log.record(
+            db, actor=user, action="map_requirements", entity_type="control", entity_id=cid,
+            summary=f"Bulk-mapped {label} to {len(new)} requirement(s): {shown}"[:500],
+            changes={"batch_id": batch, "bulk": True, "requirement_ids": [str(r.id) for r in new]},
+        )
+        results.append(BulkResultItem(
+            id=cid, reference=ref, label=label, outcome="updated",
+            changed=[f"{len(new)} requirement{'s' if len(new) != 1 else ''}"],
+        ))
+    updated = sum(1 for r in results if r.outcome == "updated")
+    return BulkResult(
+        entity_type="control", batch_id=batch, updated=updated, skipped=len(results) - updated,
+        summary=bulk_edit.summarize(results), results=results,
+    )
 
 
 @router.post(

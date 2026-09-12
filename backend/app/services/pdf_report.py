@@ -702,3 +702,73 @@ def executive_summary_pdf(stats: dict, org_name: str) -> bytes:
                   _table(ss, ["Status", "Count"], [[k.title(), str(v)] for k, v in by_status.items()],
                          col_widths=[200, 80])]
     return _render(story, org_name)
+
+
+# ================================================================ board packs ===
+# Phase 3: the committee's board pack. ``board_pack.section_views`` words every section;
+# these functions only lay the words out, in the house style above, so the PDF and the
+# spreadsheet built from the same views say the same thing.
+def _pack_text(value) -> str:
+    from xml.sax.saxutils import escape
+
+    return escape(str(value)) if value not in (None, "") else "—"
+
+
+def _pack_kpis(ss, items: list[tuple[str, str]], width: float = CONTENT_WIDTH):
+    """A row of headline figures, equal widths (values are short phrases, not numbers
+    alone, so the large single-number style of :func:`_kpis` would wrap)."""
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table, TableStyle
+
+    cells = [[Paragraph(f"<font size=12.5 color='{PRIMARY}'><b>{_pack_text(v)}</b></font><br/>"
+                        f"<font size=7.5 color='{MUTED}'>{_pack_text(k)}</font>", ss["NxCell"]) for k, v in items]]
+    t = Table(cells, colWidths=[width / len(items)] * len(items))
+    t.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.3, colors.HexColor(LINE)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor(LINE)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return t
+
+
+def board_pack_pdf(*, title: str, subtitle: str, cover: list[tuple[str, str]], views: list, org_name: str) -> bytes:
+    """The board pack: a cover page (what, for whom, which period, generated when and by
+    whom), then each section — headline figures, facts, tables and the note on how the
+    figures were worked out. ``views`` are ``board_pack.SectionView`` objects."""
+    _require_reportlab()
+    from reportlab.platypus import CondPageBreak, PageBreak, Paragraph, Spacer
+
+    ss = _styles()
+    story = _title_block(ss, _pack_text(title), _pack_text(subtitle), _pack_text(org_name))
+    story += [_kv(ss, [(_pack_text(k), _pack_text(v)) for k, v in cover]), Spacer(1, 8)]
+    story.append(_body(ss, "Position figures (health score, appetite, top risks, control assurance, compliance, "
+                           "issues, KRIs and third parties) are as at the date shown. Risk movement, failed tests "
+                           "and incidents cover the period."))
+    available = CONTENT_WIDTH - 4
+    for index, view in enumerate(views):
+        story.append(PageBreak() if index == 0 else CondPageBreak(180))
+        story.append(_h2(ss, _pack_text(view.title)))
+        if view.kpis:
+            story += [_pack_kpis(ss, list(view.kpis)[:4]), Spacer(1, 6)]
+        if view.facts:
+            story += [_kv(ss, [(_pack_text(k), _pack_text(v)) for k, v in view.facts]), Spacer(1, 6)]
+        for table in view.tables:
+            story.append(Paragraph(f"<b>{_pack_text(table.caption)}</b>", ss["NxBody"]))
+            story.append(Spacer(1, 3))
+            if table.rows:
+                total = float(sum(table.widths) or 1)
+                widths = [max(28, available * w / total) for w in table.widths]
+                story.append(_table(ss, [_pack_text(h) for h in table.headers],
+                                    [[_pack_text(c) for c in row] for row in table.rows], col_widths=widths))
+                if table.total is not None and table.total > len(table.rows):
+                    story.append(Paragraph(
+                        f"<font size=8 color='{MUTED}'>Showing {len(table.rows)} of {table.total}; "
+                        "the spreadsheet version of this pack lists them all.</font>", ss["NxBody"]))
+            else:
+                story.append(Paragraph(f"<font color='{MUTED}'>{_pack_text(table.empty)}</font>", ss["NxBody"]))
+            story.append(Spacer(1, 8))
+        for note in view.notes:
+            story.append(Paragraph(f"<font size=8 color='{MUTED}'>{_pack_text(note)}</font>", ss["NxBody"]))
+    return _render(story, org_name)

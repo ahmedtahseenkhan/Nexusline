@@ -488,6 +488,9 @@ LINK_KINDS: tuple[tuple[str, str], ...] = (
     ("rcsa_lines", "RCSA lines"),
     ("quantifications", "Quantifications"),
     ("issues", "Issues"),
+    # Phase 3 hierarchy: a risk that rolls others up, or sits under one, is in use.
+    ("child_risks", "Child risks"),
+    ("parent_risk", "Parent risk"),
 )
 LINK_KEYS: tuple[str, ...] = tuple(k for k, _ in LINK_KINDS)
 
@@ -610,6 +613,25 @@ def link_count_query(risk_ids: Sequence[uuid.UUID]):
         select(_kind("issues"), by_issue.c.risk_id.label("risk_id"),
                func.count(func.distinct(by_issue.c.issue_id)).label("n"))
         .group_by(by_issue.c.risk_id)
+    )
+    # Phase 3 hierarchy, both directions: live children under the risk, and a live parent.
+    from sqlalchemy.orm import aliased
+
+    from app.models.risk import Risk
+
+    child = aliased(Risk)
+    parts.append(
+        select(_kind("child_risks"), child.parent_id.label("risk_id"), func.count().label("n"))
+        .where(child.parent_id.in_(ids), child.deleted.is_(False))
+        .group_by(child.parent_id)
+    )
+    parent = aliased(Risk)
+    parts.append(
+        select(_kind("parent_risk"), Risk.id.label("risk_id"), func.count().label("n"))
+        .select_from(Risk)
+        .join(parent, and_(parent.id == Risk.parent_id, parent.deleted.is_(False)))
+        .where(Risk.id.in_(ids))
+        .group_by(Risk.id)
     )
     return union_all(*parts)
 

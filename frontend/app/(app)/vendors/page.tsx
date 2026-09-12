@@ -10,7 +10,9 @@ import { useFormat } from "@/lib/format";
 import { confirmDeleteWithImpact } from "@/lib/records";
 import { lookupValues, pickProcesses, type LookupRef, type UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { useFilterParams, type FilterSpec } from "@/lib/useFilterParams";
 import DataTable, { type Column } from "@/components/DataTable";
+import BulkEditBar from "@/components/BulkEditBar";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -88,6 +90,12 @@ const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const CRITICALITY = opts(["low", "medium", "high", "critical"]);
 const STATUS = opts(["prospective", "active", "suspended", "offboarded"]);
+/** Register filters, kept in the URL: the dashboard's third-party line opens
+ *  `/vendors?criticality=critical` and `/vendors?review=overdue`. */
+const VENDOR_FILTERS = {
+  criticality: ["low", "medium", "high", "critical"],
+  review: ["overdue"],
+} as const satisfies FilterSpec;
 const RISK_RATING = opts(["low", "medium", "high", "critical"]);
 const ASSESS = opts(["not_started", "in_progress", "completed"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
@@ -215,6 +223,7 @@ function VendorsInner() {
   const setCt = <K extends keyof CertForm>(k: K, v: CertForm[K]) => setCert((p) => ({ ...p, [k]: v }));
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const filters = useFilterParams(VENDOR_FILTERS);
   const fetchVendors = useCallback((qs: string) => apiCall<PagedList<Vendor>>("GET", `/vendors?${qs}`), []);
   const loadDetail = useCallback((id: string) => { apiCall<Vendor>("GET", `/vendors/${id}`).then(setDetail).catch(() => setDetail(null)); }, []);
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
@@ -562,6 +571,22 @@ function VendorsInner() {
         activeKey={openId}
         searchPlaceholder="Search vendors by name, legal name, registration no. or category…"
         defaultSort={{ by: "name", dir: "asc" }}
+        filters={filters.values}
+        onApplyFilters={filters.replace}
+        toolbarLeft={
+          <>
+            <select className="select" style={{ maxWidth: 170 }} value={filters.values.criticality ?? ""} onChange={(e) => filters.set("criticality", (e.target.value || undefined) as typeof filters.values.criticality)} aria-label="Criticality">
+              <option value="">Any criticality</option>
+              {CRITICALITY.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }} title="The next review date has passed">
+              <input type="checkbox" checked={filters.values.review === "overdue"} onChange={(e) => filters.set("review", e.target.checked ? "overdue" : undefined)} /> Review overdue
+            </label>
+          </>
+        }
+        bulkActions={(rows, clear) => (
+          <BulkEditBar entityType="vendor" rows={rows} onDone={() => { clear(); reload(); }} />
+        )}
         toolbarRight={<ArchivedRecords entityType="vendor" noun="third parties" refreshKey={refreshKey} onRestored={reload} />}
         emptyMessage="No vendors yet. Add the third parties your organization relies on."
         refreshKey={refreshKey}

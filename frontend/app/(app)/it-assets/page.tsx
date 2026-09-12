@@ -13,6 +13,7 @@ import ArchivedRecords from "@/components/ArchivedRecords";
 import { type Page } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
+import BulkEditBar from "@/components/BulkEditBar";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
@@ -353,7 +354,10 @@ function ITAssetsInner() {
         tableKey="it-assets"
         statusModel="asset"
         bulkActions={(rows, clear) => (
-          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          <>
+            <BulkEditBar entityType="asset" rows={rows} onDone={() => { clear(); setRefreshKey((k) => k + 1); loadSummary(); }} />
+            <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          </>
         )}
         columns={columns}
         fetcher={fetchAssets}

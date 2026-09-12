@@ -53,8 +53,10 @@ def test_a_control_reaches_risks_and_its_children():
 def test_many_to_one_pointers_are_not_dependents():
     """A risk points *at* its owner, category and business units via FK columns on the
     risk row; none of those make the user or lookup depend on the risk."""
-    names = {p.link_table.name for p in ri.impact_paths(Risk)}
-    assert "risks" not in names
+    # The only path through the risks table itself is the phase-3 hierarchy: child risks
+    # point at their parent (parent_id), so a parent's impact lists its children.
+    self_paths = [p for p in ri.impact_paths(Risk) if p.link_table.name == "risks"]
+    assert [p.local_column.name for p in self_paths] in ([], ["parent_id"])
     assert "users" not in {p.target_table.name for p in ri.impact_paths(Risk)}
     assert "lookups" not in {p.target_table.name for p in ri.impact_paths(Risk)}
 

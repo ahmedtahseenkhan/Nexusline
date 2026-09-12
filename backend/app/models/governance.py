@@ -13,7 +13,10 @@ import enum
 import uuid
 from datetime import date
 
-from sqlalchemy import Boolean, Date, ForeignKey, String, Text, Uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -76,6 +79,8 @@ class DecisionStatus(str, enum.Enum):
 # ============================================================= committees ===
 class Committee(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "committees"
+    # Phase 3: generate the board pack this many days before each meeting (None = by hand).
+    board_pack_days_before: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -161,3 +166,35 @@ class MeetingDecision(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     def is_overdue(self) -> bool:
         return (self.status in (DecisionStatus.open, DecisionStatus.in_progress)
                 and self.due_date is not None and self.due_date < date.today())
+
+
+class BoardPack(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 3: a generated committee pack — appetite, top risks, trend, assurance,
+    issues, incidents, KRIs — kept as a PDF (and XLSX) so the version the committee saw is
+    the version on file."""
+
+    __tablename__ = "board_packs"
+
+    committee_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("committees.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    meeting_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("committee_meetings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    sections: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="ready", nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    pdf_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("stored_files.id", ondelete="SET NULL"), nullable=True
+    )
+    xlsx_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("stored_files.id", ondelete="SET NULL"), nullable=True
+    )
+    generated_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+

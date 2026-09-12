@@ -177,3 +177,5 @@ api_router.include_router(users.router)
 api_router.include_router(dataio.router)
 api_router.include_router(search.router)
 api_router.include_router(system.router)
+from app.api.v1 import my_work  # noqa: E402 - phase 3: My Work + approve-from-email
+api_router.include_router(my_work.router)
