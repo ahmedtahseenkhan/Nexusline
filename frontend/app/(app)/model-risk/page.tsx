@@ -8,10 +8,13 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ local types
 interface ModelValidation {
@@ -62,7 +65,7 @@ interface ModelRiskSummary {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
@@ -79,7 +82,6 @@ const MODEL_TYPE = opts([
 ]);
 const MODEL_STATUS = opts(["development", "validated", "in_production", "under_review", "retired"]);
 const MATERIALITY = opts(["low", "medium", "high", "critical"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const VAL_TYPE = opts(["initial", "periodic", "targeted"]);
 const VAL_OUTCOME = opts(["pass", "pass_with_findings", "fail", "not_completed"]);
 const VAL_STATUS = opts(["planned", "in_progress", "completed"]);
@@ -130,7 +132,6 @@ type ModelForm = {
   vendor: string;
   last_validation_date: string;
   next_validation_date: string;
-  workflow_status: string;
 };
 const BLANK_MODEL: ModelForm = {
   name: "",
@@ -146,7 +147,6 @@ const BLANK_MODEL: ModelForm = {
   vendor: "",
   last_validation_date: "",
   next_validation_date: "",
-  workflow_status: "draft",
 };
 function fromModel(m: ModelInventory): ModelForm {
   return {
@@ -163,7 +163,6 @@ function fromModel(m: ModelInventory): ModelForm {
     vendor: m.vendor || "",
     last_validation_date: m.last_validation_date || "",
     next_validation_date: m.next_validation_date || "",
-    workflow_status: m.workflow_status || "draft",
   };
 }
 function modelPayload(f: ModelForm): Record<string, unknown> {
@@ -181,7 +180,6 @@ function modelPayload(f: ModelForm): Record<string, unknown> {
     vendor: f.vendor,
     last_validation_date: f.last_validation_date || null,
     next_validation_date: f.next_validation_date || null,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -209,6 +207,7 @@ const BLANK_VAL: ValDraft = {
 
 function ModelRiskInner() {
   const [error, setError] = useState<string | null>(null);
+  const { formatDate } = useFormat();
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
@@ -355,7 +354,7 @@ function ModelRiskInner() {
         {m.regulatory_relevant && <Badge tone="medium">Regulatory</Badge>}
       </div>
     ) },
-    { key: "next_validation_date", header: "Next validation", sortable: true, render: (m) => (m.is_validation_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{m.next_validation_date || "—"}</span>) },
+    { key: "next_validation_date", header: "Next validation", sortable: true, render: (m) => (m.is_validation_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{formatDate(m.next_validation_date)}</span>) },
     { key: "actions", header: "", render: (m) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditModel(m)}>Edit</button> <button className="btn secondary sm" onClick={() => removeModel(m)}>Delete</button></div> },
   ];
 
@@ -405,9 +404,6 @@ function ModelRiskInner() {
           <TextInput value={mf.vendor} onChange={(v) => setM("vendor", v)} placeholder="Vendor" />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this inventory record.">
-        <Select value={mf.workflow_status} onChange={(v) => setM("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
   const scheduleTab = (
@@ -496,7 +492,12 @@ function ModelRiskInner() {
 
       {/* ============================================= MODEL DRAWER */}
       <RecordDrawer
-        aside={modelDetail ? <RecordPanels model="model_inventory" entityId={modelDetail.id} /> : null}
+        aside={modelDetail ? (
+          <>
+            <RecordApproval entityType="model_inventory" entityId={modelDetail.id} onChanged={() => { reload(); loadModelDetail(modelDetail.id); }} />
+            <RecordPanels model="model_inventory" entityId={modelDetail.id} />
+          </>
+        ) : null}
         open={!!openId && !!modelDetail}
         onClose={() => setOpenId(null)}
         title={modelDetail ? `${modelDetail.reference || ""} ${modelDetail.name}`.trim() : "…"}
@@ -590,7 +591,7 @@ function ModelRiskInner() {
                             <td className="ref">{v.reference || "—"}</td>
                             <td className="cell-title">{cap(v.validation_type)}</td>
                             <td className="muted">{v.validator || "—"}</td>
-                            <td className="muted">{v.validation_date || "—"}</td>
+                            <td className="muted">{formatDate(v.validation_date)}</td>
                             <td><OutcomeBadge value={v.outcome} /></td>
                             <td><Badge tone={VAL_STATUS_TONE[v.status] || "neutral"}>{cap(v.status)}</Badge></td>
                             <td className="muted">{v.findings || "—"}</td>

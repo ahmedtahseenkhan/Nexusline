@@ -45,6 +45,50 @@ async def _next_ref(db) -> str:
     return await next_reference(db, ApprovalRequest, "APR")
 
 
+# ------------------------------------------------------- segregation of duties ---
+_SOD_DETAIL = (
+    "Segregation of duties: the maker of a request cannot approve it — "
+    "an independent checker must decide."
+)
+
+
+def is_maker(
+    requested_by: uuid.UUID | None,
+    requested_by_email: str | None,
+    user_id: uuid.UUID | None,
+    user_email: str | None,
+) -> bool:
+    """Whether this user raised the request.
+
+    The id is authoritative when present. The e-mail is checked as well
+    (case-insensitively) because requests raised by imports, integrations and older
+    seed data carry only the maker's address; without it those would have no maker at
+    all and anyone — including the person who raised them — could approve them.
+    """
+    if requested_by is not None and user_id is not None and requested_by == user_id:
+        return True
+    maker_email = (requested_by_email or "").strip().lower()
+    return bool(maker_email) and maker_email == (user_email or "").strip().lower()
+
+
+def require_maker_identity(requested_by: uuid.UUID | None, requested_by_email: str | None) -> None:
+    """A request nobody can be identified as having raised cannot be checked for
+    segregation of duties, so it is refused rather than stored."""
+    if requested_by is None and not (requested_by_email or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="An approval request must record who raised it (maker id or e-mail).",
+        )
+
+
+def enforce_sod(obj: ApprovalRequest, user_id: uuid.UUID | None, user_email: str | None) -> None:
+    """403 when segregation of duties is on and the would-be checker is the maker."""
+    if settings.enforce_segregation_of_duties and is_maker(
+        obj.requested_by, obj.requested_by_email, user_id, user_email
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_SOD_DETAIL)
+
+
 @router.get("", response_model=Page[ApprovalRead], dependencies=[Depends(require("workflow:read"))])
 async def list_approvals(
     db: DbSession,
@@ -85,6 +129,7 @@ async def submit_approval(body: ApprovalCreate, db: DbSession, user: CurrentUser
         requested_by_email=user.email,
         **body.model_dump(),
     )
+    require_maker_identity(obj.requested_by, obj.requested_by_email)
     obj.reference = await _next_ref(db)
     db.add(obj)
     await db.flush()
@@ -115,16 +160,9 @@ async def decide_approval(
             status_code=status.HTTP_409_CONFLICT, detail=f"Already {obj.status.value}"
         )
 
-    # Segregation of Duties: the maker (submitter) can never be a checker (approver).
-    if (
-        settings.enforce_segregation_of_duties
-        and obj.requested_by is not None
-        and obj.requested_by == user.id
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Segregation of duties: the maker of a request cannot approve it — an independent checker must decide.",
-        )
+    # Segregation of Duties: the maker (submitter) can never be a checker (approver) —
+    # matched on the maker's id, or on their e-mail when the request carries only that.
+    enforce_sod(obj, user.id, user.email)
     # One decision per checker (prevents a single user counting twice toward N-eyes).
     if any(a.actor_id == user.id for a in obj.actions):
         raise HTTPException(
@@ -177,7 +215,24 @@ async def decide_approval(
     from app.services import notifications as notifications_service
     from app.services import workflow_engine
 
-    instance = await workflow_engine.on_approval_decided(db, obj)
+    instance = await workflow_engine.on_approval_decided(db, obj, actor=user)
+    if instance is None and obj.status in (ApprovalStatus.approved, ApprovalStatus.rejected):
+        # A single-stage request raised against a record: its final decision is the
+        # record's review outcome — approved, or back to draft. (A route's outcome is
+        # written by the engine when the last stage lands.)
+        from app.services import record_workflow
+
+        new_state = await record_workflow.write_back(
+            db,
+            entity_type=obj.entity_type,
+            entity_id=obj.entity_id,
+            approved=obj.status == ApprovalStatus.approved,
+            via=f"approval {obj.reference}",
+            comment=obj.decision_comment or "",
+            actor=user,
+        )
+        if new_state:
+            summary += f" · record now {new_state.replace('_', ' ')}"
     if instance is not None:
         summary += (
             f" · workflow {instance.completed_stages}/{instance.total_stages}"

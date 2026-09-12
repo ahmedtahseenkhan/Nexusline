@@ -23,7 +23,6 @@ class EsgAssessmentBase(BaseModel):
     owner: str = ""
     period: str = ""
     sbp_green_banking_ref: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class EsgAssessmentCreate(EsgAssessmentBase):
@@ -43,10 +42,11 @@ class EsgAssessmentUpdate(BaseModel):
     owner: str | None = None
     period: str | None = None
     sbp_green_banking_ref: str | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class EsgAssessmentRead(EsgAssessmentBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

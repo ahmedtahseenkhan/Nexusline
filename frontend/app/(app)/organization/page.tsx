@@ -10,6 +10,8 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Toggle, MultiSelect, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconShield, IconUsers } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ----------------------------------------------------------------- inline API types
 type RoleSummary = { id: string; name: string; description: string };
@@ -33,8 +35,7 @@ type Permission = { code: string; description: string };
 type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 
 // --------------------------------------------------------------------------- helpers
-const cap = (s: string) => s.replace(/[:_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-const fmtDate = (s: string | null) => (s ? new Date(s).toLocaleDateString() : "—");
+const cap = (s: string) => titleCase(s.replace(/:/g, " "));
 const resourceOf = (code: string) => code.split(":")[0] || "other";
 
 // ----------------------------------------------------------------------- user dialog
@@ -52,6 +53,7 @@ type RoleForm = { name: string; description: string; permission_codes: string[] 
 const BLANK_ROLE: RoleForm = { name: "", description: "", permission_codes: [] };
 
 function OrganizationInner() {
+  const { formatDate } = useFormat();
   const [view, setView] = useState<"users" | "roles">("users");
 
   const [roles, setRoles] = useState<RoleRecord[]>([]);
@@ -362,7 +364,7 @@ function OrganizationInner() {
     { key: "roles", header: "Roles", render: (u) => <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{u.roles.length === 0 && <span className="muted">—</span>}{u.roles.map((r) => <Badge key={r.id} tone="info" plain>{r.name}</Badge>)}</div> },
     { key: "permissions", header: "Permissions", align: "center", render: (u) => <span className="muted">{u.permission_codes.length}</span> },
     { key: "is_active", header: "Status", sortable: true, render: (u) => <Badge tone={u.is_active ? "low" : "neutral"}>{u.is_active ? "active" : "inactive"}</Badge> },
-    { key: "created_at", header: "Created", sortable: true, render: (u) => <span className="muted">{fmtDate(u.created_at)}</span> },
+    { key: "created_at", header: "Created", sortable: true, render: (u) => <span className="muted">{formatDate(u.created_at)}</span> },
     { key: "actions", header: "", render: (u) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditUser(u)}>Edit</button> <button className="btn secondary sm" onClick={() => toggleActive(u)}>{u.is_active ? "Deactivate" : "Activate"}</button></div> },
   ];
 
@@ -501,7 +503,7 @@ function OrganizationInner() {
               </div>
               <div style={{ minWidth: 140 }}>
                 <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Created</div>
-                <div style={{ marginTop: 3 }}>{fmtDate(detail.created_at)}</div>
+                <div style={{ marginTop: 3 }}>{formatDate(detail.created_at)}</div>
               </div>
             </div>
 

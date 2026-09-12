@@ -14,20 +14,21 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 
 // ------------------------------------------------------------------ enum lists
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const SUBJECT_TYPE = opts(["customer", "counterparty", "employee", "vendor"]);
 const SCREENING_TYPE = opts(["sanctions", "pep", "adverse_media", "comprehensive"]);
 const MATCH_STATUS = opts(["no_match", "potential_match", "confirmed_match", "false_positive"]);
@@ -81,7 +82,6 @@ type ScreeningForm = {
   screened_date: string;
   reviewer: string;
   disposition: string;
-  workflow_status: string;
 };
 const BLANK_SCREENING: ScreeningForm = {
   subject_name: "",
@@ -94,7 +94,6 @@ const BLANK_SCREENING: ScreeningForm = {
   screened_date: "",
   reviewer: "",
   disposition: "",
-  workflow_status: "draft",
 };
 function fromScreening(s: ScreeningCase): ScreeningForm {
   return {
@@ -108,7 +107,6 @@ function fromScreening(s: ScreeningCase): ScreeningForm {
     screened_date: s.screened_date || "",
     reviewer: s.reviewer || "",
     disposition: s.disposition || "",
-    workflow_status: s.workflow_status || "draft",
   };
 }
 function screeningPayload(f: ScreeningForm): Record<string, unknown> {
@@ -123,7 +121,6 @@ function screeningPayload(f: ScreeningForm): Record<string, unknown> {
     screened_date: f.screened_date || null,
     reviewer: f.reviewer,
     disposition: f.disposition,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -141,7 +138,6 @@ type SarForm = {
   suspicion_reason: string;
   filed_date: string;
   fmu_reference: string;
-  workflow_status: string;
 };
 const BLANK_SAR: SarForm = {
   subject: "",
@@ -156,7 +152,6 @@ const BLANK_SAR: SarForm = {
   suspicion_reason: "",
   filed_date: "",
   fmu_reference: "",
-  workflow_status: "draft",
 };
 function fromSar(s: Sar): SarForm {
   return {
@@ -172,7 +167,6 @@ function fromSar(s: Sar): SarForm {
     suspicion_reason: s.suspicion_reason || "",
     filed_date: s.filed_date || "",
     fmu_reference: s.fmu_reference || "",
-    workflow_status: s.workflow_status || "draft",
   };
 }
 function sarPayload(f: SarForm): Record<string, unknown> {
@@ -189,7 +183,6 @@ function sarPayload(f: SarForm): Record<string, unknown> {
     suspicion_reason: f.suspicion_reason,
     filed_date: f.filed_date || null,
     fmu_reference: f.fmu_reference,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -205,7 +198,6 @@ type RiskForm = {
   assessment_date: string;
   review_frequency: string;
   next_review_date: string;
-  workflow_status: string;
 };
 const BLANK_RISK: RiskForm = {
   title: "",
@@ -218,7 +210,6 @@ const BLANK_RISK: RiskForm = {
   assessment_date: "",
   review_frequency: "annual",
   next_review_date: "",
-  workflow_status: "draft",
 };
 function fromRisk(r: AmlRisk): RiskForm {
   return {
@@ -232,7 +223,6 @@ function fromRisk(r: AmlRisk): RiskForm {
     assessment_date: r.assessment_date || "",
     review_frequency: r.review_frequency || "annual",
     next_review_date: r.next_review_date || "",
-    workflow_status: r.workflow_status || "draft",
   };
 }
 function riskPayload(f: RiskForm): Record<string, unknown> {
@@ -247,7 +237,6 @@ function riskPayload(f: RiskForm): Record<string, unknown> {
     assessment_date: f.assessment_date || null,
     review_frequency: f.review_frequency,
     next_review_date: f.next_review_date || null,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -261,6 +250,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 
 function AmlInner() {
   const [section, setSection] = useState<SectionId>("screening");
+  const { formatDate, formatDateTime, formatMoney, currency, currencyOptions } = useFormat();
   const [error, setError] = useState<string | null>(null);
 
   const [summary, setSummary] = useState<ScreeningSummary | null>(null);
@@ -374,7 +364,7 @@ function AmlInner() {
   // ------------------------------------------------------------- SAR CRUD
   function openNewSar() {
     setEditingSar(null);
-    setAf(BLANK_SAR);
+    setAf({ ...BLANK_SAR, currency });
     setShowSarForm(true);
   }
   function openEditSar(s: Sar) {
@@ -481,7 +471,7 @@ function AmlInner() {
     { key: "match_status", header: "Match", sortable: true, render: (c) => <Badge tone={MATCH_STATUS_TONE[c.match_status] || "neutral"}>{cap(c.match_status)}</Badge> },
     { key: "risk_rating", header: "Risk", sortable: true, render: (c) => <SeverityBadge value={c.risk_rating} /> },
     { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={SCREENING_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
-    { key: "screened_date", header: "Screened", sortable: true, render: (c) => <span className="muted">{c.screened_date || "—"}</span> },
+    { key: "screened_date", header: "Screened", sortable: true, render: (c) => <span className="muted">{formatDate(c.screened_date)}</span> },
     { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCase(c)}>Delete</button></div> },
   ];
 
@@ -489,9 +479,9 @@ function AmlInner() {
     { key: "reference", header: "Ref", sortable: true, render: (s) => <span className="ref">{s.reference || "—"}</span> },
     { key: "subject", header: "Subject", sortable: true, render: (s) => <span className="cell-title">{s.subject}</span> },
     { key: "priority", header: "Priority", sortable: true, render: (s) => <SeverityBadge value={s.priority} /> },
-    { key: "amount", header: "Amount", sortable: true, render: (s) => <span className="muted">{num(s.amount)} {s.currency}</span> },
-    { key: "detected_date", header: "Detected", sortable: true, render: (s) => <span className="muted">{s.detected_date || "—"}</span> },
-    { key: "deadline", header: "Deadline", sortable: true, render: (s) => (s.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{s.deadline || "—"}</span>) },
+    { key: "amount", header: "Amount", sortable: true, render: (s) => <span className="muted">{formatMoney(s.amount, s.currency)}</span> },
+    { key: "detected_date", header: "Detected", sortable: true, render: (s) => <span className="muted">{formatDate(s.detected_date)}</span> },
+    { key: "deadline", header: "Deadline", sortable: true, render: (s) => (s.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{formatDate(s.deadline)}</span>) },
     { key: "status", header: "Status", sortable: true, render: (s) => <Badge tone={SAR_STATUS_TONE[s.status] || "neutral"}>{cap(s.status)}</Badge> },
     { key: "fmu_reference", header: "FMU ref", render: (s) => <span className="muted">{s.fmu_reference || "—"}</span> },
     { key: "actions", header: "", render: (s) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeSar(s)}>Delete</button></div> },
@@ -504,7 +494,7 @@ function AmlInner() {
     { key: "subject", header: "Subject", sortable: true, render: (r) => <span className="muted">{r.subject || "—"}</span> },
     { key: "inherent_risk", header: "Inherent", sortable: true, render: (r) => <SeverityBadge value={r.inherent_risk} /> },
     { key: "residual_risk", header: "Residual", sortable: true, render: (r) => <SeverityBadge value={r.residual_risk} /> },
-    { key: "next_review_date", header: "Next review", sortable: true, render: (r) => (r.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.next_review_date || "—"}</span>) },
+    { key: "next_review_date", header: "Next review", sortable: true, render: (r) => (r.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(r.next_review_date)}</span>) },
     { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeRisk(r)}>Delete</button></div> },
   ];
 
@@ -547,9 +537,6 @@ function AmlInner() {
       <Field label="Disposition" help="How the potential match was resolved.">
         <TextArea value={sf.disposition} onChange={(v) => setS("disposition", v)} rows={3} placeholder="Resolution and rationale." />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this screening record.">
-        <Select value={sf.workflow_status} onChange={(v) => setS("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -572,7 +559,7 @@ function AmlInner() {
           <TextInput type="number" value={af.amount} onChange={(v) => setA("amount", v)} placeholder="0" />
         </Field>
         <Field label="Currency">
-          <TextInput value={af.currency} onChange={(v) => setA("currency", v)} placeholder="PKR" />
+          <Select value={af.currency} onChange={(v) => setA("currency", v)} options={currencyOptions} />
         </Field>
       </div>
       <div className="field-row">
@@ -604,9 +591,6 @@ function AmlInner() {
           <TextInput value={af.fmu_reference} onChange={(v) => setA("fmu_reference", v)} placeholder="FMU-…" />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this filing record.">
-        <Select value={af.workflow_status} onChange={(v) => setA("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -651,9 +635,7 @@ function AmlInner() {
           <TextInput type="date" value={rf.next_review_date} onChange={(v) => setR("next_review_date", v)} />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this assessment record.">
-        <Select value={rf.workflow_status} onChange={(v) => setR("workflow_status", v)} options={WORKFLOW} />
-      </Field>
+      <RecordApproval entityType="aml_risk_assessment" entityId={editingRisk?.id ?? null} onChanged={reloadRisks} />
     </>
   );
 
@@ -779,6 +761,7 @@ function AmlInner() {
 
       {/* ============================================= SCREENING VIEW DRAWER */}
       <RecordDrawer
+        aside={caseDetail ? <RecordApproval entityType="screening_case" entityId={caseDetail.id} onChanged={() => { reloadCases(); loadSummary(); loadCase(caseDetail.id); }} /> : null}
         open={!!caseId && !!caseDetail}
         onClose={() => setCaseId(null)}
         title={caseDetail ? `${caseDetail.reference || "Case"} — ${caseDetail.subject_name}` : "…"}
@@ -809,14 +792,13 @@ function AmlInner() {
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Lists checked", caseDetail.lists_checked || "—")}
               {field("Reviewer", caseDetail.reviewer || "—")}
-              {field("Screened date", caseDetail.screened_date || "—")}
+              {field("Screened date", formatDate(caseDetail.screened_date))}
             </div>
 
             {longText("Disposition", caseDetail.disposition)}
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 6, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
-              {field("Workflow", cap(caseDetail.workflow_status))}
-              {field("Created", caseDetail.created_at ? caseDetail.created_at.slice(0, 10) : "—")}
+              {field("Created", formatDateTime(caseDetail.created_at))}
             </div>
           </>
         )}
@@ -824,6 +806,7 @@ function AmlInner() {
 
       {/* ============================================= STR / SAR VIEW DRAWER */}
       <RecordDrawer
+        aside={sarDetail ? <RecordApproval entityType="suspicious_activity_report" entityId={sarDetail.id} onChanged={() => { reloadSars(); loadSar(sarDetail.id); }} /> : null}
         open={!!sarId && !!sarDetail}
         onClose={() => setSarId(null)}
         title={sarDetail ? `${sarDetail.reference || "STR/SAR"} — ${sarDetail.subject}` : "…"}
@@ -843,7 +826,7 @@ function AmlInner() {
               {field("Status", <Badge tone={SAR_STATUS_TONE[sarDetail.status] || "neutral"}>{cap(sarDetail.status)}</Badge>)}
               <div style={{ marginLeft: "auto", textAlign: "right" }}>
                 <div className="muted" style={{ fontSize: 12 }}>Amount</div>
-                <div style={{ marginTop: 4 }}>{num(sarDetail.amount)} {sarDetail.currency}</div>
+                <div style={{ marginTop: 4 }}>{formatMoney(sarDetail.amount, sarDetail.currency)}</div>
               </div>
             </div>
 
@@ -854,9 +837,9 @@ function AmlInner() {
             </div>
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
-              {field("Detected date", sarDetail.detected_date || "—")}
-              {field("Deadline", sarDetail.is_overdue ? <Badge tone="critical">Overdue · {sarDetail.deadline || "—"}</Badge> : (sarDetail.deadline || "—"))}
-              {field("Filed date", sarDetail.filed_date || "—")}
+              {field("Detected date", formatDate(sarDetail.detected_date))}
+              {field("Deadline", sarDetail.is_overdue ? <Badge tone="critical">Overdue · {formatDate(sarDetail.deadline)}</Badge> : formatDate(sarDetail.deadline))}
+              {field("Filed date", formatDate(sarDetail.filed_date))}
               {field("FMU reference", sarDetail.fmu_reference || "—")}
             </div>
 
@@ -864,8 +847,7 @@ function AmlInner() {
             {longText("Suspicion reason", sarDetail.suspicion_reason)}
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 6, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
-              {field("Workflow", cap(sarDetail.workflow_status))}
-              {field("Created", sarDetail.created_at ? sarDetail.created_at.slice(0, 10) : "—")}
+              {field("Created", formatDateTime(sarDetail.created_at))}
             </div>
           </>
         )}

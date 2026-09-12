@@ -26,13 +26,26 @@ def build_risk_query(
     process_id: uuid.UUID | None = None,
     asset_id: uuid.UUID | None = None,
     search: str | None = None,
+    owner_id: uuid.UUID | None = None,
+    treatment_owner_id: uuid.UUID | None = None,
+    category_id: uuid.UUID | None = None,
 ) -> Select:
-    """Live risks matching the given filters. See the module docstring."""
+    """Live risks matching the given filters. See the module docstring.
+
+    ``category`` (legacy text, exact) and ``category_id`` (the picked risk category)
+    may both be given; a risk must then match both.
+    """
     stmt: Select = select(Risk).where(Risk.deleted.is_(False))
     if status is not None:
         stmt = stmt.where(Risk.status == status)
     if category:
         stmt = stmt.where(Risk.category == category)
+    if category_id is not None:
+        stmt = stmt.where(Risk.category_id == category_id)
+    if owner_id is not None:
+        stmt = stmt.where(Risk.owner_id == owner_id)
+    if treatment_owner_id is not None:
+        stmt = stmt.where(Risk.treatment_owner_id == treatment_owner_id)
     if business_unit_id is not None:
         stmt = stmt.where(
             select(risk_business_units.c.risk_id)

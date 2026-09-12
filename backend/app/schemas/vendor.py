@@ -5,10 +5,23 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.common import GraphRef
+from app.schemas.common import GraphRef, LookupRef, UserRef
 
 from app.models.base import WorkflowState
 from app.models.enums import AssessmentStatus, Criticality, ReviewFrequency, Severity, VendorStatus
+
+
+# Phase 1 picker fields. ``category_id`` wins over the legacy ``category`` text when both
+# are sent; the text is still accepted this release and matched to a lookup value when it
+# names exactly one. ``country_id`` has no text twin: ``location`` is a city or address
+# and stays free text.
+_CATEGORY = "Value from the `vendor_category` lookup list; wins over `category` text."
+_COUNTRY = (
+    "Country, from the `country` lookup list. Not the same thing as `location`, "
+    "which stays free text for a city or street address."
+)
+_LOCATION = "City or street address, free text. The country is `country_id`, picked from the country list."
+_WF_OWNER = "User who owns the approval workflow. `workflow_status` changes only through the workflow endpoints."
 
 
 class VendorRefItem(BaseModel):
@@ -56,15 +69,17 @@ class VendorBase(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     category: str = ""
+    category_id: uuid.UUID | None = Field(default=None, description=_CATEGORY)
     type_id: uuid.UUID | None = None
     contact_name: str = ""
     contact_email: str = ""
     contact_phone: str = ""
     website: str = ""
-    location: str = ""
+    location: str = Field(default="", description=_LOCATION)
+    country_id: uuid.UUID | None = Field(default=None, description=_COUNTRY)
     criticality: Criticality = Criticality.medium
     status: VendorStatus = VendorStatus.active
-    workflow_status: WorkflowState = WorkflowState.draft
+    workflow_owner_id: uuid.UUID | None = Field(default=None, description=_WF_OWNER)
     risk_rating: Severity | None = None
     shares_data: bool = False
     assessment_status: AssessmentStatus = AssessmentStatus.not_started
@@ -86,15 +101,17 @@ class VendorUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     category: str | None = None
+    category_id: uuid.UUID | None = Field(default=None, description=_CATEGORY)
     type_id: uuid.UUID | None = None
     contact_name: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None
     website: str | None = None
-    location: str | None = None
+    location: str | None = Field(default=None, description=_LOCATION)
+    country_id: uuid.UUID | None = Field(default=None, description=_COUNTRY)
     criticality: Criticality | None = None
     status: VendorStatus | None = None
-    workflow_status: WorkflowState | None = None
+    workflow_owner_id: uuid.UUID | None = Field(default=None, description=_WF_OWNER)
     risk_rating: Severity | None = None
     shares_data: bool | None = None
     assessment_status: AssessmentStatus | None = None
@@ -112,6 +129,11 @@ class VendorUpdate(BaseModel):
 class VendorRead(VendorBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    workflow_status: WorkflowState = WorkflowState.draft
+    workflow_owner: str = ""
+    category_ref: LookupRef | None = None
+    country_ref: LookupRef | None = None
+    workflow_owner_ref: UserRef | None = None
     type: VendorTypeRead | None = None
     contracts: list[ServiceContractRead] = []
     risks: list[VendorRefItem] = []

@@ -15,6 +15,8 @@ import FileAttachments from "@/components/FileAttachments";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconEvidence, IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ---- inline types (backend: app/schemas/evidence.py, app/schemas/control.py) ----
 type ControlRef = { id: string; name: string; reference: string };
@@ -31,13 +33,28 @@ type Evidence = {
   valid_until: string | null;
   control?: ControlRef | null;
   is_expired: boolean;
+  display_status?: string;
   created_at: string;
 };
 
 type ControlListItem = { id: string; name: string; reference: string };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
+
+// What the register shows. "Valid" with no collection date is a claim about nothing, so
+// uncollected evidence reads "Not collected" whatever its stored status says.
+function statusBadge(ev: Evidence) {
+  const shown = ev.display_status || (ev.is_expired ? "expired" : ev.status);
+  if (shown === "expired") return <Badge tone="critical">Expired</Badge>;
+  if (shown === "not_collected") return <Badge tone="neutral">Not collected</Badge>;
+  return <Badge tone={STATUS_TONE[shown] || "neutral"}>{cap(shown)}</Badge>;
+}
+
+function statusLabel(ev: Evidence) {
+  const shown = ev.display_status || (ev.is_expired ? "expired" : ev.status);
+  return shown === "not_collected" ? "Not collected" : cap(shown);
+}
 
 const TYPES = opts(["document", "screenshot", "log", "link", "configuration", "other"]);
 const STATUS = opts(["pending", "valid", "expired"]);
@@ -66,7 +83,7 @@ const BLANK: FormState = {
   title: "",
   description: "",
   evidence_type: "document",
-  status: "valid",
+  status: "pending",
   reference: "",
   collected_at: "",
   valid_until: "",
@@ -104,6 +121,7 @@ function EvidenceInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [recordId, setRecordId] = useRecordParam("id");
+  const { formatDate, formatDateTime } = useFormat();
   // Read-only detail loaded for the view drawer (?id=). Edit is a separate action.
   const [detail, setDetail] = useState<Evidence | null>(null);
 
@@ -226,19 +244,15 @@ function EvidenceInner() {
       key: "status",
       header: "Status",
       sortable: true,
-      render: (ev) => (
-        <Badge tone={ev.is_expired ? "critical" : STATUS_TONE[ev.status] || "neutral"}>
-          {ev.is_expired && ev.status !== "expired" ? "Expired" : cap(ev.status)}
-        </Badge>
-      ),
+      render: (ev) => statusBadge(ev),
     },
     { key: "control", header: "Control", render: (ev) => <span className="muted">{controlLabel(ev)}</span> },
-    { key: "collected_at", header: "Collected", sortable: true, render: (ev) => <span className="muted">{ev.collected_at || "—"}</span> },
+    { key: "collected_at", header: "Collected", sortable: true, render: (ev) => <span className="muted">{ev.collected_at ? formatDate(ev.collected_at) : "Not collected"}</span> },
     {
       key: "valid_until",
       header: "Valid until",
       sortable: true,
-      render: (ev) => (ev.valid_until ? (ev.is_expired ? <Badge tone="high">{ev.valid_until}</Badge> : <span className="muted">{ev.valid_until}</span>) : <span className="muted">—</span>),
+      render: (ev) => (ev.valid_until ? (ev.is_expired ? <Badge tone="high">{formatDate(ev.valid_until)}</Badge> : <span className="muted">{formatDate(ev.valid_until)}</span>) : <span className="muted">{ev.collected_at ? "No expiry set" : "—"}</span>),
     },
     {
       key: "actions",
@@ -273,7 +287,7 @@ function EvidenceInner() {
         <Field label="Type" help="A label for the artifact. Upload the file in the Files tab, or paste a link under Source & Validity.">
           <Select value={f.evidence_type} onChange={(v) => set("evidence_type", v)} options={TYPES} />
         </Field>
-        <Field label="Status" help="Expired evidence (or one past its valid-until date) is flagged in the list.">
+        <Field label="Status" help="Mark it valid once it has been collected (set the collected date under Source & Validity). Expired evidence, or evidence past its valid-until date, is flagged in the list.">
           <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
         </Field>
       </div>
@@ -341,7 +355,7 @@ function EvidenceInner() {
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? detail.title : "…"}
-        subtitle={detail ? cap(detail.evidence_type) + " · " + (detail.is_expired ? "Expired" : cap(detail.status)) : ""}
+        subtitle={detail ? cap(detail.evidence_type) + " · " + statusLabel(detail) : ""}
         width={640}
         actions={detail && (
           <>
@@ -355,11 +369,7 @@ function EvidenceInner() {
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Control", <span className="chip">{controlLabel(detail)}</span>)}
               {field("Type", <Badge tone="info" plain>{cap(detail.evidence_type)}</Badge>)}
-              {field("Status", (
-                <Badge tone={detail.is_expired ? "critical" : STATUS_TONE[detail.status] || "neutral"}>
-                  {detail.is_expired && detail.status !== "expired" ? "Expired" : cap(detail.status)}
-                </Badge>
-              ))}
+              {field("Status", statusBadge(detail))}
             </div>
 
             {detail.description && (
@@ -373,11 +383,11 @@ function EvidenceInner() {
               {field("Reference", detail.reference ? (
                 <a href={detail.reference} target="_blank" rel="noreferrer">{detail.reference}</a>
               ) : "—")}
-              {field("Collected at", detail.collected_at || "—")}
+              {field("Collected at", detail.collected_at ? formatDate(detail.collected_at) : "Not collected")}
               {field("Valid until", detail.valid_until ? (
-                detail.is_expired ? <Badge tone="high">{detail.valid_until}</Badge> : detail.valid_until
-              ) : "—")}
-              {field("Created", detail.created_at ? detail.created_at.slice(0, 10) : "—")}
+                detail.is_expired ? <Badge tone="high">{formatDate(detail.valid_until)}</Badge> : formatDate(detail.valid_until)
+              ) : (detail.collected_at ? "No expiry set" : "—"))}
+              {field("Created", formatDateTime(detail.created_at))}
             </div>
 
             <div style={{ marginBottom: 8 }}>

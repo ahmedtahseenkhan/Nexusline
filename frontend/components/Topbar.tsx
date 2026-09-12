@@ -69,7 +69,8 @@ export default function Topbar({ user }: { user: Me | null }) {
   const searchRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    api.notifications().then((r) => setUnseen(r.unseen_count)).catch(() => {});
+    // Only the badge count is needed here; the count covers the whole feed, not the page.
+    api.notifications(1).then((r) => setUnseen(r.unseen_count)).catch(() => {});
   }, [pathname]);
 
   // Debounced global search.

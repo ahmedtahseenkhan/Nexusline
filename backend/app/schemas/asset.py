@@ -221,7 +221,6 @@ class AssetWrite(BaseModel):
     last_seen: date | None = None
     review_frequency: ReviewFrequency = ReviewFrequency.annual
     next_review_date: date | None = None
-    workflow_status: WorkflowStatus = WorkflowStatus.draft
     classification_ids: list[uuid.UUID] = []
     tag_ids: list[uuid.UUID] = []
     process_ids: list[uuid.UUID] = []
@@ -278,7 +277,6 @@ class AssetUpdate(BaseModel):
     last_seen: date | None = None
     review_frequency: ReviewFrequency | None = None
     next_review_date: date | None = None
-    workflow_status: WorkflowStatus | None = None
     classification_ids: list[uuid.UUID] | None = None
     tag_ids: list[uuid.UUID] | None = None
     process_ids: list[uuid.UUID] | None = None

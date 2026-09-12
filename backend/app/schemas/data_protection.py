@@ -31,7 +31,6 @@ class DpiaBase(BaseModel):
     owner: str = ""
     dpo_reviewer: str = ""
     review_date: date | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class DpiaCreate(DpiaBase):
@@ -50,10 +49,11 @@ class DpiaUpdate(BaseModel):
     owner: str | None = None
     dpo_reviewer: str | None = None
     review_date: date | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class DpiaRead(DpiaBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -71,7 +71,6 @@ class DsarBase(BaseModel):
     handler: str = ""
     notes: str = ""
     status: DsarStatus = DsarStatus.received
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class DsarCreate(DsarBase):
@@ -88,10 +87,11 @@ class DsarUpdate(BaseModel):
     handler: str | None = None
     notes: str | None = None
     status: DsarStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class DsarRead(DsarBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -118,7 +118,6 @@ class DataBreachBase(BaseModel):
     owner: str = ""
     root_cause: str = ""
     remediation: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class DataBreachCreate(DataBreachBase):
@@ -144,10 +143,11 @@ class DataBreachUpdate(BaseModel):
     owner: str | None = None
     root_cause: str | None = None
     remediation: str | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class DataBreachRead(DataBreachBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     incident_id: uuid.UUID | None = None

@@ -48,7 +48,6 @@ class CctBase(BaseModel):
     last_result: CcmResult = CcmResult.not_run
     pass_rate: float = Field(default=0, ge=0, le=100)
     status: CcmStatus = CcmStatus.active
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class CctCreate(CctBase):
@@ -67,10 +66,11 @@ class CctUpdate(BaseModel):
     last_result: CcmResult | None = None
     pass_rate: float | None = Field(default=None, ge=0, le=100)
     status: CcmStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class CctRead(CctBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -91,7 +91,6 @@ class ConnectorBase(BaseModel):
     config_note: str = ""
     status: ConnectorStatus = ConnectorStatus.configured
     last_sync: date | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class ConnectorCreate(ConnectorBase):
@@ -109,10 +108,11 @@ class ConnectorUpdate(BaseModel):
     config_note: str | None = None
     status: ConnectorStatus | None = None
     last_sync: date | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class ConnectorRead(ConnectorBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

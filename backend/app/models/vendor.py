@@ -62,6 +62,9 @@ class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(100), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     type_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("vendor_types.id", ondelete="SET NULL"), nullable=True
     )
@@ -72,6 +75,9 @@ class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     contact_phone: Mapped[str] = mapped_column(String(60), default="")
     website: Mapped[str] = mapped_column(String(255), default="")
     location: Mapped[str] = mapped_column(String(200), default="")
+    country_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `location`
 
     criticality: Mapped[Criticality] = mapped_column(
         SAEnum(Criticality, name="criticality"), default=Criticality.medium, nullable=False

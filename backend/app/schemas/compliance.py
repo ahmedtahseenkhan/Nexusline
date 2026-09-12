@@ -3,11 +3,12 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.common import GraphRef
 
 from app.models.base import WorkflowState
+from app.models.compliance import FRAMEWORK_KINDS
 from app.models.enums import (
     ComplianceStatus,
     ComplianceTreatment,
@@ -26,31 +27,75 @@ class CompRef(BaseModel):
 
 
 # --------------------------------------------------------------------- Framework
+_KIND_HELP = (
+    "compliance | maturity | guidance. A compliance framework's clauses are obligations and "
+    "feed the compliance percentage; maturity and guidance frameworks (ISO 31000, ISO 27005) "
+    "are self-assessed and never counted as non-compliant."
+)
+
+
+def _check_kind(value: str | None) -> str | None:
+    if value is None:
+        return value
+    value = value.strip().lower()
+    if value not in FRAMEWORK_KINDS:
+        raise ValueError(f"kind must be one of: {', '.join(FRAMEWORK_KINDS)}")
+    return value
+
+
 class FrameworkBase(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+    kind: str = Field(default="compliance", description=_KIND_HELP)
     version: str = ""
     authority: str = ""
     regulator: str = ""
     scope: str = ""
     description: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class FrameworkCreate(FrameworkBase):
-    pass
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v: str) -> str:
+        return _check_kind(v)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Name is required")
+        return v
 
 
 class FrameworkUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
+    kind: str | None = Field(default=None, description=_KIND_HELP)
     version: str | None = None
     authority: str | None = None
     regulator: str | None = None
     scope: str | None = None
     description: str | None = None
-    workflow_status: WorkflowState | None = None
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v: str | None) -> str | None:
+        return _check_kind(v)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("Name is required")
+        return v
 
 
 class FrameworkRead(FrameworkBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     requirement_count: int
@@ -84,6 +129,9 @@ class RequirementBase(BaseModel):
     reference: str = ""
     title: str = Field(min_length=1, max_length=255)
     description: str = ""
+    #: Statement of Applicability: why the clause is in or out of scope. Required when
+    #: the clause is excluded (treatment or status "not applicable").
+    applicability_justification: str = ""
     domain: str = ""
     audit_questionnaire: str = ""
     status: ComplianceStatus = ComplianceStatus.not_assessed
@@ -92,7 +140,6 @@ class RequirementBase(BaseModel):
     efficacy: int | None = Field(default=None, ge=0, le=100)
     implementation: str = ""
     legal_id: uuid.UUID | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class RequirementCreate(RequirementBase):
@@ -105,6 +152,7 @@ class RequirementUpdate(BaseModel):
     reference: str | None = None
     title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
+    applicability_justification: str | None = None
     domain: str | None = None
     audit_questionnaire: str | None = None
     status: ComplianceStatus | None = None
@@ -113,13 +161,14 @@ class RequirementUpdate(BaseModel):
     efficacy: int | None = Field(default=None, ge=0, le=100)
     implementation: str | None = None
     legal_id: uuid.UUID | None = None
-    workflow_status: WorkflowState | None = None
     control_ids: list[uuid.UUID] | None = None
     risk_ids: list[uuid.UUID] | None = None
     policy_ids: list[uuid.UUID] | None = None
 
 
 class RequirementRead(RequirementBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     framework_id: uuid.UUID
@@ -194,18 +243,137 @@ class GapAnalysis(BaseModel):
     failing: int = 0
     compliant_pct: float
     gaps: list[GapItem]
+    #: compliance | maturity | guidance. For a non-compliance kind ``compliant_pct`` is
+    #: not a compliance score; show ``assessed`` of ``total_requirements`` instead.
+    kind: str = "compliance"
+    #: Requirements with a status other than not assessed (self-assessment progress).
+    assessed: int = 0
 
 
 class FrameworkSummary(BaseModel):
     framework_id: uuid.UUID
     name: str
+    kind: str = "compliance"
     total_requirements: int
     compliant: int
     compliant_pct: float
+    assessed: int = 0
 
 
 class ComplianceSummary(BaseModel):
     total_frameworks: int
     total_requirements: int
+    #: Across compliance-kind frameworks only: a maturity self-assessment (ISO 31000)
+    #: is not an obligation and does not move the compliance percentage.
     overall_compliant_pct: float
     frameworks: list[FrameworkSummary]
+
+
+# ----------------------------------------------------- Statement of Applicability
+class SoaControlRead(BaseModel):
+    id: uuid.UUID
+    reference: str = ""
+    name: str = ""
+    effectiveness: str = "not_assessed"
+    status: str = ""
+    last_test_date: date | None = None
+    last_test_result: str | None = None
+
+
+class SoaRowRead(BaseModel):
+    requirement_id: uuid.UUID
+    reference: str
+    title: str
+    domain: str = ""
+    #: False when the clause's treatment or status is "not applicable".
+    applicable: bool
+    justification: str = ""
+    #: The clause's compliance status (not assessed … compliant).
+    implementation_status: str
+    treatment: str | None = None
+    #: unmapped | unassessed | failing | assured.
+    coverage: str = "unmapped"
+    controls: list[SoaControlRead] = []
+    #: The most recent test across the implementing controls.
+    last_test_date: date | None = None
+    last_test_result: str | None = None
+
+
+class SoaSummary(BaseModel):
+    total: int = 0
+    applicable: int = 0
+    excluded: int = 0
+    #: Applicable clauses with no implementing control.
+    no_control: int = 0
+    #: Exclusions recorded before the rule existed, with no justification.
+    missing_justification: int = 0
+
+
+class StatementOfApplicabilityRead(BaseModel):
+    framework_id: uuid.UUID
+    framework_name: str
+    version: str = ""
+    organisation: str = ""
+    generated_at: datetime
+    summary: SoaSummary
+    rows: list[SoaRowRead]
+
+
+class ApplicabilityUpdate(BaseModel):
+    """Include or exclude a clause. Excluding needs a justification (ISO/IEC 27001
+    6.1.3 d); including without one clears a previous exclusion reason."""
+
+    applicable: bool
+    justification: str | None = Field(default=None, max_length=4000)
+
+
+# ------------------------------------------------------ Suggested requirements (D-03)
+class RequirementSuggestionRead(BaseModel):
+    requirement_id: uuid.UUID
+    framework_id: uuid.UUID | None = None
+    framework: str
+    reference: str
+    title: str
+    #: 0-1; higher is a stronger match. Deterministic for the same data.
+    score: float
+    #: Why it was suggested: synonym match, shared keywords, crosswalk, shared scenarios.
+    reasons: list[str] = []
+
+
+class AcceptSuggestionsBody(BaseModel):
+    requirement_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
+class AcceptSuggestionsResult(BaseModel):
+    #: Links written (already-linked requirements are skipped, not counted).
+    linked: int
+    requirement_ids: list[uuid.UUID] = []
+
+
+class BulkSuggestBody(BaseModel):
+    control_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    min_score: float = Field(default=0.5, ge=0, le=1)
+    #: Suggestions per control.
+    limit: int = Field(default=5, ge=1, le=25)
+
+
+class ControlSuggestionsRead(BaseModel):
+    control_id: uuid.UUID
+    reference: str = ""
+    name: str = ""
+    suggestions: list[RequirementSuggestionRead] = []
+
+
+class SuggestionPair(BaseModel):
+    control_id: uuid.UUID
+    requirement_id: uuid.UUID
+
+
+class BulkAcceptBody(BaseModel):
+    pairs: list[SuggestionPair] = Field(min_length=1, max_length=5000)
+
+
+class BulkAcceptResult(BaseModel):
+    linked: int
+    #: Controls that gained at least one link.
+    controls: int

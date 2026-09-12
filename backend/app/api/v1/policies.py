@@ -16,18 +16,6 @@ from app.models.control import Control, control_policies
 from app.models.enums import PolicyStatus
 from app.models.policy import Policy, PolicyAcknowledgment, PolicyReview
 from app.models.risk import Risk, risk_policies
-
-
-def _loads():
-    return (
-        selectinload(Policy.related),
-        selectinload(Policy.controls),
-        selectinload(Policy.requirements),
-        selectinload(Policy.risks),
-        selectinload(Policy.reviews),
-        selectinload(Policy.acknowledgments),
-        selectinload(Policy.label),
-    )
 from app.schemas.common import Page
 from app.schemas.policy import (
     PolicyAcknowledgmentRead,
@@ -40,10 +28,46 @@ from app.schemas.policy import (
 )
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import delete_guard
 from app.services import dual_control
+from app.services import ref_fields
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/policies", tags=["policies"])
+
+
+def _loads():
+    return (
+        selectinload(Policy.related),
+        selectinload(Policy.controls),
+        selectinload(Policy.requirements),
+        selectinload(Policy.risks),
+        selectinload(Policy.reviews),
+        selectinload(Policy.acknowledgments),
+        selectinload(Policy.label),
+    )
+
+#: The policy's picked fields (phase 1). See services.ref_fields.
+POLICY_REFS: tuple[ref_fields.RefField, ...] = (
+    ref_fields.user("owner_id", "owner"),
+    ref_fields.lookup(Policy, "category_id", "category"),
+    ref_fields.WORKFLOW_OWNER,
+)
+REVIEW_REFS: tuple[ref_fields.RefField, ...] = (ref_fields.user("reviewer_id", "reviewer"),)
+
+
+async def _reads(db, policies) -> list[PolicyRead]:
+    """Serialise a page of policies with every pick resolved — one query per kind for
+    the policies and one for all their reviewers, whatever the page size."""
+    items = [PolicyRead.model_validate(p) for p in policies]
+    await ref_fields.fill_refs(db, list(zip(policies, items)), POLICY_REFS)
+    reviews = [pair for p, rd in zip(policies, items) for pair in zip(p.reviews, rd.reviews)]
+    await ref_fields.fill_refs(db, reviews, REVIEW_REFS)
+    return items
+
+
+async def _read(db, policy) -> PolicyRead:
+    return (await _reads(db, [policy]))[0]
 
 
 async def _load(db, policy_id: uuid.UUID) -> Policy:
@@ -145,6 +169,8 @@ _POLICY_SORTABLE = {
 async def list_policies(
     db: DbSession,
     search: str | None = None,
+    owner_id: uuid.UUID | None = None,
+    category_id: uuid.UUID | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -153,6 +179,10 @@ async def list_policies(
     stmt = select(Policy).where(Policy.deleted.is_(False))
     if search:
         stmt = stmt.where(Policy.title.ilike(f"%{search}%") | Policy.reference.ilike(f"%{search}%"))
+    if owner_id is not None:
+        stmt = stmt.where(Policy.owner_id == owner_id)
+    if category_id is not None:
+        stmt = stmt.where(Policy.category_id == category_id)
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
         stmt = apply_sort(stmt, params, _POLICY_SORTABLE, default=Policy.reference)
@@ -162,9 +192,7 @@ async def list_policies(
     rows = (
         await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))
     ).all()
-    return Page(
-        items=[PolicyRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
-    )
+    return Page(items=await _reads(db, list(rows)), total=total, limit=limit, offset=offset)
 
 
 @router.post(
@@ -175,6 +203,8 @@ async def list_policies(
 )
 async def create_policy(body: PolicyCreate, db: DbSession, user: CurrentUser) -> PolicyRead:
     data = body.model_dump()
+    _check_initial_status(user, data.get("status"))
+    await ref_fields.apply_refs(db, Policy, data, POLICY_REFS)
     obj = Policy(tenant_id=user.tenant_id)
     stash = await _apply_related(db, obj, data)
     for field, value in data.items():
@@ -189,12 +219,12 @@ async def create_policy(body: PolicyCreate, db: DbSession, user: CurrentUser) ->
         db, actor=user, action="create", entity_type="policy", entity_id=obj.id,
         summary=f"Created policy {obj.reference}: {obj.title}",
     )
-    return PolicyRead.model_validate(await _load(db, obj.id))
+    return await _read(db, await _load(db, obj.id))
 
 
 @router.get("/{policy_id}", response_model=PolicyRead, dependencies=[Depends(require("policy:read"))])
 async def get_policy(policy_id: uuid.UUID, db: DbSession) -> PolicyRead:
-    return PolicyRead.model_validate(await _load(db, policy_id))
+    return await _read(db, await _load(db, policy_id))
 
 
 @router.patch(
@@ -205,6 +235,10 @@ async def update_policy(
 ) -> PolicyRead:
     obj = await _load(db, policy_id)
     data = body.model_dump(exclude_unset=True)
+    refusal = status_edit_refusal(obj.status, data.get("status"))
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=refusal)
+    await ref_fields.apply_refs(db, Policy, data, POLICY_REFS, record=obj)
     stash = await _apply_related(db, obj, data)
     for field, value in data.items():
         setattr(obj, field, value)
@@ -217,7 +251,49 @@ async def update_policy(
         db, actor=user, action="update", entity_type="policy", entity_id=obj.id,
         summary=f"Updated policy {obj.reference}: {obj.title}",
     )
-    return PolicyRead.model_validate(await _load(db, obj.id))
+    return await _read(db, await _load(db, obj.id))
+
+
+#: Business statuses a policy reaches only through the approval lifecycle (Submit for
+#: review → Approve, then Publish), never by editing the field.
+LIFECYCLE_STATUSES = (PolicyStatus.under_review, PolicyStatus.approved, PolicyStatus.published)
+
+
+def status_edit_refusal(current, wanted) -> str | None:
+    """Why an edit may not set this policy status, or None. Pure."""
+    if wanted is None or wanted == current or wanted not in LIFECYCLE_STATUSES:
+        return None
+    step = "Publish" if wanted == PolicyStatus.published else "Submit for review and Approve"
+    return f"A policy becomes {wanted.value.replace('_', ' ')} through {step}, not by editing its status."
+
+
+def publish_refusal(workflow_status, business_status) -> str | None:
+    """Why this policy can't be published yet, or None. Pure."""
+    state = getattr(workflow_status, "value", workflow_status)
+    if state == "approved" or business_status in (PolicyStatus.approved, PolicyStatus.published):
+        return None
+    return (
+        "Approve this policy before publishing it: submit it for review, and an "
+        "independent approver approves it."
+    )
+
+
+def _check_initial_status(user, wanted) -> None:
+    """A new policy starts as a draft unless the creator could approve it (a migration
+    bringing already-approved policies in, say)."""
+    if wanted is None or wanted not in LIFECYCLE_STATUSES:
+        return
+    from app.services.record_workflow import required_permissions
+
+    needed = required_permissions("policy", "approve")
+    if not set(needed).issubset(set(user.permission_codes or [])):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"A new policy starts as a draft. Creating one as {wanted.value.replace('_', ' ')} "
+                f"needs approval rights ({', '.join(needed)})."
+            ),
+        )
 
 
 @router.post(
@@ -228,8 +304,11 @@ async def update_policy(
 )
 async def publish_policy(policy_id: uuid.UUID, db: DbSession, user: CurrentUser) -> PolicyRead:
     obj = await _load(db, policy_id)
-    # Publishing is the policy's approval moment — it becomes binding on staff. The
-    # author cannot approve their own policy.
+    refusal = publish_refusal(obj.workflow_status, obj.status)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
+    # Publishing makes the approved policy binding on staff. The author cannot publish
+    # their own policy either.
     await dual_control.enforce_record_maker_checker(
         db, module="policy", action="publish", entity_type="policy", entity_id=obj.id,
         checker_id=user.id, subject="policy publication",
@@ -241,7 +320,7 @@ async def publish_policy(policy_id: uuid.UUID, db: DbSession, user: CurrentUser)
         db, actor=user, action="publish", entity_type="policy", entity_id=obj.id,
         summary=f"Published policy {obj.reference}",
     )
-    return PolicyRead.model_validate(await _load(db, obj.id))
+    return await _read(db, await _load(db, obj.id))
 
 
 @router.post(
@@ -277,12 +356,23 @@ async def acknowledge_policy(
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require("policy:write"))],
 )
-async def delete_policy(policy_id: uuid.UUID, db: DbSession) -> None:
+async def delete_policy(policy_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    """Archive a policy (soft delete, audit-logged).
+
+    **Dual control** ``policy / delete``: while segregation of duties applies, whoever
+    entered the policy (``dual_control.maker_of``) cannot also archive it — 403.
+    """
     from datetime import datetime, timezone
 
     obj = await _load(db, policy_id)
+    await delete_guard.enforce(db, entity_type="policy", record=obj, user=user, label="policy")
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="delete", entity_type="policy", entity_id=obj.id,
+        summary=f"Archived policy {obj.reference}: {obj.title}",
+    )
 
 
 # ----------------------------------------------------------------- review cycle
@@ -292,20 +382,30 @@ async def delete_policy(policy_id: uuid.UUID, db: DbSession) -> None:
 )
 async def list_policy_reviews(policy_id: uuid.UUID, db: DbSession) -> list[PolicyReviewRead]:
     obj = await _load(db, policy_id)
-    return [PolicyReviewRead.model_validate(r) for r in obj.reviews]
+    items = [PolicyReviewRead.model_validate(r) for r in obj.reviews]
+    await ref_fields.fill_refs(db, list(zip(obj.reviews, items)), REVIEW_REFS)
+    return items
 
 
 @router.post(
     "/{policy_id}/reviews", response_model=PolicyRead, status_code=201,
     dependencies=[Depends(require("policy:write"))],
 )
-async def schedule_policy_review(policy_id: uuid.UUID, body: PolicyReviewCreate, db: DbSession) -> PolicyRead:
+async def schedule_policy_review(
+    policy_id: uuid.UUID, body: PolicyReviewCreate, db: DbSession, user: CurrentUser
+) -> PolicyRead:
     obj = await _load(db, policy_id)
-    db.add(PolicyReview(tenant_id=obj.tenant_id, policy_id=obj.id, planned_date=body.planned_date,
-                        reviewer=body.reviewer, comments=body.comments))
+    fields = body.model_dump()
+    await ref_fields.apply_refs(db, PolicyReview, fields, REVIEW_REFS)
+    db.add(PolicyReview(tenant_id=obj.tenant_id, policy_id=obj.id, **fields))
     obj.next_review_date = body.planned_date
     await db.flush()
-    return PolicyRead.model_validate(await _load(db, obj.id))
+    await audit.record(
+        db, actor=user, action="schedule_review", entity_type="policy", entity_id=obj.id,
+        summary=f"Scheduled a review of policy {obj.reference} for {body.planned_date}"
+        + (f" by {fields['reviewer']}" if fields.get("reviewer") else ""),
+    )
+    return await _read(db, await _load(db, obj.id))
 
 
 @router.post(
@@ -328,4 +428,4 @@ async def complete_policy_review(
     await audit.record(db, actor=user, action="review", entity_type="policy", entity_id=obj.id,
                        summary=f"Reviewed policy {obj.reference}")
     await db.flush()
-    return PolicyRead.model_validate(await _load(db, obj.id))
+    return await _read(db, await _load(db, obj.id))

@@ -49,7 +49,13 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, 
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(100), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     classification: Mapped[str] = mapped_column(String(120), default="")
+    classification_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `classification`
     severity: Mapped[Severity] = mapped_column(
         SAEnum(Severity, name="severity"), default=Severity.medium, nullable=False
     )
@@ -66,7 +72,13 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, 
         nullable=False,
     )
     assignee: Mapped[str] = mapped_column(String(200), default="")
+    assignee_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `assignee`
     reported_by: Mapped[str] = mapped_column(String(200), default="")
+    reported_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `reported_by`
     impact: Mapped[str] = mapped_column(Text, default="")
     root_cause: Mapped[str] = mapped_column(Text, default="")
     lessons_learned: Mapped[str] = mapped_column(Text, default="")
@@ -78,6 +90,9 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, 
     # Regulatory reporting (e.g. SBP breach notification obligations).
     is_reportable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     regulator: Mapped[str] = mapped_column(String(64), default="")
+    regulator_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `regulator`
 
     regulatory_reports: Mapped[list["RegulatoryReport"]] = relationship(
         back_populates="incident", cascade="all, delete-orphan", lazy="selectin",
@@ -168,6 +183,9 @@ class RegulatoryReport(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     reference: Mapped[str] = mapped_column(String(120), default="")  # regulator acknowledgement ref
     summary: Mapped[str] = mapped_column(Text, default="")
     submitted_by: Mapped[str] = mapped_column(String(200), default="")
+    submitted_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `submitted_by`
 
     incident: Mapped[Incident] = relationship(back_populates="regulatory_reports")
 

@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.common import GraphRef
+from app.schemas.common import GraphRef, LookupRef, UserRef
 
 from app.models.base import WorkflowState
 from app.models.enums import PolicyDocType, PolicyStatus, ReviewFrequency
@@ -19,17 +19,25 @@ class PolicyRefItem(BaseModel):
     name: str = ""
 
 
+_LEGACY = "Legacy free text, accepted for one release; send the *_id instead. "
+
+
 class PolicyBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     summary: str = ""
     body: str = ""
     url: str = ""
-    category: str = ""
+    # Phase 1: category and owner are picked; the text columns are kept in step with the
+    # keys (and matched onto them when sent alone) — see services.ref_fields.
+    category_id: uuid.UUID | None = None
+    category: str = Field(default="", description=_LEGACY + "Matched onto a policy category.")
     document_type: PolicyDocType = PolicyDocType.policy
     version: str = "1.0"
     status: PolicyStatus = PolicyStatus.draft
-    workflow_status: WorkflowState = WorkflowState.draft
-    owner: str = ""
+    # ``workflow_status`` is not writable: it moves only through the record lifecycle.
+    workflow_owner_id: uuid.UUID | None = None
+    owner_id: uuid.UUID | None = None
+    owner: str = Field(default="", description=_LEGACY + "Matched onto a user by email or name.")
     label_id: uuid.UUID | None = None
     use_attachments: bool = False
     review_frequency: ReviewFrequency = ReviewFrequency.annual
@@ -47,12 +55,14 @@ class PolicyUpdate(BaseModel):
     summary: str | None = None
     body: str | None = None
     url: str | None = None
-    category: str | None = None
+    category_id: uuid.UUID | None = None
+    category: str | None = Field(default=None, description=_LEGACY)
     document_type: PolicyDocType | None = None
     version: str | None = None
     status: PolicyStatus | None = None
-    workflow_status: WorkflowState | None = None
-    owner: str | None = None
+    workflow_owner_id: uuid.UUID | None = None
+    owner_id: uuid.UUID | None = None
+    owner: str | None = Field(default=None, description=_LEGACY)
     label_id: uuid.UUID | None = None
     use_attachments: bool | None = None
     review_frequency: ReviewFrequency | None = None
@@ -64,7 +74,8 @@ class PolicyUpdate(BaseModel):
 
 class PolicyReviewCreate(BaseModel):
     planned_date: date
-    reviewer: str = ""
+    reviewer_id: uuid.UUID | None = None
+    reviewer: str = Field(default="", description=_LEGACY + "Matched onto a user by email or name.")
     comments: str = ""
 
 
@@ -77,7 +88,9 @@ class PolicyReviewRead(BaseModel):
     id: uuid.UUID
     planned_date: date
     actual_review_date: date | None
-    reviewer: str
+    reviewer: str  # legacy text: the reviewer's name
+    reviewer_id: uuid.UUID | None = None
+    reviewer_ref: UserRef | None = None
     comments: str
     created_at: datetime
 
@@ -86,6 +99,12 @@ class PolicyRead(PolicyBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
+    # Resolved picks (``owner`` / ``category`` stay as the legacy text).
+    owner_ref: UserRef | None = None
+    category_ref: LookupRef | None = None
+    workflow_status: WorkflowState = WorkflowState.draft
+    workflow_owner: str = ""  # legacy text
+    workflow_owner_ref: UserRef | None = None
     next_review_date: date | None
     last_review_date: date | None
     published_at: date | None

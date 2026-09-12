@@ -7,6 +7,7 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { sentenceCase } from "@/lib/text";
 
 const TYPES = ["text", "textarea", "number", "date", "select", "checkbox"];
 
@@ -57,7 +58,7 @@ export default function CustomFieldsPage() {
   }
 
   const columns: Column<CustomField>[] = [
-    { key: "model", header: "Module", sortable: true, render: (f) => <span className="muted" style={{ textTransform: "capitalize" }}>{f.model.replace(/_/g, " ")}</span> },
+    { key: "model", header: "Module", sortable: true, render: (f) => <span className="muted">{sentenceCase(f.model)}</span> },
     { key: "label", header: "Label", sortable: true, render: (f) => <span className="cell-title">{f.label}</span> },
     { key: "field_type", header: "Type", sortable: true, render: (f) => <Badge tone="info">{f.field_type}</Badge> },
     { key: "required", header: "Required", render: (f) => (f.required ? <Badge tone="medium">required</Badge> : <span className="muted">optional</span>) },
@@ -79,7 +80,7 @@ export default function CustomFieldsPage() {
           <div style={{ flex: "0 0 180px" }}>
             <label className="label">Module</label>
             <select className="input" value={model} onChange={(e) => setModel(e.target.value)}>
-              {models.map((m) => <option key={m} value={m}>{m}</option>)}
+              {models.map((m) => <option key={m} value={m}>{sentenceCase(m)}</option>)}
             </select>
           </div>
           <div style={{ flex: "1 1 220px" }}>
@@ -114,7 +115,7 @@ export default function CustomFieldsPage() {
         toolbarRight={
           <select className="input" style={{ maxWidth: 200 }} value={filterModel} onChange={(e) => setFilterModel(e.target.value)}>
             <option value="">All modules</option>
-            {models.map((m) => <option key={m} value={m}>{m}</option>)}
+            {models.map((m) => <option key={m} value={m}>{sentenceCase(m)}</option>)}
           </select>
         }
         emptyMessage="No custom fields yet. Add one above to extend a module."

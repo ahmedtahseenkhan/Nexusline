@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, setToken } from "@/lib/api";
 import { IconNexus } from "@/components/icons";
@@ -14,6 +14,14 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [challenge, setChallenge] = useState<string | null>(null);
   const [code, setCode] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Arriving from forced MFA enrolment: say what happens next.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("mfa") === "enabled") {
+      setNotice("Two-factor authentication is on. Sign in again and enter a code from your authenticator app.");
+    }
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -23,7 +31,12 @@ export default function LoginPage() {
       const res = await api.login(tenant, email, password);
       if (res.mfa_required && res.challenge_token) {
         setChallenge(res.challenge_token);
+      } else if (res.access_token && res.mfa_enrolment_required) {
+        // Grace period over: this token can only enrol in MFA.
+        setToken(res.access_token);
+        router.push("/mfa-setup");
       } else if (res.access_token) {
+        // Inside a grace period the app shell shows the "MFA required from …" banner.
         setToken(res.access_token);
         router.push("/dashboard");
       }
@@ -109,6 +122,11 @@ export default function LoginPage() {
         </div>
         <h1>Welcome back</h1>
         <p className="sub">Sign in to your governance workspace.</p>
+        {notice && (
+          <div role="status" style={{ background: "var(--green-bg)", color: "var(--green)", border: "1px solid #bfe3cc", borderRadius: 6, padding: "8px 12px", fontSize: 13, marginBottom: 12 }}>
+            {notice}
+          </div>
+        )}
 
         <label className="label">Organization</label>
         <input className="input" value={tenant} onChange={(e) => setTenant(e.target.value)} placeholder="org-slug" />
@@ -130,7 +148,8 @@ export default function LoginPage() {
         </button>
 
         <p className="hint">
-          Demo · org <strong>acme</strong> · admin@acme.com / ChangeMe123!
+          Demo · org <strong>acme</strong> · admin@acme.com / ChangeMe123! (checker) ·
+          ayesha.siddiqui@acme.com, same password (maker)
         </p>
       </form>
     </div>

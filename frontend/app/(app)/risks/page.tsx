@@ -6,6 +6,16 @@ import { api, apiCall, type CustomField, type MatrixLevel, type RiskAcceptance, 
 import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
+import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
+import { cachedBusinessUnits, pickProcesses, type LookupRef, type UserRef } from "@/lib/masterData";
+import UserPicker, { UserName } from "@/components/UserPicker";
+import LookupSelect from "@/components/LookupSelect";
+import BusinessUnitSelect from "@/components/BusinessUnitSelect";
+import ProcessSelect from "@/components/ProcessSelect";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import CustomFieldsEditor from "@/components/CustomFieldsEditor";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
@@ -28,6 +38,7 @@ import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
 
 // --------------------------------------------------------------- inline types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -37,9 +48,13 @@ type RiskRow = {
   reference: string;
   title: string;
   description: string;
+  /** Legacy free text, kept in step with the picked category. */
   category: string;
+  category_id: string | null;
+  category_ref: (LookupRef & { path?: string }) | null;
   status: string;
   owner_id: string | null;
+  owner_ref: UserRef | null;
 
   inherent_likelihood: number;
   inherent_impact: number;
@@ -49,6 +64,11 @@ type RiskRow = {
   residual_score: number | null;
   inherent_severity: string | null;
   residual_severity: string | null;
+  residual_override_reason?: string;
+
+  // Raised when something the risk depended on changed underneath it; one reason per line.
+  needs_review?: boolean;
+  review_reason?: string;
 
   annual_loss_frequency: number | null;
   single_loss_expectancy: number | null;
@@ -56,7 +76,10 @@ type RiskRow = {
 
   treatment_strategy: string | null;
   treatment_description: string;
+  /** Legacy free text; shown only while no user is picked. */
   treatment_owner: string;
+  treatment_owner_id: string | null;
+  treatment_owner_ref: UserRef | null;
   treatment_deadline: string | null;
   treatment_cost: number | null;
 
@@ -64,8 +87,8 @@ type RiskRow = {
   last_review_date: string | null;
   next_review_date: string | null;
   expired_reviews: number;
+  /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
-  workflow_owner: string;
 
   control_health?: string;
 
@@ -92,16 +115,13 @@ type RiskRow = {
   audit_findings?: Ref[];
 };
 
-type Page<T> = { items: T[] };
 type Named = { id: string; name?: string; reference?: string; title?: string };
-type UserRow = { id: string; email: string; full_name: string };
 
 // --------------------------------------------------------------- option helpers
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const STATUS = opts(["draft", "assessed", "treatment_planned", "treatment_in_progress", "accepted", "closed"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const STRATEGY = opts(["mitigate", "accept", "transfer", "avoid"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 /** Score options for the tenant's matrix — a 4x4 register must not offer a 5. */
@@ -117,12 +137,11 @@ const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neut
   draft: "neutral",
 };
 
-function money(n: number | null | undefined) {
-  if (!n) return "—";
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
-  return `$${n.toFixed(0)}`;
-}
+/** The picked category as the list shows it: "Parent › Child", else the legacy text. */
+const categoryText = (r: Pick<RiskRow, "category" | "category_ref">) =>
+  r.category_ref ? r.category_ref.path || r.category_ref.label : r.category || "";
+
+const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
 
 function isOverdue(d: string | null): boolean {
   if (!d) return false;
@@ -145,24 +164,32 @@ function controlHealth(v: string | null | undefined): React.ReactNode {
   return <span className="muted">—</span>;
 }
 
+/** One reason per line on the risk; shown as the badge's tooltip and in the drawer. */
+const reviewReasons = (r: { review_reason?: string }) =>
+  (r.review_reason || "").split("\n").filter((x) => x.trim());
+
+const REVIEW_FILTER: Option[] = [
+  { value: "true", label: "Needs review" },
+  { value: "false", label: "No review needed" },
+];
+
 // --------------------------------------------------------------- form state
 type FormState = {
   title: string;
   description: string;
-  category: string;
+  category_id: string | null;
   status: string;
-  workflow_status: string;
-  workflow_owner: string;
-  owner_id: string;
+  owner_id: string | null;
   inherent_likelihood: number | "";
   inherent_impact: number | "";
   residual_likelihood: string;
   residual_impact: string;
+  residual_override_reason: string;
   annual_loss_frequency: number | "";
   single_loss_expectancy: number | "";
   treatment_strategy: string;
   treatment_description: string;
-  treatment_owner: string;
+  treatment_owner_id: string | null;
   treatment_deadline: string;
   treatment_cost: number | "";
   review_frequency: string;
@@ -182,12 +209,11 @@ const refToOpt = (x: Ref): AsyncOption => ({
 });
 
 const BLANK: FormState = {
-  title: "", description: "", category: "", status: "draft",
-  workflow_status: "draft", workflow_owner: "", owner_id: "",
+  title: "", description: "", category_id: null, status: "draft", owner_id: null,
   inherent_likelihood: 3, inherent_impact: 3,
-  residual_likelihood: "", residual_impact: "",
+  residual_likelihood: "", residual_impact: "", residual_override_reason: "",
   annual_loss_frequency: "", single_loss_expectancy: "",
-  treatment_strategy: "", treatment_description: "", treatment_owner: "",
+  treatment_strategy: "", treatment_description: "", treatment_owner_id: null,
   treatment_deadline: "", treatment_cost: "", review_frequency: "annual",
   business_unit_ids: [], process_ids: [],
   asset_ids: [], control_ids: [], threat_ids: [], vulnerability_ids: [], policy_ids: [], incident_ids: [],
@@ -197,20 +223,19 @@ function fromRisk(r: RiskRow): FormState {
   return {
     title: r.title,
     description: r.description || "",
-    category: r.category || "",
+    category_id: r.category_id ?? null,
     status: r.status,
-    workflow_status: r.workflow_status,
-    workflow_owner: r.workflow_owner || "",
-    owner_id: r.owner_id || "",
+    owner_id: r.owner_id ?? null,
     inherent_likelihood: r.inherent_likelihood,
     inherent_impact: r.inherent_impact,
     residual_likelihood: r.residual_likelihood ? String(r.residual_likelihood) : "",
     residual_impact: r.residual_impact ? String(r.residual_impact) : "",
+    residual_override_reason: r.residual_override_reason || "",
     annual_loss_frequency: r.annual_loss_frequency ?? "",
     single_loss_expectancy: r.single_loss_expectancy ?? "",
     treatment_strategy: r.treatment_strategy || "",
     treatment_description: r.treatment_description || "",
-    treatment_owner: r.treatment_owner || "",
+    treatment_owner_id: r.treatment_owner_id ?? null,
     treatment_deadline: r.treatment_deadline || "",
     treatment_cost: r.treatment_cost ?? "",
     review_frequency: r.review_frequency,
@@ -231,20 +256,19 @@ function toPayload(f: FormState): Record<string, unknown> {
   return {
     title: f.title,
     description: f.description,
-    category: f.category,
+    category_id: f.category_id,
     status: f.status,
-    workflow_status: f.workflow_status,
-    workflow_owner: f.workflow_owner,
-    owner_id: f.owner_id || null,
+    owner_id: f.owner_id,
     inherent_likelihood: f.inherent_likelihood === "" ? 1 : Number(f.inherent_likelihood),
     inherent_impact: f.inherent_impact === "" ? 1 : Number(f.inherent_impact),
     residual_likelihood: scale(f.residual_likelihood),
     residual_impact: scale(f.residual_impact),
+    residual_override_reason: f.residual_override_reason.trim(),
     annual_loss_frequency: num(f.annual_loss_frequency),
     single_loss_expectancy: num(f.single_loss_expectancy),
     treatment_strategy: f.treatment_strategy || null,
     treatment_description: f.treatment_description,
-    treatment_owner: f.treatment_owner,
+    treatment_owner_id: f.treatment_owner_id,
     treatment_deadline: f.treatment_deadline || null,
     treatment_cost: num(f.treatment_cost),
     review_frequency: f.review_frequency,
@@ -264,8 +288,10 @@ function RisksPage() {
   const [settings, setSettings] = useState<RiskSetting | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [users, setUsers] = useState<UserRow[]>([]);
   const [recordId, setRecordId] = useRecordParam("id");
+  const { currency, formatDate, formatMoney } = useFormat();
+  /** Money in the organisation's currency, compact from a million up ("PKR 1.2M"). */
+  const money = (n: number | null | undefined) => formatMoney(n, null, { compact: "auto" });
   // Read-only detail loaded for the view drawer (?id=). Edit is a separate action.
   const [detail, setDetail] = useState<RiskRow | null>(null);
 
@@ -295,10 +321,10 @@ function RisksPage() {
   const [matrix, setMatrix] = useState<RiskMatrixConfig | null>(null);
   const [showScale, setShowScale] = useState(false);
 
-  const [segments, setSegments] = useState<{ units: Named[]; processes: Named[] }>({ units: [], processes: [] });
-  const [scopeUnit, setScopeUnit] = useState("");
-  const [scopeProcess, setScopeProcess] = useState("");
+  const [scopeUnit, setScopeUnit] = useState<{ id: string; name: string } | null>(null);
+  const [scopeProcess, setScopeProcess] = useState<{ id: string; name: string } | null>(null);
   const [scopeStatus, setScopeStatus] = useState("");
+  const [scopeReview, setScopeReview] = useState("");
   const [scopeAsset, setScopeAsset] = useState<{ id: string; name: string } | null>(null);
 
   // org-defined custom fields, edited inside the form and saved with the record
@@ -357,25 +383,30 @@ function RisksPage() {
   const fetchRisks = useCallback((qs: string) => apiCall<PagedList<RiskRow>>("GET", `/risks?${qs}`), []);
 
   // One scope object, read by the table and by the export. Undefined entries are
-  // dropped from the query string, so "no scope" is the plain register.
+  // dropped from the query string, so "no scope" is the plain register. The review
+  // filter narrows the table only: the register PDF has no such filter yet.
   const scopeFilters = useMemo(
     () => ({
-      business_unit_id: scopeUnit || undefined,
-      process_id: scopeProcess || undefined,
+      business_unit_id: scopeUnit?.id || undefined,
+      process_id: scopeProcess?.id || undefined,
       asset_id: scopeAsset?.id || undefined,
       status: scopeStatus || undefined,
     }),
     [scopeUnit, scopeProcess, scopeAsset, scopeStatus],
   );
+  const tableFilters = useMemo(
+    () => ({ ...scopeFilters, needs_review: scopeReview || undefined }),
+    [scopeFilters, scopeReview],
+  );
   const scopeLabel = useMemo(() => {
     const parts = [
-      segments.units.find((u) => u.id === scopeUnit)?.name,
-      segments.processes.find((x) => x.id === scopeProcess)?.name,
+      scopeUnit?.name,
+      scopeProcess?.name,
       scopeAsset?.name,
       scopeStatus ? cap(scopeStatus) : undefined,
     ].filter(Boolean);
     return parts.length ? `Scoped to ${parts.join(" · ")}` : "Whole register";
-  }, [scopeUnit, scopeProcess, scopeAsset, scopeStatus, segments]);
+  }, [scopeUnit, scopeProcess, scopeAsset, scopeStatus]);
 
   // Server typeahead sources for the form's link pickers (replaces 6 capped preloads).
   const linkSearch = (path: string) => (q: string) =>
@@ -389,13 +420,6 @@ function RisksPage() {
       setAppetiteScore(s.appetite_score);
       setToleranceScore(s.tolerance_score);
     }).catch(() => {});
-    apiCall<PagedList<UserRow>>("GET", "/users?limit=200").then((r) => setUsers(r.items)).catch(() => {});
-    Promise.all([
-      apiCall<PagedList<Named>>("GET", "/business-units?limit=200&sort_by=name"),
-      apiCall<PagedList<Named>>("GET", "/processes?limit=200&sort_by=name"),
-    ])
-      .then(([u, p]) => setSegments({ units: u.items, processes: p.items }))
-      .catch(() => {});
     api.customFields("risk").then((d) => setCfDefs(d.filter((x) => x.enabled))).catch(() => {});
     api.riskMatrixConfig().then(setMatrix).catch(() => {});
   }, []);
@@ -433,6 +457,10 @@ function RisksPage() {
 
   async function save() {
     setError(null);
+    if (residualAbove && !f.residual_override_reason.trim()) {
+      setError("Residual cannot exceed inherent without an override reason. Lower the residual, or write down why it is higher.");
+      return;
+    }
     setSaving(true);
     try {
       const payload = toPayload(f);
@@ -454,15 +482,26 @@ function RisksPage() {
   }
 
   async function remove(r: RiskRow) {
-    if (!(await confirmDialog({ title: `Archive risk ${r.reference}?`, message: "It will be soft-deleted from the register.", confirmLabel: "Archive", danger: true }))) return;
-    setError(null);
+    if (!(await confirmDeleteWithImpact("risk", r.id, `${r.reference} — ${r.title}`))) return;
     try {
       await apiCall("DELETE", `/risks/${r.id}`);
       if (recordId === r.id) setRecordId(null);
       reload();
-      toast("Archived");
+      toast(`Archived ${r.reference}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete risk");
+      // A segregation-of-duties refusal (you entered it) says who must delete it.
+      toast(deleteErrorText(e, "Failed to delete risk"), "error");
+    }
+  }
+
+  async function markReviewed(r: RiskRow) {
+    try {
+      await apiCall("POST", `/risks/${r.id}/mark-reviewed`);
+      reload();
+      loadDetail(r.id);
+      toast("Marked reviewed");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Could not mark the risk reviewed", "error");
     }
   }
 
@@ -478,13 +517,7 @@ function RisksPage() {
     }
   }
 
-  const userOpts: Option[] = users.map((u) => ({ value: u.id, label: u.full_name || u.email, sub: u.email }));
-
-  const userName = (id: string | null) => {
-    if (!id) return "—";
-    const u = users.find((x) => x.id === id);
-    return u ? u.full_name || u.email : "—";
-  };
+  const personText = (u: UserRef | null | undefined, fallback?: string) => (u ? u.full_name || u.email : fallback || "");
   const linkCount = (r: RiskRow) =>
     r.assets.length + r.controls.length + r.threats.length + r.vulnerabilities.length + r.policies.length + r.incidents.length;
 
@@ -509,6 +542,16 @@ function RisksPage() {
   // computed previews
   const inhScore = f.inherent_likelihood === "" || f.inherent_impact === "" ? null : Number(f.inherent_likelihood) * Number(f.inherent_impact);
   const resScore = f.residual_likelihood === "" || f.residual_impact === "" ? null : Number(f.residual_likelihood) * Number(f.residual_impact);
+  // Controls can only reduce a risk. A residual above inherent is refused by the server
+  // unless an override reason is recorded by someone who can accept risk.
+  const residualAbove = inhScore != null && resScore != null && resScore > inhScore;
+  /** Label the options that, with the other residual axis as chosen, would exceed inherent. */
+  const markAbove = (options: Option[], other: string): Option[] =>
+    inhScore == null || other === ""
+      ? options
+      : options.map((o) =>
+          Number(o.value) * Number(other) > inhScore ? { ...o, label: `${o.label} (above inherent)` } : o,
+        );
   const alePreview =
     f.annual_loss_frequency === "" || f.single_loss_expectancy === ""
       ? null
@@ -524,22 +567,28 @@ function RisksPage() {
         <TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="Threat / vulnerability context and what could go wrong." />
       </Field>
       <div className="field-row">
-        <Field label="Category">
-          <TextInput value={f.category} onChange={(v) => set("category", v)} placeholder="Information Security" />
+        <Field label="Category" help="From the organisation's risk category list (Settings → Lookups).">
+          <LookupSelect
+            lookupKey="risk_category"
+            value={f.category_id}
+            onChange={(id) => set("category_id", id)}
+            legacyText={editing?.category_id ? null : editing?.category}
+            placeholder="Choose a category…"
+            allowCreate
+          />
         </Field>
-        <Field label="Risk Owner" help="The user accountable for this risk.">
-          <Select value={f.owner_id} onChange={(v) => set("owner_id", v)} options={userOpts} placeholder="Unassigned" />
+        <Field label="Risk Owner" help="The person accountable for this risk.">
+          <UserPicker
+            value={f.owner_id}
+            onChange={(id) => set("owner_id", id)}
+            selected={editing?.owner_ref}
+            placeholder="Unassigned — search people…"
+          />
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Status">
+        <Field label="Status" help="Where the risk is in assessment and treatment. Approval is separate: submit it for review from the risk's detail view.">
           <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
-        </Field>
-        <Field label="Workflow">
-          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-        <Field label="Workflow Owner">
-          <TextInput value={f.workflow_owner} onChange={(v) => set("workflow_owner", v)} placeholder="Approver" />
         </Field>
       </div>
     </>
@@ -613,28 +662,48 @@ function RisksPage() {
         </div>
         {chosen(f.inherent_likelihood, f.inherent_impact)}
       </Field>
-      <Field label="Residual Risk" help="Likelihood × Impact after controls. Leave blank until assessed.">
+      <Field label="Residual Risk" help="Likelihood × Impact after controls. Leave blank until assessed. Controls can only reduce a risk, so residual should not exceed inherent.">
         <div className="field-row">
-          <Select value={f.residual_likelihood} onChange={(v) => set("residual_likelihood", v)} options={LIKELIHOOD} placeholder="Likelihood" />
-          <Select value={f.residual_impact} onChange={(v) => set("residual_impact", v)} options={IMPACT} placeholder="Impact" />
+          <Select value={f.residual_likelihood} onChange={(v) => set("residual_likelihood", v)} options={markAbove(LIKELIHOOD, f.residual_impact)} placeholder="Likelihood" />
+          <Select value={f.residual_impact} onChange={(v) => set("residual_impact", v)} options={markAbove(IMPACT, f.residual_likelihood)} placeholder="Impact" />
           <div className="field" style={{ margin: 0 }}>
             <label>Score</label>
             <div style={{ paddingTop: 4 }}>
-              {resScore != null ? <Badge tone="neutral" plain>{resScore}</Badge> : <span className="muted">—</span>}
+              {resScore != null ? <Badge tone={residualAbove ? "critical" : "neutral"} plain>{resScore}</Badge> : <span className="muted">—</span>}
             </div>
           </div>
         </div>
         {chosen(f.residual_likelihood, f.residual_impact)}
+        {residualAbove && (
+          <div role="alert" style={{ marginTop: 8, padding: "8px 10px", borderRadius: 6, background: "var(--red-bg)", color: "var(--red)", fontSize: 12.5, lineHeight: 1.5 }}>
+            Residual {resScore} is higher than inherent {inhScore}. Residual cannot exceed inherent
+            without an override reason. Lower the residual, or record why it is higher below.
+          </div>
+        )}
       </Field>
+      {residualAbove && (
+        <Field
+          label="Override reason"
+          required
+          help="Why the residual is higher than inherent. Only a user who can accept risk may record this; it is kept on the risk and in the audit trail."
+        >
+          <TextArea
+            value={f.residual_override_reason}
+            onChange={(v) => set("residual_override_reason", v)}
+            rows={2}
+            placeholder="For example: the compensating control was withdrawn on 1 Sep; exposure now exceeds the original assessment"
+          />
+        </Field>
+      )}
 
-      <Field label="Quantitative (FAIR)" help="Annual Loss Expectancy = loss events / year × $ per event. Optional.">
+      <Field label="Quantitative (FAIR)" help={`Annual Loss Expectancy = loss events / year × ${currency} per event. Optional.`}>
         <div className="field-row">
           <div className="field" style={{ margin: 0 }}>
             <label>Loss events / year (ALF)</label>
             <NumberInput value={f.annual_loss_frequency} onChange={(v) => set("annual_loss_frequency", v)} min={0} step={0.1} placeholder="0.5" />
           </div>
           <div className="field" style={{ margin: 0 }}>
-            <label>$ per event (SLE)</label>
+            <label>{currency} per event (SLE)</label>
             <NumberInput value={f.single_loss_expectancy} onChange={(v) => set("single_loss_expectancy", v)} min={0} step={1000} placeholder="200000" />
           </div>
           <div className="field" style={{ margin: 0 }}>
@@ -650,15 +719,21 @@ function RisksPage() {
         <Field label="Treatment Strategy">
           <Select value={f.treatment_strategy} onChange={(v) => set("treatment_strategy", v)} options={STRATEGY} placeholder="Not decided" />
         </Field>
-        <Field label="Treatment Owner">
-          <TextInput value={f.treatment_owner} onChange={(v) => set("treatment_owner", v)} placeholder="Responsible person" />
+        <Field label="Treatment Owner" help="The person responsible for carrying out the treatment plan.">
+          <UserPicker
+            value={f.treatment_owner_id}
+            onChange={(id) => set("treatment_owner_id", id)}
+            selected={editing?.treatment_owner_ref}
+            legacyText={editing?.treatment_owner_id ? null : editing?.treatment_owner}
+            placeholder="Search people…"
+          />
         </Field>
       </div>
       <div className="field-row">
         <Field label="Treatment Deadline">
           <TextInput value={f.treatment_deadline} onChange={(v) => set("treatment_deadline", v)} type="date" />
         </Field>
-        <Field label="Treatment Cost ($)">
+        <Field label={`Treatment Cost (${currency})`}>
           <NumberInput value={f.treatment_cost} onChange={(v) => set("treatment_cost", v)} min={0} step={1000} placeholder="50000" />
         </Field>
       </div>
@@ -708,10 +783,10 @@ function RisksPage() {
       {editing && (
         <div className="field-row">
           <Field label="Last Review">
-            <TextInput value={editing.last_review_date || "—"} onChange={() => {}} />
+            <TextInput value={formatDate(editing.last_review_date)} onChange={() => {}} />
           </Field>
           <Field label="Next Review">
-            <TextInput value={editing.next_review_date || "—"} onChange={() => {}} />
+            <TextInput value={formatDate(editing.next_review_date)} onChange={() => {}} />
           </Field>
           <Field label="Expired Reviews">
             <TextInput value={String(editing.expired_reviews)} onChange={() => {}} />
@@ -760,9 +835,9 @@ function RisksPage() {
   const riskColumns: Column<RiskRow>[] = [
     { key: "reference", header: "Ref", sortable: true, locked: true, render: (r) => <span className="ref">{r.reference}</span> },
     { key: "title", header: "Title", sortable: true, locked: true, render: (r) => <span className="cell-title">{r.title}</span> },
-    { key: "category", header: "Category", sortable: true, render: (r) => <span className="muted">{r.category || "—"}</span> },
+    { key: "category", header: "Category", sortable: true, render: (r) => <span className="muted">{categoryText(r) || "—"}</span>, text: (r) => categoryText(r) },
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge>, text: (r) => cap(r.status) },
-    { key: "owner", header: "Owner", render: (r) => <span className="muted">{userName(r.owner_id)}</span>, text: (r) => userName(r.owner_id) },
+    { key: "owner", header: "Owner", render: (r) => <span className="muted"><UserName user={r.owner_ref} /></span>, text: (r) => personText(r.owner_ref) },
     { key: "business_units", header: "Business units", render: (r) => linkChips(r.business_units, "/business-units"), text: (r) => names(r.business_units) },
     { key: "processes", header: "Processes", hidden: true, render: (r) => linkChips(r.processes, "/processes"), text: (r) => names(r.processes) },
     { key: "assets", header: "Assets", render: (r) => linkChips(r.assets, "/information-assets"), text: (r) => names(r.assets) },
@@ -777,16 +852,17 @@ function RisksPage() {
     { key: "residual_score", header: "Residual", sortable: true, render: (r) => scoreCell(r.residual_severity, r.residual_score), text: (r) => `${r.residual_score ?? ""} ${r.residual_severity ?? ""}`.trim() },
     { key: "appetite", header: "Appetite", render: (r) => { const a = appetite(r, settings); return a ? <Badge tone={a.tone}>{a.label}</Badge> : <span className="muted">—</span>; }, text: (r) => appetite(r, settings)?.label ?? "" },
     { key: "control_health", header: "Control health", render: (r) => controlHealth(r.control_health), text: (r) => r.control_health ?? "" },
+    { key: "needs_review", header: "Review flag", render: (r) => (r.needs_review ? <span title={reviewReasons(r).join("\n")}><Badge tone="high">Needs review</Badge></span> : <span className="muted">—</span>), text: (r) => (r.needs_review ? `Needs review: ${reviewReasons(r).join("; ")}` : "") },
     { key: "treatment_strategy", header: "Treatment", hidden: true, render: (r) => <span className="muted">{r.treatment_strategy ? cap(r.treatment_strategy) : "—"}</span>, text: (r) => r.treatment_strategy ? cap(r.treatment_strategy) : "" },
-    { key: "treatment_owner", header: "Treatment owner", hidden: true, render: (r) => <span className="muted">{r.treatment_owner || "—"}</span> },
-    { key: "treatment_deadline", header: "Treatment deadline", hidden: true, sortable: true, render: (r) => <span className="muted">{r.treatment_deadline || "—"}</span> },
+    { key: "treatment_owner", header: "Treatment owner", hidden: true, render: (r) => <span className="muted"><UserName user={r.treatment_owner_ref} fallback={r.treatment_owner} /></span>, text: (r) => personText(r.treatment_owner_ref, r.treatment_owner) },
+    { key: "treatment_deadline", header: "Treatment deadline", hidden: true, sortable: true, render: (r) => <span className="muted">{formatDate(r.treatment_deadline)}</span>, text: (r) => (r.treatment_deadline ? formatDate(r.treatment_deadline) : "") },
     { key: "exposure", header: "Exposure", render: (r) => <span className="muted">{money(r.annual_loss_expectancy)}</span>, text: (r) => money(r.annual_loss_expectancy) },
-    { key: "workflow_status", header: "Workflow", hidden: true, render: (r) => <span className="muted">{cap(r.workflow_status)}</span>, text: (r) => cap(r.workflow_status) },
+    { key: "workflow_status", header: "Approval", hidden: true, render: (r) => <span className="muted">{workflowLabel(r.workflow_status)}</span>, text: (r) => workflowLabel(r.workflow_status) },
     { key: "review_frequency", header: "Review cycle", hidden: true, render: (r) => <span className="muted">{cap(r.review_frequency)}</span>, text: (r) => cap(r.review_frequency) },
-    { key: "last_review_date", header: "Last review", hidden: true, render: (r) => <span className="muted">{r.last_review_date || "—"}</span> },
-    { key: "next_review_date", header: "Review", sortable: true, render: (r) => (isOverdue(r.next_review_date) ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.next_review_date || "—"}</span>), text: (r) => r.next_review_date ?? "" },
-    { key: "created_at", header: "Created", hidden: true, render: (r) => <span className="muted">{r.created_at?.slice(0, 10) || "—"}</span>, text: (r) => r.created_at?.slice(0, 10) ?? "" },
-    { key: "updated_at", header: "Updated", hidden: true, render: (r) => <span className="muted">{r.updated_at?.slice(0, 10) || "—"}</span>, text: (r) => r.updated_at?.slice(0, 10) ?? "" },
+    { key: "last_review_date", header: "Last review", hidden: true, render: (r) => <span className="muted">{formatDate(r.last_review_date)}</span>, text: (r) => (r.last_review_date ? formatDate(r.last_review_date) : "") },
+    { key: "next_review_date", header: "Review", sortable: true, render: (r) => (isOverdue(r.next_review_date) ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(r.next_review_date)}</span>), text: (r) => (r.next_review_date ? formatDate(r.next_review_date) : "") },
+    { key: "created_at", header: "Created", hidden: true, render: (r) => <span className="muted">{formatDate(r.created_at)}</span>, text: (r) => (r.created_at ? formatDate(r.created_at) : "") },
+    { key: "updated_at", header: "Updated", hidden: true, render: (r) => <span className="muted">{formatDate(r.updated_at)}</span>, text: (r) => (r.updated_at ? formatDate(r.updated_at) : "") },
     { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(r)}>Delete</button></div> },
   ];
 
@@ -794,24 +870,34 @@ function RisksPage() {
   async function removeMany(rowsToDelete: RiskRow[], clear: () => void) {
     const ok = await confirmDialog({
       title: `Delete ${rowsToDelete.length} risk${rowsToDelete.length === 1 ? "" : "s"}?`,
-      message: "They are archived, not destroyed: links from other records are kept and the activity trail records who removed them.",
+      message: "They are archived, not destroyed: links from other records are kept, they can be restored from Archived, and the activity trail records who removed them.",
       confirmLabel: "Delete", danger: true,
     });
     if (!ok) return;
-    let failed = 0;
-    for (const r of rowsToDelete) {
-      try { await apiCall("DELETE", `/risks/${r.id}`); } catch { failed += 1; }
-    }
+    const res = await deleteEach(rowsToDelete, (r) => apiCall("DELETE", `/risks/${r.id}`));
     clear();
     reload();
-    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+    toastDeleteSummary(res, "risk");
   }
 
   /** A saved view restoring its filters into the page's own scope state. */
   const applyScope = (f: Record<string, string | number | boolean | undefined>) => {
-    setScopeUnit(typeof f.business_unit_id === "string" ? f.business_unit_id : "");
-    setScopeProcess(typeof f.process_id === "string" ? f.process_id : "");
+    const unitId = typeof f.business_unit_id === "string" ? f.business_unit_id : "";
+    setScopeUnit(unitId ? { id: unitId, name: "" } : null);
+    if (unitId) {
+      cachedBusinessUnits()
+        .then((all) => { const u = all.find((x) => x.id === unitId); if (u) setScopeUnit({ id: u.id, name: u.name }); })
+        .catch(() => {});
+    }
+    const processId = typeof f.process_id === "string" ? f.process_id : "";
+    setScopeProcess(processId ? { id: processId, name: "" } : null);
+    if (processId) {
+      pickProcesses({ ids: [processId] })
+        .then((rows) => { if (rows[0]) setScopeProcess({ id: rows[0].id, name: rows[0].name }); })
+        .catch(() => {});
+    }
     setScopeStatus(typeof f.status === "string" ? f.status : "");
+    setScopeReview(typeof f.needs_review === "string" ? f.needs_review : typeof f.needs_review === "boolean" ? String(f.needs_review) : "");
     const assetId = typeof f.asset_id === "string" ? f.asset_id : "";
     if (!assetId) { setScopeAsset(null); return; }
     setScopeAsset({ id: assetId, name: "" });
@@ -849,7 +935,7 @@ function RisksPage() {
                  own rating?": one proposed risk per asset, impact from that asset's own
                  criticality, rather than one rating stretched across four assets. */
               { label: "Generate risks from assets…", hint: "One proposed risk per asset, from the scenario library", onClick: () => gen.current?.open() },
-              { label: "Clean up orphans…", hint: "Risks whose every linked asset has since been deleted", onClick: () => orphans.current?.open() },
+              { label: "Review risks with no live links…", hint: "Risks whose assets were deleted and that link to nothing else", onClick: () => orphans.current?.open() },
               "divider",
               {
                 label: "Risk methodology…",
@@ -878,11 +964,20 @@ function RisksPage() {
              own: it narrows the whole page — counts and the export included — but it
              does not need its own hundred and fifty pixels to say so. */
           <div className="toolbar-filters">
-            <div style={{ width: 180 }}>
-              <Select value={scopeUnit} onChange={setScopeUnit} options={segments.units.map((u) => ({ value: u.id, label: u.name || u.id }))} placeholder="All business units" />
+            <div style={{ width: 200 }}>
+              <BusinessUnitSelect
+                value={scopeUnit?.id ?? null}
+                onChange={(id, u) => setScopeUnit(id ? { id, name: u?.name ?? "" } : null)}
+                placeholder="All business units"
+              />
             </div>
-            <div style={{ width: 160 }}>
-              <Select value={scopeProcess} onChange={setScopeProcess} options={segments.processes.map((x) => ({ value: x.id, label: x.name || x.id }))} placeholder="All processes" />
+            <div style={{ width: 180 }}>
+              <ProcessSelect
+                value={scopeProcess?.id ?? null}
+                businessUnitId={scopeUnit?.id}
+                onChange={(id, p) => setScopeProcess(id ? { id, name: p?.name ?? "" } : null)}
+                placeholder="All processes"
+              />
             </div>
             <div style={{ width: 180 }}>
               <AsyncSelect
@@ -896,8 +991,11 @@ function RisksPage() {
             <div style={{ width: 150 }}>
               <Select value={scopeStatus} onChange={setScopeStatus} options={STATUS} placeholder="Any status" />
             </div>
-            {(scopeUnit || scopeProcess || scopeAsset || scopeStatus) && (
-              <button className="btn secondary sm" onClick={() => { setScopeUnit(""); setScopeProcess(""); setScopeAsset(null); setScopeStatus(""); }}>
+            <div style={{ width: 160 }}>
+              <Select value={scopeReview} onChange={setScopeReview} options={REVIEW_FILTER} placeholder="Any review flag" />
+            </div>
+            {(scopeUnit || scopeProcess || scopeAsset || scopeStatus || scopeReview) && (
+              <button className="btn secondary sm" onClick={() => { setScopeUnit(null); setScopeProcess(null); setScopeAsset(null); setScopeStatus(""); setScopeReview(""); }}>
                 Clear
               </button>
             )}
@@ -916,11 +1014,12 @@ function RisksPage() {
             </span>
           )
         }
+        toolbarRight={<ArchivedRecords entityType="risk" noun="risks" onRestored={reload} refreshKey={refreshKey} />}
         tableKey="risks"
         statusModel="risk"
         columns={riskColumns}
         fetcher={fetchRisks}
-        filters={scopeFilters}
+        filters={tableFilters}
         onApplyFilters={applyScope}
         bulkActions={(rows, clear) => (
           <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
@@ -973,7 +1072,7 @@ function RisksPage() {
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
-        subtitle={detail ? cap(detail.status) + (detail.category ? ` · ${detail.category}` : "") : ""}
+        subtitle={detail ? cap(detail.status) + (categoryText(detail) ? ` · ${categoryText(detail)}` : "") : ""}
         width={680}
         actions={detail && (
           <>
@@ -984,6 +1083,17 @@ function RisksPage() {
       >
         {detail && (
           <>
+            {detail.needs_review && (
+              <div role="status" style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "10px 14px", borderRadius: 8, marginBottom: 16, background: "var(--amber-bg)", border: "1px solid var(--border)" }}>
+                <Badge tone="high">Needs review</Badge>
+                <div style={{ flex: 1, fontSize: 13, lineHeight: 1.5 }}>
+                  {reviewReasons(detail).length
+                    ? reviewReasons(detail).map((line, i) => <div key={i}>{line}</div>)
+                    : <span className="muted">Something this risk depended on changed.</span>}
+                </div>
+                <button className="btn secondary sm" onClick={() => markReviewed(detail)}>Mark reviewed</button>
+              </div>
+            )}
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-end", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Inherent</div><div style={{ marginTop: 4 }}><Severity value={detail.inherent_severity} /> <span className="muted">({detail.inherent_score ?? "—"})</span></div></div>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Residual</div><div style={{ marginTop: 4 }}><Severity value={detail.residual_severity} /> <span className="muted">({detail.residual_score ?? "—"})</span></div></div>
@@ -992,12 +1102,18 @@ function RisksPage() {
               <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Exposure (ALE)</div><div style={{ marginTop: 4 }}>{money(detail.annual_loss_expectancy)}</div></div>
             </div>
 
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13, display: "block", marginBottom: 10 }}>Approval</strong>
+              <WorkflowFields entityType="risk" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            </div>
+
             <WorkflowStrip
               entityType="risk"
               entityId={detail.id}
               entityLabel={`${detail.reference} — ${detail.title}`}
               link="/risks"
-              ownerEmail={userName(detail.owner_id)}
+              ownerEmail={detail.owner_ref?.email ?? ""}
+              hideStart
               onChange={() => { reload(); loadDetail(detail.id); }}
             />
 
@@ -1014,10 +1130,9 @@ function RisksPage() {
             />
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
-              {field("Owner", userName(detail.owner_id))}
+              {field("Owner", <UserName user={detail.owner_ref} />)}
+              {field("Category", categoryText(detail) || "—")}
               {field("Status", <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>)}
-              {field("Workflow", cap(detail.workflow_status))}
-              {field("Workflow owner", detail.workflow_owner || "—")}
             </div>
 
             {detail.description && (
@@ -1031,8 +1146,8 @@ function RisksPage() {
               <strong style={{ fontSize: 13 }}>Treatment</strong>
               <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
                 {field("Strategy", detail.treatment_strategy ? cap(detail.treatment_strategy) : "—")}
-                {field("Owner", detail.treatment_owner || "—")}
-                {field("Deadline", detail.treatment_deadline || "—")}
+                {field("Owner", <UserName user={detail.treatment_owner_ref} fallback={detail.treatment_owner} />)}
+                {field("Deadline", formatDate(detail.treatment_deadline))}
                 {field("Cost", money(detail.treatment_cost))}
               </div>
               {detail.treatment_description && (
@@ -1042,8 +1157,8 @@ function RisksPage() {
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 18 }}>
               {field("Review frequency", cap(detail.review_frequency))}
-              {field("Last review", detail.last_review_date || "—")}
-              {field("Next review", isOverdue(detail.next_review_date) ? <Badge tone="high">Overdue · {detail.next_review_date}</Badge> : (detail.next_review_date || "—"))}
+              {field("Last review", formatDate(detail.last_review_date))}
+              {field("Next review", isOverdue(detail.next_review_date) ? <Badge tone="high">Overdue · {formatDate(detail.next_review_date)}</Badge> : formatDate(detail.next_review_date))}
               {field("Expired reviews", String(detail.expired_reviews))}
             </div>
 

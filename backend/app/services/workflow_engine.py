@@ -190,12 +190,19 @@ async def _open_stage(
     await db.flush()
 
 
-async def on_approval_decided(db: AsyncSession, approval: ApprovalRequest) -> WorkflowInstance | None:
+async def on_approval_decided(
+    db: AsyncSession, approval: ApprovalRequest, actor=None
+) -> WorkflowInstance | None:
     """Advance (or terminate) the instance whose stage this approval was.
 
     Called from the approvals decision endpoint. An approval that is not part of a
     workflow — the overwhelming majority — returns ``None`` immediately, so single-stage
     approvals are unaffected.
+
+    When the route finishes, the record it was about takes the outcome: approved moves
+    it to ``approved``, a rejection returns it to ``draft`` (see
+    :func:`app.services.record_workflow.write_back`). ``actor`` is the user whose
+    decision finished it, for the audit trail.
     """
     step = await db.scalar(
         select(WorkflowInstanceStage).where(
@@ -224,6 +231,7 @@ async def on_approval_decided(db: AsyncSession, approval: ApprovalRequest) -> Wo
         instance.status = WorkflowInstanceStatus.rejected
         instance.completed_at = now
         await db.flush()
+        await _record_outcome(db, instance, approval, approved=False, actor=actor)
         return instance
 
     if approval.status != ApprovalStatus.approved:
@@ -240,6 +248,7 @@ async def on_approval_decided(db: AsyncSession, approval: ApprovalRequest) -> Wo
         instance.status = WorkflowInstanceStatus.approved
         instance.completed_at = now
         await db.flush()
+        await _record_outcome(db, instance, approval, approved=True, actor=actor)
         return instance
 
     await _open_stage(
@@ -249,8 +258,35 @@ async def on_approval_decided(db: AsyncSession, approval: ApprovalRequest) -> Wo
     return instance
 
 
-async def cancel(db: AsyncSession, instance: WorkflowInstance) -> WorkflowInstance:
-    """Abandon a route, cancelling whatever approval is currently open."""
+async def _record_outcome(
+    db: AsyncSession,
+    instance: WorkflowInstance,
+    approval: ApprovalRequest,
+    *,
+    approved: bool,
+    actor=None,
+) -> None:
+    """Write a finished route's outcome onto the record's lifecycle state."""
+    from app.services import record_workflow
+
+    await record_workflow.write_back(
+        db,
+        entity_type=instance.entity_type,
+        entity_id=instance.entity_id,
+        approved=approved,
+        via=f"approval route, {approval.reference or 'approval'}",
+        comment=approval.decision_comment or "",
+        actor=actor,
+        tenant_id=instance.tenant_id,
+    )
+
+
+async def cancel(db: AsyncSession, instance: WorkflowInstance, actor=None) -> WorkflowInstance:
+    """Abandon a route, cancelling whatever approval is currently open.
+
+    A record that was waiting in review goes back to draft ("withdrawn"): with no route
+    and no decision it would otherwise sit in review with nothing to decide it.
+    """
     for step in instance.steps:
         if step.status in (StageStatus2.pending, StageStatus2.in_progress):
             step.status = StageStatus2.skipped
@@ -263,4 +299,17 @@ async def cancel(db: AsyncSession, instance: WorkflowInstance) -> WorkflowInstan
     instance.status = WorkflowInstanceStatus.cancelled
     instance.completed_at = datetime.now(timezone.utc)
     await db.flush()
+
+    from app.services import record_workflow
+
+    await record_workflow.write_back(
+        db,
+        entity_type=instance.entity_type,
+        entity_id=instance.entity_id,
+        approved=False,
+        via="approval route cancelled",
+        actor=actor,
+        tenant_id=instance.tenant_id,
+        action="withdraw",
+    )
     return instance

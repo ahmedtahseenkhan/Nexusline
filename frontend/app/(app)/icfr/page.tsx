@@ -10,11 +10,14 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect from "@/components/AsyncSelect";
 import RelatedChips from "@/components/RelatedChips";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 /* ------------------------------------------------------------------ types */
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -110,12 +113,11 @@ type IcfrSummary = {
 /* ------------------------------------------------------------------ helpers */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 /* ------------------------------------------------------------------ enum lists */
 const PROCESS_STATUS = opts(["active", "retired"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const ASSERTIONS = [
   "existence_occurrence",
   "completeness",
@@ -180,7 +182,6 @@ type ProcessForm = {
   description: string;
   key_process: boolean;
   status: string;
-  workflow_status: string;
 };
 const BLANK_PROCESS: ProcessForm = {
   name: "",
@@ -190,7 +191,6 @@ const BLANK_PROCESS: ProcessForm = {
   description: "",
   key_process: false,
   status: "active",
-  workflow_status: "draft",
 };
 function fromProcess(p: IcfrProcess): ProcessForm {
   return {
@@ -201,7 +201,6 @@ function fromProcess(p: IcfrProcess): ProcessForm {
     description: p.description || "",
     key_process: !!p.key_process,
     status: p.status || "active",
-    workflow_status: p.workflow_status || "draft",
   };
 }
 function processPayload(f: ProcessForm): Record<string, unknown> {
@@ -213,7 +212,6 @@ function processPayload(f: ProcessForm): Record<string, unknown> {
     description: f.description,
     key_process: f.key_process,
     status: f.status,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -345,6 +343,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 
 function IcfrInner() {
   const [section, setSection] = useState<SectionId>("processes");
+  const { formatDate } = useFormat();
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -626,8 +625,8 @@ function IcfrInner() {
     },
     { key: "status", header: "Status", sortable: true, render: (d) => <Badge tone={DEF_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge> },
     { key: "owner", header: "Owner", sortable: true, render: (d) => <span className="muted">{d.owner || "—"}</span> },
-    { key: "identified_date", header: "Identified", sortable: true, render: (d) => <span className="muted">{d.identified_date || "—"}</span> },
-    { key: "target_date", header: "Target", sortable: true, render: (d) => <span className="muted">{d.target_date || "—"}</span> },
+    { key: "identified_date", header: "Identified", sortable: true, render: (d) => <span className="muted">{formatDate(d.identified_date)}</span> },
+    { key: "target_date", header: "Target", sortable: true, render: (d) => <span className="muted">{formatDate(d.target_date)}</span> },
     {
       key: "actions",
       header: "",
@@ -670,9 +669,6 @@ function IcfrInner() {
     <>
       <Field label="Description">
         <TextArea value={pf.description} onChange={(v) => setP("description", v)} rows={4} placeholder="Scope of the process and its financial-reporting relevance." />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this process record.">
-        <Select value={pf.workflow_status} onChange={(v) => setP("workflow_status", v)} options={WORKFLOW} />
       </Field>
     </>
   );
@@ -831,7 +827,12 @@ function IcfrInner() {
 
       {/* ============================================= PROCESS / RCM DRAWER */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="icfr_process" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="icfr_process" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="icfr_process" entityId={detail.id} />
+          </>
+        ) : null}
         open={section === "processes" && !!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || "PRC"} — ${detail.name}` : "…"}
@@ -1065,7 +1066,7 @@ function IcfrInner() {
                                             <td className="muted">{t.exceptions_found}</td>
                                             <td><Badge tone={TEST_RESULT_TONE[t.result] || "neutral"}>{cap(t.result)}</Badge></td>
                                             <td><Badge tone={TEST_STATUS_TONE[t.status] || "neutral"}>{cap(t.status)}</Badge></td>
-                                            <td className="muted">{t.test_date || "—"}</td>
+                                            <td className="muted">{formatDate(t.test_date)}</td>
                                           </tr>
                                         ))}
                                         {c.tests.length === 0 && (

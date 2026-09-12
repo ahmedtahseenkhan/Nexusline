@@ -15,6 +15,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import AuditPlanTab from "@/components/AuditPlanTab";
 import AuditProgramTab from "@/components/AuditProgramTab";
 import AuditCalendarTab from "@/components/AuditCalendarTab";
@@ -27,11 +28,13 @@ import { Field, TextInput, TextArea, Select, type Option } from "@/components/fi
 import { Badge } from "@/components/badges";
 import { IconPlus, IconAlert } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // Graph refs returned/accepted by the backend for finding ↔ control/risk/requirement links.
@@ -44,7 +47,6 @@ const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.reference || 
 // ------------------------------------------------------------------ enum lists
 const INHERENT_RISK = opts(["low", "medium", "high", "critical"]);
 const AUDIT_FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
-const UNIT_WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const ENG_STATUS = opts(["planned", "fieldwork", "reporting", "closed", "cancelled"]);
 /* Every audit the bank is subject to lives in this one register. Provenance is what
    makes "how many SBP inspection findings are still open?" answerable without keeping a
@@ -105,7 +107,6 @@ type UnitForm = {
   audit_frequency: string;
   last_audited_date: string;
   next_audit_due: string;
-  workflow_status: string;
 };
 const BLANK_UNIT: UnitForm = {
   name: "",
@@ -116,7 +117,6 @@ const BLANK_UNIT: UnitForm = {
   audit_frequency: "annual",
   last_audited_date: "",
   next_audit_due: "",
-  workflow_status: "draft",
 };
 function fromUnit(u: AuditableUnit): UnitForm {
   return {
@@ -128,7 +128,6 @@ function fromUnit(u: AuditableUnit): UnitForm {
     audit_frequency: u.audit_frequency || "annual",
     last_audited_date: u.last_audited_date || "",
     next_audit_due: u.next_audit_due || "",
-    workflow_status: u.workflow_status || "draft",
   };
 }
 function unitPayload(f: UnitForm): Record<string, unknown> {
@@ -141,7 +140,6 @@ function unitPayload(f: UnitForm): Record<string, unknown> {
     audit_frequency: f.audit_frequency,
     last_audited_date: f.last_audited_date || null,
     next_audit_due: f.next_audit_due || null,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -311,6 +309,7 @@ type FindingSummary = { total: number; open: number; overdue: number };
 // ================================================================ page =====
 function InternalAuditInner() {
   const [tab, setTab] = useState<TabId>("universe");
+  const { formatDate } = useFormat();
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [assurance, setAssurance] = useState<AssuranceSummary | null>(null);
@@ -555,7 +554,7 @@ function InternalAuditInner() {
     { key: "owner", header: "Owner", sortable: true, render: (u) => <span className="muted">{u.owner || "—"}</span> },
     { key: "inherent_risk", header: "Inherent risk", sortable: true, render: (u) => <RatingBadge value={u.inherent_risk} /> },
     { key: "audit_frequency", header: "Frequency", render: (u) => <span className="muted">{cap(u.audit_frequency || "none")}</span> },
-    { key: "next_audit_due", header: "Next audit due", sortable: true, render: (u) => (u.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{u.next_audit_due || "—"}</span>) },
+    { key: "next_audit_due", header: "Next audit due", sortable: true, render: (u) => (u.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(u.next_audit_due)}</span>) },
     { key: "actions", header: "", render: (u) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditUnit(u)}>Edit</button> <button className="btn secondary sm" onClick={() => removeUnit(u)}>Delete</button></div> },
   ];
 
@@ -565,7 +564,7 @@ function InternalAuditInner() {
     { key: "status", header: "Status", sortable: true, render: (e) => <Badge tone={ENG_STATUS_TONE[e.status] || "neutral"}>{cap(e.status)}</Badge> },
     { key: "audit_type", header: "Type", render: (e) => <Badge tone={AUDIT_TYPE_TONE[e.audit_type] || "neutral"}>{AUDIT_TYPE_LABEL[e.audit_type] || cap(e.audit_type || "internal")}</Badge> },
     { key: "lead_auditor", header: "Auditor", sortable: true, render: (e) => <span className="muted">{e.auditor_firm || e.lead_auditor || "—"}</span> },
-    { key: "planned_end", header: "Planned end", sortable: true, render: (e) => (e.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{e.planned_end || "—"}</span>) },
+    { key: "planned_end", header: "Planned end", sortable: true, render: (e) => (e.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(e.planned_end)}</span>) },
     { key: "findings", header: "Findings", render: (e) => <span className="muted">{e.open_finding_count}/{e.finding_count} open</span> },
     { key: "actions", header: "", render: (e) => <div onClick={(ev) => ev.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditEng(e)}>Edit</button> <button className="btn secondary sm" onClick={() => removeEng(e)}>Delete</button></div> },
   ];
@@ -575,7 +574,7 @@ function InternalAuditInner() {
     { key: "title", header: "Title", sortable: true, render: (f) => <span className="cell-title">{f.title}</span> },
     { key: "rating", header: "Rating", sortable: true, render: (f) => <RatingBadge value={f.rating} /> },
     { key: "action_owner", header: "Action owner", sortable: true, render: (f) => <span className="muted">{f.action_owner || "—"}</span> },
-    { key: "due_date", header: "Due", sortable: true, render: (f) => (f.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{f.due_date || "—"}</span>) },
+    { key: "due_date", header: "Due", sortable: true, render: (f) => (f.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(f.due_date)}</span>) },
     {
       key: "status", header: "Status", sortable: true, render: (f) => (
         <div style={{ display: "flex", gap: 8, alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
@@ -624,9 +623,7 @@ function InternalAuditInner() {
           <TextInput type="date" value={uf.next_audit_due} onChange={(v) => setU("next_audit_due", v)} />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this universe record.">
-        <Select value={uf.workflow_status} onChange={(v) => setU("workflow_status", v)} options={UNIT_WORKFLOW} />
-      </Field>
+      <RecordApproval entityType="auditable_unit" entityId={editingUnit?.id ?? null} onChanged={reload} />
     </>
   );
 
@@ -878,7 +875,12 @@ function InternalAuditInner() {
 
       {/* ============================================= ENGAGEMENT DRAWER */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="audit_engagement" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="audit_engagement" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="audit_engagement" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -970,7 +972,7 @@ function InternalAuditInner() {
                           <td className="cell-title">{fi.title}</td>
                           <td><RatingBadge value={fi.rating} /></td>
                           <td className="muted">{fi.action_owner || "—"}</td>
-                          <td>{fi.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{fi.due_date || "—"}</span>}</td>
+                          <td>{fi.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(fi.due_date)}</span>}</td>
                           <td>
                             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                               <Badge tone={FINDING_STATUS_TONE[fi.status] || "neutral"}>{cap(fi.status)}</Badge>

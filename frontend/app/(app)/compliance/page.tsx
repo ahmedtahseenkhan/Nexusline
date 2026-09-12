@@ -12,16 +12,22 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import RelatedChips from "@/components/RelatedChips";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, ComplianceBadge } from "@/components/badges";
 import { IconCompliance, IconPlus, IconCheck } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
+import StatementOfApplicability from "@/components/StatementOfApplicability";
 
 /* ------------------------------------------------------------------ types */
 type Framework = {
   id: string;
   name: string;
+  /** compliance | maturity | guidance — only compliance frameworks carry a compliance %. */
+  kind: string;
   version: string;
   authority: string;
   regulator: string;
@@ -61,6 +67,8 @@ type Requirement = {
   owner: string;
   efficacy: number | null;
   implementation: string;
+  /** Statement of Applicability: why the clause is in or out of scope. */
+  applicability_justification?: string;
   legal_id: string | null;
   workflow_status: string;
   controls: Ref[];
@@ -121,11 +129,21 @@ type GapAnalysis = {
   failing: number;
   compliant_pct: number;
   gaps: GapItem[];
+  kind: string;
+  /** Clauses with a status other than not assessed (self-assessment progress). */
+  assessed: number;
 };
 
 /* ------------------------------------------------------------------ helpers */
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
+
+const FRAMEWORK_KIND: Option[] = [
+  { value: "compliance", label: "Compliance (obligations)" },
+  { value: "maturity", label: "Maturity self-assessment" },
+  { value: "guidance", label: "Guidance" },
+];
+const isSelfAssessed = (kind: string | undefined) => !!kind && kind !== "compliance";
 
 const COMPLIANCE_STATUS = opts([
   "not_assessed",
@@ -135,7 +153,6 @@ const COMPLIANCE_STATUS = opts([
   "not_applicable",
 ]);
 const TREATMENT = opts(["implement", "improve", "accept", "transfer", "not_applicable"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 
 const SEVERITY_TONE: Record<string, "low" | "medium" | "high" | "critical"> = {
@@ -161,33 +178,33 @@ const legalToOpt = (l: Ref): AsyncOption => ({ value: l.id, label: l.name || l.r
 /* ------------------------------------------------------------------ framework form */
 type FwState = {
   name: string;
+  kind: string;
   version: string;
   authority: string;
   regulator: string;
   scope: string;
   description: string;
-  workflow_status: string;
 };
 
 const FW_BLANK: FwState = {
   name: "",
+  kind: "compliance",
   version: "",
   authority: "",
   regulator: "",
   scope: "",
   description: "",
-  workflow_status: "draft",
 };
 
 function fromFramework(f: Framework): FwState {
   return {
     name: f.name,
+    kind: f.kind || "compliance",
     version: f.version || "",
     authority: f.authority || "",
     regulator: f.regulator || "",
     scope: f.scope || "",
     description: f.description || "",
-    workflow_status: f.workflow_status || "draft",
   };
 }
 
@@ -198,11 +215,12 @@ type ReqState = {
   description: string;
   domain: string;
   status: string;
-  workflow_status: string;
   treatment: string;
   owner: string;
   efficacy: number | "";
   implementation: string;
+  /** Statement of Applicability: why the clause is in or out of scope. */
+  applicability_justification?: string;
   audit_questionnaire: string;
   legal: AsyncOption | null;
   control_ids: AsyncOption[];
@@ -216,11 +234,11 @@ const REQ_BLANK: ReqState = {
   description: "",
   domain: "",
   status: "not_assessed",
-  workflow_status: "draft",
   treatment: "",
   owner: "",
   efficacy: "",
   implementation: "",
+  applicability_justification: "",
   audit_questionnaire: "",
   legal: null,
   control_ids: [],
@@ -235,11 +253,11 @@ function fromRequirement(r: Requirement): ReqState {
     description: r.description || "",
     domain: r.domain || "",
     status: r.status,
-    workflow_status: r.workflow_status || "draft",
     treatment: r.treatment || "",
     owner: r.owner || "",
     efficacy: r.efficacy ?? "",
     implementation: r.implementation || "",
+    applicability_justification: r.applicability_justification || "",
     audit_questionnaire: r.audit_questionnaire || "",
     legal: r.legal ? legalToOpt(r.legal) : null,
     control_ids: r.controls.map(ctrlToOpt),
@@ -255,11 +273,11 @@ function reqPayload(s: ReqState) {
     description: s.description,
     domain: s.domain,
     status: s.status,
-    workflow_status: s.workflow_status,
     treatment: s.treatment || null,
     owner: s.owner,
     efficacy: s.efficacy === "" ? null : s.efficacy,
     implementation: s.implementation,
+    applicability_justification: s.applicability_justification || "",
     audit_questionnaire: s.audit_questionnaire,
     legal_id: s.legal?.value || null,
     control_ids: s.control_ids.map((o) => o.value),
@@ -298,6 +316,7 @@ function CoverageBadge({ value }: { value: string }) {
 /* ================================================================== page */
 function ComplianceInner() {
   const [openId, setOpenId] = useRecordParam("id"); // open requirement id (deep-linkable)
+  const { formatDate } = useFormat();
   // `?framework=<id>` lets other modules (the Framework Library, a risk's requirement chip)
   // land on a specific framework instead of whichever sorts first.
   const [frameworkParam] = useRecordParam("framework");
@@ -319,7 +338,7 @@ function ComplianceInner() {
   const [savingFw, setSavingFw] = useState(false);
 
   // framework library
-  type FwTemplate = { key: string; name: string; version: string; authority: string; description: string; requirement_count: number };
+  type FwTemplate = { key: string; name: string; version: string; authority: string; description: string; requirement_count: number; kind?: string };
   const [showLib, setShowLib] = useState(false);
   const [templates, setTemplates] = useState<FwTemplate[]>([]);
   const [loadingTpl, setLoadingTpl] = useState<string | null>(null);
@@ -388,6 +407,9 @@ function ComplianceInner() {
      framework record, not to the requirements list — collapsed so they stop competing
      with the table for the top of the page. */
   const [showFrameworkPanels, setShowFrameworkPanels] = useState(false);
+  /* The framework view has two tabs: the requirements register and, for compliance
+     frameworks, the Statement of Applicability. */
+  const [fwTab, setFwTab] = useState<"requirements" | "soa">("requirements");
 
   const fetchRequirements = useCallback(
     (qs: string): Promise<PagedList<Requirement>> => {
@@ -631,10 +653,10 @@ function ComplianceInner() {
         <Field label="Version" help="Release/edition of the framework.">
           <TextInput value={fw.version} onChange={(v) => setF("version", v)} placeholder="2022" />
         </Field>
-        <Field label="Workflow">
-          <Select value={fw.workflow_status} onChange={(v) => setF("workflow_status", v)} options={WORKFLOW} />
-        </Field>
       </div>
+      <Field label="Kind" help="A compliance framework's clauses are obligations and count towards the compliance percentage. A maturity self-assessment (ISO 31000, ISO 27005) or guidance is tracked clause by clause but never scored as non-compliant.">
+        <Select value={fw.kind} onChange={(v) => setF("kind", v)} options={FRAMEWORK_KIND} />
+      </Field>
       <div className="field-row">
         <Field label="Authority" help="Body that publishes the standard (ISO, AICPA, NIST…).">
           <TextInput value={fw.authority} onChange={(v) => setF("authority", v)} placeholder="ISO" />
@@ -678,9 +700,6 @@ function ComplianceInner() {
         <Field label="Compliance Status">
           <Select value={rq.status} onChange={(v) => setR("status", v)} options={COMPLIANCE_STATUS} />
         </Field>
-        <Field label="Workflow">
-          <Select value={rq.workflow_status} onChange={(v) => setR("workflow_status", v)} options={WORKFLOW} />
-        </Field>
       </div>
     </>
   );
@@ -700,6 +719,18 @@ function ComplianceInner() {
       </Field>
       <Field label="How We Comply (Implementation)" help="Narrative of the controls/processes that satisfy this requirement.">
         <RichText value={rq.implementation} onChange={(v) => setR("implementation", v)} placeholder="Describe how the organization complies…" />
+      </Field>
+      <Field
+        label="Applicability justification"
+        required={rq.treatment === "not_applicable" || rq.status === "not_applicable"}
+        help="Statement of Applicability: why this clause is in or out of scope. Required when the treatment or status is Not Applicable."
+      >
+        <TextArea
+          value={rq.applicability_justification || ""}
+          onChange={(v) => setR("applicability_justification", v)}
+          rows={3}
+          placeholder="e.g. Excluded — no cardholder data is stored, processed or transmitted."
+        />
       </Field>
     </>
   );
@@ -747,7 +778,7 @@ function ComplianceInner() {
                     <Badge tone={fnd.status === "open" ? "high" : "low"} plain>
                       {fnd.status}
                     </Badge>
-                    {fnd.deadline ? ` · due ${fnd.deadline}` : ""}
+                    {fnd.deadline ? ` · due ${formatDate(fnd.deadline)}` : ""}
                   </div>
                 </div>
               </div>
@@ -801,7 +832,7 @@ function ComplianceInner() {
           >
             {frameworks.map((f) => (
               <option key={f.id} value={f.id}>
-                {f.name} ({f.requirement_count})
+                {f.name} ({f.requirement_count}){isSelfAssessed(f.kind) ? " · self-assessment" : ""}
               </option>
             ))}
           </select>
@@ -829,19 +860,39 @@ function ComplianceInner() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
+      {selectedFw && isSelfAssessed(selectedFw.kind) && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 12.5 }}>
+          <Badge tone="info">{selectedFw.kind === "guidance" ? "Guidance" : "Maturity self-assessment"}</Badge>
+          <span className="muted">
+            Good practice to measure against, not an obligation: it has no compliance percentage and stays out of the
+            organisation&apos;s compliance score.
+          </span>
+        </div>
+      )}
+
       {gap && (
         <div className="grid stat-grid">
           <div className="card stat">
             <div className="stat-top"><span className="n">{gap.total_requirements}</span></div>
-            <span className="l">Requirements</span>
+            <span className="l">{isSelfAssessed(gap.kind) ? "Clauses" : "Requirements"}</span>
           </div>
-          <div className="card stat ok">
-            <div className="stat-top"><span className="n" style={{ color: "var(--green)" }}>{gap.compliant_pct}%</span></div>
-            <span className="l">Compliant</span>
-            <div className="progress" style={{ marginTop: 4 }}>
-              <span style={{ width: `${gap.compliant_pct}%` }} />
+          {isSelfAssessed(gap.kind) ? (
+            <div className="card stat">
+              <div className="stat-top"><span className="n">{gap.assessed}/{gap.total_requirements}</span></div>
+              <span className="l">Clauses self-assessed</span>
+              <div className="progress" style={{ marginTop: 4 }}>
+                <span style={{ width: `${gap.total_requirements ? Math.round((100 * gap.assessed) / gap.total_requirements) : 0}%`, background: "var(--muted)" }} />
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="card stat ok">
+              <div className="stat-top"><span className="n" style={{ color: "var(--green)" }}>{gap.compliant_pct}%</span></div>
+              <span className="l">Compliant</span>
+              <div className="progress" style={{ marginTop: 4 }}>
+                <span style={{ width: `${gap.compliant_pct}%` }} />
+              </div>
+            </div>
+          )}
           <div className="card stat">
             <div className="stat-top"><span className="n">{gap.assured}/{gap.total_requirements}</span></div>
             <span className="l">Assured by a working control</span>
@@ -851,12 +902,25 @@ function ComplianceInner() {
           </div>
           <div className="card stat warn">
             <div className="stat-top"><span className="n" style={{ color: "var(--orange)" }}>{gap.gaps.length}</span></div>
-            <span className="l">Open gaps</span>
+            <span className="l">{isSelfAssessed(gap.kind) ? "Improvement areas" : "Open gaps"}</span>
           </div>
         </div>
       )}
 
-      {selected ? (
+      {selectedFw && !isSelfAssessed(selectedFw.kind) && (
+        <div className="seg" style={{ marginBottom: 12 }} role="tablist" aria-label="Framework view">
+          <button type="button" role="tab" aria-selected={fwTab === "requirements"} className={fwTab === "requirements" ? "on" : ""} onClick={() => setFwTab("requirements")}>
+            Requirements
+          </button>
+          <button type="button" role="tab" aria-selected={fwTab === "soa"} className={fwTab === "soa" ? "on" : ""} onClick={() => setFwTab("soa")}>
+            Statement of Applicability
+          </button>
+        </div>
+      )}
+
+      {selectedFw && fwTab === "soa" && !isSelfAssessed(selectedFw.kind) ? (
+        <StatementOfApplicability key={selectedFw.id} frameworkId={selectedFw.id} frameworkName={selectedFw.name} onChanged={reload} />
+      ) : selected ? (
         <DataTable<Requirement>
           columns={columns}
           fetcher={fetchRequirements}
@@ -899,7 +963,7 @@ function ComplianceInner() {
             type="button"
             onClick={() => setShowFrameworkPanels((v) => !v)}
           >
-            {showFrameworkPanels ? "Hide" : "Show"} framework details — review cadence, files and comments
+            {showFrameworkPanels ? "Hide" : "Show"} framework details — approval, review cadence, files and comments
           </button>
           {showFrameworkPanels && (
             <div style={{ marginTop: 12 }}>
@@ -908,6 +972,11 @@ function ComplianceInner() {
                 the periodic attestation that its status is accurate, plus files, tags and
                 comments kept against the framework.
               </p>
+              <RecordApproval
+                entityType="framework"
+                entityId={selectedFw.id}
+                onChanged={() => { loadFrameworks(selectedFw.id).catch(() => {}); }}
+              />
               <RecordPanels model="framework" entityId={selectedFw.id} />
             </div>
           )}
@@ -916,6 +985,7 @@ function ComplianceInner() {
 
       {/* -------------------------------------------------- requirement detail drawer */}
       <RecordDrawer
+        aside={detail ? <RecordApproval entityType="requirement" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference || detail.title : "…"}
@@ -1006,7 +1076,7 @@ function ComplianceInner() {
                           <td className="cell-title">{fnd.title}</td>
                           <td><Badge tone={SEVERITY_TONE[fnd.severity] || "neutral"}>{fnd.severity}</Badge></td>
                           <td><Badge tone={fnd.status === "open" ? "high" : "low"}>{fnd.status}</Badge></td>
-                          <td className="muted">{fnd.deadline || "—"}</td>
+                          <td className="muted">{formatDate(fnd.deadline)}</td>
                           <td>
                             {fnd.status === "open" && (
                               <button className="btn secondary sm" onClick={() => closeFinding(fnd.id)}>
@@ -1046,6 +1116,7 @@ function ComplianceInner() {
                     <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
                       <Badge tone="info">{t.authority}</Badge>
                       <Badge tone="neutral" plain>{t.requirement_count} requirements</Badge>
+                      {isSelfAssessed(t.kind) && <Badge tone="info" plain>Maturity self-assessment</Badge>}
                     </div>
                   </div>
                   <button className="btn" disabled={loadingTpl === t.key} onClick={() => loadTemplate(t.key)}>

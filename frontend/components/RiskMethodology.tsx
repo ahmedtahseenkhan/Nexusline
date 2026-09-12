@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type MatrixLevel, type ResidualPolicy, type RiskMatrixConfig } from "@/lib/api";
 import { Badge } from "@/components/badges";
+import { useFormat } from "@/lib/format";
 
 /* Two things a bank baselines its register on:
 
@@ -26,6 +27,7 @@ const EFFECTIVENESS_ROWS: { key: keyof ResidualPolicy; label: string; hint: stri
 ];
 
 export default function RiskMethodology({ onSaved }: { onSaved?: () => void }) {
+  const { currency } = useFormat();
   const [config, setConfig] = useState<RiskMatrixConfig | null>(null);
   const [policy, setPolicy] = useState<ResidualPolicy | null>(null);
   const [size, setSize] = useState(5);
@@ -134,7 +136,7 @@ export default function RiskMethodology({ onSaved }: { onSaved?: () => void }) {
             placeholder={
               axis === "likelihood"
                 ? "e.g. Could occur once in 1–3 years"
-                : "e.g. PKR 50–200m loss, or regulatory censure"
+                : `e.g. ${currency} 50–200m loss, or regulatory censure`
             }
             onChange={(e) => editLevel(axis, row.level, { definition: e.target.value })}
           />

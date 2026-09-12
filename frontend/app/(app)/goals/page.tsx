@@ -5,6 +5,13 @@ import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
+import { deleteErrorText } from "@/lib/bulkDelete";
+import type { UserRef } from "@/lib/masterData";
+import UserPicker, { UserName } from "@/components/UserPicker";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
@@ -16,6 +23,7 @@ import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
 
 // ---- inline types (mirror backend GoalRead / GoalAuditRead) ----------------
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -38,13 +46,16 @@ type Goal = {
   reference: string;
   name: string;
   description: string;
+  /** Legacy free text ("CISO"); shown only while no owner is picked. */
   owner: string;
+  owner_id: string | null;
+  owner_ref: UserRef | null;
   status: string;
   audit_metric: string;
   success_criteria: string;
   audit_frequency: string;
+  /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
-  workflow_owner: string;
   next_audit_date: string | null;
   last_audit_date: string | null;
   audit_count: number;
@@ -76,12 +87,13 @@ const WORKFLOW_TONE: Record<string, "low" | "medium" | "neutral" | "info"> = {
   retired: "neutral",
 };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const refToOpt = (r: Ref): AsyncOption => ({ value: r.id, label: r.title || r.name || r.reference || r.id, sub: r.reference });
 
 const STATUS = opts(["not_started", "on_track", "at_risk", "off_track", "achieved"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[(s || "draft") as WorkflowStateKey] ?? cap(s);
+const personText = (u: UserRef | null | undefined, fallback?: string) => (u ? u.full_name || u.email : fallback || "");
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const RESULT = opts(["not_assessed", "passed", "failed"]);
 
@@ -89,10 +101,8 @@ const RESULT = opts(["not_assessed", "passed", "failed"]);
 type FormState = {
   name: string;
   description: string;
-  owner: string;
+  owner_id: string | null;
   status: string;
-  workflow_status: string;
-  workflow_owner: string;
   audit_frequency: string;
   next_audit_date: string;
   audit_metric: string;
@@ -105,10 +115,8 @@ type FormState = {
 const BLANK: FormState = {
   name: "",
   description: "",
-  owner: "",
+  owner_id: null,
   status: "not_started",
-  workflow_status: "draft",
-  workflow_owner: "",
   audit_frequency: "annual",
   next_audit_date: "",
   audit_metric: "",
@@ -122,10 +130,8 @@ function fromGoal(g: Goal): FormState {
   return {
     name: g.name,
     description: g.description || "",
-    owner: g.owner || "",
+    owner_id: g.owner_id ?? null,
     status: g.status,
-    workflow_status: g.workflow_status || "draft",
-    workflow_owner: g.workflow_owner || "",
     audit_frequency: g.audit_frequency,
     next_audit_date: g.next_audit_date || "",
     audit_metric: g.audit_metric || "",
@@ -140,10 +146,8 @@ function toPayload(f: FormState): Record<string, unknown> {
   return {
     name: f.name,
     description: f.description,
-    owner: f.owner,
+    owner_id: f.owner_id,
     status: f.status,
-    workflow_status: f.workflow_status,
-    workflow_owner: f.workflow_owner,
     audit_frequency: f.audit_frequency,
     next_audit_date: f.next_audit_date || null,
     audit_metric: f.audit_metric,
@@ -157,7 +161,8 @@ function toPayload(f: FormState): Record<string, unknown> {
 type AuditDraft = {
   result: string;
   conducted_date: string;
-  auditor: string;
+  /** Picked from the user list; goal audits keep the auditor as a name, so the name is sent. */
+  auditor: UserRef | null;
   result_description: string;
   metric_description: string;
   success_criteria: string;
@@ -165,7 +170,7 @@ type AuditDraft = {
 const BLANK_AUDIT: AuditDraft = {
   result: "passed",
   conducted_date: "",
-  auditor: "",
+  auditor: null,
   result_description: "",
   metric_description: "",
   success_criteria: "",
@@ -179,6 +184,7 @@ function GoalsInner() {
   const [detail, setDetail] = useState<Goal | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const { formatDate } = useFormat();
 
   const [editing, setEditing] = useState<Goal | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -237,15 +243,14 @@ function GoalsInner() {
   }
 
   async function remove(g: Goal) {
-    if (!(await confirmDialog({ title: `Delete goal ${g.reference || g.name}?`, danger: true }))) return;
-    setError(null);
+    if (!(await confirmDeleteWithImpact("goal", g.id, g.reference ? `${g.reference} — ${g.name}` : g.name))) return;
     try {
       await apiCall<unknown>("DELETE", `/goals/${g.id}`);
       if (openId === g.id) setOpenId(null);
       reload();
-      toast("Deleted");
+      toast(`Archived ${g.reference || g.name}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      toast(deleteErrorText(e, "Failed to delete the goal"), "error");
     }
   }
 
@@ -256,7 +261,7 @@ function GoalsInner() {
       await apiCall<Goal>("POST", `/goals/${detail.id}/audits`, {
         result: ad.result,
         conducted_date: ad.conducted_date || null,
-        auditor: ad.auditor,
+        auditor: ad.auditor ? ad.auditor.full_name || ad.auditor.email : "",
         result_description: ad.result_description,
         metric_description: ad.metric_description,
         success_criteria: ad.success_criteria,
@@ -287,13 +292,13 @@ function GoalsInner() {
   const columns: Column<Goal>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (g) => <span className="ref">{g.reference || "—"}</span> },
     { key: "name", header: "Goal", sortable: true, render: (g) => <span className="cell-title">{g.name}</span> },
-    { key: "owner", header: "Owner", sortable: true, render: (g) => <span className="muted">{g.owner || "—"}</span> },
-    { key: "status", header: "Status", sortable: true, render: (g) => <Badge tone={STATUS_TONE[g.status] || "neutral"}>{cap(g.status)}</Badge> },
-    { key: "workflow_status", header: "Workflow", render: (g) => <Badge tone={WORKFLOW_TONE[g.workflow_status] || "neutral"} plain>{cap(g.workflow_status || "draft")}</Badge> },
+    { key: "owner", header: "Owner", sortable: true, render: (g) => <span className="muted"><UserName user={g.owner_ref} fallback={g.owner} /></span>, text: (g) => personText(g.owner_ref, g.owner) },
+    { key: "status", header: "Status", sortable: true, render: (g) => <Badge tone={STATUS_TONE[g.status] || "neutral"}>{cap(g.status)}</Badge>, text: (g) => cap(g.status) },
+    { key: "workflow_status", header: "Approval", render: (g) => <Badge tone={WORKFLOW_TONE[g.workflow_status] || "neutral"} plain>{workflowLabel(g.workflow_status)}</Badge>, text: (g) => workflowLabel(g.workflow_status) },
     { key: "last_result", header: "Last result", render: (g) => (g.last_result ? <Badge tone={RESULT_TONE[g.last_result] || "neutral"}>{cap(g.last_result)}</Badge> : <span className="muted">—</span>) },
     { key: "audit_count", header: "Audits", align: "center", render: (g) => <span className="muted">{g.audit_count}</span> },
     { key: "links", header: "Links", align: "center", render: (g) => <span className="muted">{linkCount(g) || "—"}</span> },
-    { key: "next_audit_date", header: "Next audit", sortable: true, render: (g) => (g.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{g.next_audit_date || "—"}</span>) },
+    { key: "next_audit_date", header: "Next audit", sortable: true, render: (g) => (g.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(g.next_audit_date)}</span>), text: (g) => (g.next_audit_date ? formatDate(g.next_audit_date) : "") },
     { key: "actions", header: "", render: (g) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(g)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(g)}>Delete</button></div> },
   ];
 
@@ -307,19 +312,17 @@ function GoalsInner() {
         <RichText value={f.description} onChange={(v) => set("description", v)} />
       </Field>
       <div className="field-row">
-        <Field label="Owner / GRC Contact">
-          <TextInput value={f.owner} onChange={(v) => set("owner", v)} placeholder="CISO" />
+        <Field label="Owner / GRC Contact" help="Accountable for delivering the goal.">
+          <UserPicker
+            value={f.owner_id}
+            onChange={(id) => set("owner_id", id)}
+            selected={editing?.owner_ref}
+            legacyText={editing?.owner_id ? null : editing?.owner}
+            placeholder="Search people…"
+          />
         </Field>
-        <Field label="Status">
+        <Field label="Status" help="Progress toward the goal. Approval is separate: submit the goal for review from its detail view.">
           <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
-        </Field>
-      </div>
-      <div className="field-row">
-        <Field label="Workflow" help="Approval lifecycle for this goal record.">
-          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-        <Field label="Workflow Owner">
-          <TextInput value={f.workflow_owner} onChange={(v) => set("workflow_owner", v)} placeholder="Approver" />
         </Field>
       </div>
     </>
@@ -376,6 +379,7 @@ function GoalsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<Goal>
+        toolbarRight={<ArchivedRecords entityType="goal" noun="goals" onRestored={reload} refreshKey={refreshKey} />}
         columns={columns}
         fetcher={fetchGoals}
         rowKey={(g) => g.id}
@@ -392,7 +396,7 @@ function GoalsInner() {
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.name}`.trim() : "…"}
-        subtitle={detail ? `${cap(detail.status)} · ${detail.owner || "no owner"}` : ""}
+        subtitle={detail ? `${cap(detail.status)} · ${personText(detail.owner_ref, detail.owner) || "no owner"}` : ""}
         width={720}
         actions={detail && (
           <>
@@ -405,9 +409,21 @@ function GoalsInner() {
           <>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
               <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
-              <Badge tone={WORKFLOW_TONE[detail.workflow_status] || "neutral"} plain>{cap(detail.workflow_status || "draft")}</Badge>
               {detail.last_result && <Badge tone={RESULT_TONE[detail.last_result] || "neutral"}>{cap(detail.last_result)}</Badge>}
               {linkCount(detail) > 0 && <Badge tone="neutral" plain>{linkCount(detail)} links</Badge>}
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16, fontSize: 13.5 }}>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Owner</div><div style={{ marginTop: 3 }}><UserName user={detail.owner_ref} fallback={detail.owner} /></div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Next audit</div><div style={{ marginTop: 3 }}>{detail.is_audit_overdue ? <Badge tone="high">Overdue · {formatDate(detail.next_audit_date)}</Badge> : formatDate(detail.next_audit_date)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Last audit</div><div style={{ marginTop: 3 }}>{formatDate(detail.last_audit_date)}</div></div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Approval</h3></div>
+              <div className="card-pad">
+                <WorkflowFields entityType="goal" entityId={detail.id} onChanged={() => { loadDetail(detail.id); reload(); }} />
+              </div>
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
@@ -430,9 +446,14 @@ function GoalsInner() {
                     <label className="label">Conducted</label>
                     <input className="input" type="date" value={ad.conducted_date} onChange={(e) => setA("conducted_date", e.target.value)} />
                   </div>
-                  <div style={{ width: 130 }}>
+                  <div style={{ width: 200 }}>
                     <label className="label">Auditor</label>
-                    <input className="input" value={ad.auditor} onChange={(e) => setA("auditor", e.target.value)} placeholder="Name" />
+                    <UserPicker
+                      value={ad.auditor?.id ?? null}
+                      selected={ad.auditor}
+                      onChange={(_id, ref) => setA("auditor", ref ?? null)}
+                      placeholder="Who assessed it…"
+                    />
                   </div>
                   <div style={{ flex: "1 1 180px" }}>
                     <label className="label">Conclusion</label>
@@ -447,7 +468,7 @@ function GoalsInner() {
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: 13 }}>{a.result_description || "Audit"}</div>
                         <div className="when">
-                          {a.conducted_date || a.planned_date || "—"} · {a.auditor || "unassigned"}
+                          {formatDate(a.conducted_date || a.planned_date)} · {a.auditor || "unassigned"}
                         </div>
                       </div>
                       <Badge tone={RESULT_TONE[a.result] || "neutral"}>{cap(a.result)}</Badge>

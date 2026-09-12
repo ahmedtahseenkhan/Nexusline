@@ -112,6 +112,7 @@ from datetime import timedelta  # noqa: E402
 from sqlalchemy import and_, or_  # noqa: E402
 
 from app.api.v1.compliance import _gap_reason  # noqa: E402
+from app.models.control import UNTESTABLE_CONTROL_STATUSES  # noqa: E402
 from app.models.compliance import Framework, Requirement  # noqa: E402
 from app.models.control import ControlAudit  # noqa: E402
 from app.models.enums import (  # noqa: E402
@@ -140,6 +141,7 @@ from app.schemas.dashboard import (  # noqa: E402
     FrameworkPosture,
     Health,
     HealthComponent,
+    HealthCoverage,
     IncidentsPosture,
     KriItem,
     KriPosture,
@@ -156,6 +158,8 @@ _OPEN_INCIDENT = (IncidentStatus.resolved, IncidentStatus.closed)
 _CLOSED_ISSUE_WORDS = {"closed", "resolved", "risk_accepted", "withdrawn", "cancelled"}
 _OPEN_FINDING = (AuditFindingStatus.open, AuditFindingStatus.in_progress)
 _SETTLED_RISK = (RiskStatus.accepted, RiskStatus.closed)
+#: Only compliance frameworks are obligations; maturity/guidance ones never add gaps.
+_COMPLIANCE_KIND = "compliance"
 
 
 async def _count(db, stmt) -> int:
@@ -180,7 +184,7 @@ async def get_overview(
             select(
                 Risk.id, Risk.reference, Risk.title, Risk.inherent_score, Risk.residual_score,
                 Risk.owner_id, Risk.status, Risk.treatment_strategy, Risk.next_review_date,
-                Risk.treatment_deadline,
+                Risk.treatment_deadline, Risk.needs_review, Risk.review_reason,
             ).where(live)
         )
     ).all()
@@ -233,21 +237,30 @@ async def get_overview(
             next_review_date=r.next_review_date,
             review_overdue=bool(r.next_review_date and r.next_review_date < today),
             control_count=control_counts.get(r.id, 0),
+            needs_review=bool(r.needs_review), review_reason=r.review_reason or "",
         )
         for r, eff, status, sev in top
     ]
 
     # --------------------------------------------------------------- controls
+    # A planned control is not operating yet and a retired one no longer is: neither has
+    # anything to test, so neither counts as overdue, due, never tested or unassured.
+    # They are reported once, as "not in operation", so the bar still adds up.
     live_ctl = Control.deleted.is_(False)
+    testable_ctl = live_ctl & Control.status.not_in(UNTESTABLE_CONTROL_STATUSES)
     by_eff: Counter[str] = Counter()
     for eff_val, n in (await db.execute(
-        select(Control.effectiveness, func.count()).where(live_ctl).group_by(Control.effectiveness)
+        select(Control.effectiveness, func.count()).where(testable_ctl).group_by(Control.effectiveness)
     )).all():
         by_eff[eff_val.value] = n
-    controls_total = sum(by_eff.values())
-    tests_overdue = await _count(db, select(Control.id).where(live_ctl, Control.next_audit_date < today))
+    controls_operating = sum(by_eff.values())
+    not_operating = await _count(db, select(Control.id).where(
+        live_ctl, Control.status.in_(UNTESTABLE_CONTROL_STATUSES)
+    ))
+    controls_total = controls_operating + not_operating
+    tests_overdue = await _count(db, select(Control.id).where(testable_ctl, Control.next_audit_date < today))
     tests_due = await _count(db, select(Control.id).where(
-        live_ctl, Control.next_audit_date >= today, Control.next_audit_date <= soon
+        testable_ctl, Control.next_audit_date >= today, Control.next_audit_date <= soon
     ))
     # Latest test per control, in SQL: one row per control, newest first.
     latest = (
@@ -258,7 +271,7 @@ async def get_overview(
     last_failed = await db.scalar(
         select(func.count()).select_from(latest)
         .join(Control, Control.id == latest.c.control_id)
-        .where(live_ctl, latest.c.result == TestResult.failed)
+        .where(testable_ctl, latest.c.result == TestResult.failed)
     ) or 0
     tests_in_period = await _count(db, select(ControlAudit.id).where(ControlAudit.conducted_date >= start))
     assurance = Assurance(
@@ -267,16 +280,23 @@ async def get_overview(
         partially_effective=by_eff.get("partially_effective", 0),
         ineffective=by_eff.get("ineffective", 0),
         not_assessed=by_eff.get("not_assessed", 0),
+        not_operating=not_operating,
         tests_overdue=tests_overdue, tests_due_30d=tests_due,
         last_test_failed=last_failed, tests_in_period=tests_in_period,
     )
     controls_assured = assurance.effective + assurance.partially_effective
 
     # ------------------------------------------------------------- compliance
+    # Only compliance frameworks are obligations. Maturity and guidance frameworks (ISO
+    # 31000, ISO 27005) are listed separately and never add clauses or gaps: a bank is
+    # not "non-compliant" with good-practice guidance.
     frameworks = (await db.scalars(select(Framework).where(Framework.deleted.is_(False)))).all()
     fw_rows: list[FrameworkPosture] = []
+    other_rows: list[FrameworkPosture] = []
     clauses_applicable = clauses_assured = 0
     for fw in frameworks:
+        kind = (getattr(fw, "kind", None) or _COMPLIANCE_KIND).lower()
+        counts = kind == _COMPLIANCE_KIND
         reqs = (await db.scalars(select(Requirement).where(Requirement.framework_id == fw.id))).all()
         by_cov: Counter[str] = Counter()
         applicable = [r for r in reqs if r.status != ComplianceStatus.not_applicable]
@@ -285,19 +305,22 @@ async def get_overview(
         gaps = sum(1 for r in reqs if _gap_reason(r))
         compliant = sum(1 for r in applicable if r.status == ComplianceStatus.compliant)
         assured = by_cov.get(control_assurance.ASSURED, 0)
-        clauses_applicable += len(applicable)
-        clauses_assured += assured
-        fw_rows.append(FrameworkPosture(
+        if counts:
+            clauses_applicable += len(applicable)
+            clauses_assured += assured
+        (fw_rows if counts else other_rows).append(FrameworkPosture(
             id=fw.id, name=fw.name, total=len(reqs), applicable=len(applicable),
             assured=assured, unassessed=by_cov.get(control_assurance.UNASSESSED, 0),
             failing=by_cov.get(control_assurance.FAILING, 0), unmapped=by_cov.get(control_assurance.UNMAPPED, 0),
             compliant_pct=round(100 * compliant / len(applicable), 1) if applicable else 0.0,
-            gaps=gaps,
+            gaps=gaps, kind=kind,
         ))
     fw_rows.sort(key=lambda f: (f.applicable - f.assured), reverse=True)
+    other_rows.sort(key=lambda f: f.name.lower())
     compliance = CompliancePosture(
         frameworks=fw_rows,
         overall_assured_pct=round(100 * clauses_assured / clauses_applicable, 1) if clauses_applicable else 0.0,
+        other_frameworks=other_rows,
     )
 
     # ---------------------------------------------------------------- actions
@@ -434,7 +457,7 @@ async def get_overview(
     deadlines_total = (
         sum(1 for r in rows if r.next_review_date)
         + sum(1 for r in rows if r.treatment_deadline and r.status not in _SETTLED_RISK)
-        + await _count(db, select(Control.id).where(live_ctl, Control.next_audit_date.is_not(None)))
+        + await _count(db, select(Control.id).where(testable_ctl, Control.next_audit_date.is_not(None)))
         + await _count(db, select(Policy.id).where(Policy.deleted.is_(False), Policy.next_review_date.is_not(None),
                                                   Policy.status.in_((PolicyStatus.approved, PolicyStatus.published))))
         + await _count(db, select(Issue.id).where(open_issue, Issue.due_date.is_not(None)))
@@ -443,17 +466,21 @@ async def get_overview(
     deadlines_overdue = reviews_overdue + treatments_overdue + tests_overdue + policies_overdue + issues_overdue + findings_overdue
     parts = governance_health.components(
         risks_total=total_risks, risks_within_tolerance=total_risks - appetite_counts["breach"],
-        controls_total=controls_total, controls_assured=controls_assured,
+        controls_total=controls_operating, controls_assured=controls_assured,
         clauses_applicable=clauses_applicable, clauses_assured=clauses_assured,
         deadlines_total=deadlines_total, deadlines_overdue=deadlines_overdue,
     )
     score = governance_health.score(parts)
     scoreable = governance_health.has_data(parts)
+    cov = governance_health.coverage(parts)
 
     return DashboardOverview(
         as_of=today, period_days=days,
-        health=Health(score=score, band=governance_health.band(score, data=scoreable),
-                      components=[HealthComponent(**c.__dict__) for c in parts]),
+        health=Health(
+            score=score, band=governance_health.band(score, data=scoreable),
+            components=[HealthComponent(**c.__dict__) for c in parts],
+            coverage=HealthCoverage(scored=cov.scored, total=cov.total, weight_pct=cov.weight_pct),
+        ),
         posture=Posture(
             total_risks=total_risks, appetite_score=settings.appetite_score, tolerance_score=settings.tolerance_score,
             within_appetite=appetite_counts["within_appetite"], elevated=appetite_counts["elevated"],

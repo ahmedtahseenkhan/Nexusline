@@ -44,9 +44,13 @@ from app.schemas.risk import (
     RiskUpdate,
     SuggestedResidual,
 )
+from app.db.data_repairs import RESIDUAL_REVIEW_REASON
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import delete_guard
 from app.services import dual_control
+from app.services import ref_fields
+from app.services import risk_integrity
 from app.services.residual_engine import ControlInput, suggest_residual
 from app.services.risk_scoring import next_review_date
 from app.services.risk_settings import (
@@ -57,6 +61,15 @@ from app.services.risk_settings import (
 )
 
 router = APIRouter(prefix="/risks", tags=["risks"])
+
+#: The risk's picked fields (phase 1): each key beside the legacy text it keeps in step
+#: (``owner_id`` never had one). Reads carry ``<name>_ref``. See services.ref_fields.
+RISK_REFS: tuple[ref_fields.RefField, ...] = (
+    ref_fields.user("owner_id", None),
+    ref_fields.user("treatment_owner_id", "treatment_owner"),
+    ref_fields.lookup(Risk, "category_id", "category"),
+    ref_fields.WORKFLOW_OWNER,
+)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -116,6 +129,45 @@ async def _check_scale(db, user: CurrentUser, values: dict[str, object]) -> None
             )
 
 
+def _scoring_changed(risk: Risk | None, incoming: dict[str, object]) -> bool:
+    """Whether the request actually changes a score or the override reason.
+
+    The register form sends every field on each save, so presence in the payload is not
+    a change; only a different value is.
+    """
+    for name in risk_integrity.SCORING_FIELDS:
+        if name not in incoming:
+            continue
+        new, old = incoming[name], (getattr(risk, name) if risk is not None else None)
+        if name == "residual_override_reason":
+            if (new or "").strip() != (old or "").strip():
+                return True
+        elif new != old:
+            return True
+    return False
+
+
+def _enforce_residual(
+    user: CurrentUser,
+    *,
+    inherent: tuple[int | None, int | None],
+    residual: tuple[int | None, int | None],
+    override_reason: str | None,
+    changes_scoring: bool = True,
+) -> None:
+    """Residual may not exceed inherent without a reason from someone who can accept
+    risk. 422 without a reason, 403 without ``risk:accept``. See ``risk_integrity``."""
+    risk_integrity.enforce_residual_rule(
+        inherent_likelihood=inherent[0],
+        inherent_impact=inherent[1],
+        residual_likelihood=residual[0],
+        residual_impact=residual[1],
+        override_reason=override_reason,
+        can_accept=risk_integrity.can_accept_risk(user),
+        changes_scoring=changes_scoring,
+    )
+
+
 def _control_inputs(risk: Risk) -> list[ControlInput]:
     """Describe each linked control to the residual engine, including whether it can be
     relied on today — a failed audit, an overdue test or an open finding means it cannot.
@@ -167,6 +219,10 @@ async def list_risks(
     business_unit_id: uuid.UUID | None = None,
     process_id: uuid.UUID | None = None,
     asset_id: uuid.UUID | None = None,
+    owner_id: uuid.UUID | None = None,
+    treatment_owner_id: uuid.UUID | None = None,
+    category_id: uuid.UUID | None = None,
+    needs_review: bool | None = None,
     search: str | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
@@ -180,7 +236,12 @@ async def list_risks(
         process_id=process_id,
         asset_id=asset_id,
         search=search,
+        owner_id=owner_id,
+        treatment_owner_id=treatment_owner_id,
+        category_id=category_id,
     )
+    if needs_review is not None:
+        stmt = stmt.where(Risk.needs_review.is_(needs_review))
 
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
@@ -190,12 +251,9 @@ async def list_risks(
         stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
     context = {"max_score": await get_max_score(db, user.tenant_id)}
-    return Page(
-        items=[RiskRead.model_validate(r, context=context) for r in rows],
-        total=total,
-        limit=limit,
-        offset=offset,
-    )
+    items = [RiskRead.model_validate(r, context=context) for r in rows]
+    await ref_fields.fill_refs(db, list(zip(rows, items)), RISK_REFS)
+    return Page(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post(
@@ -206,12 +264,19 @@ async def list_risks(
 )
 async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> RiskRead:
     await _check_scale(db, user, body.model_dump())
+    _enforce_residual(
+        user,
+        inherent=(body.inherent_likelihood, body.inherent_impact),
+        residual=(body.residual_likelihood, body.residual_impact),
+        override_reason=body.residual_override_reason,
+    )
     data = body.model_dump(
         exclude={
             "business_unit_ids", "process_ids", "asset_ids", "control_ids",
             "threat_ids", "vulnerability_ids", "policy_ids", "incident_ids",
         }
     )
+    await ref_fields.apply_refs(db, Risk, data, RISK_REFS)
     risk = Risk(tenant_id=user.tenant_id, **data)
     risk.reference = await _next_reference(db)
     risk.business_units = await _resolve(db, BusinessUnit, body.business_unit_ids)
@@ -238,43 +303,22 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
 
 
 # ------------------------------------------------------------------ orphan cleanup
-async def _orphaned_risk_ids(db) -> list[uuid.UUID]:
-    """Live risks that are linked only to deleted assets.
-
-    A risk with no asset links at all is left alone — a hand-made register entry
-    is not required to name an asset. Orphaned means: link rows exist in
-    ``risk_assets``, but none of them reaches a live asset any more (assets are
-    soft-deleted, so the link rows survive).
-    """
-    has_links = select(risk_assets.c.risk_id)
-    has_live_asset = (
-        select(risk_assets.c.risk_id)
-        .join(Asset, Asset.id == risk_assets.c.asset_id)
-        .where(Asset.deleted.is_(False))
-    )
-    return list(
-        (
-            await db.scalars(
-                select(Risk.id).where(
-                    Risk.deleted.is_(False),
-                    Risk.id.in_(has_links),
-                    Risk.id.notin_(has_live_asset),
-                )
-            )
-        ).all()
-    )
-
-
+# A risk is offered for archiving only when it was written against assets that are all
+# deleted *and* nothing else live links to it — no control, business unit, process,
+# policy, incident, threat, requirement, KRI, issue and so on (``risk_integrity``).
+# The review dialog lists the survivors with their live-link counts; nothing is archived
+# until a person ticks rows, writes a reason and presses the button.
 @router.get(
     "/orphaned",
     response_model=OrphanedRiskPage,
     dependencies=[Depends(require("risk:read"))],
-    summary="Risks whose every linked asset has been deleted — candidates for cleanup",
+    summary="Risks with no live links — their assets were deleted and nothing else links",
 )
 async def list_orphaned_risks(db: DbSession) -> OrphanedRiskPage:
-    ids = await _orphaned_risk_ids(db)
+    scan = await risk_integrity.scan_orphans(db)
+    ids = scan.orphaned
     if not ids:
-        return OrphanedRiskPage(items=[], total=0)
+        return OrphanedRiskPage(items=[], total=0, kept_with_links=len(scan.kept))
 
     rows = (
         await db.scalars(
@@ -292,8 +336,10 @@ async def list_orphaned_risks(db: DbSession) -> OrphanedRiskPage:
         )
     ).all():
         names.setdefault(rid, []).append(name)
-    return OrphanedRiskPage(
-        items=[
+    items = []
+    for r in rows:
+        counts = scan.counts.get(r.id, risk_integrity.empty_link_counts())
+        items.append(
             OrphanedRisk(
                 id=r.id,
                 reference=r.reference,
@@ -302,48 +348,95 @@ async def list_orphaned_risks(db: DbSession) -> OrphanedRiskPage:
                 status=r.status.value,
                 inherent_score=r.inherent_score,
                 deleted_asset_names=sorted(names.get(r.id, [])),
+                live_links=counts,
+                live_link_total=sum(counts.values()),
             )
-            for r in rows
-        ],
-        total=len(rows),
-    )
+        )
+    return OrphanedRiskPage(items=items, total=len(items), kept_with_links=len(scan.kept))
+
+
+BULK_ARCHIVE_UNDER_DUAL_CONTROL = (
+    "Archiving risks in bulk is under dual control, and one person cannot be both the "
+    "maker and the checker of a bulk archive. Archive the risks one at a time from the "
+    "register, or ask an administrator to add a dual-control rule for "
+    "risk / bulk_archive that lets this action through."
+)
 
 
 @router.post(
     "/orphaned/purge",
     response_model=OrphanPurgeResult,
     dependencies=[Depends(require("risk:delete"))],
-    summary="Archive orphaned risks (soft delete, audit-logged)",
+    summary="Archive chosen risks that have no live links (soft delete, audit-logged)",
 )
 async def purge_orphaned_risks(
     body: OrphanPurgeRequest, db: DbSession, user: CurrentUser
 ) -> OrphanPurgeResult:
+    """Archive exactly the ticked risks, and only those still without a live link.
+
+    **Dual control.** The dual-control model gates a checker deciding a maker's request;
+    a bulk archive is carried out at once by one person, who is both, so there is no
+    second person to route it to. The action is therefore gated on the
+    ``risk / bulk_archive`` DualControlRule: when dual control applies (an active rule
+    requiring it, or — with no rule — the global ``enforce_segregation_of_duties``
+    switch, on by default) the bulk archive is refused with 403. An administrator
+    enables it with a rule that sets ``requires_dual_control = false``, or with a
+    ``threshold_amount``: the amount compared is the archived risks' total annual loss
+    expectancy (0 when none has one), the same measure ``risk / accept`` uses.
+    """
     from datetime import datetime, timezone
 
-    orphaned = set(await _orphaned_risk_ids(db))
-    targets = orphaned & set(body.risk_ids) if body.risk_ids else orphaned
+    scan = await risk_integrity.scan_orphans(db)
+    requested = set(body.risk_ids)
+    targets = requested & set(scan.orphaned)
+    skipped = len(requested - targets)
     if not targets:
-        return OrphanPurgeResult(archived=0, references=[])
+        return OrphanPurgeResult(archived=0, references=[], skipped=skipped)
 
-    rows = (await db.scalars(select(Risk).where(Risk.id.in_(targets)))).all()
+    rows = (
+        await db.scalars(select(Risk).where(Risk.id.in_(targets)).order_by(Risk.reference))
+    ).all()
+    exposure = sum(float(r.annual_loss_expectancy or 0) for r in rows)
+    required, _rule = await dual_control.dual_control_required(
+        db, "risk", "bulk_archive", amount=exposure
+    )
+    if required:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=BULK_ARCHIVE_UNDER_DUAL_CONTROL
+        )
+
     now = datetime.now(timezone.utc)
     for risk in rows:
         risk.deleted = True
         risk.deleted_date = now
-    refs = sorted(r.reference for r in rows)
+    refs = [r.reference for r in rows]
     await db.flush()
+    # One row per risk, so each risk's own history says who archived it and why.
+    for risk in rows:
+        await audit.record(
+            db,
+            actor=user,
+            action="delete",
+            entity_type="risk",
+            entity_id=risk.id,
+            summary=f"Archived risk {risk.reference} (no live links). Reason: {body.reason}",
+            changes={"reason": body.reason, "via": "bulk archive of risks with no live links"},
+        )
     await audit.record(
         db,
         actor=user,
-        action="delete",
+        action="bulk_archive",
         entity_type="risk",
         entity_id=None,
-        summary=(
-            f"Archived {len(rows)} orphaned risk(s) whose linked assets were deleted"
-        ),
-        changes={"references": ", ".join(refs[:50]) + (" …" if len(refs) > 50 else "")},
+        summary=f"Archived {len(rows)} risk(s) with no live links. Reason: {body.reason}",
+        changes={
+            "reason": body.reason,
+            "archived": len(rows),
+            "skipped": skipped,
+            "references": ", ".join(refs[:50]) + (" …" if len(refs) > 50 else ""),
+        },
     )
-    return OrphanPurgeResult(archived=len(rows), references=refs)
+    return OrphanPurgeResult(archived=len(rows), references=refs, skipped=skipped)
 
 
 @router.get("/{risk_id}", response_model=RiskRead, dependencies=[Depends(require("risk:read"))])
@@ -360,6 +453,20 @@ async def update_risk(
     risk = await _load_risk(db, risk_id)
     data = body.model_dump(exclude_unset=True)
     await _check_scale(db, user, data)
+    if "residual_override_reason" in data:
+        data["residual_override_reason"] = (data["residual_override_reason"] or "").strip()
+    # The rule is checked on the state the update would leave behind: a PATCH that only
+    # lowers inherent can push an untouched residual above it.
+    merged = {name: data.get(name, getattr(risk, name)) for name in risk_integrity.SCORING_FIELDS}
+    _enforce_residual(
+        user,
+        inherent=(merged["inherent_likelihood"], merged["inherent_impact"]),
+        residual=(merged["residual_likelihood"], merged["residual_impact"]),
+        override_reason=merged["residual_override_reason"],
+        changes_scoring=_scoring_changed(risk, data),
+    )
+
+    await ref_fields.apply_refs(db, Risk, data, RISK_REFS, record=risk)
 
     business_unit_ids = data.pop("business_unit_ids", None)
     process_ids = data.pop("process_ids", None)
@@ -393,8 +500,12 @@ async def update_risk(
         risk.next_review_date = next_review_date(
             risk.review_frequency, risk.last_review_date
         )
+    cleared = risk_integrity.clear_residual_flag(risk, RESIDUAL_REVIEW_REASON)
 
     await db.flush()
+    changes = {k: str(v) for k, v in data.items()}
+    if cleared:
+        changes["review_reason"] = "residual corrected; review flag cleared"
     await audit.record(
         db,
         actor=user,
@@ -402,7 +513,7 @@ async def update_risk(
         entity_type="risk",
         entity_id=risk.id,
         summary=f"Updated risk {risk.reference}",
-        changes={k: str(v) for k, v in data.items()},
+        changes=changes,
     )
     return await _read(db, risk.id, user)
 
@@ -413,9 +524,19 @@ async def update_risk(
     dependencies=[Depends(require("risk:delete"))],
 )
 async def delete_risk(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    """Archive a risk (soft delete, audit-logged).
+
+    **Dual control** ``risk / delete``: while segregation of duties applies, whoever
+    entered the risk (``dual_control.maker_of``) cannot also archive it — 403. The ALE is
+    the amount a rule's threshold compares, as for ``risk / accept``.
+    """
     from datetime import datetime, timezone
 
     risk = await _load_risk(db, risk_id)
+    await delete_guard.enforce(
+        db, entity_type="risk", record=risk, user=user, label="risk",
+        amount=float(risk.annual_loss_expectancy) if risk.annual_loss_expectancy else None,
+    )
     ref = risk.reference
     risk.deleted = True
     risk.deleted_date = datetime.now(timezone.utc)
@@ -440,11 +561,25 @@ async def assess_risk(
     risk_id: uuid.UUID, body: RiskAssessment, db: DbSession, user: CurrentUser
 ) -> RiskRead:
     risk = await _load_risk(db, risk_id)
-    await _check_scale(db, user, body.model_dump())
+    incoming = body.model_dump(exclude_none=True)
+    await _check_scale(db, user, incoming)
+    if "residual_override_reason" in incoming:
+        incoming["residual_override_reason"] = incoming["residual_override_reason"].strip()
+    reason = incoming.get("residual_override_reason", risk.residual_override_reason)
+    _enforce_residual(
+        user,
+        inherent=(risk.inherent_likelihood, risk.inherent_impact),
+        residual=(body.residual_likelihood, body.residual_impact),
+        override_reason=reason,
+        changes_scoring=_scoring_changed(risk, incoming),
+    )
     risk.residual_likelihood = body.residual_likelihood
     risk.residual_impact = body.residual_impact
+    if "residual_override_reason" in incoming:
+        risk.residual_override_reason = incoming["residual_override_reason"]
     if risk.status == RiskStatus.draft:
         risk.status = RiskStatus.assessed
+    cleared = risk_integrity.clear_residual_flag(risk, RESIDUAL_REVIEW_REASON)
     await db.flush()
     await audit.record(
         db,
@@ -452,7 +587,13 @@ async def assess_risk(
         action="assess",
         entity_type="risk",
         entity_id=risk.id,
-        summary=f"Assessed residual risk for {risk.reference}",
+        summary=f"Assessed residual risk for {risk.reference}"
+        + ("; review flag cleared" if cleared else ""),
+        changes={
+            "residual_likelihood": body.residual_likelihood,
+            "residual_impact": body.residual_impact,
+            "override_reason": risk.residual_override_reason,
+        },
     )
     return await _read(db, risk.id, user)
 
@@ -476,6 +617,48 @@ async def review_risk(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> R
         entity_type="risk",
         entity_id=risk.id,
         summary=f"Reviewed risk {risk.reference}",
+    )
+    return await _read(db, risk.id, user)
+
+
+RESIDUAL_STILL_ABOVE_INHERENT = (
+    "Residual risk is still higher than inherent risk. Lower the residual, or record an "
+    "override reason, before marking this risk reviewed."
+)
+
+
+@router.post(
+    "/{risk_id}/mark-reviewed",
+    response_model=RiskRead,
+    dependencies=[Depends(require("risk:write"))],
+    summary="Clear the needs-review flag once a person has looked at the risk",
+)
+async def mark_risk_reviewed(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> RiskRead:
+    """Clear ``needs_review`` and its reasons. Refused (409) while the residual is above
+    inherent with no override reason: that contradiction has to be fixed, not waved
+    through. Separate from ``/review``, which reschedules the periodic review."""
+    risk = await _load_risk(db, risk_id)
+    if not risk.needs_review and not risk.review_reason:
+        return await _read(db, risk.id, user)
+    if risk_integrity.residual_exceeds_inherent(
+        risk.inherent_likelihood, risk.inherent_impact,
+        risk.residual_likelihood, risk.residual_impact,
+    ) and not (risk.residual_override_reason or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=RESIDUAL_STILL_ABOVE_INHERENT
+        )
+    previous = risk.review_reason
+    risk.needs_review = False
+    risk.review_reason = ""
+    await db.flush()
+    await audit.record(
+        db,
+        actor=user,
+        action="mark_reviewed",
+        entity_type="risk",
+        entity_id=risk.id,
+        summary=f"Marked risk {risk.reference} reviewed and cleared its review flag",
+        changes={"review_reason": previous},
     )
     return await _read(db, risk.id, user)
 
@@ -559,6 +742,15 @@ async def accept_residual(
             ),
         )
 
+    # The suggestion never exceeds inherent, but an override can: that needs the reason
+    # above *and* the right to accept risk.
+    _enforce_residual(
+        user,
+        inherent=(risk.inherent_likelihood, risk.inherent_impact),
+        residual=(likelihood, impact),
+        override_reason=body.override_reason if is_override else "",
+    )
+
     risk.residual_likelihood = likelihood
     risk.residual_impact = impact
     risk.suggested_residual_likelihood = suggestion.likelihood
@@ -569,6 +761,7 @@ async def accept_residual(
     risk.residual_accepted_at = date.today()
     if risk.status == RiskStatus.draft:
         risk.status = RiskStatus.assessed
+    cleared = risk_integrity.clear_residual_flag(risk, RESIDUAL_REVIEW_REASON)
 
     await db.flush()
     await audit.record(
@@ -586,6 +779,7 @@ async def accept_residual(
             "residual_impact": impact,
             "suggested": f"{suggestion.likelihood}x{suggestion.impact}",
             "override_reason": risk.residual_override_reason,
+            **({"review_reason": "residual corrected; review flag cleared"} if cleared else {}),
         },
     )
     return await _read(db, risk.id, user)
@@ -698,6 +892,7 @@ async def _read(db, risk_id: uuid.UUID, user: CurrentUser) -> RiskRead:
     on the same scale the heat map uses — a 4x4 register must not be banded as 5x5.
     """
     max_score = await get_max_score(db, user.tenant_id)
-    return RiskRead.model_validate(
-        await _load_risk(db, risk_id), context={"max_score": max_score}
-    )
+    risk = await _load_risk(db, risk_id)
+    read = RiskRead.model_validate(risk, context={"max_score": max_score})
+    await ref_fields.fill_refs(db, [(risk, read)], RISK_REFS)
+    return read

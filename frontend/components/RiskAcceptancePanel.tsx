@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { api, type RiskAcceptance } from "@/lib/api";
 import { toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
 import { Badge } from "@/components/badges";
 import { Field, TextInput, TextArea } from "@/components/fields";
 
@@ -54,6 +55,7 @@ export default function RiskAcceptancePanel({ riskId, riskReference, acceptances
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { formatDate } = useFormat();
 
   const history = useMemo(
     () => [...acceptances].sort((a, b) => b.created_at.localeCompare(a.created_at)),
@@ -127,11 +129,11 @@ export default function RiskAcceptancePanel({ riskId, riskReference, acceptances
           <div className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
             {left <= 30 ? (
               <b>
-                Expires in {left} day{left === 1 ? "" : "s"} ({inForce.expires_at}) — renew it, or the risk
+                Expires in {left} day{left === 1 ? "" : "s"} ({formatDate(inForce.expires_at)}) — renew it, or the risk
                 returns to the register on its own.
               </b>
             ) : (
-              <>In force until {inForce.expires_at}.</>
+              <>In force until {formatDate(inForce.expires_at)}.</>
             )}
           </div>
         );
@@ -205,8 +207,8 @@ export default function RiskAcceptancePanel({ riskId, riskReference, acceptances
               {history.map((a) => (
                 <tr key={a.id}>
                   <td><Badge tone={TONE[a.status]}>{WORDS[a.status]}</Badge></td>
-                  <td className="muted">{a.expires_at || "Open-ended"}</td>
-                  <td className="muted">{a.decided_at || "—"}</td>
+                  <td className="muted">{a.expires_at ? formatDate(a.expires_at) : "Open-ended"}</td>
+                  <td className="muted">{formatDate(a.decided_at)}</td>
                   <td style={{ fontSize: 13 }}>{a.rationale || "—"}</td>
                 </tr>
               ))}

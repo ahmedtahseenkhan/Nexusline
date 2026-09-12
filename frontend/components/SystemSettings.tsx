@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, type SystemInfo, type SystemHealth, type BackupItem, type ModuleState } from "@/lib/api";
 import { Badge } from "@/components/badges";
+import { useFormat } from "@/lib/format";
 
 function fmtBytes(n: number) {
   if (!n) return "0 B";
@@ -13,6 +14,7 @@ function fmtBytes(n: number) {
 
 /** On-prem System admin: version, health, license status, backups, support bundle. */
 export default function SystemSettings() {
+  const { formatDate, formatDateTime } = useFormat();
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [backups, setBackups] = useState<BackupItem[]>([]);
@@ -95,7 +97,7 @@ export default function SystemSettings() {
               <div><Badge tone={licTone}>{lic?.status ?? "…"}</Badge></div>
               {lic?.licensed_to && <div className="muted">Licensed to <b>{lic.licensed_to}</b></div>}
               {lic?.plan && <div className="muted">Plan: {lic.plan} · {lic.seats} seats</div>}
-              {lic?.expires && <div className="muted">Expires: {lic.expires}</div>}
+              {lic?.expires && <div className="muted">Expires: {formatDate(lic.expires)}</div>}
               {lic?.features?.length ? <div className="muted">Features: {lic.features.join(", ")}</div> : null}
               {lic && !lic.valid && <div className="muted">{lic.message}</div>}
             </div>
@@ -147,7 +149,7 @@ export default function SystemSettings() {
                   <tr key={b.filename}>
                     <td className="ref">{b.filename}</td>
                     <td className="muted">{fmtBytes(b.size_bytes)}</td>
-                    <td className="muted">{new Date(b.created_at).toLocaleString()}</td>
+                    <td className="muted">{formatDateTime(b.created_at)}</td>
                   </tr>
                 ))}
               </tbody>

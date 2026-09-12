@@ -70,7 +70,6 @@ class OutsourcingArrangementBase(BaseModel):
     concentration_note: str = ""
     status: OutsourcingStatus = OutsourcingStatus.proposed
     owner: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class OutsourcingArrangementCreate(OutsourcingArrangementBase):
@@ -99,10 +98,11 @@ class OutsourcingArrangementUpdate(BaseModel):
     concentration_note: str | None = None
     status: OutsourcingStatus | None = None
     owner: str | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class OutsourcingArrangementRead(OutsourcingArrangementBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

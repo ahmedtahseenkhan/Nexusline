@@ -27,6 +27,8 @@ def _feature_flags() -> dict:
         "scheduler_enabled": settings.scheduler_enabled,
         "ldap_enabled": settings.ldap_enabled,
         "mfa_required": settings.mfa_required,
+        "mfa_required_roles": settings.mfa_required_roles,
+        "mfa_grace_days": settings.mfa_grace_days,
         "enforce_segregation_of_duties": settings.enforce_segregation_of_duties,
         "enforce_license": lic.enforcement_enabled(),
         "smtp_configured": bool(settings.smtp_host),
@@ -47,6 +49,31 @@ async def system_info() -> dict:
 @router.get("/license", dependencies=[Depends(require("role:read"))])
 async def license_status() -> dict:
     return lic.load_current(refresh=True).to_public()
+
+
+def license_banner_state(status: str, enforcing: bool) -> dict:
+    """What every signed-in user should be told about the licence.
+
+    ``evaluation_build`` is true for a dev/self-host build running without a licence —
+    the one state in which everything is unlocked. It changes nothing about enforcement
+    (a release image with no valid licence refuses to start, see ``core/build.py``); it
+    exists so nobody mistakes an evaluation build for a production one.
+    """
+    evaluation = not enforcing and status in ("unlicensed", "unconfigured")
+    return {"license_status": status, "evaluation_build": evaluation, "enforce_license": enforcing}
+
+
+@router.get("/status")
+async def system_status(user: CurrentUser) -> dict:
+    """Auth-only deployment status for the app shell: licence state (drives the
+    "Unlicensed evaluation build" banner) and the version. No admin permission —
+    every user sees the banner, so every user may read this."""
+    info = lic.load_current()
+    return {
+        **license_banner_state(info.status, lic.enforcement_enabled()),
+        "app_version": settings.app_version,
+        "deployment_mode": settings.deployment_mode,
+    }
 
 
 @router.get("/modules")

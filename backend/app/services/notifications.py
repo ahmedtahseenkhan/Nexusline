@@ -1,12 +1,28 @@
 """Cross-module alert scanner — computes due/overdue/gap alerts across every module
-and reconciles them into the ``notifications`` table (dedup + auto-resolve)."""
+and reconciles them into the ``notifications`` table (dedup + auto-resolve).
+
+Two rules keep the feed readable once real data is in it:
+
+* **Housekeeping is grouped, decisions never are.** When one low-urgency family (tests,
+  maintenance, scheduled reviews, training) raises more than :data:`GROUP_THRESHOLD`
+  alerts, they collapse into one row ("36 controls have tests overdue") with a handful
+  of examples and a link to the list. The families in :data:`NEVER_GROUPED` (tolerance
+  breaches, turnaround-time breaches, approvals, attestations, regulator and incident
+  deadlines, and the like) always stay one row per record, so they can't be buried.
+* **An alert says what is true now.** ``refresh`` rewrites the text of an alert that
+  already exists when the condition behind it has changed ("R-117 scores 20", not the
+  15 it scored when first raised).
+"""
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from datetime import date, timedelta
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.control import UNTESTABLE_CONTROL_STATUSES
 from app.models.access_review import AccessReview
 from app.models.approval import ApprovalRequest
 from app.models.attestation import Attestation
@@ -39,6 +55,7 @@ from app.models.policy import Policy
 from app.models.privacy import ProcessingActivity
 from app.models.project import Project
 from app.models.risk import Risk, RiskAcceptance
+from app.models.vendor import Vendor
 from app.services.risk_acceptance import EXPIRY_WARNING_DAYS
 from app.services.risk_scoring import effective_score
 from app.services.risk_settings import get_or_create_settings
@@ -49,6 +66,155 @@ _I = NotificationCategory.info
 
 # EVENT_PREFIX is defined on the model and imported above; callers that already reach
 # for it through this module keep working.
+
+
+#: Entity types whose own record carries the review schedule (``review_frequency`` /
+#: ``next_review_date``). Attesting one of these moves that schedule (see
+#: ``api.v1.attestations``), and the native review sweep below raises the overdue alert,
+#: so the attestation sweep must not raise a second one for the same date.
+NATIVE_REVIEW_ENTITY_TYPES: frozenset[str] = frozenset({"risk", "policy", "vendor"})
+
+#: More than this many alerts in one groupable family collapse into a single row.
+GROUP_THRESHOLD = 5
+#: Examples named in a grouped alert's body.
+GROUP_EXAMPLES = 5
+
+#: Low-urgency families that may be grouped: dedup-key prefix -> (noun singular,
+#: noun plural, predicate, link). Everything here is scheduled housekeeping whose
+#: individual rows add nothing a filtered list doesn't show better.
+GROUPABLE_FAMILIES: dict[str, tuple[str, str, str, str]] = {
+    "control-audit": ("control", "controls", "tests overdue", "/controls"),
+    "control-maint": ("control", "controls", "maintenance overdue", "/controls"),
+    "risk-review": ("risk", "risks", "reviews overdue", "/risks"),
+    "policy-review": ("policy", "policies", "reviews overdue", "/policies"),
+    "vendor-review": ("third party", "third parties", "reviews overdue", "/vendors"),
+    "goal-audit": ("goal", "goals", "audits overdue", "/goals"),
+    "bcp-test": ("continuity plan", "continuity plans", "tests overdue", "/continuity"),
+    "ar-overdue": ("access review", "access reviews", "past due", "/access-reviews"),
+    "aw-due": ("awareness programme", "awareness programmes", "training due", "/awareness"),
+    "proj-overdue": ("project", "projects", "deadlines passed", "/projects"),
+    "rcsa-overdue": ("RCSA", "RCSAs", "past due", "/operational-risk"),
+    "iaeng-overdue": ("audit engagement", "audit engagements", "planned completion passed", "/internal-audit"),
+}
+
+#: Families that always render one row per record, however many there are. Each one is
+#: either a breach, a decision somebody must take, or a clock set by a regulator:
+#:
+#: * ``risk-breach`` — a risk above tolerance; the board-level question.
+#: * ``risk-acceptance-expiring`` — each lapse needs a named renew/let-lapse decision.
+#: * ``tat-breach`` / ``tat-at-risk`` — turnaround-time (SLA) clocks, escalated by email.
+#: * ``approval-pending`` — a named person's decision is waiting.
+#: * ``attest-overdue`` — a sign-off owed by a named person.
+#: * ``regreport-overdue`` / ``sar-overdue`` — regulator (SBP / FMU) filing deadlines.
+#: * ``screening-escalated`` — a sanctions match awaiting a decision.
+#: * ``exc-expired`` — an approved deviation has lapsed and is now unapproved.
+#: * ``kri-breach`` — an indicator past its limit.
+#: * ``iafinding-overdue`` / ``snc-overdue`` — audit and Shariah findings past remediation date.
+#: * ``ropa-transfer`` / ``ropa-dpia`` — data-protection obligations under the law.
+#:
+#: Anything not in :data:`GROUPABLE_FAMILIES` is never grouped, so a new family is
+#: individual until someone decides otherwise; this list documents the deliberate choices.
+NEVER_GROUPED: frozenset[str] = frozenset({
+    "risk-breach", "risk-acceptance-expiring", "tat-breach", "tat-at-risk",
+    "approval-pending", "attest-overdue", "regreport-overdue", "sar-overdue",
+    "screening-escalated", "exc-expired", "kri-breach", "iafinding-overdue",
+    "snc-overdue", "ropa-transfer", "ropa-dpia",
+})
+
+GROUP_PREFIX = "group:"
+
+_CATEGORY_RANK = {NotificationCategory.critical: 0, NotificationCategory.warning: 1, NotificationCategory.info: 2}
+
+
+def family_of(dedup_key: str) -> str:
+    """The alert family a dedup key belongs to: everything before the first ``:``."""
+    return dedup_key.split(":", 1)[0]
+
+
+def _example_label(alert: Mapping[str, Any]) -> str:
+    title = str(alert.get("title", ""))
+    return title.split(": ", 1)[1] if ": " in title else title
+
+
+def group_alerts(
+    alerts: list[dict], *, threshold: int = GROUP_THRESHOLD, examples: int = GROUP_EXAMPLES
+) -> list[dict]:
+    """Collapse any groupable family with more than ``threshold`` alerts into one alert.
+
+    Pure: takes and returns the scanner's alert dicts. Order is preserved; the grouped
+    alert takes the position of its family's first member. Families in
+    :data:`NEVER_GROUPED` (or not in :data:`GROUPABLE_FAMILIES`) pass through untouched.
+    """
+    by_family: dict[str, list[dict]] = {}
+    for a in alerts:
+        fam = family_of(a["dedup_key"])
+        if fam in GROUPABLE_FAMILIES and fam not in NEVER_GROUPED:
+            by_family.setdefault(fam, []).append(a)
+    to_group = {fam for fam, members in by_family.items() if len(members) > threshold}
+    if not to_group:
+        return list(alerts)
+
+    out: list[dict] = []
+    emitted: set[str] = set()
+    for a in alerts:
+        fam = family_of(a["dedup_key"])
+        if fam not in to_group:
+            out.append(a)
+            continue
+        if fam in emitted:
+            continue
+        emitted.add(fam)
+        members = by_family[fam]
+        singular, plural, predicate, link = GROUPABLE_FAMILIES[fam]
+        n = len(members)
+        names = [_example_label(m) for m in members[:examples]]
+        more = n - len(names)
+        body = "Including " + ", ".join(names) + (f" and {more} more" if more > 0 else "") + "."
+        category = min((m["category"] for m in members), key=lambda c: _CATEGORY_RANK.get(c, 3))
+        out.append({
+            "dedup_key": f"{GROUP_PREFIX}{fam}",
+            "title": f"{n} {plural if n != 1 else singular} {'have' if n != 1 else 'has'} {predicate}",
+            "body": body,
+            "category": category,
+            "entity_type": members[0]["entity_type"],
+            "entity_id": None,
+            "link": link,
+        })
+    return out
+
+
+#: Notification columns an alert re-derives on every scan and ``refresh`` keeps current.
+REFRESHED_FIELDS: tuple[str, ...] = ("title", "body", "category", "link", "entity_type", "entity_id")
+
+
+def alert_changes(existing: Any, alert: Mapping[str, Any]) -> dict[str, Any]:
+    """Fields of an existing notification that differ from the freshly computed alert.
+
+    Pure: ``existing`` is anything with the notification attributes (the ORM row, or a
+    stand-in in tests). An empty dict means the stored alert is still accurate.
+    """
+    changes: dict[str, Any] = {}
+    for field in REFRESHED_FIELDS:
+        if field not in alert:
+            continue
+        new = alert[field]
+        old = getattr(existing, field, None)
+        if field == "category":
+            old_v = getattr(old, "value", old)
+            new_v = getattr(new, "value", new)
+            if old_v != new_v:
+                changes[field] = new
+        elif (old or None) != (new or None):
+            changes[field] = new
+    return changes
+
+
+def keys_to_delete(
+    existing_keys: Iterable[str], current_keys: set[str], *, keep_prefix: str = EVENT_PREFIX
+) -> list[str]:
+    """Stored alert keys whose condition no longer holds. Keys starting with
+    ``keep_prefix`` (recorded events) are never swept."""
+    return [k for k in existing_keys if not k.startswith(keep_prefix) and k not in current_keys]
 
 
 async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
@@ -111,8 +277,11 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
             f"({days_left} day(s) left) — renew it or the risk returns to the register",
             _W, "risk", risk.id, "/risks")
 
+    # Planned and retired controls have no test or maintenance clock (D-02): a control
+    # that is not operating yet cannot be overdue for a test of how it operates.
     _control_stmt = select(Control).where(
         Control.deleted.is_(False),
+        Control.status.not_in(UNTESTABLE_CONTROL_STATUSES),
         or_(Control.next_audit_date < today, Control.next_maintenance_date < today),
     )
     for c in (await db.scalars(_control_stmt)).all():
@@ -175,6 +344,13 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
         add(f"policy-review:{pol.id}", f"Policy review overdue: {pol.reference}",
             f"{pol.title} — review was due {pol.next_review_date}", _W, "policy", pol.id, "/policies")
 
+    # Third parties carry their own review cycle on the record; attesting a vendor moves
+    # it, so this is the one overdue alert for a vendor review.
+    _vendor_stmt = select(Vendor).where(Vendor.deleted.is_(False), Vendor.next_review_date < today)
+    for v in (await db.scalars(_vendor_stmt)).all():
+        add(f"vendor-review:{v.id}", f"Third-party review overdue: {v.name}",
+            f"Review was due {v.next_review_date}", _W, "vendor", v.id, "/vendors")
+
     _aw_stmt = select(AwarenessProgram).where(
         AwarenessProgram.deleted.is_(False), AwarenessProgram.next_due_date < today
     )
@@ -193,8 +369,12 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
 
     # Overdue attestations — DISTINCT ON keeps only the latest attestation per record
     # (one row each instead of the full history), then alert if that latest is past due.
+    # Records with a native review schedule (risk, policy, vendor) are skipped: their
+    # attestation writes the record's own next_review_date, which the sweeps above
+    # already watch. One review clock per record, one alert.
     _att_stmt = (
         select(Attestation)
+        .where(Attestation.entity_type.not_in(sorted(NATIVE_REVIEW_ENTITY_TYPES)))
         .distinct(Attestation.entity_type, Attestation.entity_id)
         .order_by(Attestation.entity_type, Attestation.entity_id, Attestation.attested_at.desc())
     )
@@ -248,10 +428,17 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
             _C if sf.severity.value in ("high", "critical") else _W,
             "shariah_finding", sf.id, "/shariah")
 
+    # ``KeyRiskIndicator.status`` is a Python property (it depends on the direction), so
+    # it can't be filtered in SQL — comparing it there compiled to ``WHERE false`` and no
+    # KRI breach alert ever fired. Narrow in SQL to KRIs that can breach, decide in Python.
     _kri_stmt = select(KeyRiskIndicator).where(
-        KeyRiskIndicator.deleted.is_(False), KeyRiskIndicator.status == KriStatus.red
+        KeyRiskIndicator.deleted.is_(False),
+        KeyRiskIndicator.current_value.is_not(None),
+        KeyRiskIndicator.limit_threshold.is_not(None),
     )
     for kri in (await db.scalars(_kri_stmt)).all():
+        if kri.status != KriStatus.red:
+            continue
         add(f"kri-breach:{kri.id}", f"KRI breach: {kri.reference}",
             f"{kri.name} — current {kri.current_value} breached its limit threshold",
             _C, "key_risk_indicator", kri.id, "/operational-risk")
@@ -331,40 +518,48 @@ async def scan_alerts(db: AsyncSession, tenant_id) -> list[dict]:
 
 
 async def refresh(db: AsyncSession, tenant_id) -> list[Notification]:
-    """Reconcile current alerts into the notifications table (add new, delete resolved).
+    """Reconcile current alerts into the notifications table.
+
+    Adds new alerts, rewrites the text of existing ones whose condition changed, and
+    deletes resolved ones. Low-urgency families above the threshold arrive already
+    grouped (:func:`group_alerts`); when a group shrinks back under it, the group key
+    stops appearing and is deleted while the individual keys come back as new rows.
 
     Returns the list of newly created notifications so callers (e.g. the scheduler)
     can email a digest of only what is genuinely new — dedup prevents repeat alerts.
+    An updated alert is not "new": its ``created_at`` (and so each user's seen state)
+    is kept.
     """
-    alerts = await scan_alerts(db, tenant_id)
+    alerts = group_alerts(await scan_alerts(db, tenant_id))
     existing = {n.dedup_key: n for n in (await db.scalars(select(Notification))).all()}
     current_keys = {a["dedup_key"] for a in alerts}
 
     created: list[Notification] = []
     for a in alerts:
-        if a["dedup_key"] not in existing:
-            n = Notification(
-                tenant_id=tenant_id,
-                title=a["title"],
-                body=a["body"],
-                category=a["category"],
-                entity_type=a["entity_type"],
-                entity_id=a["entity_id"],
-                link=a["link"],
-                dedup_key=a["dedup_key"],
-            )
-            db.add(n)
-            created.append(n)
-    for key, n in existing.items():
-        # Only reconcile what this scanner produces. Alerts describe a *condition* that
-        # is either still true or has resolved, so one that no longer appears is deleted.
-        # Event notifications (prefix `event:`) record something that *happened* — a
-        # workflow finishing, for instance — and are written directly by the module that
-        # observed it. Sweeping those away would mean the user never sees them, because
-        # this reconciler runs every time the notification list is opened.
-        if key.startswith(EVENT_PREFIX):
+        stored = existing.get(a["dedup_key"])
+        if stored is not None:
+            for field, value in alert_changes(stored, a).items():
+                setattr(stored, field, value)
             continue
-        if key not in current_keys:
-            await db.delete(n)
+        n = Notification(
+            tenant_id=tenant_id,
+            title=a["title"],
+            body=a["body"],
+            category=a["category"],
+            entity_type=a["entity_type"],
+            entity_id=a["entity_id"],
+            link=a["link"],
+            dedup_key=a["dedup_key"],
+        )
+        db.add(n)
+        created.append(n)
+    # Only reconcile what this scanner produces. Alerts describe a *condition* that is
+    # either still true or has resolved, so one that no longer appears is deleted.
+    # Event notifications (prefix `event:`) record something that *happened* — a
+    # workflow finishing, for instance — and are written directly by the module that
+    # observed it. Sweeping those away would mean the user never sees them, because
+    # this reconciler runs every time the notification list is opened.
+    for key in keys_to_delete(existing.keys(), current_keys, keep_prefix=EVENT_PREFIX):
+        await db.delete(existing[key])
     await db.flush()
     return created

@@ -12,6 +12,8 @@ import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ----------------------------------------------------------------- inline types
 type AccessReviewItem = {
@@ -64,7 +66,7 @@ const DECISION_TONE: Record<string, "low" | "critical" | "neutral"> = {
   pending: "neutral",
 };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const STATUS = opts(["draft", "in_progress", "completed"]);
@@ -115,6 +117,7 @@ function toPayload(f: FormState): Record<string, unknown> {
 /* ================================================================ page ===== */
 function AccessReviewsInner() {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate } = useFormat();
   const [detail, setDetail] = useState<AccessReview | null>(null);
   const [assets, setAssets] = useState<AssetRef[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -229,7 +232,7 @@ function AccessReviewsInner() {
     { key: "accounts", header: "Accounts", render: (r) => <span className="muted">{r.total_items}</span> },
     { key: "decided", header: "Decided", render: (r) => <div style={{ minWidth: 120 }}><div className="progress"><span style={{ width: `${r.completion_pct}%` }} /></div><span className="muted" style={{ fontSize: 11 }}>{r.reviewed_count}/{r.total_items} · {r.completion_pct}%</span></div> },
     { key: "keeprevoke", header: "Keep / Revoke", render: (r) => <span className="muted"><span style={{ color: "var(--green)" }}>{r.keep_count}</span> / <span style={{ color: "var(--red)" }}>{r.revoke_count}</span></span> },
-    { key: "due_date", header: "Due", sortable: true, render: (r) => <span className="muted">{r.due_date || "—"}{r.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}</span> },
+    { key: "due_date", header: "Due", sortable: true, render: (r) => <span className="muted">{formatDate(r.due_date)}{r.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}</span> },
     { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(r)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(r)}>Delete</button></div> },
   ];
 
@@ -269,8 +272,8 @@ function AccessReviewsInner() {
       {editing && (
         <div className="field-row">
           <Field label="Reference"><div className="muted">{editing.reference}</div></Field>
-          <Field label="Next Review"><div className="muted">{editing.next_review_date || "—"}</div></Field>
-          <Field label="Completed"><div className="muted">{editing.completed_at || "—"}</div></Field>
+          <Field label="Next Review"><div className="muted">{formatDate(editing.next_review_date)}</div></Field>
+          <Field label="Completed"><div className="muted">{formatDate(editing.completed_at)}</div></Field>
         </div>
       )}
     </>
@@ -366,7 +369,7 @@ function AccessReviewsInner() {
                           <td className="cell-title">{it.username}{it.display_name && <div className="when">{it.display_name}</div>}</td>
                           <td className="muted">{it.access || "—"}</td>
                           <td><Badge tone={DECISION_TONE[it.decision] || "neutral"}>{cap(it.decision)}</Badge></td>
-                          <td className="muted">{it.decided_by || "—"}{it.decided_at && <div className="when">{it.decided_at}</div>}</td>
+                          <td className="muted">{it.decided_by || "—"}{it.decided_at && <div className="when">{formatDate(it.decided_at)}</div>}</td>
                           <td>
                             <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                               <button className="btn secondary sm" type="button" disabled={busyItem === it.id} onClick={() => decideItem(it.id, "keep")}>Keep</button>

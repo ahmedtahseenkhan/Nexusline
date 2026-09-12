@@ -33,7 +33,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.asset import Asset
-from app.models.control import Control, control_assets
+from app.models.control import UNTESTABLE_CONTROL_STATUSES, Control, control_assets
 from app.models.enums import (
     ControlEffectiveness,
     ControlStatus,
@@ -438,11 +438,21 @@ def _control_filters(stmt: Select, f: dict, ctx: ReportContext) -> Select:
             .exists()
         )
 
+    # A planned or retired control carries no test clock: never overdue, whatever date
+    # an older row still holds.
     overdue = _bool(f.get("audit_overdue"))
     if overdue is True:
-        stmt = stmt.where(Control.next_audit_date < ctx.today)
+        stmt = stmt.where(
+            Control.next_audit_date < ctx.today, Control.status.notin_(UNTESTABLE_CONTROL_STATUSES)
+        )
     elif overdue is False:
-        stmt = stmt.where(or_(Control.next_audit_date.is_(None), Control.next_audit_date >= ctx.today))
+        stmt = stmt.where(
+            or_(
+                Control.next_audit_date.is_(None),
+                Control.next_audit_date >= ctx.today,
+                Control.status.in_(UNTESTABLE_CONTROL_STATUSES),
+            )
+        )
 
     audit_from, audit_to = _date(f.get("audit_from")), _date(f.get("audit_to"))
     if audit_from:

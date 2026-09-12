@@ -106,7 +106,6 @@ class CommitteeBase(BaseModel):
     members: str = ""
     meeting_frequency: ReviewFrequency = ReviewFrequency.quarterly
     status: CommitteeStatus = CommitteeStatus.active
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class CommitteeCreate(CommitteeBase):
@@ -122,10 +121,11 @@ class CommitteeUpdate(BaseModel):
     members: str | None = None
     meeting_frequency: ReviewFrequency | None = None
     status: CommitteeStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class CommitteeRead(CommitteeBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

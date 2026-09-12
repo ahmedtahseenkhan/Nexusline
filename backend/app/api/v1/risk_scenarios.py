@@ -231,6 +231,15 @@ async def install_library(db: DbSession, user: CurrentUser) -> LibraryInstallRes
             if not (row.control_references or "").strip() and control_mapping.references_for(spec.reference):
                 row.control_references = ", ".join(control_mapping.references_for(spec.reference))
                 backfilled += 1
+            else:
+                # A row still holding an earlier release's mapping verbatim is old, not
+                # retuned: it takes the SBP additions. Edited rows are left alone.
+                upgraded = control_mapping.upgraded_references(
+                    spec.reference, (row.control_references or "").split(",")
+                )
+                if upgraded:
+                    row.control_references = ", ".join(upgraded)
+                    backfilled += 1
             continue
         db.add(
             RiskScenarioTemplate(

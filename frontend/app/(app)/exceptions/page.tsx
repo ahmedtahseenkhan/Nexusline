@@ -10,12 +10,15 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ----- inline types (api.ts is shared / read-only) -----------------------------
 type LinkRef = { id: string; reference?: string; title?: string; name?: string };
@@ -55,12 +58,11 @@ const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neut
   closed: "neutral",
 };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const TYPE = opts(["risk", "policy", "compliance", "other"]);
 const STATUS = opts(["pending", "approved", "rejected", "expired", "closed"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 
 const refToOpt = (x: LinkRef): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
 
@@ -71,7 +73,6 @@ type FormState = {
   classification: string;
   rationale: string;
   status: string;
-  workflow_status: string;
   business_owner: string;
   start_date: string;
   expires_at: string;
@@ -86,7 +87,7 @@ type FormState = {
 
 const BLANK: FormState = {
   title: "", description: "", exception_type: "risk", classification: "",
-  rationale: "", status: "pending", workflow_status: "draft", business_owner: "",
+  rationale: "", status: "pending", business_owner: "",
   start_date: "", expires_at: "", closure_date: "", compensating_controls: "",
   control_ids: [], risk_ids: [], policy_ids: [], requirement_ids: [], asset_ids: [],
 };
@@ -99,7 +100,6 @@ function fromException(x: Exception): FormState {
     classification: x.classification || "",
     rationale: x.rationale || "",
     status: x.status,
-    workflow_status: x.workflow_status || "draft",
     business_owner: x.business_owner || "",
     start_date: x.start_date || "",
     expires_at: x.expires_at || "",
@@ -123,7 +123,6 @@ function toPayload(f: FormState, editing: boolean): Record<string, unknown> {
     exception_type: f.exception_type,
     classification: f.classification,
     rationale: f.rationale,
-    workflow_status: f.workflow_status,
     business_owner: f.business_owner,
     compensating_controls: f.compensating_controls,
     start_date: f.start_date || null,
@@ -141,6 +140,7 @@ function toPayload(f: FormState, editing: boolean): Record<string, unknown> {
 /* ================================================================ page ===== */
 function ExceptionsInner() {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate, formatDateTime } = useFormat();
   const [detail, setDetail] = useState<Exception | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -210,8 +210,8 @@ function ExceptionsInner() {
     { key: "title", header: "Title", sortable: true, render: (x) => <span className="cell-title">{x.title}</span> },
     { key: "exception_type", header: "Type", sortable: true, render: (x) => <Badge tone="info" plain>{cap(x.exception_type)}</Badge> },
     { key: "status", header: "Status", sortable: true, render: (x) => <><Badge tone={STATUS_TONE[x.status] || "neutral"}>{cap(x.status)}</Badge>{x.is_expired && <span style={{ marginLeft: 6 }}><Badge tone="high">Expired</Badge></span>}</> },
-    { key: "start_date", header: "Start", sortable: true, render: (x) => <span className="muted">{x.start_date || "—"}</span> },
-    { key: "expires_at", header: "Expires", sortable: true, render: (x) => (x.expires_at ? (isPast(x.expires_at) ? <Badge tone="high">{x.expires_at}</Badge> : <span className="muted">{x.expires_at}</span>) : <span className="muted">—</span>) },
+    { key: "start_date", header: "Start", sortable: true, render: (x) => <span className="muted">{formatDate(x.start_date)}</span> },
+    { key: "expires_at", header: "Expires", sortable: true, render: (x) => (x.expires_at ? (isPast(x.expires_at) ? <Badge tone="high">{formatDate(x.expires_at)}</Badge> : <span className="muted">{formatDate(x.expires_at)}</span>) : <span className="muted">—</span>) },
     { key: "controls", header: "Controls", align: "center", render: (x) => <span className="muted">{x.controls.length || "—"}</span> },
     { key: "links", header: "Links", align: "center", render: (x) => <span className="muted">{linkCount(x) || "—"}</span> },
     { key: "actions", header: "", render: (x) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(x)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(x)}>Delete</button></div> },
@@ -245,9 +245,6 @@ function ExceptionsInner() {
             <TextInput value="Pending (on submit)" onChange={() => {}} />
           </Field>
         )}
-        <Field label="Workflow">
-          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-        </Field>
         <Field label="Business Owner">
           <TextInput value={f.business_owner} onChange={(v) => set("business_owner", v)} placeholder="Head of Engineering" />
         </Field>
@@ -343,7 +340,12 @@ function ExceptionsInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="exception" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="exception" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="exception" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -373,10 +375,10 @@ function ExceptionsInner() {
             </div>
 
             <div style={{ display: "flex", gap: 20, flexWrap: "wrap", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <div><div className="muted" style={{ fontSize: 12 }}>Start</div><div style={{ marginTop: 4 }}>{detail.start_date || "—"}</div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Expires</div><div style={{ marginTop: 4 }}>{detail.expires_at || "—"}</div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Closure</div><div style={{ marginTop: 4 }}>{detail.closure_date || "—"}</div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Decided</div><div style={{ marginTop: 4 }}>{detail.decided_at || "—"}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Start</div><div style={{ marginTop: 4 }}>{formatDate(detail.start_date)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Expires</div><div style={{ marginTop: 4 }}>{formatDate(detail.expires_at)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Closure</div><div style={{ marginTop: 4 }}>{formatDate(detail.closure_date)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Decided</div><div style={{ marginTop: 4 }}>{formatDateTime(detail.decided_at)}</div></div>
             </div>
 
             {detail.description && (

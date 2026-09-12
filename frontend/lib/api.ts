@@ -176,16 +176,12 @@ export async function downloadBlob(path: string, filename: string): Promise<void
   const res = await fetch(`${API_BASE}/api/v1${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
-  if (!res.ok) throw new Error(`Download failed (${res.status})`);
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename || "download";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  if (!res.ok) {
+    let message = `Download failed (${res.status})`;
+    try { message = formatDetail((await res.json()).detail, message); } catch { /* ignore */ }
+    throw new Error(message);
+  }
+  saveBlob(await res.blob(), filename);
 }
 
 export interface LoginResponse {
@@ -201,6 +197,10 @@ export interface LoginResult {
   token_type: string;
   expires_in: number | null;
   user: LoginResponse["user"] | null;
+  /** MFA grace period is over: the token can only be used to enrol. */
+  mfa_enrolment_required?: boolean;
+  /** MFA is required and not yet set up; full access continues until this time. */
+  mfa_enrolment_due?: string | null;
 }
 export interface MfaSetup {
   secret: string;
@@ -492,7 +492,7 @@ export interface GenerateRisksCommitResult {
   errors: { title: string; message: string }[];
 }
 
-/** A live risk whose every linked asset has since been deleted. */
+/** A live risk whose linked assets were all deleted and that has no other live link. */
 export interface OrphanedRisk {
   id: string;
   reference: string;
@@ -501,14 +501,20 @@ export interface OrphanedRisk {
   status: string;
   inherent_score: number | null;
   deleted_asset_names: string[];
+  /** Live records still linked, per kind — zero for every listed risk. */
+  live_links: Record<string, number>;
+  live_link_total: number;
 }
 export interface OrphanedRiskPage {
   items: OrphanedRisk[];
   total: number;
+  /** Risks that lost their assets but still link to something live, so are not listed. */
+  kept_with_links: number;
 }
 export interface OrphanPurgeResult {
   archived: number;
   references: string[];
+  skipped: number;
 }
 
 /** A proposal only — nothing is recorded until the risk owner accepts or overrides it. */
@@ -617,15 +623,18 @@ export interface Page<T> {
 }
 
 // --- dashboard overview (the redesigned page's single payload) ---------------------
-export interface HealthComponent { key: string; label: string; value: number; weight: number; detail: string }
+/** `value` is null and `population` 0 when a measure has no data: it is left out of the score. */
+export interface HealthComponent { key: string; label: string; value: number | null; weight: number; detail: string; population: number; formula: string }
+export interface HealthCoverage { scored: number; total: number; weight_pct: number }
 export interface TopRisk {
   id: string; reference: string; title: string; score: number | null; severity: string | null;
   appetite_status: string | null; owner: string; business_units: string[]; status: string;
   treatment_strategy: string | null; next_review_date: string | null; review_overdue: boolean; control_count: number;
+  needs_review?: boolean; review_reason?: string;
 }
 export interface FrameworkPosture {
   id: string; name: string; total: number; applicable: number; assured: number; unassessed: number;
-  failing: number; unmapped: number; compliant_pct: number; gaps: number;
+  failing: number; unmapped: number; compliant_pct: number; gaps: number; kind?: string;
 }
 export interface ActionItem { key: string; label: string; count: number; href: string; tone: "critical" | "warning" | "info" }
 export interface KriItem {
@@ -635,7 +644,7 @@ export interface KriItem {
 export interface DashboardOverview {
   as_of: string;
   period_days: number;
-  health: { score: number; band: string; components: HealthComponent[] };
+  health: { score: number; band: string; components: HealthComponent[]; coverage?: HealthCoverage | null };
   posture: {
     total_risks: number; appetite_score: number; tolerance_score: number; within_appetite: number; elevated: number;
     breach: number; by_inherent_severity: Record<string, number>; by_residual_severity: Record<string, number>; top_risks: TopRisk[];
@@ -643,8 +652,9 @@ export interface DashboardOverview {
   assurance: {
     total: number; effective: number; partially_effective: number; ineffective: number; not_assessed: number;
     tests_overdue: number; tests_due_30d: number; last_test_failed: number; tests_in_period: number;
+    not_operating?: number;
   };
-  compliance: { frameworks: FrameworkPosture[]; overall_assured_pct: number };
+  compliance: { frameworks: FrameworkPosture[]; overall_assured_pct: number; other_frameworks?: FrameworkPosture[] };
   actions: ActionItem[];
   incidents: { open: number; open_by_severity: Record<string, number>; reportable_open: number; opened_in_period: number; opened_prior_period: number; tat_breached: number };
   kris: { green: number; amber: number; red: number; no_data: number; red_items: KriItem[] };
@@ -673,6 +683,8 @@ export interface Dashboard {
 export interface Framework {
   id: string;
   name: string;
+  /** compliance | maturity | guidance — only compliance frameworks carry a compliance %. */
+  kind?: string;
   version: string;
   authority: string;
   requirement_count: number;
@@ -872,6 +884,24 @@ export interface Me {
   auth_source?: string;
   /** Operator of the deployment, not of this organisation — gates the Organisations console. */
   is_platform_admin?: boolean;
+  /** This session may only enrol in MFA (grace period over). */
+  mfa_enrolment_required?: boolean;
+  /** MFA is required for this user and not yet set up; due by this time. */
+  mfa_enrolment_due?: string | null;
+  /** The MFA policy applies to this user (they cannot switch MFA off). */
+  mfa_required_for_user?: boolean;
+  /** Every permission code the user's roles grant (e.g. "org:write"). */
+  permission_codes?: string[];
+}
+
+/** Auth-only deployment status for the app shell (licence banner). */
+export interface SystemStatus {
+  license_status: string;
+  /** Dev/self-host build running without a licence — everything unlocked. */
+  evaluation_build: boolean;
+  enforce_license: boolean;
+  app_version: string;
+  deployment_mode: string;
 }
 
 /** One organisation on this deployment. Counts are read inside that organisation's own
@@ -910,6 +940,12 @@ export interface Notification {
 export interface NotificationList {
   items: Notification[];
   unseen_count: number;
+  /** Rows in the whole feed; `items` is one page of it. */
+  total: number;
+  limit: number;
+  offset: number;
+  /** critical / warning / info tallies across the whole feed. */
+  counts: Record<string, number>;
 }
 
 export interface ApprovalAction {
@@ -929,6 +965,8 @@ export interface ApprovalRequest {
   entity_label: string;
   link: string;
   approver: string;
+  /** Maker's user id (null for requests that only carry an e-mail). */
+  requested_by?: string | null;
   requested_by_email: string;
   required_approvals: number;
   approvals_received: number;
@@ -1413,11 +1451,17 @@ export interface FieldInfo {
 
 export interface Attestation {
   id: string;
+  attested_by_id: string | null;
   attested_by_email: string;
   attested_at: string;
   comment: string;
   frequency: string;
   next_due: string | null;
+  statement: string;
+  scope: string;
+  confirmed_by_id: string | null;
+  confirmed_by_email: string | null;
+  confirmed_at: string | null;
   created_at: string;
 }
 export interface AttestationStatus {
@@ -1427,6 +1471,9 @@ export interface AttestationStatus {
   next_due: string | null;
   frequency: string | null;
   history: Attestation[];
+  /** The record carries its own review cycle (risk, policy, vendor). */
+  native_review: boolean;
+  default_statement: string;
 }
 
 export interface FilterCondition {
@@ -1697,9 +1744,13 @@ export interface AuditEntry {
 export interface FrameworkSummary {
   framework_id: string;
   name: string;
+  /** compliance | maturity | guidance */
+  kind?: string;
   total_requirements: number;
   compliant: number;
   compliant_pct: number;
+  /** Clauses assessed (self-assessment progress for maturity frameworks). */
+  assessed?: number;
 }
 
 export interface ComplianceSummary {
@@ -1808,16 +1859,17 @@ export const api = {
     request<LdapConfig>("/auth/ldap/config", { method: "PUT", body: JSON.stringify(payload) }),
   systemInfo: () => request<SystemInfo>("/system/info"),
   systemModules: () => request<ModuleState[]>("/system/modules"),
+  systemStatus: () => request<SystemStatus>("/system/status"),
   systemHealth: () => request<SystemHealth>("/system/health"),
   listBackups: () => request<BackupItem[]>("/system/backups"),
   createBackup: () => request<BackupItem>("/system/backups", { method: "POST" }),
   downloadSupportBundle: () => downloadBlob("/system/support-bundle", "nexusline-support-bundle.zip"),
   risks: () => request<Page<Risk>>("/risks?limit=200"),
   orphanedRisks: () => request<OrphanedRiskPage>("/risks/orphaned"),
-  purgeOrphanedRisks: (riskIds: string[]) =>
+  purgeOrphanedRisks: (riskIds: string[], reason: string) =>
     request<OrphanPurgeResult>("/risks/orphaned/purge", {
       method: "POST",
-      body: JSON.stringify({ risk_ids: riskIds }),
+      body: JSON.stringify({ risk_ids: riskIds, reason }),
     }),
   dashboard: () => request<Dashboard>("/dashboard"),
   dashboardOverview: (days = 30) => request<DashboardOverview>(`/dashboard/overview?days=${days}`),
@@ -1847,7 +1899,7 @@ export const api = {
   updateOrganization: (id: string, body: { name?: string; is_active?: boolean }) =>
     request<Organization>(`/platform/organizations/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   platformSummary: () => request<PlatformSummary>("/platform/summary"),
-  notifications: () => request<NotificationList>("/notifications"),
+  notifications: (limit = 100, offset = 0) => request<NotificationList>(`/notifications?limit=${limit}&offset=${offset}`),
   markNotificationsSeen: () => request<void>("/notifications/seen", { method: "POST" }),
   approvals: () => request<Page<ApprovalRequest>>("/approvals?limit=200"),
   submitApproval: (payload: Record<string, unknown>) =>
@@ -1923,6 +1975,8 @@ export const api = {
     request<AttestationStatus>(`/attestations/${entityType}/${entityId}`),
   attest: (entityType: string, entityId: string, payload: Record<string, unknown>) =>
     request<AttestationStatus>(`/attestations/${entityType}/${entityId}`, { method: "POST", body: JSON.stringify(payload) }),
+  confirmAttestation: (attestationId: string) =>
+    request<AttestationStatus>(`/attestations/${attestationId}/confirm`, { method: "POST" }),
   filterFields: (model: string) => request<FieldInfo[]>(`/filters/fields/${model}`),
   filters: (model?: string) =>
     request<Page<SavedFilter>>(`/filters?limit=200${model ? `&model=${model}` : ""}`).then((r) => r.items),

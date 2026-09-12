@@ -8,9 +8,12 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -62,15 +65,13 @@ type AuthoritySummary = {
 };
 
 // ------------------------------------------------------------------ helpers
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 
 // ------------------------------------------------------------------ enum lists
 const CATEGORIES = opts(["credit", "expenditure", "procurement", "hr", "it_change", "risk_acceptance", "treasury", "general"]);
 const AUTHORITY_STATUS = opts(["active", "retired"]);
 const DUAL_STATUS = opts(["active", "disabled"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 
 // ------------------------------------------------------------------ tones
 const CATEGORY_TONE: Record<string, Tone> = {
@@ -84,21 +85,21 @@ const DUAL_STATUS_TONE: Record<string, Tone> = { active: "low", disabled: "neutr
 type MatrixForm = {
   activity: string; description: string; category: string; role_title: string; approval_level: string;
   amount_from: string; amount_to: string; currency: string; conditions: string; effective_date: string;
-  status: string; workflow_status: string;
+  status: string;
 };
 const BLANK_MATRIX: MatrixForm = {
   activity: "", description: "", category: "credit", role_title: "", approval_level: "1",
-  amount_from: "0", amount_to: "", currency: "PKR", conditions: "", effective_date: "",
-  status: "active", workflow_status: "draft",
+  amount_from: "0", amount_to: "", currency: "", conditions: "", effective_date: "",
+  status: "active",
 };
-function fromMatrix(m: AuthorityMatrix): MatrixForm {
+function fromMatrix(m: AuthorityMatrix, defaultCurrency: string): MatrixForm {
   return {
     activity: m.activity, description: m.description || "", category: m.category || "credit",
     role_title: m.role_title || "", approval_level: m.approval_level != null ? String(m.approval_level) : "1",
     amount_from: m.amount_from != null ? String(m.amount_from) : "0",
-    amount_to: m.amount_to != null ? String(m.amount_to) : "", currency: m.currency || "PKR",
+    amount_to: m.amount_to != null ? String(m.amount_to) : "", currency: m.currency || defaultCurrency,
     conditions: m.conditions || "", effective_date: m.effective_date || "",
-    status: m.status || "active", workflow_status: m.workflow_status || "draft",
+    status: m.status || "active",
   };
 }
 function matrixPayload(f: MatrixForm): Record<string, unknown> {
@@ -108,25 +109,25 @@ function matrixPayload(f: MatrixForm): Record<string, unknown> {
     amount_from: f.amount_from === "" ? 0 : Number(f.amount_from),
     amount_to: f.amount_to === "" ? null : Number(f.amount_to),
     currency: f.currency, conditions: f.conditions, effective_date: f.effective_date || null,
-    status: f.status, workflow_status: f.workflow_status,
+    status: f.status,
   };
 }
 
 // ------------------------------------------------------------------ rule form state
 type RuleForm = {
   module: string; action: string; requires_dual_control: boolean; maker_role: string; checker_role: string;
-  threshold_amount: string; currency: string; description: string; enabled: boolean; status: string; workflow_status: string;
+  threshold_amount: string; currency: string; description: string; enabled: boolean; status: string;
 };
 const BLANK_RULE: RuleForm = {
   module: "", action: "", requires_dual_control: true, maker_role: "", checker_role: "",
-  threshold_amount: "", currency: "PKR", description: "", enabled: true, status: "active", workflow_status: "draft",
+  threshold_amount: "", currency: "", description: "", enabled: true, status: "active",
 };
-function fromRule(r: DualControlRule): RuleForm {
+function fromRule(r: DualControlRule, defaultCurrency: string): RuleForm {
   return {
     module: r.module, action: r.action, requires_dual_control: r.requires_dual_control,
     maker_role: r.maker_role || "", checker_role: r.checker_role || "",
-    threshold_amount: r.threshold_amount != null ? String(r.threshold_amount) : "", currency: r.currency || "PKR",
-    description: r.description || "", enabled: r.enabled, status: r.status || "active", workflow_status: r.workflow_status || "draft",
+    threshold_amount: r.threshold_amount != null ? String(r.threshold_amount) : "", currency: r.currency || defaultCurrency,
+    description: r.description || "", enabled: r.enabled, status: r.status || "active",
   };
 }
 function rulePayload(f: RuleForm): Record<string, unknown> {
@@ -134,7 +135,7 @@ function rulePayload(f: RuleForm): Record<string, unknown> {
     module: f.module, action: f.action, requires_dual_control: f.requires_dual_control,
     maker_role: f.maker_role, checker_role: f.checker_role,
     threshold_amount: f.threshold_amount === "" ? null : Number(f.threshold_amount),
-    currency: f.currency, description: f.description, enabled: f.enabled, status: f.status, workflow_status: f.workflow_status,
+    currency: f.currency, description: f.description, enabled: f.enabled, status: f.status,
   };
 }
 
@@ -147,6 +148,11 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 /* ================================================================ page ===== */
 function DelegationOfAuthorityInner() {
   const [section, setSection] = useState<SectionId>("matrix");
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
+  const amountRange = (m: AuthorityMatrix) =>
+    m.amount_to == null
+      ? `${formatMoney(m.amount_from ?? 0, m.currency)}+ (unlimited)`
+      : `${formatMoney(m.amount_from ?? 0, m.currency)} – ${formatMoney(m.amount_to, m.currency)}`;
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<AuthoritySummary | null>(null);
@@ -179,8 +185,8 @@ function DelegationOfAuthorityInner() {
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
 
   // ------------------------------------------------------------- matrix CRUD
-  function openNewMatrix() { setEditingMatrix(null); setMf(BLANK_MATRIX); setError(null); setShowMatrixForm(true); }
-  function openEditMatrix(m: AuthorityMatrix) { setEditingMatrix(m); setMf(fromMatrix(m)); setError(null); setShowMatrixForm(true); }
+  function openNewMatrix() { setEditingMatrix(null); setMf({ ...BLANK_MATRIX, currency }); setError(null); setShowMatrixForm(true); }
+  function openEditMatrix(m: AuthorityMatrix) { setEditingMatrix(m); setMf(fromMatrix(m, currency)); setError(null); setShowMatrixForm(true); }
   async function saveMatrix() {
     setError(null); setSavingMatrix(true);
     try {
@@ -202,8 +208,8 @@ function DelegationOfAuthorityInner() {
   }
 
   // ------------------------------------------------------------- rule CRUD
-  function openNewRule() { setEditingRule(null); setRf(BLANK_RULE); setError(null); setShowRuleForm(true); }
-  function openEditRule(r: DualControlRule) { setEditingRule(r); setRf(fromRule(r)); setError(null); setShowRuleForm(true); }
+  function openNewRule() { setEditingRule(null); setRf({ ...BLANK_RULE, currency }); setError(null); setShowRuleForm(true); }
+  function openEditRule(r: DualControlRule) { setEditingRule(r); setRf(fromRule(r, currency)); setError(null); setShowRuleForm(true); }
   async function saveRule() {
     setError(null); setSavingRule(true);
     try {
@@ -241,7 +247,7 @@ function DelegationOfAuthorityInner() {
     { key: "category", header: "Category", sortable: true, render: (m) => <Badge tone={CATEGORY_TONE[m.category] || "neutral"}>{cap(m.category)}</Badge> },
     { key: "role_title", header: "Role", sortable: true, render: (m) => <span className="muted">{m.role_title || "—"}</span> },
     { key: "approval_level", header: "Level", sortable: true, render: (m) => <span className="muted">L{m.approval_level}</span> },
-    { key: "amount_from", header: "Amount range", sortable: true, render: (m) => <span className="muted">{m.amount_range_label}</span> },
+    { key: "amount_from", header: "Amount range", sortable: true, render: (m) => <span className="muted">{amountRange(m)}</span> },
     { key: "status", header: "Status", sortable: true, render: (m) => <Badge tone={AUTHORITY_STATUS_TONE[m.status] || "neutral"}>{cap(m.status)}</Badge> },
     { key: "actions", header: "", render: (m) => <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditMatrix(m)}>Edit</button><button className="btn secondary sm" onClick={() => removeMatrix(m)}>Delete</button></div> },
   ];
@@ -251,7 +257,7 @@ function DelegationOfAuthorityInner() {
     { key: "module", header: "Module", sortable: true, render: (r) => <span className="cell-title">{r.module}</span> },
     { key: "action", header: "Action", sortable: true, render: (r) => <span className="muted">{cap(r.action)}</span> },
     { key: "makerchecker", header: "Maker → Checker", render: (r) => <span className="muted">{(r.maker_role || "—")} → {(r.checker_role || "—")}{!r.requires_dual_control && <span className="muted"> (single)</span>}</span> },
-    { key: "threshold_amount", header: "Threshold", sortable: true, render: (r) => <span className="muted">{r.threshold_amount != null ? `${num(r.threshold_amount)} ${r.currency}` : "Always"}</span> },
+    { key: "threshold_amount", header: "Threshold", sortable: true, render: (r) => <span className="muted">{r.threshold_amount != null ? formatMoney(r.threshold_amount, r.currency) : "Always"}</span> },
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={DUAL_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
     { key: "enabled", header: "Enabled", render: (r) => <span onClick={(e) => e.stopPropagation()}><Toggle checked={r.enabled} onChange={() => toggleEnabled(r)} label={r.enabled ? "On" : "Off"} /></span> },
     { key: "actions", header: "", render: (r) => <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditRule(r)}>Edit</button><button className="btn secondary sm" onClick={() => removeRule(r)}>Delete</button></div> },
@@ -296,17 +302,14 @@ function DelegationOfAuthorityInner() {
       </div>
       <div className="field-row">
         <Field label="Currency">
-          <TextInput value={mf.currency} onChange={(v) => setM("currency", v)} placeholder="PKR" />
+          <Select value={mf.currency} onChange={(v) => setM("currency", v)} options={currencyOptions} />
         </Field>
         <Field label="Effective date" help="When this mandate takes effect.">
           <TextInput type="date" value={mf.effective_date} onChange={(v) => setM("effective_date", v)} />
         </Field>
       </div>
       <Field label="Conditions" help="Any conditions or caveats attached to this mandate.">
-        <TextArea value={mf.conditions} onChange={(v) => setM("conditions", v)} rows={3} placeholder="e.g. subject to committee endorsement above PKR 50M." />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this authority record.">
-        <Select value={mf.workflow_status} onChange={(v) => setM("workflow_status", v)} options={WORKFLOW} />
+        <TextArea value={mf.conditions} onChange={(v) => setM("conditions", v)} rows={3} placeholder={`e.g. subject to committee endorsement above ${currency} 50M.`} />
       </Field>
     </>
   );
@@ -338,6 +341,7 @@ function DelegationOfAuthorityInner() {
           <Toggle checked={rf.enabled} onChange={(v) => setR("enabled", v)} label={rf.enabled ? "Enabled" : "Disabled"} />
         </Field>
       </div>
+      <RecordApproval entityType="dual_control_rule" entityId={editingRule?.id ?? null} onChanged={reload} />
     </>
   );
   const ruleDetails = (
@@ -347,20 +351,15 @@ function DelegationOfAuthorityInner() {
           <TextInput type="number" value={rf.threshold_amount} onChange={(v) => setR("threshold_amount", v)} placeholder="Always" />
         </Field>
         <Field label="Currency">
-          <TextInput value={rf.currency} onChange={(v) => setR("currency", v)} placeholder="PKR" />
+          <Select value={rf.currency} onChange={(v) => setR("currency", v)} options={currencyOptions} />
         </Field>
       </div>
       <Field label="Description">
         <TextArea value={rf.description} onChange={(v) => setR("description", v)} rows={3} placeholder="What this maker-checker rule enforces." />
       </Field>
-      <div className="field-row">
-        <Field label="Status">
-          <Select value={rf.status} onChange={(v) => setR("status", v)} options={DUAL_STATUS} />
-        </Field>
-        <Field label="Workflow" help="Approval lifecycle for this rule record.">
-          <Select value={rf.workflow_status} onChange={(v) => setR("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-      </div>
+      <Field label="Status">
+        <Select value={rf.status} onChange={(v) => setR("status", v)} options={DUAL_STATUS} />
+      </Field>
     </>
   );
 
@@ -435,7 +434,12 @@ function DelegationOfAuthorityInner() {
       )}
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="authority_matrix" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="authority_matrix" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="authority_matrix" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.activity}`.trim() : "…"}
@@ -451,8 +455,8 @@ function DelegationOfAuthorityInner() {
         {detail && (
           <>
             <div style={{ display: "flex", gap: 20, flexWrap: "wrap", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <div><div className="muted" style={{ fontSize: 12 }}>Amount range</div><div style={{ marginTop: 4 }}><strong>{detail.amount_range_label}</strong></div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Effective date</div><div style={{ marginTop: 4 }}><strong>{detail.effective_date || "—"}</strong></div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Amount range</div><div style={{ marginTop: 4 }}><strong>{amountRange(detail)}</strong></div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Effective date</div><div style={{ marginTop: 4 }}><strong>{formatDate(detail.effective_date)}</strong></div></div>
               <div><div className="muted" style={{ fontSize: 12 }}>Status</div><div style={{ marginTop: 4 }}><Badge tone={AUTHORITY_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge></div></div>
             </div>
             {detail.description && <p style={{ margin: "0 0 10px" }}>{detail.description}</p>}

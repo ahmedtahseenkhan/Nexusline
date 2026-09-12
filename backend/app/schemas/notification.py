@@ -23,4 +23,11 @@ class NotificationRead(BaseModel):
 
 class NotificationList(BaseModel):
     items: list[NotificationRead]
+    #: Unseen across the whole feed, not just this page (the bell badge).
     unseen_count: int
+    #: Rows in the whole feed; ``items`` is the ``offset``/``limit`` slice of it.
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+    #: critical / warning / info tallies across the whole feed.
+    counts: dict[str, int] = {}

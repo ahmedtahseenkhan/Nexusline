@@ -42,8 +42,17 @@ class RcsaAssessment(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowM
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     business_unit: Mapped[str] = mapped_column(String(200), default="")
+    business_unit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("business_units.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: business unit; replaces free-text `business_unit`
     process: Mapped[str] = mapped_column(String(200), default="")
+    process_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("processes.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: process; replaces free-text `process`
     assessor: Mapped[str] = mapped_column(String(200), default="")
+    assessor_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `assessor`
     status: Mapped[RcsaStatus] = mapped_column(
         SAEnum(RcsaStatus, name="rcsa_status"), default=RcsaStatus.planned, nullable=False
     )
@@ -76,6 +85,9 @@ class RcsaRisk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     category: Mapped[str] = mapped_column(String(120), default="")
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     inherent_likelihood: Mapped[int] = mapped_column(Integer, default=1)
     inherent_impact: Mapped[int] = mapped_column(Integer, default=1)
     control_description: Mapped[str] = mapped_column(Text, default="")
@@ -87,6 +99,9 @@ class RcsaRisk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     residual_impact: Mapped[int] = mapped_column(Integer, default=1)
     action: Mapped[str] = mapped_column(Text, default="")
     action_owner: Mapped[str] = mapped_column(String(200), default="")
+    action_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `action_owner`
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Reconcile the RCSA line with the enterprise register + control catalog (Basel loop):
@@ -133,8 +148,17 @@ class KeyRiskIndicator(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflo
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(120), default="")
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     business_area: Mapped[str] = mapped_column(String(200), default="")
+    business_unit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("business_units.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: business unit; replaces free-text `business_area`
     owner: Mapped[str] = mapped_column(String(200), default="")
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `owner`
     unit: Mapped[str] = mapped_column(String(32), default="")  # %, count, PKR…
     frequency: Mapped[ReviewFrequency] = mapped_column(
         SAEnum(ReviewFrequency, name="review_frequency"),
@@ -209,6 +233,9 @@ class LossEvent(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
         default=BaselEventType.execution_delivery_process_management, nullable=False,
     )
     business_line: Mapped[str] = mapped_column(String(200), default="")
+    business_unit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("business_units.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: business unit; replaces free-text `business_line`
     gross_loss: Mapped[float] = mapped_column(Numeric(18, 2), default=0, nullable=False)
     recovery: Mapped[float] = mapped_column(Numeric(18, 2), default=0, nullable=False)
     currency: Mapped[str] = mapped_column(String(8), default="PKR")
@@ -221,6 +248,9 @@ class LossEvent(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
     accounting_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     root_cause: Mapped[str] = mapped_column(Text, default="")
     action_owner: Mapped[str] = mapped_column(String(200), default="")
+    action_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `action_owner`
 
     # Loss data calibrates risk scoring and often stems from a logged incident.
     incident_id: Mapped[uuid.UUID | None] = mapped_column(

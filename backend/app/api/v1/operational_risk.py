@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
@@ -38,11 +38,60 @@ from app.schemas.operational_risk import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import ref_fields as rf
 
 router = APIRouter(tags=["operational risk"])
 
 _READ = Depends(require("oprisk:read"))
 _WRITE = Depends(require("oprisk:write"))
+
+# Phase 1 picker fields and the legacy text each one keeps in step (services/ref_fields).
+RCSA_REFS = (
+    rf.user("assessor_id", "assessor"),
+    rf.unit("business_unit_id", "business_unit"),
+    rf.process("process_id", "process"),
+    rf.WORKFLOW_OWNER,
+)
+RCSA_LINE_REFS = (
+    rf.lookup(RcsaRisk, "category_id", "category"),
+    rf.user("action_owner_id", "action_owner"),
+)
+KRI_REFS = (
+    rf.user("owner_id", "owner"),
+    rf.unit("business_unit_id", "business_area"),
+    rf.lookup(KeyRiskIndicator, "category_id", "category"),
+    rf.WORKFLOW_OWNER,
+)
+LOSS_REFS = (
+    rf.user("action_owner_id", "action_owner"),
+    rf.unit("business_unit_id", "business_line"),
+    rf.WORKFLOW_OWNER,
+)
+
+
+async def _rcsa_reads(db, rows) -> list[RcsaRead]:
+    """RCSA read models with people, units, processes and categories resolved in one
+    query per kind across the campaigns and their risk lines."""
+    items = [RcsaRead.model_validate(r) for r in rows]
+    pairs: list = []
+    for row, item in zip(rows, items):
+        pairs.append((row, item))
+        pairs.extend(zip(row.risks, item.risks))
+    await rf.fill_refs(db, pairs, RCSA_REFS + RCSA_LINE_REFS)
+    return items
+
+
+async def _reads(db, schema, rows, fields) -> list:
+    items = [schema.model_validate(r) for r in rows]
+    await rf.fill_refs(db, list(zip(rows, items)), fields)
+    return items
+
+
+async def _audit_delete(db, user, entity_type: str, obj, label: str) -> None:
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type=entity_type, entity_id=obj.id,
+        summary=f"Archived {label} {obj.reference}",
+    )
 
 
 async def _next_ref(db, model, prefix: str) -> str:
@@ -92,6 +141,8 @@ _RCSA_SORTABLE = {
 
 @router.get("/rcsa", response_model=Page[RcsaRead], dependencies=[_READ])
 async def list_rcsa(db: DbSession, search: str | None = None,
+                    business_unit_id: uuid.UUID | None = None,
+                    assessor_id: uuid.UUID | None = None,
                     sort_by: Annotated[str | None, Query()] = None,
                     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
                     limit: Annotated[int, Query(ge=1, le=200)] = 100,
@@ -101,6 +152,10 @@ async def list_rcsa(db: DbSession, search: str | None = None,
         like = f"%{search}%"
         stmt = stmt.where(or_(RcsaAssessment.title.ilike(like), RcsaAssessment.reference.ilike(like),
                              RcsaAssessment.business_unit.ilike(like)))
+    if business_unit_id is not None:
+        stmt = stmt.where(RcsaAssessment.business_unit_id == business_unit_id)
+    if assessor_id is not None:
+        stmt = stmt.where(RcsaAssessment.assessor_id == assessor_id)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
@@ -108,57 +163,66 @@ async def list_rcsa(db: DbSession, search: str | None = None,
     else:
         stmt = stmt.order_by(RcsaAssessment.created_at.desc())
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    return Page(items=[RcsaRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    return Page(items=await _rcsa_reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post("/rcsa", response_model=RcsaRead, status_code=201, dependencies=[_WRITE])
 async def create_rcsa(body: RcsaCreate, db: DbSession, user: CurrentUser) -> RcsaRead:
-    obj = RcsaAssessment(tenant_id=user.tenant_id, **body.model_dump())
+    data = body.model_dump()
+    await rf.apply_refs(db, RcsaAssessment, data, RCSA_REFS)
+    obj = RcsaAssessment(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db, RcsaAssessment, "RCSA")
     db.add(obj)
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="rcsa_assessment",
                            entity_id=obj.id, summary=f"Opened RCSA {obj.reference}: {obj.title}")
-    return RcsaRead.model_validate(await _load_rcsa(db, obj.id))
+    return (await _rcsa_reads(db, [await _load_rcsa(db, obj.id)]))[0]
 
 
 @router.get("/rcsa/{rid}", response_model=RcsaRead, dependencies=[_READ])
 async def get_rcsa(rid: uuid.UUID, db: DbSession) -> RcsaRead:
-    return RcsaRead.model_validate(await _load_rcsa(db, rid))
+    return (await _rcsa_reads(db, [await _load_rcsa(db, rid)]))[0]
 
 
 @router.patch("/rcsa/{rid}", response_model=RcsaRead, dependencies=[_WRITE])
 async def update_rcsa(rid: uuid.UUID, body: RcsaUpdate, db: DbSession) -> RcsaRead:
     obj = await _load_rcsa(db, rid)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    await rf.apply_refs(db, RcsaAssessment, data, RCSA_REFS, record=obj)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
-    return RcsaRead.model_validate(await _load_rcsa(db, rid))
+    return (await _rcsa_reads(db, [await _load_rcsa(db, rid)]))[0]
 
 
 @router.delete("/rcsa/{rid}", status_code=204, dependencies=[_WRITE])
-async def delete_rcsa(rid: uuid.UUID, db: DbSession) -> None:
+async def delete_rcsa(rid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_rcsa(db, rid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
+    await _audit_delete(db, user, "rcsa_assessment", obj, "RCSA")
 
 
 @router.post("/rcsa/{rid}/risks", response_model=RcsaRead, status_code=201, dependencies=[_WRITE])
 async def add_rcsa_risk(rid: uuid.UUID, body: RcsaRiskCreate, db: DbSession, user: CurrentUser) -> RcsaRead:
     await _load_rcsa(db, rid)
-    db.add(RcsaRisk(tenant_id=user.tenant_id, assessment_id=rid, **body.model_dump()))
+    data = body.model_dump()
+    await rf.apply_refs(db, RcsaRisk, data, RCSA_LINE_REFS)
+    db.add(RcsaRisk(tenant_id=user.tenant_id, assessment_id=rid, **data))
     await db.flush()
-    return RcsaRead.model_validate(await _load_rcsa(db, rid))
+    return (await _rcsa_reads(db, [await _load_rcsa(db, rid)]))[0]
 
 
 @router.patch("/rcsa-risks/{line_id}", response_model=RcsaRiskRead, dependencies=[_WRITE])
 async def update_rcsa_risk(line_id: uuid.UUID, body: RcsaRiskUpdate, db: DbSession) -> RcsaRiskRead:
     obj = await _get(db, RcsaRisk, line_id, "RCSA risk")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    await rf.apply_refs(db, RcsaRisk, data, RCSA_LINE_REFS, record=obj)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
-    return RcsaRiskRead.model_validate(obj)
+    return (await _reads(db, RcsaRiskRead, [obj], RCSA_LINE_REFS))[0]
 
 
 @router.delete("/rcsa-risks/{line_id}", status_code=204, dependencies=[_WRITE])
@@ -181,6 +245,10 @@ async def _load_kri(db, kid) -> KeyRiskIndicator:
     return obj
 
 
+async def _kri_read(db, kid) -> KriRead:
+    return (await _reads(db, KriRead, [await _load_kri(db, kid)], KRI_REFS))[0]
+
+
 # `status` / `is_breached` are computed from current_value vs thresholds, so they are not
 # DB columns and cannot be sorted server-side; current_value is the sortable proxy.
 _KRI_SORTABLE = {
@@ -196,6 +264,9 @@ _KRI_SORTABLE = {
 
 @router.get("/kris", response_model=Page[KriRead], dependencies=[_READ])
 async def list_kris(db: DbSession, search: str | None = None,
+                    owner_id: uuid.UUID | None = None,
+                    category_id: uuid.UUID | None = None,
+                    business_unit_id: uuid.UUID | None = None,
                     sort_by: Annotated[str | None, Query()] = None,
                     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
                     limit: Annotated[int, Query(ge=1, le=200)] = 100,
@@ -205,6 +276,12 @@ async def list_kris(db: DbSession, search: str | None = None,
         like = f"%{search}%"
         stmt = stmt.where(or_(KeyRiskIndicator.name.ilike(like), KeyRiskIndicator.reference.ilike(like),
                              KeyRiskIndicator.category.ilike(like), KeyRiskIndicator.owner.ilike(like)))
+    if owner_id is not None:
+        stmt = stmt.where(KeyRiskIndicator.owner_id == owner_id)
+    if category_id is not None:
+        stmt = stmt.where(KeyRiskIndicator.category_id == category_id)
+    if business_unit_id is not None:
+        stmt = stmt.where(KeyRiskIndicator.business_unit_id == business_unit_id)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
@@ -212,41 +289,46 @@ async def list_kris(db: DbSession, search: str | None = None,
     else:
         stmt = stmt.order_by(KeyRiskIndicator.name)
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    return Page(items=[KriRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    return Page(items=await _reads(db, KriRead, rows, KRI_REFS), total=total, limit=limit, offset=offset)
 
 
 @router.post("/kris", response_model=KriRead, status_code=201, dependencies=[_WRITE])
 async def create_kri(body: KriCreate, db: DbSession, user: CurrentUser) -> KriRead:
-    obj = KeyRiskIndicator(tenant_id=user.tenant_id, **body.model_dump(exclude={"risk_ids"}))
+    data = body.model_dump(exclude={"risk_ids"})
+    await rf.apply_refs(db, KeyRiskIndicator, data, KRI_REFS)
+    obj = KeyRiskIndicator(tenant_id=user.tenant_id, **data)
     obj.risks = await _resolve(db, Risk, body.risk_ids)
     obj.reference = await _next_ref(db, KeyRiskIndicator, "KRI")
     db.add(obj)
     await db.flush()
-    return KriRead.model_validate(await _load_kri(db, obj.id))
+    return await _kri_read(db, obj.id)
 
 
 @router.get("/kris/{kid}", response_model=KriRead, dependencies=[_READ])
 async def get_kri(kid: uuid.UUID, db: DbSession) -> KriRead:
-    return KriRead.model_validate(await _load_kri(db, kid))
+    return await _kri_read(db, kid)
 
 
 @router.patch("/kris/{kid}", response_model=KriRead, dependencies=[_WRITE])
 async def update_kri(kid: uuid.UUID, body: KriUpdate, db: DbSession) -> KriRead:
     obj = await _load_kri(db, kid)
-    for k, v in body.model_dump(exclude_unset=True, exclude={"risk_ids"}).items():
+    data = body.model_dump(exclude_unset=True, exclude={"risk_ids"})
+    await rf.apply_refs(db, KeyRiskIndicator, data, KRI_REFS, record=obj)
+    for k, v in data.items():
         setattr(obj, k, v)
     if body.risk_ids is not None:
         obj.risks = await _resolve(db, Risk, body.risk_ids)
     await db.flush()
-    return KriRead.model_validate(await _load_kri(db, kid))
+    return await _kri_read(db, kid)
 
 
 @router.delete("/kris/{kid}", status_code=204, dependencies=[_WRITE])
-async def delete_kri(kid: uuid.UUID, db: DbSession) -> None:
+async def delete_kri(kid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_kri(db, kid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
+    await _audit_delete(db, user, "key_risk_indicator", obj, "KRI")
 
 
 @router.post("/kris/{kid}/measurements", response_model=KriRead, status_code=201, dependencies=[_WRITE])
@@ -262,7 +344,7 @@ async def add_measurement(kid: uuid.UUID, body: MeasurementCreate, db: DbSession
         kri.current_value = body.value
         kri.last_measured_date = as_of
     await db.flush()
-    return KriRead.model_validate(await _load_kri(db, kid))
+    return await _kri_read(db, kid)
 
 
 # =============================================================== loss events ===
@@ -282,6 +364,8 @@ _LOSS_SORTABLE = {
 
 @router.get("/loss-events", response_model=Page[LossEventRead], dependencies=[_READ])
 async def list_loss_events(db: DbSession, search: str | None = None,
+                           business_unit_id: uuid.UUID | None = None,
+                           action_owner_id: uuid.UUID | None = None,
                            sort_by: Annotated[str | None, Query()] = None,
                            sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
                            limit: Annotated[int, Query(ge=1, le=200)] = 100,
@@ -291,6 +375,10 @@ async def list_loss_events(db: DbSession, search: str | None = None,
         like = f"%{search}%"
         stmt = stmt.where(or_(LossEvent.title.ilike(like), LossEvent.reference.ilike(like),
                              LossEvent.business_line.ilike(like)))
+    if business_unit_id is not None:
+        stmt = stmt.where(LossEvent.business_unit_id == business_unit_id)
+    if action_owner_id is not None:
+        stmt = stmt.where(LossEvent.action_owner_id == action_owner_id)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
@@ -298,38 +386,43 @@ async def list_loss_events(db: DbSession, search: str | None = None,
     else:
         stmt = stmt.order_by(LossEvent.occurrence_date.is_(None), LossEvent.occurrence_date.desc())
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    return Page(items=[LossEventRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    return Page(items=await _reads(db, LossEventRead, rows, LOSS_REFS), total=total, limit=limit, offset=offset)
 
 
 @router.post("/loss-events", response_model=LossEventRead, status_code=201, dependencies=[_WRITE])
 async def create_loss_event(body: LossEventCreate, db: DbSession, user: CurrentUser) -> LossEventRead:
-    obj = LossEvent(tenant_id=user.tenant_id, **body.model_dump(exclude={"risk_ids"}))
+    data = body.model_dump(exclude={"risk_ids"})
+    await rf.apply_refs(db, LossEvent, data, LOSS_REFS)
+    obj = LossEvent(tenant_id=user.tenant_id, **data)
     obj.risks = await _resolve(db, Risk, body.risk_ids)
     obj.reference = await _next_ref(db, LossEvent, "LOSS")
     db.add(obj)
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="loss_event",
                            entity_id=obj.id, summary=f"Logged loss event {obj.reference}: {obj.title}")
-    return LossEventRead.model_validate(await _get(db, LossEvent, obj.id, "Loss event"))
+    return (await _reads(db, LossEventRead, [await _get(db, LossEvent, obj.id, "Loss event")], LOSS_REFS))[0]
 
 
 @router.patch("/loss-events/{lid}", response_model=LossEventRead, dependencies=[_WRITE])
 async def update_loss_event(lid: uuid.UUID, body: LossEventUpdate, db: DbSession) -> LossEventRead:
     obj = await _get(db, LossEvent, lid, "Loss event")
-    for k, v in body.model_dump(exclude_unset=True, exclude={"risk_ids"}).items():
+    data = body.model_dump(exclude_unset=True, exclude={"risk_ids"})
+    await rf.apply_refs(db, LossEvent, data, LOSS_REFS, record=obj)
+    for k, v in data.items():
         setattr(obj, k, v)
     if body.risk_ids is not None:
         obj.risks = await _resolve(db, Risk, body.risk_ids)
     await db.flush()
-    return LossEventRead.model_validate(obj)
+    return (await _reads(db, LossEventRead, [obj], LOSS_REFS))[0]
 
 
 @router.delete("/loss-events/{lid}", status_code=204, dependencies=[_WRITE])
-async def delete_loss_event(lid: uuid.UUID, db: DbSession) -> None:
+async def delete_loss_event(lid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _get(db, LossEvent, lid, "Loss event")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
+    await _audit_delete(db, user, "loss_event", obj, "loss event")
 
 
 class LossSummaryRow(BaseModel):

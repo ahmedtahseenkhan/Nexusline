@@ -12,6 +12,7 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import aliased, selectinload
 
@@ -62,7 +63,7 @@ from app.schemas.asset import (
     LinkRef,
 )
 from app.schemas.common import GraphRef, Page
-from app.services import audit
+from app.services import audit, risk_integrity
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -391,15 +392,40 @@ async def update_asset(asset_id: uuid.UUID, body: AssetUpdate, db: DbSession, us
     return _serialize(await _fresh(db, asset.id))
 
 
+class AssetImpact(BaseModel):
+    """Live records that link to an asset — what deleting it would touch."""
+
+    risks: int
+    controls: int
+
+
+@router.get("/{asset_id}/impact", response_model=AssetImpact, dependencies=[Depends(require("asset:read"))])
+async def asset_impact(asset_id: uuid.UUID, db: DbSession) -> AssetImpact:
+    """Counts for the delete confirmation: linked live risks are flagged for review when
+    the asset goes, so the person deleting it should know how many first."""
+    await _get_or_404(db, asset_id)
+    return AssetImpact(**await risk_integrity.asset_impact(db, asset_id))
+
+
 @router.delete("/{asset_id}", status_code=204, dependencies=[Depends(require("asset:write"))])
 async def delete_asset(asset_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    """Soft delete. Every live risk written against the asset is kept and flagged
+    ``needs_review`` with the asset's name, so a person decides what happens to it —
+    nothing is archived or relinked on its own."""
     from datetime import datetime, timezone
 
     asset = await _get_or_404(db, asset_id)
+    risks = await risk_integrity.live_risks_for_assets(db, [asset.id])
+    flagged = risk_integrity.flag_for_asset_removal(risks, asset.name)
     asset.deleted = True
     asset.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    summary = f"Archived asset {asset.name}"
+    if flagged:
+        summary += f"; flagged {flagged} linked risk(s) for review"
     await audit.record(db, actor=user, action="delete", entity_type="asset", entity_id=asset.id,
-                       summary=f"Archived asset {asset.name}")
+                       summary=summary,
+                       changes={"risks_flagged": ", ".join(sorted(r.reference for r in risks))} if flagged else None)
 
 
 # ----------------------------------------------------------------- review cycle

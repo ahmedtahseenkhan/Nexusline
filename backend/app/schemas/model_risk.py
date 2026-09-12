@@ -67,7 +67,6 @@ class ModelBase(BaseModel):
     methodology: str = ""
     last_validation_date: date | None = None
     next_validation_date: date | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class ModelCreate(ModelBase):
@@ -89,10 +88,11 @@ class ModelUpdate(BaseModel):
     methodology: str | None = None
     last_validation_date: date | None = None
     next_validation_date: date | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class ModelRead(ModelBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
     id: uuid.UUID
     reference: str

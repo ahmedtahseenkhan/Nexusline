@@ -37,6 +37,9 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     body: Mapped[str] = mapped_column(Text, default="")
     url: Mapped[str] = mapped_column(String(1024), default="")  # external document link
     category: Mapped[str] = mapped_column(String(100), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     document_type: Mapped[PolicyDocType] = mapped_column(
         SAEnum(PolicyDocType, name="policy_doc_type"), default=PolicyDocType.policy, nullable=False
     )
@@ -45,6 +48,9 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
         SAEnum(PolicyStatus, name="policy_status"), default=PolicyStatus.draft, nullable=False
     )
     owner: Mapped[str] = mapped_column(String(200), default="")
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `owner`
     label_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("asset_labels.id", ondelete="SET NULL"), nullable=True
     )
@@ -118,6 +124,9 @@ class PolicyReview(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMix
     planned_date: Mapped[date] = mapped_column(Date, nullable=False)
     actual_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     reviewer: Mapped[str] = mapped_column(String(200), default="")
+    reviewer_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `reviewer`
     comments: Mapped[str] = mapped_column(Text, default="")
 
     policy: Mapped[Policy] = relationship(back_populates="reviews")

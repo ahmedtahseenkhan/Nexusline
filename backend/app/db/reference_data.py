@@ -1,6 +1,7 @@
 """Baseline lookup data every tenant needs from day one.
 
-Dropdowns like *Media type* and *Vendor type* read tenant-scoped lookup tables. Those
+Dropdowns like *Media type* and *Vendor type* read tenant-scoped lookup tables, and the
+governed lists (``app.db.lookup_seed``) feed every category/regulator/country picker. Those
 tables used to be filled only by the demo seeder, which runs for the very first org —
 every org registered afterwards (and every install with ``SEED_DATA=false``) got empty
 dropdowns with no way to fill them. This module owns the built-in vocabulary and two
@@ -65,15 +66,38 @@ DEFAULT_ASSET_LABELS: tuple[tuple[str, str], ...] = (
     ("Restricted", "#b91c1c"),
 )
 
-#: The default classification scheme: three CIA axes, each with the same graded values.
+#: The default classification scheme: three CIA axes, each graded 1..4 on its own terms.
+#: Confidentiality is about disclosure, integrity about unauthorised or accidental change,
+#: availability about how long the business can do without it — so each axis names its
+#: grades and criteria for what it measures. The numeric values line up (1 = least
+#: sensitive) so an asset's overall rating can still be the highest of the three.
 #: A tenant with its own methodology edits or replaces the axes under Settings → Lookups.
-DEFAULT_CLASSIFICATION_VALUES: tuple[tuple[str, float, str], ...] = (
+CONFIDENTIALITY_VALUES: tuple[tuple[str, float, str], ...] = (
     ("Public", 1.0, "Publicly shareable, no harm if disclosed"),
     ("Internal", 2.0, "Internal use only"),
     ("Confidential", 3.0, "Limited distribution, business impact if disclosed"),
     ("Restricted", 4.0, "Strictly need-to-know, severe impact if disclosed"),
 )
-DEFAULT_CLASSIFICATION_AXES: tuple[str, ...] = ("Confidentiality", "Integrity", "Availability")
+INTEGRITY_VALUES: tuple[tuple[str, float, str], ...] = (
+    ("Low", 1.0, "Errors or unauthorised changes would have little business effect"),
+    ("Moderate", 2.0, "Errors would cause rework or minor customer impact"),
+    ("High", 3.0, "Errors would cause financial loss, misreporting or customer harm"),
+    ("Critical", 4.0, "Errors would cause material loss, regulatory breach or fraud"),
+)
+AVAILABILITY_VALUES: tuple[tuple[str, float, str], ...] = (
+    ("Standard", 1.0, "Can be unavailable for several days (recovery time over 72 hours)"),
+    ("Important", 2.0, "Needed within a working day (recovery time up to 24 hours)"),
+    ("Business-critical", 3.0, "Needed within hours (recovery time up to 4 hours)"),
+    ("Mission-critical", 4.0, "Must stay up; any outage is immediately material (under 1 hour)"),
+)
+#: Kept for callers that predate per-axis values: the confidentiality grades.
+DEFAULT_CLASSIFICATION_VALUES = CONFIDENTIALITY_VALUES
+CLASSIFICATION_VALUES_BY_AXIS: dict[str, tuple[tuple[str, float, str], ...]] = {
+    "Confidentiality": CONFIDENTIALITY_VALUES,
+    "Integrity": INTEGRITY_VALUES,
+    "Availability": AVAILABILITY_VALUES,
+}
+DEFAULT_CLASSIFICATION_AXES: tuple[str, ...] = tuple(CLASSIFICATION_VALUES_BY_AXIS)
 
 
 async def ensure_reference_data(db: AsyncSession, tenant_id: UUID) -> int:
@@ -129,7 +153,7 @@ async def ensure_reference_data(db: AsyncSession, tenant_id: UUID) -> int:
         )
         db.add(ct)
         await db.flush()
-        for vname, value, criteria in DEFAULT_CLASSIFICATION_VALUES:
+        for vname, value, criteria in CLASSIFICATION_VALUES_BY_AXIS[axis]:
             db.add(
                 AssetClassification(
                     tenant_id=tenant_id, type_id=ct.id, name=vname, value=value, criteria=criteria
@@ -137,6 +161,12 @@ async def ensure_reference_data(db: AsyncSession, tenant_id: UUID) -> int:
             )
             added += 1
         added += 1
+
+    # Governed lookup lists (risk category, regulator, country …): same insert-only
+    # contract, matched on value or label so text-derived rows are never duplicated.
+    from app.db.lookup_seed import ensure_lookup_defaults
+
+    added += await ensure_lookup_defaults(db, tenant_id)
 
     if added:
         await db.flush()

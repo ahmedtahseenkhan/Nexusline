@@ -20,7 +20,6 @@ from app.models.vendor import ServiceContract, Vendor, VendorType
 from app.schemas.common import Page
 from app.schemas.vendor import (
     ServiceContractCreate,
-    ServiceContractRead,
     VendorCreate,
     VendorRead,
     VendorTypeCreate,
@@ -28,9 +27,28 @@ from app.schemas.vendor import (
     VendorTypeUpdate,
     VendorUpdate,
 )
-from app.services import audit
+from app.services import audit, delete_guard
+from app.services import ref_fields as rf
 
 router = APIRouter(prefix="/vendors", tags=["vendors"])
+
+# Phase 1 picker fields (services/ref_fields). ``country_id`` has no text twin: the
+# vendor's ``location`` is a city or address and stays free text.
+VENDOR_REFS = (
+    rf.lookup(Vendor, "category_id", "category"),
+    rf.lookup(Vendor, "country_id", None),
+    rf.WORKFLOW_OWNER,
+)
+
+
+async def _reads(db, rows) -> list[VendorRead]:
+    items = [VendorRead.model_validate(r) for r in rows]
+    await rf.fill_refs(db, list(zip(rows, items)), VENDOR_REFS)
+    return items
+
+
+async def _read(db, vendor_id: uuid.UUID) -> VendorRead:
+    return (await _reads(db, [await _load(db, vendor_id)]))[0]
 
 
 def _loads():
@@ -77,6 +95,8 @@ _VENDOR_SORTABLE = {
 async def list_vendors(
     db: DbSession,
     search: str | None = None,
+    category_id: uuid.UUID | None = None,
+    country_id: uuid.UUID | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -85,6 +105,10 @@ async def list_vendors(
     stmt = select(Vendor).where(Vendor.deleted.is_(False))
     if search:
         stmt = stmt.where(Vendor.name.ilike(f"%{search}%") | Vendor.category.ilike(f"%{search}%"))
+    if category_id is not None:
+        stmt = stmt.where(Vendor.category_id == category_id)
+    if country_id is not None:
+        stmt = stmt.where(Vendor.country_id == country_id)
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
         stmt = apply_sort(stmt, params, _VENDOR_SORTABLE, default=Vendor.name)
@@ -92,9 +116,7 @@ async def list_vendors(
         stmt = stmt.order_by(Vendor.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))).all()
-    return Page(
-        items=[VendorRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
-    )
+    return Page(items=await _reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=VendorRead, status_code=201, dependencies=[Depends(require("vendor:write"))])
@@ -104,6 +126,7 @@ async def create_vendor(body: VendorCreate, db: DbSession, user: CurrentUser) ->
     asset_ids = data.pop("asset_ids", [])
     requirement_ids = data.pop("requirement_ids", [])
     control_ids = data.pop("control_ids", [])
+    await rf.apply_refs(db, Vendor, data, VENDOR_REFS)
     obj = Vendor(tenant_id=user.tenant_id, **data)
     obj.risks = await _resolve(db, Risk, risk_ids)
     obj.assets = await _resolve(db, Asset, asset_ids)
@@ -115,12 +138,12 @@ async def create_vendor(body: VendorCreate, db: DbSession, user: CurrentUser) ->
         db, actor=user, action="create", entity_type="vendor", entity_id=obj.id,
         summary=f"Registered vendor {obj.name}",
     )
-    return VendorRead.model_validate(await _load(db, obj.id))
+    return await _read(db, obj.id)
 
 
 @router.get("/{vendor_id}", response_model=VendorRead, dependencies=[Depends(require("vendor:read"))])
 async def get_vendor(vendor_id: uuid.UUID, db: DbSession) -> VendorRead:
-    return VendorRead.model_validate(await _load(db, vendor_id))
+    return await _read(db, vendor_id)
 
 
 @router.patch("/{vendor_id}", response_model=VendorRead, dependencies=[Depends(require("vendor:write"))])
@@ -133,6 +156,7 @@ async def update_vendor(
     asset_ids = data.pop("asset_ids", None)
     requirement_ids = data.pop("requirement_ids", None)
     control_ids = data.pop("control_ids", None)
+    await rf.apply_refs(db, Vendor, data, VENDOR_REFS, record=obj)
     for field, value in data.items():
         setattr(obj, field, value)
     if risk_ids is not None:
@@ -148,17 +172,20 @@ async def update_vendor(
         db, actor=user, action="update", entity_type="vendor", entity_id=obj.id,
         summary=f"Updated vendor {obj.name}",
     )
-    return VendorRead.model_validate(await _load(db, obj.id))
+    return await _read(db, obj.id)
 
 
 @router.delete("/{vendor_id}", status_code=204, dependencies=[Depends(require("vendor:write"))])
 async def delete_vendor(vendor_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load(db, vendor_id)
+    # (vendor, delete) is a dual-control action: whoever registered the third party
+    # cannot also remove it from the register.
+    await delete_guard.enforce(db, entity_type="vendor", record=obj, user=user, label="vendor")
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
     await audit.record(db, actor=user, action="delete", entity_type="vendor",
-                         entity_id=obj.id, summary=f"Archived vendor {obj.name}")
+                       entity_id=obj.id, summary=f"Archived vendor {obj.name}")
 
 
 # ----------------------------------------------------------------- contracts
@@ -170,7 +197,7 @@ async def add_contract(vendor_id: uuid.UUID, body: ServiceContractCreate, db: Db
     obj = await _load(db, vendor_id)
     db.add(ServiceContract(tenant_id=obj.tenant_id, vendor_id=obj.id, **body.model_dump()))
     await db.flush()
-    return VendorRead.model_validate(await _load(db, obj.id))
+    return await _read(db, obj.id)
 
 
 @router.delete(

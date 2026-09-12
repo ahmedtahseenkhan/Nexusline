@@ -6,6 +6,14 @@ import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
+import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
+import type { LookupRef, UserRef } from "@/lib/masterData";
+import UserPicker, { UserName } from "@/components/UserPicker";
+import LookupSelect from "@/components/LookupSelect";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
@@ -13,18 +21,27 @@ import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import RecordIssues from "@/components/RecordIssues";
 import RelatedChips from "@/components/RelatedChips";
+import SuggestedClauses, { BulkSuggestMappings } from "@/components/SuggestedClauses";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, EffectivenessBadge, StatusBadge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
 
 /* ---------------------------------------------------------------- inline types */
 type LinkRef = { id: string; reference?: string; title?: string; name?: string };
 type Control = {
-  id: string; name: string; reference: string; description: string; objective: string; owner: string;
-  control_type: string; classification: string; documentation_url: string; status: string; effectiveness: string;
+  id: string; name: string; reference: string; description: string; objective: string;
+  /** Legacy free text ("CISO"); shown only while no owner is picked. */
+  owner: string; owner_id: string | null; owner_ref: UserRef | null;
+  operator_id: string | null; operator_ref: UserRef | null;
+  control_type: string;
+  /** Legacy free text, kept in step with the picked classification. */
+  classification: string; classification_id: string | null; classification_ref: (LookupRef & { path?: string }) | null;
+  documentation_url: string; status: string; effectiveness: string;
+  /** Read-only: moved only through WorkflowFields. */
   workflow_status: string; opex: number | null; capex: number | null; resource_utilization: number | null;
   audit_frequency: string; audit_metric: string; audit_success_criteria: string; maintenance_frequency: string;
   next_audit_date: string | null; last_audit_date: string | null; next_maintenance_date: string | null;
@@ -35,17 +52,39 @@ type Control = {
   assets?: LinkRef[]; vendors?: LinkRef[];
   incidents?: LinkRef[]; exceptions?: LinkRef[]; projects?: LinkRef[]; audit_findings?: LinkRef[];
 };
-type ControlAudit = { id: string; result: string; conducted_date: string | null; result_description: string; auditor: string };
+type ControlAudit = {
+  id: string; result: string; conducted_date: string | null; result_description: string;
+  /** The tester's name as text (legacy, kept equal to the picked tester's name). */
+  auditor: string; tested_by_id?: string | null; tested_by_ref?: UserRef | null;
+};
 type ControlMaintenance = { id: string; result: string; task: string; conducted_date: string | null };
 
 /* ----------------------------------------------------------------- enum options */
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const CONTROL_TYPE = opts(["design", "production"]);
 const STATUS = opts(["planned", "implemented", "operational", "retired"]);
 const EFFECTIVENESS = opts(["not_assessed", "ineffective", "partially_effective", "effective"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
-const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
+const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
+/** The picked classification ("Parent › Child"), else the legacy text. */
+const classificationText = (c: Pick<Control, "classification" | "classification_ref">) =>
+  c.classification_ref ? c.classification_ref.path || c.classification_ref.label : c.classification || "";
+const personText = (u: UserRef | null | undefined, fallback?: string) => (u ? u.full_name || u.email : fallback || "");
+const FREQ = opts(["none", "fortnightly", "monthly", "quarterly", "semiannual", "annual"]);
+/** How often a cycle runs, in words. "none" has no cadence, so the line is hidden. */
+const FREQ_ADVERB: Record<string, string> = {
+  fortnightly: "Every two weeks", monthly: "Monthly", quarterly: "Quarterly",
+  semiannual: "Twice a year", annual: "Annually",
+};
+const cadence = (freq: string) => FREQ_ADVERB[freq] ?? "";
+/** Planned and retired controls carry no test clock (the server never schedules one). */
+const UNTESTABLE = new Set(["planned", "retired"]);
+const NO_CLOCK_NOTE: Record<string, string> = {
+  planned: "No test scheduled until the control is implemented",
+  retired: "Retired — no further tests scheduled",
+};
+/** Local calendar date as YYYY-MM-DD (toISOString would give the UTC date). */
+const today = () => new Date().toLocaleDateString("en-CA");
 const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
   operational: "low", implemented: "info", planned: "neutral", retired: "neutral",
 };
@@ -58,24 +97,26 @@ const refToOpt = (x: LinkRef): AsyncOption => ({ value: x.id, label: x.reference
 
 /* ------------------------------------------------------------------- form state */
 type FormState = {
-  name: string; reference: string; objective: string; description: string; owner: string; control_type: string;
-  classification: string; documentation_url: string; status: string; effectiveness: string; workflow_status: string;
+  name: string; reference: string; objective: string; description: string;
+  owner_id: string | null; operator_id: string | null; control_type: string;
+  classification_id: string | null; documentation_url: string; status: string; effectiveness: string;
   opex: number | ""; capex: number | ""; resource_utilization: number | ""; audit_frequency: string;
   audit_metric: string; audit_success_criteria: string; next_audit_date: string; maintenance_frequency: string;
   next_maintenance_date: string; policy_ids: AsyncOption[]; requirement_ids: AsyncOption[]; risk_ids: AsyncOption[]; asset_ids: AsyncOption[];
 };
 const BLANK: FormState = {
-  name: "", reference: "", objective: "", description: "", owner: "", control_type: "production", classification: "",
-  documentation_url: "", status: "planned", effectiveness: "not_assessed", workflow_status: "draft", opex: "", capex: "",
+  name: "", reference: "", objective: "", description: "", owner_id: null, operator_id: null, control_type: "production",
+  classification_id: null, documentation_url: "", status: "planned", effectiveness: "not_assessed", opex: "", capex: "",
   resource_utilization: "", audit_frequency: "annual", audit_metric: "", audit_success_criteria: "", next_audit_date: "",
   maintenance_frequency: "quarterly", next_maintenance_date: "", policy_ids: [], requirement_ids: [], risk_ids: [], asset_ids: [],
 };
 function fromControl(c: Control): FormState {
   return {
     name: c.name, reference: c.reference || "", objective: c.objective || "", description: c.description || "",
-    owner: c.owner || "", control_type: c.control_type, classification: c.classification || "",
+    owner_id: c.owner_id ?? null, operator_id: c.operator_id ?? null, control_type: c.control_type,
+    classification_id: c.classification_id ?? null,
     documentation_url: c.documentation_url || "", status: c.status, effectiveness: c.effectiveness,
-    workflow_status: c.workflow_status, opex: c.opex ?? "", capex: c.capex ?? "", resource_utilization: c.resource_utilization ?? "",
+    opex: c.opex ?? "", capex: c.capex ?? "", resource_utilization: c.resource_utilization ?? "",
     audit_frequency: c.audit_frequency, audit_metric: c.audit_metric || "", audit_success_criteria: c.audit_success_criteria || "",
     next_audit_date: c.next_audit_date || "", maintenance_frequency: c.maintenance_frequency, next_maintenance_date: c.next_maintenance_date || "",
     policy_ids: c.policies.map(refToOpt), requirement_ids: c.requirements.map(refToOpt), risk_ids: c.risks.map(refToOpt),
@@ -84,9 +125,10 @@ function fromControl(c: Control): FormState {
 }
 function toPayload(f: FormState) {
   return {
-    name: f.name, reference: f.reference, objective: f.objective, description: f.description, owner: f.owner,
-    control_type: f.control_type, classification: f.classification, documentation_url: f.documentation_url,
-    status: f.status, effectiveness: f.effectiveness, workflow_status: f.workflow_status,
+    name: f.name, reference: f.reference, objective: f.objective, description: f.description,
+    owner_id: f.owner_id, operator_id: f.operator_id,
+    control_type: f.control_type, classification_id: f.classification_id, documentation_url: f.documentation_url,
+    status: f.status, effectiveness: f.effectiveness,
     opex: f.opex === "" ? null : f.opex, capex: f.capex === "" ? null : f.capex,
     resource_utilization: f.resource_utilization === "" ? null : f.resource_utilization,
     audit_frequency: f.audit_frequency, audit_metric: f.audit_metric, audit_success_criteria: f.audit_success_criteria,
@@ -106,6 +148,7 @@ function ControlsInner() {
   const [maints, setMaints] = useState<ControlMaintenance[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const { currency, formatDate, formatMoney } = useFormat();
 
   const [editing, setEditing] = useState<Control | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -113,13 +156,19 @@ function ControlsInner() {
   const [f, setF] = useState<FormState>(BLANK);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
-  const [auditResult, setAuditResult] = useState("passed");
+  // No preselected result: "passed" by default recorded untested controls as passed.
+  const [auditResult, setAuditResult] = useState("");
+  const [auditDate, setAuditDate] = useState("");
   const [auditNote, setAuditNote] = useState("");
-  const [auditor, setAuditor] = useState("");
+  /** The tester, picked from the user list (tested_by_id); their name is also sent as `auditor`. */
+  const [tester, setTester] = useState<UserRef | null>(null);
+  const auditReady = !!auditResult && !!auditDate && auditNote.trim().length > 0;
   const [maintResult, setMaintResult] = useState("passed");
   const [maintTask, setMaintTask] = useState("");
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  // Register bulk action "Suggest mappings": the selected control ids under review.
+  const [suggestFor, setSuggestFor] = useState<string[] | null>(null);
   const fetchControls = useCallback((qs: string) => apiCall<PagedList<Control>>("GET", `/controls?${qs}`), []);
 
   const loadDetail = useCallback((id: string) => {
@@ -154,20 +203,25 @@ function ControlsInner() {
     finally { setSaving(false); }
   }
   async function remove(c: Control) {
-    if (!(await confirmDialog({ title: `Delete control ${c.reference || c.name}?`, danger: true }))) return;
-    setError(null);
+    if (!(await confirmDeleteWithImpact("control", c.id, c.reference ? `${c.reference} — ${c.name}` : c.name))) return;
     try {
       await apiCall<unknown>("DELETE", `/controls/${c.id}`);
       if (openId === c.id) setOpenId(null);
-      reload(); toast("Deleted");
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
+      reload(); toast(`Archived ${c.reference || c.name}`);
+    } catch (e) { toast(deleteErrorText(e, "Failed to delete the control"), "error"); }
   }
   async function recordAudit() {
-    if (!detail) return; setError(null);
+    if (!detail || !auditReady) return; setError(null);
     try {
-      await apiCall<Control>("POST", `/controls/${detail.id}/audits`, { result: auditResult, result_description: auditNote, auditor });
-      setAuditNote(""); setAuditor(""); loadDetail(detail.id); reload(); toast("Audit recorded");
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to record audit"); }
+      await apiCall<Control>("POST", `/controls/${detail.id}/audits`, {
+        result: auditResult, conducted_date: auditDate, result_description: auditNote.trim(),
+        tested_by_id: tester?.id ?? null,
+        // The legacy text column, kept for display compatibility with older readers.
+        auditor: tester ? tester.full_name || tester.email : "",
+      });
+      setAuditResult(""); setAuditDate(""); setAuditNote(""); setTester(null);
+      loadDetail(detail.id); reload(); toast("Test recorded");
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed to record the test"); }
   }
   async function recordMaintenance() {
     if (!detail) return; setError(null);
@@ -196,21 +250,22 @@ function ControlsInner() {
     { key: "control_type", header: "Type", render: (c) => <Badge tone="neutral" plain>{cap(c.control_type)}</Badge>, text: (c) => cap(c.control_type) },
     { key: "status", header: "Status", sortable: true, render: (c) => <StatusBadge value={c.status} tone={STATUS_TONE[c.status] === "low" ? "info" : "neutral"} />, text: (c) => cap(c.status) },
     { key: "effectiveness", header: "Effectiveness", sortable: true, render: (c) => <EffectivenessBadge value={c.effectiveness} />, text: (c) => cap(c.effectiveness) },
-    { key: "owner", header: "Owner", render: (c) => <span className="muted">{c.owner || "—"}</span> },
-    { key: "classification", header: "Classification", hidden: true, render: (c) => <span className="muted">{c.classification || "—"}</span> },
+    { key: "owner", header: "Owner", render: (c) => <span className="muted"><UserName user={c.owner_ref} fallback={c.owner} /></span>, text: (c) => personText(c.owner_ref, c.owner) },
+    { key: "operator", header: "Operator", hidden: true, render: (c) => <span className="muted"><UserName user={c.operator_ref} /></span>, text: (c) => personText(c.operator_ref) },
+    { key: "classification", header: "Classification", hidden: true, render: (c) => <span className="muted">{classificationText(c) || "—"}</span>, text: (c) => classificationText(c) },
     { key: "risks", header: "Risks mitigated", render: (c) => linkChips(c.risks, "/risks"), text: (c) => names(c.risks) },
     { key: "policies", header: "Policies", hidden: true, render: (c) => linkChips(c.policies, "/policies"), text: (c) => names(c.policies) },
     { key: "requirements", header: "Requirements", hidden: true, render: (c) => linkChips(c.requirements, "/compliance"), text: (c) => names(c.requirements) },
     { key: "assets", header: "Protected assets", hidden: true, render: (c) => linkChips(c.assets, "/information-assets"), text: (c) => names(c.assets) },
     { key: "audit_frequency", header: "Test cycle", hidden: true, render: (c) => <span className="muted">{cap(c.audit_frequency)}</span>, text: (c) => cap(c.audit_frequency) },
-    { key: "last_audit_date", header: "Last tested", hidden: true, sortable: true, render: (c) => <span className="muted">{c.last_audit_date || "—"}</span> },
+    { key: "last_audit_date", header: "Last tested", hidden: true, sortable: true, render: (c) => <span className="muted">{formatDate(c.last_audit_date)}</span>, text: (c) => (c.last_audit_date ? formatDate(c.last_audit_date) : "") },
     { key: "last_audit_result", header: "Last result", hidden: true, render: (c) => <span className="muted">{c.last_audit_result ? cap(c.last_audit_result) : "—"}</span>, text: (c) => c.last_audit_result ? cap(c.last_audit_result) : "" },
-    { key: "next_audit_date", header: "Next test", sortable: true, render: (c) => (c.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{c.next_audit_date || "—"}</span>), text: (c) => c.next_audit_date ?? "" },
+    { key: "next_audit_date", header: "Next test", sortable: true, render: (c) => (c.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : UNTESTABLE.has(c.status) ? <span className="muted" title={NO_CLOCK_NOTE[c.status]}>Not scheduled</span> : <span className="muted">{formatDate(c.next_audit_date)}</span>), text: (c) => (UNTESTABLE.has(c.status) ? "Not scheduled" : c.next_audit_date ? formatDate(c.next_audit_date) : "") },
     { key: "audit_count", header: "Tests run", hidden: true, align: "center", render: (c) => <span className="muted">{c.audit_count || "—"}</span> },
-    { key: "next_maintenance_date", header: "Next maintenance", hidden: true, render: (c) => (c.is_maintenance_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{c.next_maintenance_date || "—"}</span>), text: (c) => c.next_maintenance_date ?? "" },
-    { key: "opex", header: "Opex / yr", hidden: true, align: "right", render: (c) => <span className="muted">{c.opex != null ? c.opex.toLocaleString() : "—"}</span>, text: (c) => c.opex != null ? String(c.opex) : "" },
-    { key: "capex", header: "Capex", hidden: true, align: "right", render: (c) => <span className="muted">{c.capex != null ? c.capex.toLocaleString() : "—"}</span>, text: (c) => c.capex != null ? String(c.capex) : "" },
-    { key: "workflow_status", header: "Workflow", hidden: true, render: (c) => <span className="muted">{cap(c.workflow_status)}</span>, text: (c) => cap(c.workflow_status) },
+    { key: "next_maintenance_date", header: "Next maintenance", hidden: true, render: (c) => (c.is_maintenance_overdue ? <Badge tone="high">Overdue</Badge> : UNTESTABLE.has(c.status) ? <span className="muted">Not scheduled</span> : <span className="muted">{formatDate(c.next_maintenance_date)}</span>), text: (c) => (UNTESTABLE.has(c.status) ? "Not scheduled" : c.next_maintenance_date ? formatDate(c.next_maintenance_date) : "") },
+    { key: "opex", header: "Opex / yr", hidden: true, align: "right", render: (c) => <span className="muted">{formatMoney(c.opex)}</span>, text: (c) => c.opex != null ? formatMoney(c.opex) : "" },
+    { key: "capex", header: "Capex", hidden: true, align: "right", render: (c) => <span className="muted">{formatMoney(c.capex)}</span>, text: (c) => c.capex != null ? formatMoney(c.capex) : "" },
+    { key: "workflow_status", header: "Approval", hidden: true, render: (c) => <span className="muted">{workflowLabel(c.workflow_status)}</span>, text: (c) => workflowLabel(c.workflow_status) },
     { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(c)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(c)}>Delete</button></div> },
   ];
 
@@ -218,17 +273,14 @@ function ControlsInner() {
   async function removeMany(rowsToDelete: { id: string }[], clear: () => void) {
     const ok = await confirmDialog({
       title: `Delete ${rowsToDelete.length} control${rowsToDelete.length === 1 ? "" : "s"}?`,
-      message: "Links from other records are kept and the activity trail records who removed them.",
+      message: "They are archived, not erased: links from other records are kept, they can be restored from Archived, and the activity trail records who removed them.",
       confirmLabel: "Delete", danger: true,
     });
     if (!ok) return;
-    let failed = 0;
-    for (const r of rowsToDelete) {
-      try { await apiCall("DELETE", `/controls/${r.id}`); } catch { failed += 1; }
-    }
+    const res = await deleteEach(rowsToDelete, (r) => apiCall("DELETE", `/controls/${r.id}`));
     clear();
     reload();
-    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+    toastDeleteSummary(res, "control");
   }
 
   /* ------------------------------ form tabs (unchanged) ------------------------------ */
@@ -241,16 +293,40 @@ function ControlsInner() {
       <Field label="Objective" help="What the control is meant to achieve."><TextArea value={f.objective} onChange={(v) => set("objective", v)} rows={2} placeholder="Prevent unauthorised access to production systems." /></Field>
       <Field label="Description"><RichText value={f.description} onChange={(v) => set("description", v)} placeholder="Describe how the control is implemented and operated…" /></Field>
       <div className="field-row">
-        <Field label="Owner / GRC Contact"><TextInput value={f.owner} onChange={(v) => set("owner", v)} placeholder="CISO" /></Field>
-        <Field label="Classification" help="Service classification, e.g. Identity & Access."><TextInput value={f.classification} onChange={(v) => set("classification", v)} placeholder="Identity & Access" /></Field>
+        <Field label="Owner / GRC Contact" help="Accountable for the control's design and effectiveness.">
+          <UserPicker
+            value={f.owner_id}
+            onChange={(id) => set("owner_id", id)}
+            selected={editing?.owner_ref}
+            legacyText={editing?.owner_id ? null : editing?.owner}
+            placeholder="Search people…"
+          />
+        </Field>
+        <Field label="Operator" help="Runs the control day to day, where that is someone other than the owner.">
+          <UserPicker
+            value={f.operator_id}
+            onChange={(id) => set("operator_id", id)}
+            selected={editing?.operator_ref}
+            placeholder="Search people…"
+          />
+        </Field>
       </div>
+      <Field label="Classification" help="From the organisation's control classification list, e.g. Identity & Access.">
+        <LookupSelect
+          lookupKey="control_classification"
+          value={f.classification_id}
+          onChange={(id) => set("classification_id", id)}
+          legacyText={editing?.classification_id ? null : editing?.classification}
+          placeholder="Choose a classification…"
+          allowCreate
+        />
+      </Field>
       <div className="field-row">
         <Field label="Control Type" help="Design artefact vs. in-production control."><Select value={f.control_type} onChange={(v) => set("control_type", v)} options={CONTROL_TYPE} /></Field>
         <Field label="Status"><Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} /></Field>
       </div>
       <div className="field-row">
-        <Field label="Effectiveness"><Select value={f.effectiveness} onChange={(v) => set("effectiveness", v)} options={EFFECTIVENESS} /></Field>
-        <Field label="Workflow"><Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} /></Field>
+        <Field label="Effectiveness" help="Approval is separate: submit the control for review from its detail view."><Select value={f.effectiveness} onChange={(v) => set("effectiveness", v)} options={EFFECTIVENESS} /></Field>
       </div>
       <Field label="Documentation URL" help="Link to the runbook, design doc or evidence location."><TextInput value={f.documentation_url} onChange={(v) => set("documentation_url", v)} placeholder="https://docs.example.com/controls/mfa" /></Field>
     </>
@@ -258,8 +334,8 @@ function ControlsInner() {
   const costTab = (
     <>
       <div className="field-row">
-        <Field label="OpEx (per year)" help="Operational cost to run this control annually."><NumberInput value={f.opex} onChange={(v) => set("opex", v)} min={0} step={100} placeholder="0" /></Field>
-        <Field label="CapEx" help="One-off capital cost to implement."><NumberInput value={f.capex} onChange={(v) => set("capex", v)} min={0} step={100} placeholder="0" /></Field>
+        <Field label={`OpEx (${currency} per year)`} help="Operational cost to run this control annually."><NumberInput value={f.opex} onChange={(v) => set("opex", v)} min={0} step={100} placeholder="0" /></Field>
+        <Field label={`CapEx (${currency})`} help="One-off capital cost to implement."><NumberInput value={f.capex} onChange={(v) => set("capex", v)} min={0} step={100} placeholder="0" /></Field>
       </div>
       <Field label="Resource Utilization (% FTE)" help="Share of a full-time person needed to operate the control."><NumberInput value={f.resource_utilization} onChange={(v) => set("resource_utilization", v)} min={0} max={100} step={5} placeholder="0" /></Field>
     </>
@@ -269,14 +345,18 @@ function ControlsInner() {
       <div className="card-pad" style={{ padding: "0 0 8px" }}><strong>Audit cycle</strong><p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>How the control&apos;s effectiveness is tested and how often.</p></div>
       <div className="field-row">
         <Field label="Audit Frequency"><Select value={f.audit_frequency} onChange={(v) => set("audit_frequency", v)} options={FREQ} /></Field>
-        <Field label="Next Audit Date" help="Leave blank to derive from the frequency."><TextInput type="date" value={f.next_audit_date} onChange={(v) => set("next_audit_date", v)} /></Field>
+        {UNTESTABLE.has(f.status)
+          ? <Field label="Next Audit Date" help="The first test is scheduled from the frequency once the control is implemented or operational."><span className="muted" style={{ fontSize: 13 }}>{NO_CLOCK_NOTE[f.status]}</span></Field>
+          : <Field label="Next Audit Date" help="Leave blank to derive from the frequency."><TextInput type="date" value={f.next_audit_date} onChange={(v) => set("next_audit_date", v)} /></Field>}
       </div>
       <Field label="Audit Metric" help="What you measure to know the control works."><TextArea value={f.audit_metric} onChange={(v) => set("audit_metric", v)} rows={2} placeholder="% of privileged accounts with MFA enforced." /></Field>
       <Field label="Audit Success Criteria" help="The threshold for a passing audit."><TextArea value={f.audit_success_criteria} onChange={(v) => set("audit_success_criteria", v)} rows={2} placeholder="100% of privileged accounts enforce MFA." /></Field>
       <div className="card-pad" style={{ padding: "16px 0 8px" }}><strong>Maintenance cycle</strong><p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>Routine upkeep that keeps the control operating.</p></div>
       <div className="field-row">
         <Field label="Maintenance Frequency"><Select value={f.maintenance_frequency} onChange={(v) => set("maintenance_frequency", v)} options={FREQ} /></Field>
-        <Field label="Next Maintenance Date" help="Leave blank to derive from the frequency."><TextInput type="date" value={f.next_maintenance_date} onChange={(v) => set("next_maintenance_date", v)} /></Field>
+        {UNTESTABLE.has(f.status)
+          ? <Field label="Next Maintenance Date" help="Scheduled from the frequency once the control is implemented or operational."><span className="muted" style={{ fontSize: 13 }}>{f.status === "planned" ? "No maintenance scheduled until the control is implemented" : "Retired — no further maintenance scheduled"}</span></Field>
+          : <Field label="Next Maintenance Date" help="Leave blank to derive from the frequency."><TextInput type="date" value={f.next_maintenance_date} onChange={(v) => set("next_maintenance_date", v)} /></Field>}
       </div>
     </>
   );
@@ -305,10 +385,14 @@ function ControlsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<Control>
+        toolbarRight={<ArchivedRecords entityType="control" noun="controls" onRestored={reload} refreshKey={refreshKey} />}
         tableKey="controls"
         statusModel="control"
         bulkActions={(rows, clear) => (
-          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          <>
+            <button className="btn secondary sm" onClick={() => { setSuggestFor(rows.map((r) => r.id)); clear(); }}>Suggest mappings</button>
+            <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+          </>
         )}
         columns={columns}
         fetcher={fetchControls}
@@ -326,7 +410,7 @@ function ControlsInner() {
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference || detail.name : "…"}
-        subtitle={detail ? `${cap(detail.control_type)} · ${detail.owner || "no owner"}` : ""}
+        subtitle={detail ? `${cap(detail.control_type)} · ${personText(detail.owner_ref, detail.owner) || "no owner"}` : ""}
         width={720}
         actions={detail && (
           <>
@@ -343,18 +427,63 @@ function ControlsInner() {
               {linkCount(detail) > 0 && <Badge tone="neutral" plain>{linkCount(detail)} links</Badge>}
             </div>
 
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16, fontSize: 13.5 }}>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Owner</div><div style={{ marginTop: 3 }}><UserName user={detail.owner_ref} fallback={detail.owner} /></div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Operator</div><div style={{ marginTop: 3 }}><UserName user={detail.operator_ref} /></div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Classification</div><div style={{ marginTop: 3 }}>{classificationText(detail) || <span className="muted">—</span>}</div></div>
+              {(detail.opex != null || detail.capex != null) && (
+                <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Cost</div><div style={{ marginTop: 3 }}>{formatMoney(detail.opex)} / yr · {formatMoney(detail.capex)} capex</div></div>
+              )}
+            </div>
+
             <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Audits</h3><span className="sub">every {detail.audit_frequency}</span></div>
+              <div className="card-head"><h3>Approval</h3></div>
               <div className="card-pad">
+                <WorkflowFields entityType="control" entityId={detail.id} onChanged={() => { loadDetail(detail.id); reload(); }} />
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Audits</h3>{cadence(detail.audit_frequency) && <span className="sub">{cadence(detail.audit_frequency)}</span>}</div>
+              <div className="card-pad">
+                <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>
+                  {UNTESTABLE.has(detail.status)
+                    ? NO_CLOCK_NOTE[detail.status]
+                    : detail.is_audit_overdue
+                      ? <>Next test was due <b>{formatDate(detail.next_audit_date)}</b> — overdue</>
+                      : detail.next_audit_date ? <>Next test due <b>{formatDate(detail.next_audit_date)}</b></> : "No next test scheduled"}
+                </div>
                 <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(e) => { e.preventDefault(); recordAudit(); }}>
-                  <div style={{ width: 120 }}><label className="label">Result</label><select className="select" value={auditResult} onChange={(e) => setAuditResult(e.target.value)}><option value="passed">passed</option><option value="failed">failed</option></select></div>
-                  <div style={{ flex: "1 1 150px" }}><label className="label">Notes</label><input className="input" value={auditNote} onChange={(e) => setAuditNote(e.target.value)} placeholder="Audit conclusion" /></div>
-                  <div style={{ width: 130 }}><label className="label">Auditor</label><input className="input" value={auditor} onChange={(e) => setAuditor(e.target.value)} placeholder="Name" /></div>
-                  <button className="btn">Record</button>
+                  <div style={{ width: 150 }}>
+                    <label className="label" htmlFor="audit-result">Result</label>
+                    <select id="audit-result" className="select" value={auditResult} onChange={(e) => setAuditResult(e.target.value)} required>
+                      <option value="" disabled>Choose a result</option>
+                      <option value="passed">Passed</option>
+                      <option value="failed">Failed</option>
+                    </select>
+                  </div>
+                  <div style={{ width: 150 }}>
+                    <label className="label" htmlFor="audit-date">Test date</label>
+                    <input id="audit-date" className="input" type="date" value={auditDate} max={today()} onChange={(e) => setAuditDate(e.target.value)} required />
+                  </div>
+                  <div style={{ flex: "1 1 180px" }}>
+                    <label className="label" htmlFor="audit-conclusion">Conclusion</label>
+                    <input id="audit-conclusion" className="input" value={auditNote} onChange={(e) => setAuditNote(e.target.value)} placeholder="What was tested and what you found" required />
+                  </div>
+                  <div style={{ width: 200 }}>
+                    <label className="label">Tester</label>
+                    <UserPicker
+                      value={tester?.id ?? null}
+                      selected={tester}
+                      onChange={(_id, ref) => setTester(ref ?? null)}
+                      placeholder="Who performed the test…"
+                    />
+                  </div>
+                  <button className="btn" disabled={!auditReady} title={auditReady ? undefined : "Choose a result, the test date and the conclusion"}>Record</button>
                 </form>
                 {audits.length ? audits.map((a) => (
                   <div key={a.id} className="activity-item">
-                    <div style={{ flex: 1 }}><div style={{ fontSize: 13 }}>{a.result_description || "Audit"}</div><div className="when">{a.conducted_date || "—"} · {a.auditor || "—"}</div></div>
+                    <div style={{ flex: 1 }}><div style={{ fontSize: 13 }}>{a.result_description || "Audit"}</div><div className="when">{formatDate(a.conducted_date)} · <UserName user={a.tested_by_ref} fallback={a.auditor} /></div></div>
                     <ResultBadge value={a.result} />
                   </div>
                 )) : <span className="muted">No audits recorded yet.</span>}
@@ -362,7 +491,7 @@ function ControlsInner() {
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Maintenances</h3><span className="sub">every {detail.maintenance_frequency}</span></div>
+              <div className="card-head"><h3>Maintenance history</h3>{cadence(detail.maintenance_frequency) && <span className="sub">{cadence(detail.maintenance_frequency)}</span>}</div>
               <div className="card-pad">
                 <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(e) => { e.preventDefault(); recordMaintenance(); }}>
                   <div style={{ width: 120 }}><label className="label">Result</label><select className="select" value={maintResult} onChange={(e) => setMaintResult(e.target.value)}><option value="passed">passed</option><option value="failed">failed</option></select></div>
@@ -371,10 +500,10 @@ function ControlsInner() {
                 </form>
                 {maints.length ? maints.map((m) => (
                   <div key={m.id} className="activity-item">
-                    <div style={{ flex: 1 }}><div style={{ fontSize: 13 }}>{m.task || "Maintenance"}</div><div className="when">{m.conducted_date || "—"}</div></div>
+                    <div style={{ flex: 1 }}><div style={{ fontSize: 13 }}>{m.task || "Maintenance"}</div><div className="when">{formatDate(m.conducted_date)}</div></div>
                     <ResultBadge value={m.result} />
                   </div>
-                )) : <span className="muted">No maintenances recorded yet.</span>}
+                )) : <span className="muted">No maintenance recorded yet.</span>}
               </div>
             </div>
 
@@ -391,6 +520,8 @@ function ControlsInner() {
               <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
             </div>
 
+            <SuggestedClauses controlId={detail.id} onAccepted={() => { loadDetail(detail.id); reload(); }} />
+
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
               <RecordIssues entityId={detail.id} entityRef={detail.reference} sourceType="self_identified" />
             </div>
@@ -398,6 +529,10 @@ function ControlsInner() {
           </>
         )}
       </RecordDrawer>
+
+      {suggestFor && (
+        <BulkSuggestMappings controlIds={suggestFor} onClose={() => setSuggestFor(null)} onDone={reload} />
+      )}
 
       {showForm && (
         <FormModal

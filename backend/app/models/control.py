@@ -26,6 +26,11 @@ from app.models.enums import (
     TestResult,
 )
 
+#: Controls that are not yet (or no longer) operating have nothing to test or maintain:
+#: a planned control carries no test clock until it is implemented, and a retired one
+#: stops carrying it. Every "overdue" / "due soon" predicate excludes these statuses.
+UNTESTABLE_CONTROL_STATUSES: tuple[ControlStatus, ...] = (ControlStatus.planned, ControlStatus.retired)
+
 control_policies = Table(
     "control_policies",
     Base.metadata,
@@ -49,10 +54,19 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     description: Mapped[str] = mapped_column(Text, default="")
     objective: Mapped[str] = mapped_column(Text, default="")  # what the control achieves
     owner: Mapped[str] = mapped_column(String(200), default="")
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `owner`
+    operator_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `owner`
     control_type: Mapped[ControlType] = mapped_column(
         SAEnum(ControlType, name="control_type"), default=ControlType.production, nullable=False
     )
     classification: Mapped[str] = mapped_column(String(120), default="")  # service classification
+    classification_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `classification`
     documentation_url: Mapped[str] = mapped_column(String(1024), default="")
     status: Mapped[ControlStatus] = mapped_column(
         SAEnum(ControlStatus, name="control_status"),
@@ -142,8 +156,17 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
         return self._last_result(self.audits)
 
     @property
+    def carries_test_clock(self) -> bool:
+        """Implemented or operational. Planned and retired controls are never due."""
+        return self.status not in UNTESTABLE_CONTROL_STATUSES
+
+    @property
     def is_audit_overdue(self) -> bool:
-        return self.next_audit_date is not None and self.next_audit_date < date.today()
+        return (
+            self.carries_test_clock
+            and self.next_audit_date is not None
+            and self.next_audit_date < date.today()
+        )
 
     @property
     def maintenance_count(self) -> int:
@@ -156,7 +179,8 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     @property
     def is_maintenance_overdue(self) -> bool:
         return (
-            self.next_maintenance_date is not None
+            self.carries_test_clock
+            and self.next_maintenance_date is not None
             and self.next_maintenance_date < date.today()
         )
 
@@ -177,6 +201,9 @@ class ControlAudit(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMix
     result_description: Mapped[str] = mapped_column(Text, default="")
     improvement: Mapped[str] = mapped_column(Text, default="")  # corrective action from the audit
     auditor: Mapped[str] = mapped_column(String(200), default="")
+    tested_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `auditor`
 
     control: Mapped[Control] = relationship(back_populates="audits")
 

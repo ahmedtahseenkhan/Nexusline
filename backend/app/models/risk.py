@@ -114,6 +114,17 @@ risk_incidents = Table(
 # raising the ceiling never leaves the schema behind the validators.
 _SCALE = f"BETWEEN 1 AND {MAX_MATRIX_SIZE}"
 
+# A row that breaks the rule is allowed only with a written reason, or while it is
+# flagged for review. The flag matters because PostgreSQL checks even a NOT VALID
+# constraint on every later UPDATE: without it, the start-up repair could not flag a
+# legacy row like R-117 without first "correcting" a number nobody has looked at. The
+# API refuses to clear the flag while the scores still contradict each other.
+RESIDUAL_NOT_ABOVE_INHERENT = (
+    "residual_likelihood IS NULL OR residual_impact IS NULL "
+    "OR residual_likelihood * residual_impact <= inherent_likelihood * inherent_impact "
+    "OR residual_override_reason <> '' OR needs_review"
+)
+
 
 class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "risks"
@@ -128,12 +139,19 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
             f"residual_impact IS NULL OR residual_impact {_SCALE}",
             name="ck_risk_res_impact",
         ),
+        # Controls can only reduce a risk: a residual above inherent is a data error
+        # unless the owner has written down why (the same reason field that explains a
+        # departure from the suggested residual). The API enforces the permission side.
+        CheckConstraint(RESIDUAL_NOT_ABOVE_INHERENT, name="ck_risk_residual_le_inherent"),
     )
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(100), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     status: Mapped[RiskStatus] = mapped_column(
         SAEnum(RiskStatus, name="risk_status"), default=RiskStatus.draft, nullable=False
     )
@@ -182,6 +200,9 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     )
     treatment_description: Mapped[str] = mapped_column(Text, default="")
     treatment_owner: Mapped[str] = mapped_column(String(200), default="")
+    treatment_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `treatment_owner`
     treatment_deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
     treatment_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
@@ -202,6 +223,12 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     last_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     next_review_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     expired_reviews: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Raised when something the risk depended on changed underneath it — an asset it
+    # was written against was deleted, or its scores contradict each other. The register
+    # keeps the risk and asks a person to look, instead of archiving it or hiding it.
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    review_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
         secondary=risk_assets, lazy="selectin",

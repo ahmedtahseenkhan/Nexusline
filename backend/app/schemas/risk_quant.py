@@ -26,7 +26,6 @@ class RiskQuantBase(BaseModel):
     owner: str = ""
     notes: str = ""
     status: QuantStatus = QuantStatus.draft
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class RiskQuantCreate(RiskQuantBase):
@@ -49,10 +48,11 @@ class RiskQuantUpdate(BaseModel):
     owner: str | None = None
     notes: str | None = None
     status: QuantStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class RiskQuantRead(RiskQuantBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

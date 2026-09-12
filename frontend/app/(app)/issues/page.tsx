@@ -1,24 +1,36 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact, records } from "@/lib/records";
+import type { LookupRef, UnitRef, UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import UserPicker, { UserName } from "@/components/UserPicker";
+import LookupSelect from "@/components/LookupSelect";
+import BusinessUnitSelect, { UnitName } from "@/components/BusinessUnitSelect";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
+const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 
 // ------------------------------------------------------------------ local types
 type IssueAction = {
@@ -28,6 +40,8 @@ type IssueAction = {
   description: string;
   action_type: string;
   owner: string;
+  owner_id: string | null;
+  owner_ref: UserRef | null;
   due_date: string | null;
   status: string;
   completed_date: string | null;
@@ -41,6 +55,8 @@ type IssueUpdate = {
   issue_id: string;
   note: string;
   author: string;
+  author_id: string | null;
+  author_ref: UserRef | null;
   update_date: string | null;
   status_change: string;
   created_at?: string;
@@ -54,11 +70,19 @@ type Issue = {
   source_type: string;
   source_reference: string;
   source_id: string | null;
+  /** Legacy text (the picked value's label once a category is picked). */
   category: string;
+  category_id: string | null;
+  category_ref: LookupRef | null;
   severity: string;
   status: string;
+  /** Legacy text (the picked user's name once an owner is picked). */
   owner: string;
+  owner_id: string | null;
+  owner_ref: UserRef | null;
   business_unit: string;
+  business_unit_id: string | null;
+  business_unit_ref: UnitRef | null;
   identified_date: string | null;
   due_date: string | null;
   closed_date: string | null;
@@ -103,7 +127,73 @@ const ISSUE_STATUS = opts(["open", "in_progress", "remediated", "closed", "risk_
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 const CAPA_TYPE = ["corrective", "preventive"];
 const ACTION_STATUS = ["open", "in_progress", "done", "cancelled"];
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+
+// ------------------------------------------------------------------ source record link
+/* `source_id` is a bare id with no type column: the kind of record it points at is picked
+   here, and an existing link is recognised by asking the generic records API which
+   register holds it (the guess from `source_type` first). */
+type SourceKind = "risk" | "control" | "requirement" | "incident";
+const SOURCE_KINDS: { value: SourceKind; label: string }[] = [
+  { value: "risk", label: "Risk" },
+  { value: "control", label: "Control" },
+  { value: "requirement", label: "Compliance requirement" },
+  { value: "incident", label: "Incident" },
+];
+/** Unknown kind: an id we could not place in any of the registers above (kept as is). */
+const OTHER_KIND = "other";
+const SOURCE_TYPE_FOR_KIND: Partial<Record<SourceKind, string>> = {
+  risk: "risk_assessment",
+  requirement: "compliance",
+  incident: "incident",
+};
+const SOURCE_HREF: Record<SourceKind, string> = {
+  risk: "/risks",
+  control: "/controls",
+  requirement: "/compliance",
+  incident: "/incidents",
+};
+const KIND_FOR_SOURCE_TYPE: Record<string, SourceKind> = {
+  risk_assessment: "risk",
+  compliance: "requirement",
+  incident: "incident",
+};
+
+type Referenced = { id: string; reference?: string; title?: string; name?: string };
+const refLabel = (x: Referenced) =>
+  [x.reference, x.title || x.name].filter(Boolean).join(" · ") || x.id;
+const pagedSearch = (path: string) => (q: string): Promise<AsyncOption[]> =>
+  apiCall<PagedList<Referenced>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+    r.items.map((x) => ({ value: x.id, label: refLabel(x) })),
+  );
+const SOURCE_SEARCH: Record<SourceKind, (q: string) => Promise<AsyncOption[]>> = {
+  risk: pagedSearch("risks"),
+  control: pagedSearch("controls"),
+  incident: pagedSearch("incidents"),
+  requirement: (q) =>
+    apiCall<{ id: string; reference: string; title: string; framework: string }[]>(
+      "GET",
+      `/requirements?search=${encodeURIComponent(q)}&limit=20`,
+    ).then((rows) => rows.map((r) => ({ value: r.id, label: refLabel(r), sub: r.framework }))),
+};
+
+type ResolvedSource = { kind: SourceKind | typeof OTHER_KIND; label: string };
+
+/** Which register holds `id`, and its label; `other` when none of them does. */
+async function resolveSource(id: string, sourceType: string): Promise<ResolvedSource> {
+  const guess = KIND_FOR_SOURCE_TYPE[sourceType];
+  const order: SourceKind[] = guess
+    ? [guess, ...SOURCE_KINDS.map((k) => k.value).filter((k) => k !== guess)]
+    : SOURCE_KINDS.map((k) => k.value);
+  for (const kind of order) {
+    try {
+      const r = await records.impact(kind, id);
+      return { kind, label: r.label || id };
+    } catch {
+      /* not this register — try the next */
+    }
+  }
+  return { kind: OTHER_KIND, label: "" };
+}
 
 // ------------------------------------------------------------------ tones
 const STATUS_TONE: Record<string, Tone> = {
@@ -128,18 +218,30 @@ function SevBadge({ value }: { value: string | null }) {
   return <Badge tone={SEV_TONE[value] || "neutral"}>{cap(value)}</Badge>;
 }
 
+function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="muted" style={{ fontSize: 12 }}>{label}</div>
+      <div style={{ marginTop: 2, fontSize: 13 }}>{children}</div>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ form state
 type IssueForm = {
   title: string;
   description: string;
   source_type: string;
   source_reference: string;
-  source_id: string;
-  category: string;
+  source_id: string | null;
+  /** "" = no linked record; "other" = an id outside the pickable registers. */
+  source_kind: string;
+  source_label: string;
+  category_id: string | null;
   severity: string;
   status: string;
-  owner: string;
-  business_unit: string;
+  owner_id: string | null;
+  business_unit_id: string | null;
   identified_date: string;
   due_date: string;
   closed_date: string;
@@ -147,19 +249,20 @@ type IssueForm = {
   management_response: string;
   repeat_finding: boolean;
   regulator_related: boolean;
-  workflow_status: string;
 };
 const BLANK_ISSUE: IssueForm = {
   title: "",
   description: "",
   source_type: "self_identified",
   source_reference: "",
-  source_id: "",
-  category: "",
+  source_id: null,
+  source_kind: "",
+  source_label: "",
+  category_id: null,
   severity: "medium",
   status: "open",
-  owner: "",
-  business_unit: "",
+  owner_id: null,
+  business_unit_id: null,
   identified_date: "",
   due_date: "",
   closed_date: "",
@@ -167,7 +270,6 @@ const BLANK_ISSUE: IssueForm = {
   management_response: "",
   repeat_finding: false,
   regulator_related: false,
-  workflow_status: "draft",
 };
 function fromIssue(i: Issue): IssueForm {
   return {
@@ -175,12 +277,15 @@ function fromIssue(i: Issue): IssueForm {
     description: i.description || "",
     source_type: i.source_type || "self_identified",
     source_reference: i.source_reference || "",
-    source_id: i.source_id || "",
-    category: i.category || "",
+    source_id: i.source_id || null,
+    // Guessed from the source type until resolveSource() places the id.
+    source_kind: i.source_id ? KIND_FOR_SOURCE_TYPE[i.source_type] || "risk" : "",
+    source_label: i.source_id ? "Loading…" : "",
+    category_id: i.category_id,
     severity: i.severity || "medium",
     status: i.status || "open",
-    owner: i.owner || "",
-    business_unit: i.business_unit || "",
+    owner_id: i.owner_id,
+    business_unit_id: i.business_unit_id,
     identified_date: i.identified_date || "",
     due_date: i.due_date || "",
     closed_date: i.closed_date || "",
@@ -188,7 +293,6 @@ function fromIssue(i: Issue): IssueForm {
     management_response: i.management_response || "",
     repeat_finding: !!i.repeat_finding,
     regulator_related: !!i.regulator_related,
-    workflow_status: i.workflow_status || "draft",
   };
 }
 function issuePayload(f: IssueForm): Record<string, unknown> {
@@ -197,12 +301,12 @@ function issuePayload(f: IssueForm): Record<string, unknown> {
     description: f.description,
     source_type: f.source_type,
     source_reference: f.source_reference,
-    source_id: f.source_id.trim() === "" ? null : f.source_id.trim(),
-    category: f.category,
+    source_id: f.source_id,
+    category_id: f.category_id,
     severity: f.severity,
     status: f.status,
-    owner: f.owner,
-    business_unit: f.business_unit,
+    owner_id: f.owner_id,
+    business_unit_id: f.business_unit_id,
     identified_date: f.identified_date || null,
     due_date: f.due_date || null,
     closed_date: f.closed_date || null,
@@ -210,37 +314,39 @@ function issuePayload(f: IssueForm): Record<string, unknown> {
     management_response: f.management_response,
     repeat_finding: f.repeat_finding,
     regulator_related: f.regulator_related,
-    workflow_status: f.workflow_status,
   };
 }
 
 type ActionDraft = {
   title: string;
   action_type: string;
-  owner: string;
+  owner_id: string | null;
   due_date: string;
   status: string;
 };
 const BLANK_ACTION: ActionDraft = {
   title: "",
   action_type: "corrective",
-  owner: "",
+  owner_id: null,
   due_date: "",
   status: "open",
 };
 
 type UpdateDraft = {
   note: string;
-  author: string;
+  /** null = the signed-in user (the server's default). */
+  author_id: string | null;
   update_date: string;
   status_change: string;
 };
-const BLANK_UPDATE: UpdateDraft = { note: "", author: "", update_date: "", status_change: "" };
+const BLANK_UPDATE: UpdateDraft = { note: "", author_id: null, update_date: "", status_change: "" };
 
 /* ================================================================ page ===== */
 function IssuesInner() {
+  const { formatDate } = useFormat();
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<Issue | null>(null);
+  const [detailSource, setDetailSource] = useState<ResolvedSource | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<IssuesSummary | null>(null);
@@ -276,6 +382,29 @@ function IssuesInner() {
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
   useEffect(() => { loadSummary(); }, [loadSummary]);
 
+  // Place the open issue's source record (for the drawer link).
+  const detailSourceId = detail?.source_id ?? null;
+  const detailSourceType = detail?.source_type ?? "";
+  useEffect(() => {
+    let live = true;
+    setDetailSource(null);
+    if (detailSourceId) resolveSource(detailSourceId, detailSourceType).then((r) => live && setDetailSource(r));
+    return () => { live = false; };
+  }, [detailSourceId, detailSourceType]);
+
+  // Place the edited issue's source record (for the form picker).
+  const editingSourceId = showForm ? editing?.source_id ?? null : null;
+  const editingSourceType = editing?.source_type ?? "";
+  useEffect(() => {
+    let live = true;
+    if (!editingSourceId) return;
+    resolveSource(editingSourceId, editingSourceType).then((r) => {
+      if (!live) return;
+      setF((p) => (p.source_id === editingSourceId ? { ...p, source_kind: r.kind, source_label: r.label } : p));
+    });
+    return () => { live = false; };
+  }, [editingSourceId, editingSourceType]);
+
   // ------------------------------------------------------------- issue CRUD
   function openNew() { setEditing(null); setF(BLANK_ISSUE); setError(null); setShowForm(true); }
   function openEdit(i: Issue) { setEditing(i); setF(fromIssue(i)); setError(null); setShowForm(true); }
@@ -287,18 +416,21 @@ function IssuesInner() {
       else await apiCall<Issue>("POST", "/issues", payload);
       setShowForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
       toast(editing ? "Changes saved" : "Issue raised");
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save issue"); }
+    } catch (e) { setError(errMsg(e, "Failed to save issue")); }
     finally { setSaving(false); }
   }
   async function remove(i: Issue) {
-    if (!(await confirmDialog({ title: `Delete issue ${i.reference || i.title}?`, danger: true }))) return;
-    setError(null);
+    const label = i.reference ? `${i.reference} ${i.title}` : i.title;
+    if (!(await confirmDeleteWithImpact("issue", i.id, label))) return;
     try {
       await apiCall<void>("DELETE", `/issues/${i.id}`);
       setShowForm(false);
       if (openId === i.id) setOpenId(null);
-      reload(); loadSummary(); toast("Deleted");
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
+      reload(); loadSummary(); toast(`Deleted ${i.reference || "issue"}`);
+    } catch (e) {
+      // A 403 here is segregation of duties: the server's message says who may delete it.
+      toast(errMsg(e, "Failed to delete"), "error");
+    }
   }
 
   // ------------------------------------------------------------- CAPA actions (inline)
@@ -306,18 +438,25 @@ function IssuesInner() {
     if (!detail) return; setError(null);
     try {
       await apiCall<Issue>("POST", `/issues/${detail.id}/actions`, {
-        title: ad.title, action_type: ad.action_type, owner: ad.owner,
+        title: ad.title, action_type: ad.action_type, owner_id: ad.owner_id,
         due_date: ad.due_date || null, status: ad.status,
       });
       setAd(BLANK_ACTION); loadDetail(detail.id); reload(); loadSummary();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to add action"); }
+    } catch (e) { setError(errMsg(e, "Failed to add action")); }
   }
   async function setActionStatus(lineId: string, status: string) {
     if (!detail) return; setError(null);
     try {
       await apiCall<IssueAction>("PATCH", `/issue-actions/${lineId}`, { status });
       loadDetail(detail.id); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to update action"); }
+    } catch (e) { setError(errMsg(e, "Failed to update action")); }
+  }
+  async function setActionOwner(lineId: string, ownerId: string | null) {
+    if (!detail) return; setError(null);
+    try {
+      await apiCall<IssueAction>("PATCH", `/issue-actions/${lineId}`, { owner_id: ownerId });
+      loadDetail(detail.id);
+    } catch (e) { setError(errMsg(e, "Failed to change the action owner")); }
   }
   async function removeAction(lineId: string) {
     if (!detail) return;
@@ -326,7 +465,7 @@ function IssuesInner() {
     try {
       await apiCall<void>("DELETE", `/issue-actions/${lineId}`);
       loadDetail(detail.id); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to remove action"); }
+    } catch (e) { setError(errMsg(e, "Failed to remove action")); }
   }
 
   // ------------------------------------------------------------- updates (inline)
@@ -334,21 +473,29 @@ function IssuesInner() {
     if (!detail) return; setError(null);
     try {
       await apiCall<Issue>("POST", `/issues/${detail.id}/updates`, {
-        note: ud.note, author: ud.author, update_date: ud.update_date || null, status_change: ud.status_change,
+        note: ud.note,
+        // Omitted when blank: the server records the signed-in user as the author.
+        ...(ud.author_id ? { author_id: ud.author_id } : {}),
+        update_date: ud.update_date || null,
+        status_change: ud.status_change,
       });
       setUd(BLANK_UPDATE); loadDetail(detail.id); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to add update"); }
+    } catch (e) { setError(errMsg(e, "Failed to add update")); }
   }
+
+  const ownerName = (i: Issue) => i.owner_ref?.full_name || i.owner_ref?.email || i.owner || "";
 
   const columns: Column<Issue>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (i) => <span className="ref">{i.reference || "—"}</span> },
     { key: "title", header: "Title", sortable: true, render: (i) => <span className="cell-title">{i.title}{i.repeat_finding && <> <Badge tone="medium">Repeat</Badge></>}{i.regulator_related && <> <Badge tone="info">Regulator</Badge></>}</span> },
     { key: "source_type", header: "Source", sortable: true, render: (i) => <Badge tone="info">{cap(i.source_type)}</Badge> },
+    { key: "category", header: "Category", hidden: true, render: (i) => <span className="muted">{i.category_ref?.label || i.category || "—"}</span>, text: (i) => i.category_ref?.label || i.category || "" },
     { key: "severity", header: "Severity", sortable: true, render: (i) => <SevBadge value={i.severity} /> },
-    { key: "owner", header: "Owner", sortable: true, render: (i) => <span className="muted">{i.owner || "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (i) => <span className="muted"><UserName user={i.owner_ref} fallback={i.owner} /></span>, text: ownerName },
+    { key: "business_unit", header: "Business unit", hidden: true, render: (i) => <span className="muted"><UnitName unit={i.business_unit_ref} fallback={i.business_unit} /></span>, text: (i) => i.business_unit_ref?.name || i.business_unit || "" },
     { key: "status", header: "Status", sortable: true, render: (i) => <StatusBadge value={i.status} /> },
     { key: "actions_count", header: "Actions", align: "center", render: (i) => <span className="muted">{i.open_action_count}/{i.action_count}</span> },
-    { key: "due_date", header: "Due", sortable: true, render: (i) => (i.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{i.due_date || "—"}</span>) },
+    { key: "due_date", header: "Due", sortable: true, render: (i) => (i.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(i.due_date)}</span>), text: (i) => (i.due_date ? formatDate(i.due_date) : "") },
     { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button></div> },
   ];
 
@@ -358,6 +505,29 @@ function IssuesInner() {
     overdue: fOverdue || undefined,
     regulator_related: fRegulator || undefined,
   };
+
+  // ------------------------------------------------------------- source picker
+  function pickSourceKind(kind: string) {
+    setF((p) => ({ ...p, source_kind: kind, source_id: null, source_label: "" }));
+  }
+  function pickSource(id: string | null, opt: AsyncOption | null) {
+    setF((p) => {
+      if (!id) return { ...p, source_id: null, source_label: "" };
+      const kind = p.source_kind as SourceKind;
+      const suggested = SOURCE_TYPE_FOR_KIND[kind];
+      const reference = (opt?.label || "").split(" · ")[0];
+      return {
+        ...p,
+        source_id: id,
+        source_label: opt?.label || "",
+        // A linked risk / requirement / incident says where the issue came from.
+        source_type: suggested && (p.source_type === "self_identified" || p.source_type === "other") ? suggested : p.source_type,
+        source_reference: p.source_reference.trim() ? p.source_reference : reference,
+      };
+    });
+  }
+  const sourceKindOptions: Option[] =
+    f.source_kind === OTHER_KIND ? [...SOURCE_KINDS, { value: OTHER_KIND, label: "Other record" }] : SOURCE_KINDS;
 
   // ------------------------------------------------------------- form tabs
   const generalTab = (
@@ -370,10 +540,20 @@ function IssuesInner() {
       </Field>
       <div className="field-row">
         <Field label="Owner" help="Accountable for remediation.">
-          <TextInput value={f.owner} onChange={(v) => setFF("owner", v)} placeholder="Remediation owner" />
+          <UserPicker
+            value={f.owner_id}
+            onChange={(id) => setFF("owner_id", id)}
+            selected={editing?.owner_ref ?? null}
+            legacyText={editing && !editing.owner_id ? editing.owner : null}
+            placeholder="Remediation owner…"
+          />
         </Field>
         <Field label="Business unit">
-          <TextInput value={f.business_unit} onChange={(v) => setFF("business_unit", v)} placeholder="Payments" />
+          <BusinessUnitSelect
+            value={f.business_unit_id}
+            onChange={(id) => setFF("business_unit_id", id)}
+            legacyText={editing && !editing.business_unit_id ? editing.business_unit : null}
+          />
         </Field>
       </div>
       <div className="field-row">
@@ -393,14 +573,41 @@ function IssuesInner() {
           <Select value={f.source_type} onChange={(v) => setFF("source_type", v)} options={SOURCE_TYPES} />
         </Field>
         <Field label="Category">
-          <TextInput value={f.category} onChange={(v) => setFF("category", v)} placeholder="Operational" />
+          <LookupSelect
+            lookupKey="issue_category"
+            value={f.category_id}
+            onChange={(id) => setFF("category_id", id)}
+            legacyText={editing && !editing.category_id ? editing.category : null}
+            allowCreate
+          />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Raised against" help="The record this issue concerns — it then lists the issue too.">
+          <Select value={f.source_kind} onChange={pickSourceKind} options={sourceKindOptions} placeholder="No linked record" />
+        </Field>
+        <Field label="Source record">
+          {f.source_kind === OTHER_KIND ? (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+              <span className="muted">Linked to a record from another module.</span>
+              <button type="button" className="btn secondary sm" onClick={() => pickSourceKind("")}>Unlink</button>
+            </div>
+          ) : f.source_kind ? (
+            <AsyncSelect
+              key={f.source_kind}
+              search={SOURCE_SEARCH[f.source_kind as SourceKind]}
+              value={f.source_id}
+              selectedLabel={f.source_label}
+              placeholder={`Search ${SOURCE_KINDS.find((k) => k.value === f.source_kind)?.label.toLowerCase() ?? "records"}…`}
+              onChange={pickSource}
+            />
+          ) : (
+            <span className="muted" style={{ fontSize: 13 }}>Choose what the issue was raised against first.</span>
+          )}
         </Field>
       </div>
       <Field label="Source reference" help='Pointer to the originating record, e.g. "AUD-004 finding 3".'>
         <TextInput value={f.source_reference} onChange={(v) => setFF("source_reference", v)} placeholder="AUD-004 finding 3" />
-      </Field>
-      <Field label="Source record ID" help="Optional UUID of the originating record.">
-        <TextInput value={f.source_id} onChange={(v) => setFF("source_id", v)} placeholder="Optional UUID" />
       </Field>
       <div className="field-row">
         <Field label="Repeat finding" help="Recurrence of a previously raised issue.">
@@ -430,9 +637,6 @@ function IssuesInner() {
       </Field>
       <Field label="Management response">
         <TextArea value={f.management_response} onChange={(v) => setFF("management_response", v)} rows={3} placeholder="Agreed management action." />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this issue record.">
-        <Select value={f.workflow_status} onChange={(v) => setFF("workflow_status", v)} options={WORKFLOW} />
       </Field>
     </>
   );
@@ -500,6 +704,7 @@ function IssuesInner() {
             <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
               <input type="checkbox" checked={fRegulator} onChange={(e) => setFRegulator(e.target.checked)} /> Regulator
             </label>
+            <ArchivedRecords entityType="issue" noun="issues" refreshKey={refreshKey} onRestored={() => { reload(); loadSummary(); }} />
           </>
         }
         emptyMessage="No issues. Raise an issue, or feed findings from audit, compliance, RCSA, Shariah, incidents and inspections into one register."
@@ -511,7 +716,7 @@ function IssuesInner() {
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
-        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.source_type)}${detail.owner ? " · owner " + detail.owner : ""} · ${detail.age_days}d old` : ""}
+        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.source_type)}${ownerName(detail) ? " · owner " + ownerName(detail) : ""} · ${detail.age_days}d old` : ""}
         width={820}
         actions={detail && (
           <>
@@ -526,6 +731,41 @@ function IssuesInner() {
               <SevBadge value={detail.severity} />
               <StatusBadge value={detail.status} />
               {detail.is_overdue && <Badge tone="high">Overdue</Badge>}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 12, padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <Fact label="Owner"><UserName user={detail.owner_ref} fallback={detail.owner} /></Fact>
+              <Fact label="Business unit"><UnitName unit={detail.business_unit_ref} fallback={detail.business_unit} /></Fact>
+              <Fact label="Category">{detail.category_ref?.label || detail.category || <span className="muted">—</span>}</Fact>
+              <Fact label="Identified">{formatDate(detail.identified_date)}</Fact>
+              <Fact label="Due">{formatDate(detail.due_date)}</Fact>
+              <Fact label="Closed">{formatDate(detail.closed_date)}</Fact>
+              <Fact label="Source">
+                {cap(detail.source_type)}
+                {detail.source_reference ? <span className="muted"> · {detail.source_reference}</span> : null}
+              </Fact>
+              {detail.source_id && (
+                <Fact label="Raised against">
+                  {!detailSource ? (
+                    <span className="muted">Loading…</span>
+                  ) : detailSource.kind === OTHER_KIND ? (
+                    <span className="muted">A record in another module</span>
+                  ) : (
+                    <Link href={`${SOURCE_HREF[detailSource.kind]}?id=${detail.source_id}`}>{detailSource.label}</Link>
+                  )}
+                </Fact>
+              )}
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Approval</h3></div>
+              <div className="card-pad">
+                <WorkflowFields
+                  entityType="issue"
+                  entityId={detail.id}
+                  onChanged={() => { loadDetail(detail.id); reload(); }}
+                />
+              </div>
             </div>
 
             {(detail.description || detail.root_cause || detail.management_response) && (
@@ -553,9 +793,9 @@ function IssuesInner() {
                       {CAPA_TYPE.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
                     </select>
                   </div>
-                  <div style={{ width: 130 }}>
+                  <div style={{ width: 210 }}>
                     <label className="label">Owner</label>
-                    <input className="input" value={ad.owner} onChange={(ev) => setAD("owner", ev.target.value)} placeholder="Owner" />
+                    <UserPicker value={ad.owner_id} onChange={(id) => setAD("owner_id", id)} placeholder="Action owner…" />
                   </div>
                   <div style={{ width: 140 }}>
                     <label className="label">Due date</label>
@@ -572,9 +812,17 @@ function IssuesInner() {
                         <tr key={a.id}>
                           <td className="cell-title">{a.title}</td>
                           <td><Badge tone={a.action_type === "preventive" ? "info" : "neutral"}>{cap(a.action_type)}</Badge></td>
-                          <td className="muted">{a.owner || "—"}</td>
-                          <td>{a.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{a.due_date || "—"}</span>}</td>
-                          <td className="muted">{a.completed_date || "—"}</td>
+                          <td style={{ minWidth: 180 }}>
+                            <UserPicker
+                              value={a.owner_id}
+                              selected={a.owner_ref}
+                              legacyText={a.owner_id ? null : a.owner}
+                              onChange={(id) => setActionOwner(a.id, id)}
+                              placeholder="No owner"
+                            />
+                          </td>
+                          <td>{a.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(a.due_date)}</span>}</td>
+                          <td className="muted">{formatDate(a.completed_date)}</td>
                           <td>
                             <select className="select" value={a.status} onChange={(ev) => setActionStatus(a.id, ev.target.value)} style={{ padding: "2px 6px", height: "auto" }}>
                               {ACTION_STATUS.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
@@ -599,9 +847,9 @@ function IssuesInner() {
                     <label className="label">Update note</label>
                     <input className="input" value={ud.note} onChange={(ev) => setUD("note", ev.target.value)} placeholder="Progress note" required />
                   </div>
-                  <div style={{ width: 130 }}>
+                  <div style={{ width: 200 }}>
                     <label className="label">Author</label>
-                    <input className="input" value={ud.author} onChange={(ev) => setUD("author", ev.target.value)} placeholder="Author" />
+                    <UserPicker value={ud.author_id} onChange={(id) => setUD("author_id", id)} placeholder="You" />
                   </div>
                   <div style={{ width: 140 }}>
                     <label className="label">Date</label>
@@ -622,8 +870,8 @@ function IssuesInner() {
                         .sort((a, b) => (b.update_date || "").localeCompare(a.update_date || ""))
                         .map((u) => (
                           <tr key={u.id}>
-                            <td className="muted">{u.update_date || "—"}</td>
-                            <td className="muted">{u.author || "—"}</td>
+                            <td className="muted">{formatDate(u.update_date)}</td>
+                            <td className="muted"><UserName user={u.author_ref} fallback={u.author} /></td>
                             <td className="cell-title">{u.note || "—"}</td>
                             <td className="muted">{u.status_change || "—"}</td>
                           </tr>

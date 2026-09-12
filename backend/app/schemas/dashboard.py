@@ -31,15 +31,27 @@ class DashboardStats(BaseModel):
 class HealthComponent(BaseModel):
     key: str
     label: str
-    value: float
+    #: None when the component has no population ("no data"), never a free 0 or 100.
+    value: float | None
     weight: float
     detail: str
+    population: int = 0
+    formula: str = ""
+
+
+class HealthCoverage(BaseModel):
+    """What the score was computed on: "scored on 2 of 4 measures (55 % of weight)"."""
+
+    scored: int
+    total: int
+    weight_pct: float
 
 
 class Health(BaseModel):
     score: int
     band: str
     components: list[HealthComponent]
+    coverage: HealthCoverage | None = None
 
 
 class TopRisk(BaseModel):
@@ -56,6 +68,10 @@ class TopRisk(BaseModel):
     next_review_date: date | None
     review_overdue: bool
     control_count: int
+    #: Set when something the risk depended on changed underneath it (an asset removed,
+    #: residual above inherent); the page flags it until a person has looked.
+    needs_review: bool = False
+    review_reason: str = ""
 
 
 class Posture(BaseModel):
@@ -75,11 +91,15 @@ class Assurance(BaseModel):
     effective: int
     partially_effective: int
     ineffective: int
+    #: Never tested, among controls that are implemented or operational.
     not_assessed: int
     tests_overdue: int
     tests_due_30d: int
     last_test_failed: int
     tests_in_period: int
+    #: Planned or retired: nothing to test, excluded from every testing count and from
+    #: the assurance percentage. ``total`` includes them so the bar still adds up.
+    not_operating: int = 0
 
 
 class FrameworkPosture(BaseModel):
@@ -93,11 +113,17 @@ class FrameworkPosture(BaseModel):
     unmapped: int
     compliant_pct: float
     gaps: int
+    #: compliance | maturity | guidance — only compliance frameworks feed the totals.
+    kind: str = "compliance"
 
 
 class CompliancePosture(BaseModel):
+    #: Compliance frameworks: the obligations the percentage and gap counts are taken over.
     frameworks: list[FrameworkPosture]
     overall_assured_pct: float
+    #: Maturity and guidance frameworks (ISO 31000, ISO 27005): self-assessed good
+    #: practice, listed for reference but never counted as gaps or in the percentage.
+    other_frameworks: list[FrameworkPosture] = []
 
 
 class ActionItem(BaseModel):

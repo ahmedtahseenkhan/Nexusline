@@ -19,6 +19,8 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconCheck } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // the list endpoint now also returns the questionnaire ref + score totals
 type Row = AssessmentSummary & {
@@ -47,7 +49,7 @@ const SEV_TONE: Record<string, "low" | "medium" | "high" | "critical"> = {
   critical: "critical",
 };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ---- assessment-header form state ------------------------------------------------
@@ -86,6 +88,7 @@ const BLANK_FINDING: FindingForm = {
 
 function AssessmentsInner() {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate } = useFormat();
   const [detail, setDetail] = useState<Assessment | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [comments, setComments] = useState<Record<string, string>>({});
@@ -368,7 +371,7 @@ function AssessmentsInner() {
     { key: "vendor", header: "Vendor", render: (a) => <span className="muted">{a.vendor ? a.vendor.name : "—"}</span> },
     { key: "questionnaire", header: "Questionnaire", render: (a) => <span className="muted">{a.questionnaire ? a.questionnaire.name : "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (a) => <Badge tone={STATUS_TONE[a.status] || "neutral"}>{cap(a.status)}</Badge> },
-    { key: "due_date", header: "Due", sortable: true, render: (a) => <span className="muted">{a.due_date || "—"}</span> },
+    { key: "due_date", header: "Due", sortable: true, render: (a) => <span className="muted">{formatDate(a.due_date)}</span> },
     { key: "progress", header: "Progress", render: (a) => <span className="muted">{a.answered_count}/{a.question_count}</span> },
     { key: "score", header: "Score", render: (a) => <Badge tone={scoreTone(a.score_pct)} plain>{a.score_pct}%</Badge> },
     { key: "findings", header: "Findings", align: "center", render: (a) => (a.open_findings > 0 ? <Badge tone="high">{a.open_findings}</Badge> : <span className="muted">0</span>) },
@@ -421,7 +424,7 @@ function AssessmentsInner() {
         title={detail?.title || "…"}
         subtitle={
           detail
-            ? `${detail.questionnaire?.name || ""}${detail.vendor ? " · " + detail.vendor.name : ""} · ${cap(detail.status)}${detail.due_date ? " · due " + detail.due_date : ""}${detail.submitted_at ? " · submitted " + detail.submitted_at : ""}`
+            ? `${detail.questionnaire?.name || ""}${detail.vendor ? " · " + detail.vendor.name : ""} · ${cap(detail.status)}${detail.due_date ? " · due " + formatDate(detail.due_date) : ""}${detail.submitted_at ? " · submitted " + formatDate(detail.submitted_at) : ""}`
             : ""
         }
         width={760}
@@ -505,7 +508,7 @@ function AssessmentsInner() {
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: 13 }}>{f.title}</div>
                       {f.description && <div className="when">{f.description}</div>}
-                      {f.deadline && <div className="when">Deadline: {f.deadline}</div>}
+                      {f.deadline && <div className="when">Deadline: {formatDate(f.deadline)}</div>}
                     </div>
                     <Badge tone={SEV_TONE[f.severity] || "neutral"}>{f.severity}</Badge>
                     <Badge tone={f.status === "open" ? "high" : "neutral"}>{f.status}</Badge>

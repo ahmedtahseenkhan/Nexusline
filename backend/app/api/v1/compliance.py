@@ -27,6 +27,7 @@ from app.models.enums import ComplianceStatus, FindingStatus
 from app.models.evidence import Evidence
 from app.schemas.common import Page
 from app.schemas.compliance import (
+    ApplicabilityUpdate,
     ComplianceFindingCreate,
     ComplianceFindingRead,
     ComplianceSummary,
@@ -42,8 +43,13 @@ from app.schemas.compliance import (
     RequirementCreate,
     RequirementRead,
     RequirementUpdate,
+    SoaControlRead,
+    SoaRowRead,
+    SoaSummary,
+    StatementOfApplicabilityRead,
 )
-from app.services import audit
+from app.services import audit, soa_export
+from app.services.framework_library import normalize_name
 
 router = APIRouter(tags=["compliance"])
 
@@ -165,8 +171,26 @@ async def _attach_counts(db, reqs: list[Requirement]) -> None:
 
 
 # ------------------------------------------------------------------ frameworks
+async def _ensure_name_free(db, name: str, *, exclude_id: uuid.UUID | None = None) -> None:
+    """One live framework per name (case-insensitive): the same standard entered twice
+    counts every gap twice. The ``uq_frameworks_tenant_name`` index backs this up."""
+    stmt = select(Framework.name).where(
+        func.lower(func.trim(Framework.name)) == normalize_name(name),
+        Framework.deleted.is_(False),
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Framework.id != exclude_id)
+    clash = await db.scalar(stmt.limit(1))
+    if clash is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A framework named {clash} already exists.",
+        )
+
+
 _FRAMEWORK_SORTABLE = {
     "name": Framework.name,
+    "kind": Framework.kind,
     "authority": Framework.authority,
     "regulator": Framework.regulator,
     "workflow_status": Framework.workflow_status,
@@ -213,6 +237,7 @@ async def list_frameworks(
 async def create_framework(
     body: FrameworkCreate, db: DbSession, user: CurrentUser
 ) -> FrameworkRead:
+    await _ensure_name_free(db, body.name)
     fw = Framework(tenant_id=user.tenant_id, **body.model_dump())
     db.add(fw)
     await db.flush()
@@ -242,7 +267,13 @@ async def update_framework(
     framework_id: uuid.UUID, body: FrameworkUpdate, db: DbSession
 ) -> FrameworkRead:
     fw = await _load_framework(db, framework_id)
-    for field, value in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    for required in ("name", "kind"):
+        if required in data and data[required] is None:
+            data.pop(required)
+    if "name" in data and normalize_name(data["name"]) != normalize_name(fw.name):
+        await _ensure_name_free(db, data["name"], exclude_id=fw.id)
+    for field, value in data.items():
         setattr(fw, field, value)
     await db.flush()
     await db.refresh(fw)
@@ -266,7 +297,7 @@ async def delete_framework(framework_id: uuid.UUID, db: DbSession) -> None:
 @router.get("/framework-templates", dependencies=[Depends(require("compliance:read"))])
 async def list_framework_templates() -> list[dict]:
     """Predefined standards that can be loaded into the tenant (e.g. ISO/IEC 42001)."""
-    from app.services.framework_library import TEMPLATES
+    from app.services.framework_library import TEMPLATES, template_kind
 
     return [
         {
@@ -276,6 +307,7 @@ async def list_framework_templates() -> list[dict]:
             "authority": t["authority"],
             "description": t.get("description", ""),
             "requirement_count": len(t["requirements"]),
+            "kind": template_kind(key),
         }
         for key, t in TEMPLATES.items()
     ]
@@ -288,7 +320,9 @@ async def list_framework_templates() -> list[dict]:
     dependencies=[Depends(require("compliance:write"))],
 )
 async def load_framework_template(key: str, db: DbSession, user: CurrentUser) -> FrameworkRead:
-    """Create a framework and all its requirements from a built-in template.
+    """Create a framework and all its requirements from a built-in template — or, when
+    the standard is already there under a legacy name or with clauses missing, upgrade
+    that framework in place (missing clauses added, statuses and links kept).
 
     Same install path as the Framework Library page (``/content-library``), so both
     surfaces agree on what is installed and a standard cannot exist twice.
@@ -410,6 +444,22 @@ async def update_requirement(
     control_ids = data.pop("control_ids", None)
     risk_ids = data.pop("risk_ids", None)
     policy_ids = data.pop("policy_ids", None)
+    if data.get("applicability_justification") is None:
+        data.pop("applicability_justification", None)
+    # Excluding a clause here (treatment or status "not applicable") is the same
+    # decision as excluding it in the Statement of Applicability, and needs the same
+    # justification. Only the transition is checked, so editing a clause excluded
+    # before the rule existed does not start failing.
+    was_applicable = soa_export.is_applicable(req.treatment, req.status)
+    now_applicable = soa_export.is_applicable(
+        data.get("treatment", req.treatment), data.get("status", req.status)
+    )
+    if was_applicable and not now_applicable:
+        error = soa_export.applicability_error(
+            False, data.get("applicability_justification", req.applicability_justification)
+        )
+        if error:
+            raise HTTPException(status_code=422, detail=error)
     if control_ids is not None:
         req.controls = await _resolve_controls(db, control_ids)
     if risk_ids is not None:
@@ -451,6 +501,182 @@ async def map_controls(
 )
 async def delete_requirement(requirement_id: uuid.UUID, db: DbSession) -> None:
     await db.delete(await _load_requirement(db, requirement_id))
+
+
+# ------------------------------------------------------ statement of applicability
+def _require_compliance_kind(fw: Framework) -> None:
+    if (fw.kind or "compliance") != "compliance":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{fw.name} is a {fw.kind} framework: good practice to self-assess against, "
+                "not an obligation, so it has no Statement of Applicability."
+            ),
+        )
+
+
+async def _org_name(db, user) -> str:
+    from app.models.tenant import Tenant
+
+    tenant = await db.scalar(select(Tenant).where(Tenant.id == user.tenant_id))
+    return tenant.name if tenant else "Organization"
+
+
+def _soa_row(row: soa_export.SoaRow) -> SoaRowRead:
+    return SoaRowRead(
+        requirement_id=row.requirement_id,
+        reference=row.reference,
+        title=row.title,
+        domain=row.domain,
+        applicable=row.applicable,
+        justification=row.justification,
+        implementation_status=row.implementation_status,
+        treatment=row.treatment,
+        coverage=row.coverage,
+        controls=[SoaControlRead(**vars(c)) for c in row.controls],
+        last_test_date=row.last_test_date,
+        last_test_result=row.last_test_result,
+    )
+
+
+async def _soa_document(db, user, framework_id: uuid.UUID, view: str | None = None):
+    fw = await _load_framework(db, framework_id)
+    _require_compliance_kind(fw)
+    rows = soa_export.build_rows(fw.requirements)
+    return fw, soa_export.SoaDocument(
+        org_name=await _org_name(db, user),
+        framework_name=fw.name,
+        version=fw.version or "",
+        rows=soa_export.filter_rows(rows, view),
+        summary=soa_export.summarize(rows),
+        view=view or "all",
+    )
+
+
+_SOA_VIEW = Query(None, pattern="^(all|applicable|excluded|no_control)$")
+
+
+@router.get(
+    "/compliance/frameworks/{framework_id}/soa",
+    response_model=StatementOfApplicabilityRead,
+    dependencies=[Depends(require("compliance:read"))],
+    summary="Statement of Applicability for a compliance framework",
+)
+async def statement_of_applicability(
+    framework_id: uuid.UUID, db: DbSession, user: CurrentUser, view: str | None = _SOA_VIEW,
+) -> StatementOfApplicabilityRead:
+    """One row per clause: applicable or excluded, the justification, the implementing
+    controls with effectiveness and last test, and the implementation status. The
+    summary always counts the whole framework; ``view`` filters only the rows."""
+    fw, doc = await _soa_document(db, user, framework_id)
+    return StatementOfApplicabilityRead(
+        framework_id=fw.id,
+        framework_name=fw.name,
+        version=fw.version or "",
+        organisation=doc.org_name,
+        generated_at=doc.generated_at,
+        summary=SoaSummary(**doc.summary),
+        rows=[_soa_row(r) for r in soa_export.filter_rows(doc.rows, view)],
+    )
+
+
+def _download(data: bytes, filename: str, media_type: str):
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    return Response(
+        content=data, media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+def _soa_filename(fw: Framework, ext: str) -> str:
+    slug = "".join(ch if ch.isalnum() else "-" for ch in fw.name.lower()).strip("-")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return f"soa-{slug[:60] or 'framework'}.{ext}"
+
+
+@router.get(
+    "/compliance/frameworks/{framework_id}/soa.xlsx",
+    dependencies=[Depends(require("compliance:read"))],
+    summary="Statement of Applicability as Excel",
+)
+async def statement_of_applicability_xlsx(
+    framework_id: uuid.UUID, db: DbSession, user: CurrentUser, view: str | None = _SOA_VIEW,
+):
+    fw, doc = await _soa_document(db, user, framework_id, view)
+    return _download(
+        soa_export.to_xlsx(doc), _soa_filename(fw, "xlsx"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@router.get(
+    "/compliance/frameworks/{framework_id}/soa.pdf",
+    dependencies=[Depends(require("compliance:read"))],
+    summary="Statement of Applicability as PDF",
+)
+async def statement_of_applicability_pdf(
+    framework_id: uuid.UUID, db: DbSession, user: CurrentUser, view: str | None = _SOA_VIEW,
+):
+    fw, doc = await _soa_document(db, user, framework_id, view)
+    return _download(soa_export.to_pdf(doc), _soa_filename(fw, "pdf"), "application/pdf")
+
+
+@router.patch(
+    "/requirements/{requirement_id}/applicability",
+    response_model=SoaRowRead,
+    dependencies=[Depends(require("compliance:write"))],
+    summary="Include or exclude a clause in the Statement of Applicability",
+)
+async def set_applicability(
+    requirement_id: uuid.UUID, body: ApplicabilityUpdate, db: DbSession, user: CurrentUser,
+) -> SoaRowRead:
+    """Excluding needs a justification (422 without one) and sets the clause's
+    treatment and status to not applicable, so the gap analysis and compliance
+    percentage stop counting it. Including resets only what said not applicable."""
+    from app.models.enums import ComplianceTreatment
+
+    req = await _load_requirement(db, requirement_id)
+    error = soa_export.applicability_error(body.applicable, body.justification)
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+    fw = await _load_framework(db, req.framework_id)
+    _require_compliance_kind(fw)
+
+    was_applicable = soa_export.is_applicable(req.treatment, req.status)
+    before = {
+        "applicable": was_applicable,
+        "justification": req.applicability_justification or "",
+        "treatment": getattr(req.treatment, "value", req.treatment),
+        "status": req.status.value,
+    }
+    for field, value in soa_export.applicability_changes(body.applicable, req.treatment, req.status).items():
+        if field == "treatment":
+            req.treatment = ComplianceTreatment(value) if value else None
+        else:
+            req.status = ComplianceStatus(value)
+    req.applicability_justification = soa_export.justification_after(
+        body.applicable, was_applicable, req.applicability_justification or "", body.justification,
+    )
+    await db.flush()
+    after = {
+        "applicable": body.applicable,
+        "justification": req.applicability_justification,
+        "treatment": getattr(req.treatment, "value", req.treatment),
+        "status": req.status.value,
+    }
+    verb = "Included" if body.applicable else "Excluded"
+    reason = f": {req.applicability_justification}" if req.applicability_justification else ""
+    await audit.record(
+        db, actor=user, action="applicability", entity_type="requirement", entity_id=req.id,
+        summary=f"{verb} {req.reference or req.title} in the Statement of Applicability{reason}"[:500],
+        changes={k: {"from": before[k], "to": after[k]} for k in after if before[k] != after[k]},
+    )
+    loaded = await _load_requirement(db, req.id)
+    return _soa_row(soa_export.build_row(loaded))
 
 
 # ----------------------------------------------------------------- crosswalking
@@ -547,6 +773,11 @@ async def _crosswalks_for(db, requirement_id: uuid.UUID) -> list[CrosswalkItem]:
 
 
 # ----------------------------------------------------------------- gap analysis
+def _assessed(reqs: list[Requirement]) -> int:
+    """Clauses somebody has assessed — the progress measure for a self-assessment."""
+    return sum(1 for r in reqs if r.status != ComplianceStatus.not_assessed)
+
+
 def _compliant_pct(reqs: list[Requirement]) -> tuple[int, int, float]:
     applicable = [r for r in reqs if r.status != ComplianceStatus.not_applicable]
     compliant = sum(1 for r in applicable if r.status == ComplianceStatus.compliant)
@@ -647,6 +878,8 @@ async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
             )
     compliant, _applicable, pct = _compliant_pct(reqs)
     return GapAnalysis(
+        kind=fw.kind or "compliance",
+        assessed=_assessed(reqs),
         framework_id=fw.id,
         framework_name=fw.name,
         total_requirements=len(reqs),
@@ -675,17 +908,24 @@ async def compliance_summary(db: DbSession) -> ComplianceSummary:
     total_compliant = 0
     total_applicable = 0
     for fw in frameworks:
-        compliant, applicable, pct = _compliant_pct(fw.requirements)
-        total_reqs += len(fw.requirements)
-        total_compliant += compliant
-        total_applicable += applicable
+        reqs = [r for r in fw.requirements if not r.deleted]
+        compliant, applicable, pct = _compliant_pct(reqs)
+        total_reqs += len(reqs)
+        kind = fw.kind or "compliance"
+        # A maturity self-assessment is not an obligation: it has no compliance score
+        # and does not move the overall percentage.
+        if kind == "compliance":
+            total_compliant += compliant
+            total_applicable += applicable
         rows.append(
             FrameworkSummary(
                 framework_id=fw.id,
                 name=fw.name,
-                total_requirements=len(fw.requirements),
+                kind=kind,
+                total_requirements=len(reqs),
                 compliant=compliant,
                 compliant_pct=pct,
+                assessed=_assessed(reqs),
             )
         )
     overall = round(100 * total_compliant / total_applicable, 1) if total_applicable else 0.0

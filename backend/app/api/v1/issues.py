@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -39,6 +39,8 @@ from app.schemas.issue import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import delete_guard
+from app.services import ref_fields as rf
 
 router = APIRouter(tags=["issues"])
 
@@ -46,6 +48,33 @@ _READ = Depends(require("issue:read"))
 _WRITE = Depends(require("issue:write"))
 
 _CLOSED_STATES = (IssueStatus2.closed, IssueStatus2.remediated, IssueStatus2.risk_accepted)
+
+# Phase 1 picker fields and the legacy text each one keeps in step (services/ref_fields).
+ISSUE_REFS = (
+    rf.user("owner_id", "owner"),
+    rf.unit("business_unit_id", "business_unit"),
+    rf.lookup(Issue, "category_id", "category"),
+    rf.WORKFLOW_OWNER,
+)
+ACTION_REFS = (rf.user("owner_id", "owner"),)
+UPDATE_REFS = (rf.user("author_id", "author"),)
+
+
+async def _issue_reads(db, rows) -> list[IssueRead]:
+    """Read models for a page of issues, with every person/unit/category resolved in
+    one query per kind across the issues, their actions and their progress log."""
+    items = [IssueRead.model_validate(r) for r in rows]
+    pairs: list = []
+    for row, item in zip(rows, items):
+        pairs.append((row, item))
+        pairs.extend(zip(row.actions, item.actions))
+        pairs.extend(zip(row.updates, item.updates))
+    await rf.fill_refs(db, pairs, ISSUE_REFS + UPDATE_REFS)
+    return items
+
+
+async def _issue_read(db, iid) -> IssueRead:
+    return (await _issue_reads(db, [await _load_issue(db, iid)]))[0]
 
 
 async def _next_ref(db, model, prefix: str) -> str:
@@ -91,6 +120,9 @@ async def list_issues(
     source_id: Annotated[uuid.UUID | None, Query()] = None,
     severity: Annotated[Severity | None, Query()] = None,
     overdue: Annotated[bool | None, Query()] = None,
+    owner_id: Annotated[uuid.UUID | None, Query()] = None,
+    category_id: Annotated[uuid.UUID | None, Query()] = None,
+    business_unit_id: Annotated[uuid.UUID | None, Query()] = None,
     regulator_related: Annotated[bool | None, Query()] = None,
     repeat_finding: Annotated[bool | None, Query()] = None,
     sort_by: Annotated[str | None, Query()] = None,
@@ -118,6 +150,12 @@ async def list_issues(
         stmt = stmt.where(Issue.source_id == source_id)
     if severity is not None:
         stmt = stmt.where(Issue.severity == severity)
+    if owner_id is not None:
+        stmt = stmt.where(Issue.owner_id == owner_id)
+    if category_id is not None:
+        stmt = stmt.where(Issue.category_id == category_id)
+    if business_unit_id is not None:
+        stmt = stmt.where(Issue.business_unit_id == business_unit_id)
     if regulator_related is not None:
         stmt = stmt.where(Issue.regulator_related.is_(regulator_related))
     if repeat_finding is not None:
@@ -138,7 +176,7 @@ async def list_issues(
     rows = (
         await db.scalars(stmt.limit(limit).offset(offset))
     ).all()
-    return Page(items=[IssueRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    return Page(items=await _issue_reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post("/issues", response_model=IssueRead, status_code=201, dependencies=[_WRITE])
@@ -146,6 +184,7 @@ async def create_issue(body: IssueCreate, db: DbSession, user: CurrentUser) -> I
     data = body.model_dump()
     if data.get("identified_date") is None:
         data["identified_date"] = date.today()
+    await rf.apply_refs(db, Issue, data, ISSUE_REFS)
     obj = Issue(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db, Issue, "ISS")
     db.add(obj)
@@ -154,19 +193,21 @@ async def create_issue(body: IssueCreate, db: DbSession, user: CurrentUser) -> I
         db, actor=user, action="create", entity_type="issue", entity_id=obj.id,
         summary=f"Raised issue {obj.reference}: {obj.title}",
     )
-    return IssueRead.model_validate(await _load_issue(db, obj.id))
+    return await _issue_read(db, obj.id)
 
 
 @router.get("/issues/{iid}", response_model=IssueRead, dependencies=[_READ])
 async def get_issue(iid: uuid.UUID, db: DbSession) -> IssueRead:
-    return IssueRead.model_validate(await _load_issue(db, iid))
+    return await _issue_read(db, iid)
 
 
 @router.patch("/issues/{iid}", response_model=IssueRead, dependencies=[_WRITE])
 async def update_issue(iid: uuid.UUID, body: IssueUpdatePatch, db: DbSession, user: CurrentUser) -> IssueRead:
     obj = await _load_issue(db, iid)
     prev_status = obj.status
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    await rf.apply_refs(db, Issue, data, ISSUE_REFS, record=obj)
+    for k, v in data.items():
         setattr(obj, k, v)
     # Stamp the closed date and log the closure when an issue is retired.
     just_closed = obj.status in _CLOSED_STATES and prev_status not in _CLOSED_STATES
@@ -178,44 +219,63 @@ async def update_issue(iid: uuid.UUID, body: IssueUpdatePatch, db: DbSession, us
             db, actor=user, action="close", entity_type="issue", entity_id=obj.id,
             summary=f"Closed issue {obj.reference} as {obj.status.value}",
         )
-    return IssueRead.model_validate(await _load_issue(db, iid))
+    return await _issue_read(db, iid)
 
 
 @router.delete("/issues/{iid}", status_code=204, dependencies=[_WRITE])
-async def delete_issue(iid: uuid.UUID, db: DbSession) -> None:
+async def delete_issue(iid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_issue(db, iid)
+    # (issue, delete) is a dual-control action: whoever raised the issue cannot also
+    # make it disappear from the register.
+    await delete_guard.enforce(db, entity_type="issue", record=obj, user=user, label="issue")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="issue", entity_id=obj.id,
+        summary=f"Archived issue {obj.reference}: {obj.title}",
+    )
 
 
 # ============================================================= CAPA actions ===
 @router.post("/issues/{iid}/actions", response_model=IssueRead, status_code=201, dependencies=[_WRITE])
 async def add_action(iid: uuid.UUID, body: IssueActionCreate, db: DbSession, user: CurrentUser) -> IssueRead:
     await _load_issue(db, iid)
-    db.add(IssueAction(tenant_id=user.tenant_id, issue_id=iid, **body.model_dump()))
+    data = body.model_dump()
+    await rf.apply_refs(db, IssueAction, data, ACTION_REFS)
+    db.add(IssueAction(tenant_id=user.tenant_id, issue_id=iid, **data))
     await db.flush()
-    return IssueRead.model_validate(await _load_issue(db, iid))
+    return await _issue_read(db, iid)
 
 
 @router.patch("/issue-actions/{line_id}", response_model=IssueActionRead, dependencies=[_WRITE])
 async def update_action(line_id: uuid.UUID, body: IssueActionUpdate, db: DbSession) -> IssueActionRead:
     obj = await _get(db, IssueAction, line_id, "Action")
     data = body.model_dump(exclude_unset=True)
+    await rf.apply_refs(db, IssueAction, data, ACTION_REFS, record=obj)
     for k, v in data.items():
         setattr(obj, k, v)
     # Auto-stamp completion when an action is marked done.
     if obj.status == ActionStatus.done and obj.completed_date is None:
         obj.completed_date = date.today()
     await db.flush()
-    return IssueActionRead.model_validate(obj)
+    read = IssueActionRead.model_validate(obj)
+    await rf.fill_refs(db, [(obj, read)], ACTION_REFS)
+    return read
 
 
 @router.delete("/issue-actions/{line_id}", status_code=204, dependencies=[_WRITE])
-async def delete_action(line_id: uuid.UUID, db: DbSession) -> None:
+async def delete_action(line_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    # IssueAction has no soft-delete envelope (no ``deleted`` column), so this stays a
+    # hard delete until the model gains one; the trail records what was removed.
     obj = await db.scalar(select(IssueAction).where(IssueAction.id == line_id))
     if obj is None:
         raise HTTPException(status_code=404, detail="Record not found")
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="issue", entity_id=obj.issue_id,
+        summary=f"Removed action '{obj.title}' (owner {obj.owner or 'n/a'})",
+        changes={"action_removed": {"id": str(obj.id), "title": obj.title, "status": obj.status.value}},
+    )
     await db.delete(obj)
 
 
@@ -226,9 +286,12 @@ async def add_update(iid: uuid.UUID, body: IssueUpdateCreate, db: DbSession, use
     data = body.model_dump()
     if data.get("update_date") is None:
         data["update_date"] = date.today()
+    if data.get("author_id") is None and not (data.get("author") or "").strip():
+        data["author_id"] = user.id  # the progress log is written by whoever is signed in
+    await rf.apply_refs(db, IssueUpdate, data, UPDATE_REFS)
     db.add(IssueUpdate(tenant_id=user.tenant_id, issue_id=iid, **data))
     await db.flush()
-    return IssueRead.model_validate(await _load_issue(db, iid))
+    return await _issue_read(db, iid)
 
 
 # ================================================================== summary ===

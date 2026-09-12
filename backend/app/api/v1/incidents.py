@@ -26,11 +26,40 @@ from app.schemas.incident import (
     StageUpdate,
 )
 from app.services.refs import next_reference
-from app.services import audit
+from app.services import audit, delete_guard
+from app.services import ref_fields as rf
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
 _KEEP = object()  # sentinel: field absent from request -> leave the link table untouched
+
+# Phase 1 picker fields and the legacy text each one keeps in step (services/ref_fields).
+REGULATOR_REF = rf.lookup(Incident, "regulator_id", "regulator")
+INCIDENT_REFS = (
+    rf.user("assignee_id", "assignee"),
+    rf.user("reported_by_id", "reported_by"),
+    rf.lookup(Incident, "category_id", "category"),
+    rf.lookup(Incident, "classification_id", "classification"),
+    REGULATOR_REF,
+    rf.WORKFLOW_OWNER,
+)
+REPORT_REFS = (rf.user("submitted_by_id", "submitted_by"),)
+
+
+async def incident_reads(db, rows) -> list[IncidentRead]:
+    """Read models for a page of incidents, with people and lookup values resolved in one
+    query per kind across the incidents and their regulatory reports."""
+    items = [IncidentRead.model_validate(r) for r in rows]
+    pairs: list = []
+    for row, item in zip(rows, items):
+        pairs.append((row, item))
+        pairs.extend(zip(row.regulatory_reports, item.regulatory_reports))
+    await rf.fill_refs(db, pairs, INCIDENT_REFS + REPORT_REFS)
+    return items
+
+
+async def incident_read(db, obj: Incident) -> IncidentRead:
+    return (await incident_reads(db, [obj]))[0]
 
 
 def _loads():
@@ -142,6 +171,9 @@ async def list_incidents(
     db: DbSession,
     status_filter: Annotated[IncidentStatus | None, Query(alias="status")] = None,
     severity: Severity | None = None,
+    assignee_id: uuid.UUID | None = None,
+    category_id: uuid.UUID | None = None,
+    classification_id: uuid.UUID | None = None,
     search: str | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
@@ -153,6 +185,12 @@ async def list_incidents(
         stmt = stmt.where(Incident.status == status_filter)
     if severity is not None:
         stmt = stmt.where(Incident.severity == severity)
+    if assignee_id is not None:
+        stmt = stmt.where(Incident.assignee_id == assignee_id)
+    if category_id is not None:
+        stmt = stmt.where(Incident.category_id == category_id)
+    if classification_id is not None:
+        stmt = stmt.where(Incident.classification_id == classification_id)
     if search:
         stmt = stmt.where(Incident.title.ilike(f"%{search}%") | Incident.reference.ilike(f"%{search}%"))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
@@ -164,9 +202,7 @@ async def list_incidents(
     rows = (
         await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))
     ).all()
-    return Page(
-        items=[IncidentRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
-    )
+    return Page(items=await incident_reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post(
@@ -181,6 +217,7 @@ async def create_incident(body: IncidentCreate, db: DbSession, user: CurrentUser
     vendor_ids = data.pop("vendor_ids", [])
     asset_ids = data.pop("asset_ids", [])
     risk_ids = data.pop("risk_ids", [])
+    await rf.apply_refs(db, Incident, data, INCIDENT_REFS)
     obj = Incident(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db)
     obj.controls = await _resolve(db, Control, control_ids)
@@ -197,12 +234,12 @@ async def create_incident(body: IncidentCreate, db: DbSession, user: CurrentUser
         db, actor=user, action="create", entity_type="incident", entity_id=obj.id,
         summary=f"Logged incident {obj.reference}: {obj.title}",
     )
-    return IncidentRead.model_validate(await _fresh(db, obj.id))
+    return await incident_read(db, await _fresh(db, obj.id))
 
 
 @router.get("/{incident_id}", response_model=IncidentRead, dependencies=[Depends(require("incident:read"))])
 async def get_incident(incident_id: uuid.UUID, db: DbSession) -> IncidentRead:
-    return IncidentRead.model_validate(await _load(db, incident_id))
+    return await incident_read(db, await _load(db, incident_id))
 
 
 @router.patch(
@@ -217,6 +254,7 @@ async def update_incident(
     vendor_ids = data.pop("vendor_ids", None)
     asset_ids = data.pop("asset_ids", _KEEP)
     risk_ids = data.pop("risk_ids", _KEEP)
+    await rf.apply_refs(db, Incident, data, INCIDENT_REFS, record=obj)
     for field, value in data.items():
         setattr(obj, field, value)
     if control_ids is not None:
@@ -230,7 +268,7 @@ async def update_incident(
         db, actor=user, action="update", entity_type="incident", entity_id=obj.id,
         summary=f"Updated incident {obj.reference}",
     )
-    return IncidentRead.model_validate(await _fresh(db, obj.id))
+    return await incident_read(db, await _fresh(db, obj.id))
 
 
 @router.delete(
@@ -242,11 +280,14 @@ async def delete_incident(incident_id: uuid.UUID, db: DbSession, user: CurrentUs
     from datetime import datetime, timezone
 
     obj = await _load(db, incident_id)
+    # (incident, delete) is a dual-control action: whoever logged the incident cannot
+    # also make it disappear from the register.
+    await delete_guard.enforce(db, entity_type="incident", record=obj, user=user, label="incident")
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
     await audit.record(db, actor=user, action="delete", entity_type="incident",
-                         entity_id=obj.id, summary=f"Archived incident {obj.reference}")
+                       entity_id=obj.id, summary=f"Archived incident {obj.reference}: {obj.title}")
 
 
 # ----------------------------------------------------------------- stages
@@ -260,7 +301,7 @@ async def add_stage(incident_id: uuid.UUID, body: StageCreate, db: DbSession, us
     await _load(db, incident_id)
     db.add(IncidentStage(tenant_id=user.tenant_id, incident_id=incident_id, **body.model_dump()))
     await db.flush()
-    return IncidentRead.model_validate(await _fresh(db, incident_id))
+    return await incident_read(db, await _fresh(db, incident_id))
 
 
 @router.patch(
@@ -279,4 +320,4 @@ async def update_stage(
     if "status" in data:
         stage.completed_at = date.today() if stage.status == StageStatus.done else None
     await db.flush()
-    return IncidentRead.model_validate(await _fresh(db, incident_id))
+    return await incident_read(db, await _fresh(db, incident_id))

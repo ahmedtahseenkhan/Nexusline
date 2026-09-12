@@ -11,6 +11,7 @@ from sqlalchemy import Enum as SAEnum
 from app.models.asset import Asset
 from app.models.compliance import Requirement
 from app.models.continuity import ContinuityPlan
+from app.models.evidence import Evidence
 from app.models.control import Control
 from app.models.exception import ExceptionRecord
 from app.models.goal import Goal
@@ -24,6 +25,7 @@ from app.models.vendor import Vendor
 
 # Models that support dynamic status rules.
 MODEL_MAP: dict[str, type] = {
+    "evidence": Evidence,
     "risk": Risk,
     "control": Control,
     "incident": Incident,

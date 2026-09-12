@@ -31,7 +31,7 @@ class Evidence(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     reference: Mapped[str] = mapped_column(String(500), default="")  # URL or location
     status: Mapped[EvidenceStatus] = mapped_column(
         SAEnum(EvidenceStatus, name="evidence_status"),
-        default=EvidenceStatus.valid,
+        default=EvidenceStatus.pending,
         nullable=False,
     )
     collected_at: Mapped[date | None] = mapped_column(Date, nullable=True)

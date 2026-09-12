@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { Badge } from "@/components/badges";
+import { MONTHS, useFormat } from "@/lib/format";
 
 /* Everything the assurance function has to turn up for, in one window. It reads dates
    that already exist — planned fieldwork, finding due dates, when each auditable unit
@@ -40,12 +41,9 @@ function monthKey(iso: string): string {
 
 function monthLabel(key: string): string {
   const [year, month] = key.split("-").map(Number);
-  return new Date(year, month - 1, 1).toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  return `${MONTHS[month - 1] ?? month} ${year}`;
 }
 
-function dayLabel(iso: string): string {
-  return new Date(iso + "T00:00:00").toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
-}
 
 /** Default window: a month and a half back, four and a half months forward. */
 function defaultRange(): { from: string; to: string } {
@@ -56,6 +54,7 @@ function defaultRange(): { from: string; to: string } {
 }
 
 export default function AuditCalendarTab() {
+  const { formatDate } = useFormat();
   const [range, setRange] = useState(defaultRange);
   const [events, setEvents] = useState<Event[]>([]);
   const [kinds, setKinds] = useState<Set<string>>(new Set(Object.keys(KIND_LABEL)));
@@ -144,7 +143,7 @@ export default function AuditCalendarTab() {
             <table>
               <thead>
                 <tr>
-                  <th style={{ width: 90 }}>Date</th>
+                  <th style={{ width: 110 }}>Date</th>
                   <th style={{ width: 170 }}>Kind</th>
                   <th>What</th>
                   <th style={{ width: 100 }}>Ref</th>
@@ -154,7 +153,7 @@ export default function AuditCalendarTab() {
               <tbody>
                 {monthEvents.map((event, index) => (
                   <tr key={`${event.kind}-${event.reference}-${event.date}-${index}`}>
-                    <td className="ref">{dayLabel(event.date)}</td>
+                    <td className="ref">{formatDate(event.date)}</td>
                     <td>
                       <Badge tone={KIND_TONE[event.kind] ?? "neutral"}>
                         {KIND_LABEL[event.kind] ?? event.kind}
@@ -163,7 +162,7 @@ export default function AuditCalendarTab() {
                     <td className="cell-title">
                       {event.title}
                       {event.end_date && event.end_date !== event.date && (
-                        <span className="muted" style={{ fontSize: 11.5 }}> → {dayLabel(event.end_date)}</span>
+                        <span className="muted" style={{ fontSize: 11.5 }}> → {formatDate(event.end_date)}</span>
                       )}
                     </td>
                     <td className="muted">{event.reference || "—"}</td>

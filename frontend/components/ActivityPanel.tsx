@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { useFormat } from "@/lib/format";
 
 /* The record's own trail: who did what to it, and when. A detail view without this is
    a snapshot; with it, it is evidence. Pulled from the same activity log the audit
@@ -29,6 +30,7 @@ const ACTION_WORDS: Record<string, string> = {
 export default function ActivityPanel({
   entityType, entityId, defaultOpen = false,
 }: { entityType: string; entityId: string; defaultOpen?: boolean }) {
+  const { formatDateTime } = useFormat();
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [total, setTotal] = useState(0);
   const [open, setOpen] = useState(defaultOpen);
@@ -60,7 +62,7 @@ export default function ActivityPanel({
               <div key={e.id} className="activity-item">
                 <span className="activity-dot" aria-hidden />
                 <div style={{ fontSize: 12.5, minWidth: 0 }}>
-                  <div className="activity-when" title={e.created_at}>{e.created_at.slice(0, 16).replace("T", " ")}</div>
+                  <div className="activity-when" title={e.created_at}>{formatDateTime(e.created_at)}</div>
                   <div>
                     <b>{e.actor_email || "system"}</b>{" "}
                     <span className="muted">{ACTION_WORDS[e.action] ?? e.action.replace(/_/g, " ")}</span>

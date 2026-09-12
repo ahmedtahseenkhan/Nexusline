@@ -1,7 +1,7 @@
 """Dashboard widgets — tenant-wide KPI dashboard configuration for the report builder."""
 from __future__ import annotations
 
-from sqlalchemy import Integer, String
+from sqlalchemy import Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -9,6 +9,10 @@ from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMix
 
 class DashboardWidget(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     __tablename__ = "dashboard_widgets"
+    # The same metric in the same form twice is a duplicate tile, not a design choice.
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "metric_key", "viz", name="uq_dashboard_widgets_metric"),
+    )
 
     title: Mapped[str] = mapped_column(String(120), nullable=False)
     metric_key: Mapped[str] = mapped_column(String(64), nullable=False)

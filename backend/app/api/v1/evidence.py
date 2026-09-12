@@ -13,7 +13,12 @@ from app.models.compliance import Requirement
 from app.models.control import Control
 from app.models.evidence import Evidence
 from app.schemas.common import Page
-from app.schemas.evidence import EvidenceCreate, EvidenceRead, EvidenceUpdate
+from app.schemas.evidence import (
+    EvidenceCreate,
+    EvidenceRead,
+    EvidenceUpdate,
+    evidence_status_problem,
+)
 from app.services import audit
 
 router = APIRouter(tags=["evidence"])
@@ -111,6 +116,11 @@ async def update_evidence(
     data = body.model_dump(exclude_unset=True)
     if "control_id" in data and data["control_id"] is not None:
         await _control_or_400(db, data["control_id"])
+    problem = evidence_status_problem(
+        data.get("status", obj.status), data.get("collected_at", obj.collected_at)
+    )
+    if problem and ("status" in data or "collected_at" in data):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=problem)
     for field, value in data.items():
         setattr(obj, field, value)
     await db.flush()

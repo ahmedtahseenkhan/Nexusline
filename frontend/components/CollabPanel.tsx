@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type CollabBundle } from "@/lib/api";
+import { formatDateTime } from "@/lib/format";
 
 function initials(email: string) {
   return (email[0] || "?").toUpperCase();
@@ -176,7 +177,7 @@ export default function CollabPanel({ entityType, entityId }: { entityType: stri
               <div key={c.id} style={{ display: "flex", gap: 10 }}>
                 <span className="avatar" style={{ flexShrink: 0 }}>{initials(c.author_email)}</span>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12 }}><b>{c.author_email}</b> <span className="muted">· {ago(c.created_at)}</span>
+                  <div style={{ fontSize: 12 }}><b>{c.author_email}</b> <span className="muted" title={formatDateTime(c.created_at)}>· {ago(c.created_at)}</span>
                     {c.can_delete && <button onClick={async () => { await api.deleteComment(c.id).catch(() => {}); await load(); }} style={{ border: "none", background: "none", cursor: "pointer", color: "var(--muted)", marginLeft: 6, fontSize: 11 }}>delete</button>}
                   </div>
                   <div style={{ fontSize: 13.5 }}>{c.body}</div>

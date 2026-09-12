@@ -98,6 +98,12 @@ services:
       MFA_REQUIRED: ${MFA_REQUIRED:-false}
       ENFORCE_SEGREGATION_OF_DUTIES: ${ENFORCE_SEGREGATION_OF_DUTIES:-true}
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      # --- first-run seeding ---
+      # Demo sample data (Acme risks, controls, approvals, a second "isolation demo"
+      # org) must never land in a client database: off unless .env says otherwise,
+      # which only our own demo hosts do. The first organisation and its admin are
+      # still created on an empty database (SEED_BOOTSTRAP, SEED_ORG_*, SEED_ADMIN_*).
+      SEED_DATA: ${SEED_DATA:-false}
     volumes:
       - appdata:/data
       # License key + public key are read from ./deploy/ (mounted read-only).

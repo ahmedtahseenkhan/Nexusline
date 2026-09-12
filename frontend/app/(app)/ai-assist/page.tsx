@@ -7,6 +7,7 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconActivity, IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
 
 // ------------------------------------------------------------------ local types
 interface AiExtraction {
@@ -37,7 +38,7 @@ interface AiSummary {
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 
 const SOURCE_TYPES = ["circular", "policy", "free_text", "incident"];
 const EXTRACTION_TYPES = ["obligations", "summary", "risk_suggestions", "control_mapping"];

@@ -1,6 +1,8 @@
 """SQLAlchemy models. Import all here so metadata is fully populated."""
 from app.models.base import Base
 from app.models.tenant import Tenant
+from app.models.settings import TenantSettings
+from app.models.lookup import Lookup
 from app.models.identity import Permission, Role, User, role_permissions, user_roles
 from app.models.audit import AuditLog
 from app.models.access_review import AccessReview, AccessReviewItem
@@ -179,6 +181,8 @@ from app.models.webhook import Webhook, WebhookDelivery
 from app.models.widget import DashboardWidget
 
 __all__ = [
+    "TenantSettings",
+    "Lookup",
     "Base",
     "Tenant",
     "User",

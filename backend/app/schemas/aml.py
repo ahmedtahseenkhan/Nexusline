@@ -29,7 +29,6 @@ class ScreeningBase(BaseModel):
     disposition: str = ""
     reviewer: str = ""
     status: ScreeningCaseStatus = ScreeningCaseStatus.open
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class ScreeningCreate(ScreeningBase):
@@ -47,10 +46,11 @@ class ScreeningUpdate(BaseModel):
     disposition: str | None = None
     reviewer: str | None = None
     status: ScreeningCaseStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class ScreeningRead(ScreeningBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -71,7 +71,6 @@ class SarBase(BaseModel):
     filed_date: date | None = None
     fmu_reference: str = ""
     status: SarStatus = SarStatus.draft
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class SarCreate(SarBase):
@@ -91,10 +90,11 @@ class SarUpdate(BaseModel):
     filed_date: date | None = None
     fmu_reference: str | None = None
     status: SarStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class SarRead(SarBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -114,7 +114,6 @@ class AmlRiskBase(BaseModel):
     assessment_date: date | None = None
     review_frequency: ReviewFrequency = ReviewFrequency.annual
     next_review_date: date | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class AmlRiskCreate(AmlRiskBase):
@@ -132,10 +131,11 @@ class AmlRiskUpdate(BaseModel):
     assessment_date: date | None = None
     review_frequency: ReviewFrequency | None = None
     next_review_date: date | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class AmlRiskRead(AmlRiskBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

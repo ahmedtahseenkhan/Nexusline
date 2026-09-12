@@ -96,6 +96,9 @@ class Issue(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Sof
     source_reference: Mapped[str] = mapped_column(String(255), default="")  # e.g. "AUD-004 finding 3"
     source_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)  # optional link to originating record
     category: Mapped[str] = mapped_column(String(120), default="")
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     severity: Mapped[Severity] = mapped_column(
         SAEnum(Severity, name="severity"), default=Severity.medium, nullable=False
     )
@@ -105,7 +108,13 @@ class Issue(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Sof
 
     # ---- ownership / timing ----
     owner: Mapped[str] = mapped_column(String(200), default="")
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `owner`
     business_unit: Mapped[str] = mapped_column(String(200), default="")
+    business_unit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("business_units.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: business unit; replaces free-text `business_unit`
     identified_date: Mapped[date] = mapped_column(Date, default=date.today, nullable=False)
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
@@ -169,6 +178,9 @@ class IssueAction(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         SAEnum(CapaType, name="capa_type"), default=CapaType.corrective, nullable=False
     )
     owner: Mapped[str] = mapped_column(String(200), default="")
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `owner`
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[ActionStatus] = mapped_column(
         SAEnum(ActionStatus, name="issue_action_status"), default=ActionStatus.open, nullable=False
@@ -197,6 +209,9 @@ class IssueUpdate(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     )
     note: Mapped[str] = mapped_column(Text, default="")
     author: Mapped[str] = mapped_column(String(200), default="")
+    author_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `author`
     update_date: Mapped[date] = mapped_column(Date, default=date.today, nullable=False)
     status_change: Mapped[str] = mapped_column(String(64), default="")
 

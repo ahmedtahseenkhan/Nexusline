@@ -13,7 +13,7 @@ from math import ceil
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -22,7 +22,9 @@ from app.core.deps import CurrentUser, DbSession, require
 from app.models.enums import RegulatoryReportStatus, RegulatoryReportType
 from app.models.incident import Incident, RegulatoryReport
 from app.schemas.incident import IncidentRead, RegReportCreate, RegReportRead, RegReportUpdate
+from app.api.v1.incidents import REGULATOR_REF, REPORT_REFS, incident_read
 from app.services import audit
+from app.services import ref_fields as rf
 
 router = APIRouter(tags=["regulatory reporting"])
 
@@ -46,16 +48,26 @@ async def _load_incident(db, incident_id: uuid.UUID) -> Incident:
     return obj
 
 
+async def _set_regulator(db, inc: Incident, text: str) -> None:
+    """Name the incident's regulator, keeping ``regulator_id`` in step with the text."""
+    data = {"regulator": text}
+    await rf.apply_refs(db, Incident, data, (REGULATOR_REF,), record=inc)
+    for k, v in data.items():
+        setattr(inc, k, v)
+
+
 @router.post("/incidents/{incident_id}/regulatory-reports", response_model=IncidentRead,
              status_code=201, dependencies=[_WRITE])
 async def add_report(incident_id: uuid.UUID, body: RegReportCreate, db: DbSession, user: CurrentUser) -> IncidentRead:
     inc = await _load_incident(db, incident_id)
     inc.is_reportable = True
     if not inc.regulator:
-        inc.regulator = body.regulator or settings.default_regulator
-    db.add(RegulatoryReport(tenant_id=user.tenant_id, incident_id=incident_id, **body.model_dump()))
+        await _set_regulator(db, inc, body.regulator or settings.default_regulator)
+    data = body.model_dump()
+    await rf.apply_refs(db, RegulatoryReport, data, REPORT_REFS)
+    db.add(RegulatoryReport(tenant_id=user.tenant_id, incident_id=incident_id, **data))
     await db.flush()
-    return IncidentRead.model_validate(await _load_incident(db, incident_id))
+    return await incident_read(db, await _load_incident(db, incident_id))
 
 
 @router.post("/incidents/{incident_id}/regulatory-reports/generate", response_model=IncidentRead,
@@ -65,7 +77,8 @@ async def generate_reports(incident_id: uuid.UUID, db: DbSession, user: CurrentU
     inc = await _load_incident(db, incident_id)
     inc.is_reportable = True
     regulator = inc.regulator or settings.default_regulator
-    inc.regulator = regulator
+    if not inc.regulator:
+        await _set_regulator(db, inc, regulator)
 
     anchor = inc.detected_at or inc.occurred_at or date.today()
     initial_days = max(1, ceil(settings.regulatory_initial_report_hours / 24))
@@ -83,7 +96,7 @@ async def generate_reports(incident_id: uuid.UUID, db: DbSession, user: CurrentU
     await db.flush()
     await audit.record(db, actor=user, action="update", entity_type="incident", entity_id=incident_id,
                        summary=f"Generated {regulator} regulatory reports for {inc.reference}")
-    return IncidentRead.model_validate(await _load_incident(db, incident_id))
+    return await incident_read(db, await _load_incident(db, incident_id))
 
 
 @router.patch("/regulatory-reports/{report_id}", response_model=RegReportRead, dependencies=[_WRITE])
@@ -92,6 +105,7 @@ async def update_report(report_id: uuid.UUID, body: RegReportUpdate, db: DbSessi
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     data = body.model_dump(exclude_unset=True)
+    await rf.apply_refs(db, RegulatoryReport, data, REPORT_REFS, record=obj)
     # Stamp the submission date when marked submitted/acknowledged and none supplied.
     if data.get("status") in (RegulatoryReportStatus.submitted, RegulatoryReportStatus.acknowledged) \
             and not obj.submitted_at and "submitted_at" not in data:
@@ -99,7 +113,9 @@ async def update_report(report_id: uuid.UUID, body: RegReportUpdate, db: DbSessi
     for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
-    return RegReportRead.model_validate(obj)
+    read = RegReportRead.model_validate(obj)
+    await rf.fill_refs(db, [(obj, read)], REPORT_REFS)
+    return read
 
 
 @router.delete("/regulatory-reports/{report_id}", status_code=204, dependencies=[_WRITE])
@@ -129,7 +145,7 @@ async def list_reports(
     stmt = stmt.order_by(RegulatoryReport.deadline.is_(None), RegulatoryReport.deadline)
     rows = (await db.scalars(stmt)).all()
 
-    out: list[RegReportTrackerRow] = []
+    pairs: list = []
     for r in rows:
         if overdue and not r.is_overdue:
             continue
@@ -137,5 +153,6 @@ async def list_reports(
         if r.incident is not None:
             row.incident_reference = r.incident.reference
             row.incident_title = r.incident.title
-        out.append(row)
-    return out
+        pairs.append((r, row))
+    await rf.fill_refs(db, pairs, REPORT_REFS)
+    return [row for _, row in pairs]

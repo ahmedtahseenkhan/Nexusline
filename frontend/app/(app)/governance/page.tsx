@@ -8,10 +8,13 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ local types
 interface MeetingDecision {
@@ -80,7 +83,7 @@ interface GovernanceSummary {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
@@ -101,7 +104,6 @@ const MEETING_FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual
 const MEETING_STATUS = opts(["scheduled", "held", "minuted", "cancelled"]);
 const DECISION_TYPE = opts(["decision", "action", "resolution"]);
 const DECISION_STATUS = opts(["open", "in_progress", "done", "deferred"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 
 // ------------------------------------------------------------------ tones
 const COMMITTEE_STATUS_TONE: Record<string, Tone> = { active: "low", dissolved: "neutral" };
@@ -127,7 +129,6 @@ type CommitteeForm = {
   meeting_frequency: string;
   status: string;
   charter: string;
-  workflow_status: string;
 };
 const BLANK_COMMITTEE: CommitteeForm = {
   name: "",
@@ -138,7 +139,6 @@ const BLANK_COMMITTEE: CommitteeForm = {
   meeting_frequency: "quarterly",
   status: "active",
   charter: "",
-  workflow_status: "draft",
 };
 function fromCommittee(c: Committee): CommitteeForm {
   return {
@@ -150,7 +150,6 @@ function fromCommittee(c: Committee): CommitteeForm {
     meeting_frequency: c.meeting_frequency || "quarterly",
     status: c.status || "active",
     charter: c.charter || "",
-    workflow_status: c.workflow_status || "draft",
   };
 }
 function committeePayload(f: CommitteeForm): Record<string, unknown> {
@@ -163,7 +162,6 @@ function committeePayload(f: CommitteeForm): Record<string, unknown> {
     meeting_frequency: f.meeting_frequency,
     status: f.status,
     charter: f.charter,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -242,6 +240,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 // ================================================================ page ===== */
 function GovernanceInner() {
   const [section, setSection] = useState<SectionId>("committees");
+  const { formatDate } = useFormat();
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -493,9 +492,6 @@ function GovernanceInner() {
       <Field label="Charter" help="Terms of reference — mandate, authority and responsibilities.">
         <TextArea value={cf.charter} onChange={(v) => setC("charter", v)} rows={8} placeholder="Committee charter / terms of reference." />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this committee record.">
-        <Select value={cf.workflow_status} onChange={(v) => setC("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -556,7 +552,7 @@ function GovernanceInner() {
     { key: "committee", header: "Committee", sortable: true, render: (d) => <span className="muted">{d.committee_name || "—"}</span> },
     { key: "meeting", header: "Meeting", sortable: true, render: (d) => <span className="muted">{d.meeting_title || "—"}</span> },
     { key: "owner", header: "Owner", sortable: true, render: (d) => <span className="muted">{d.owner || "—"}</span> },
-    { key: "due_date", header: "Due", sortable: true, render: (d) => (d.is_overdue ? <Badge tone="critical">Overdue · {d.due_date}</Badge> : <span className="muted">{d.due_date || "—"}</span>) },
+    { key: "due_date", header: "Due", sortable: true, render: (d) => (d.is_overdue ? <Badge tone="critical">Overdue · {formatDate(d.due_date)}</Badge> : <span className="muted">{formatDate(d.due_date)}</span>) },
     {
       key: "status",
       header: "Status",
@@ -665,7 +661,12 @@ function GovernanceInner() {
 
       {/* ============================================= COMMITTEE DRAWER */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="committee" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="committee" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="committee" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""}${detail.reference ? " — " : ""}${detail.name}` : "…"}
@@ -840,12 +841,13 @@ function MeetingRows({
   onDecisionStatus: (d: MeetingDecision, status: string) => void;
   onRemoveDecision: (d: MeetingDecision) => void;
 }) {
+  const { formatDate } = useFormat();
   return (
     <>
       <tr style={{ cursor: "pointer" }} onClick={onToggle}>
         <td className="ref">{meeting.reference || "—"}</td>
         <td className="cell-title">{meeting.title}</td>
-        <td className="muted">{meeting.meeting_date || "—"}</td>
+        <td className="muted">{formatDate(meeting.meeting_date)}</td>
         <td className="muted">{meeting.location || "—"}</td>
         <td>{meeting.quorum_met ? <Badge tone="low">Met</Badge> : <span className="muted">—</span>}</td>
         <td className="muted">{meeting.decision_count}</td>
@@ -939,9 +941,9 @@ function MeetingRows({
                         <td className="muted">{d.owner || "—"}</td>
                         <td>
                           {d.is_overdue ? (
-                            <Badge tone="critical">Overdue · {d.due_date}</Badge>
+                            <Badge tone="critical">Overdue · {formatDate(d.due_date)}</Badge>
                           ) : (
-                            <span className="muted">{d.due_date || "—"}</span>
+                            <span className="muted">{formatDate(d.due_date)}</span>
                           )}
                         </td>
                         <td>

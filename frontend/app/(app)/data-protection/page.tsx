@@ -8,12 +8,15 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import RelatedChips from "@/components/RelatedChips";
 import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -108,7 +111,7 @@ type DpSummary = {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 
@@ -129,7 +132,6 @@ const LAWFUL_BASIS = opts([
   "public_task",
   "legitimate_interests",
 ]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 
 // ------------------------------------------------------------------ tones
 const CRIT_TONE: Record<string, Tone> = { low: "low", medium: "medium", high: "high", critical: "critical" };
@@ -178,7 +180,6 @@ type DpiaForm = {
   owner: string;
   dpo_reviewer: string;
   review_date: string;
-  workflow_status: string;
 };
 const BLANK_DPIA: DpiaForm = {
   title: "",
@@ -192,7 +193,6 @@ const BLANK_DPIA: DpiaForm = {
   owner: "",
   dpo_reviewer: "",
   review_date: "",
-  workflow_status: "draft",
 };
 function fromDpia(d: Dpia): DpiaForm {
   return {
@@ -207,7 +207,6 @@ function fromDpia(d: Dpia): DpiaForm {
     owner: d.owner || "",
     dpo_reviewer: d.dpo_reviewer || "",
     review_date: d.review_date || "",
-    workflow_status: d.workflow_status || "draft",
   };
 }
 function dpiaPayload(f: DpiaForm): Record<string, unknown> {
@@ -223,7 +222,6 @@ function dpiaPayload(f: DpiaForm): Record<string, unknown> {
     owner: f.owner,
     dpo_reviewer: f.dpo_reviewer,
     review_date: f.review_date || null,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -237,7 +235,6 @@ type DsarForm = {
   handler: string;
   notes: string;
   status: string;
-  workflow_status: string;
 };
 const BLANK_DSAR: DsarForm = {
   subject_name: "",
@@ -249,7 +246,6 @@ const BLANK_DSAR: DsarForm = {
   handler: "",
   notes: "",
   status: "received",
-  workflow_status: "draft",
 };
 function fromDsar(d: Dsar): DsarForm {
   return {
@@ -262,7 +258,6 @@ function fromDsar(d: Dsar): DsarForm {
     handler: d.handler || "",
     notes: d.notes || "",
     status: d.status || "received",
-    workflow_status: d.workflow_status || "draft",
   };
 }
 function dsarPayload(f: DsarForm): Record<string, unknown> {
@@ -276,7 +271,6 @@ function dsarPayload(f: DsarForm): Record<string, unknown> {
     handler: f.handler,
     notes: f.notes,
     status: f.status,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -297,7 +291,6 @@ type BreachForm = {
   owner: string;
   root_cause: string;
   remediation: string;
-  workflow_status: string;
   incident_id: string;
   incident_label: string;
 };
@@ -318,7 +311,6 @@ const BLANK_BREACH: BreachForm = {
   owner: "",
   root_cause: "",
   remediation: "",
-  workflow_status: "draft",
   incident_id: "",
   incident_label: "",
 };
@@ -340,7 +332,6 @@ function fromBreach(b: DataBreach): BreachForm {
     owner: b.owner || "",
     root_cause: b.root_cause || "",
     remediation: b.remediation || "",
-    workflow_status: b.workflow_status || "draft",
     incident_id: b.incident?.id || "",
     incident_label: b.incident ? refLabel(b.incident) : "",
   };
@@ -363,7 +354,6 @@ function breachPayload(f: BreachForm): Record<string, unknown> {
     owner: f.owner,
     root_cause: f.root_cause,
     remediation: f.remediation,
-    workflow_status: f.workflow_status,
     incident_id: f.incident_id || null,
   };
 }
@@ -415,6 +405,7 @@ function consentPayload(f: ConsentForm): Record<string, unknown> {
 
 // ================================================================ DPIA section
 function DpiaSection({ onChanged }: { onChanged: () => void }) {
+  const { formatDate } = useFormat();
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const [editing, setEditing] = useState<Dpia | null>(null);
@@ -475,7 +466,7 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
     { key: "residual_risk", header: "Residual risk", sortable: true, render: (d) => <CritBadge value={d.residual_risk} /> },
     { key: "status", header: "Status", sortable: true, render: (d) => <Badge tone={DPIA_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge> },
     { key: "dpo_reviewer", header: "DPO reviewer", render: (d) => <span className="muted">{d.dpo_reviewer || "—"}</span> },
-    { key: "review_date", header: "Review date", sortable: true, render: (d) => <span className="muted">{d.review_date || "—"}</span> },
+    { key: "review_date", header: "Review date", sortable: true, render: (d) => <span className="muted">{formatDate(d.review_date)}</span> },
     { key: "actions", header: "", render: (d) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(d)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(d)}>Delete</button></div> },
   ];
 
@@ -503,6 +494,7 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
           <Select value={df.residual_risk} onChange={(v) => setD("residual_risk", v)} options={CRITICALITY} />
         </Field>
       </div>
+      <RecordApproval entityType="dpia" entityId={editing?.id ?? null} onChanged={() => { reload(); onChanged(); }} />
     </>
   );
   const assessment = (
@@ -528,9 +520,6 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
           <TextInput type="date" value={df.review_date} onChange={(v) => setD("review_date", v)} />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this DPIA record.">
-        <Select value={df.workflow_status} onChange={(v) => setD("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -573,6 +562,7 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
 
 // ================================================================ DSAR section
 function DsarSection({ onChanged }: { onChanged: () => void }) {
+  const { formatDate } = useFormat();
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const [editing, setEditing] = useState<Dsar | null>(null);
@@ -630,8 +620,8 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
     { key: "reference", header: "Ref", sortable: true, render: (d) => <span className="ref">{d.reference || "—"}</span> },
     { key: "subject_name", header: "Subject", sortable: true, render: (d) => <span className="cell-title">{d.subject_name || "—"}</span> },
     { key: "request_type", header: "Type", sortable: true, render: (d) => <Badge tone="info">{cap(d.request_type)}</Badge> },
-    { key: "received_date", header: "Received", sortable: true, render: (d) => <span className="muted">{d.received_date || "—"}</span> },
-    { key: "due_date", header: "Due / SLA", sortable: true, render: (d) => (d.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{d.due_date || "—"} · {d.sla_days}d SLA</span>) },
+    { key: "received_date", header: "Received", sortable: true, render: (d) => <span className="muted">{formatDate(d.received_date)}</span> },
+    { key: "due_date", header: "Due / SLA", sortable: true, render: (d) => (d.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{formatDate(d.due_date)} · {d.sla_days}d SLA</span>) },
     { key: "handler", header: "Handler", sortable: true, render: (d) => <span className="muted">{d.handler || "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (d) => <Badge tone={DSAR_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge> },
     { key: "actions", header: "", render: (d) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(d)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(d)}>Delete</button></div> },
@@ -658,6 +648,7 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
       <Field label="Handler" help="Officer handling the request.">
         <TextInput value={sf.handler} onChange={(v) => setS("handler", v)} placeholder="Assigned handler" />
       </Field>
+      <RecordApproval entityType="dsar" entityId={editing?.id ?? null} onChanged={() => { reload(); onChanged(); }} />
     </>
   );
   const timing = (
@@ -675,9 +666,6 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
       </Field>
       <Field label="Notes">
         <TextArea value={sf.notes} onChange={(v) => setS("notes", v)} rows={3} placeholder="Handling notes, verification steps, outcome." />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this request record.">
-        <Select value={sf.workflow_status} onChange={(v) => setS("workflow_status", v)} options={WORKFLOW} />
       </Field>
     </>
   );
@@ -721,6 +709,7 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
 // ============================================================== Breach section
 function BreachSection({ onChanged }: { onChanged: () => void }) {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate } = useFormat();
   const [detail, setDetail] = useState<DataBreach | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -891,9 +880,6 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
       <Field label="Remediation">
         <TextArea value={bf.remediation} onChange={(v) => setB("remediation", v)} rows={3} placeholder="Containment and corrective actions." />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this breach record.">
-        <Select value={bf.workflow_status} onChange={(v) => setB("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -912,11 +898,16 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="data_breach" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="data_breach" entityId={detail.id} onChanged={() => { reload(); onChanged(); loadDetail(detail.id); }} />
+            <RecordPanels model="data_breach" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.title}`.trim() : "…"}
-        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.breach_type)} · ${num(detail.records_affected)} records${detail.discovered_date ? " · discovered " + detail.discovered_date : ""}` : ""}
+        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.breach_type)} · ${num(detail.records_affected)} records${detail.discovered_date ? " · discovered " + formatDate(detail.discovered_date) : ""}` : ""}
         width={720}
         actions={detail && (
           <>
@@ -943,7 +934,7 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
               </div>
               <div>
                 <div className="muted" style={{ fontSize: 12 }}>Regulator reported</div>
-                <strong>{detail.reported_to_regulator ? (detail.regulator_report_date || "Yes") : "No"}</strong>
+                <strong>{detail.reported_to_regulator ? (detail.regulator_report_date ? formatDate(detail.regulator_report_date) : "Yes") : "No"}</strong>
               </div>
               <div>
                 <div className="muted" style={{ fontSize: 12 }}>Subjects notified</div>
@@ -992,6 +983,7 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
 
 // ============================================================= Consent section
 function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary: DpSummary | null }) {
+  const { formatDate } = useFormat();
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const [editing, setEditing] = useState<ConsentRecord | null>(null);
@@ -1051,7 +1043,7 @@ function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary
     { key: "purpose", header: "Purpose", sortable: true, render: (c) => <span className="muted">{c.purpose || "—"}</span> },
     { key: "lawful_basis", header: "Lawful basis", sortable: true, render: (c) => <span className="muted">{cap(c.lawful_basis)}</span> },
     { key: "channel", header: "Channel", sortable: true, render: (c) => <span className="muted">{c.channel || "—"}</span> },
-    { key: "given", header: "Given", render: (c) => <span className="muted">{c.consent_given ? (c.consent_date || "Yes") : "No"}</span> },
+    { key: "given", header: "Given", render: (c) => <span className="muted">{c.consent_given ? (c.consent_date ? formatDate(c.consent_date) : "Yes") : "No"}</span> },
     { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CONSENT_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
     { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(c)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(c)}>Delete</button></div> },
   ];

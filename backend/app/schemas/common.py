@@ -26,3 +26,31 @@ class Page(BaseModel, Generic[T]):
     total: int
     limit: int
     offset: int
+
+
+class UserRef(BaseModel):
+    """A person picked from the user list, as forms and lists show them."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    full_name: str = ""
+    email: str = ""
+
+
+class LookupRef(BaseModel):
+    """A value from a governed lookup list."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    key: str = ""
+    value: str = ""
+    label: str = ""
+
+
+class UnitRef(BaseModel):
+    """A business unit or process, by name."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    name: str = ""
+

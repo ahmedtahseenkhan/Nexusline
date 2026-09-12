@@ -34,7 +34,6 @@ class FraudRiskBase(BaseModel):
     red_flags: str = ""
     owner: str = ""
     status: FraudRiskStatus = FraudRiskStatus.open
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class FraudRiskCreate(FraudRiskBase):
@@ -56,10 +55,11 @@ class FraudRiskUpdate(BaseModel):
     red_flags: str | None = None
     owner: str | None = None
     status: FraudRiskStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class FraudRiskRead(FraudRiskBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -89,7 +89,6 @@ class FraudCaseBase(BaseModel):
     investigator: str = ""
     root_cause: str = ""
     resolution: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class FraudCaseCreate(FraudCaseBase):
@@ -116,10 +115,11 @@ class FraudCaseUpdate(BaseModel):
     investigator: str | None = None
     root_cause: str | None = None
     resolution: str | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class FraudCaseRead(FraudCaseBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

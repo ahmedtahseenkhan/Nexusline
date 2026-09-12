@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { Badge } from "@/components/badges";
 import { toast } from "@/lib/feedback";
+import { formatDate } from "@/lib/format";
 
 /* Where a record has got to in its approval route, on the record itself.
 
@@ -57,6 +58,9 @@ type Props = {
   ownerEmail?: string;
   /** Called after the route starts or is cancelled, so the parent can reload. */
   onChange?: () => void;
+  /** Hide the "Send for approval" box — for records that carry WorkflowFields, whose
+   *  Submit for review starts the route itself. */
+  hideStart?: boolean;
 };
 
 export default function WorkflowStrip({
@@ -66,6 +70,7 @@ export default function WorkflowStrip({
   link = "",
   ownerEmail = "",
   onChange,
+  hideStart = false,
 }: Props) {
   const [instance, setInstance] = useState<Instance | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -138,6 +143,10 @@ export default function WorkflowStrip({
   // Nothing configured and nothing running: stay completely out of the way.
   if (!loaded || (!instance && !routable)) return null;
 
+  // No route running: the record's WorkflowFields "Submit for review" starts the route
+  // (through the record lifecycle), so this strip only shows a route once it runs.
+  if (!instance && hideStart) return null;
+
   if (!instance) {
     return (
       <div style={{ padding: "10px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -164,7 +173,7 @@ export default function WorkflowStrip({
         </Badge>
         <span className="muted" style={{ fontSize: 12.5 }}>
           stage {Math.min(instance.completed_stages + 1, instance.total_stages)} of {instance.total_stages}
-          {current?.due_date && ` · due ${current.due_date}`}
+          {current?.due_date && ` · due ${formatDate(current.due_date)}`}
         </span>
         {instance.status === "in_progress" && (
           <button className="btn secondary sm" type="button" onClick={cancel} disabled={busy} style={{ marginLeft: "auto" }}>
@@ -179,7 +188,7 @@ export default function WorkflowStrip({
             key={step.id}
             title={
               `${step.name}\n${step.approver_label || "approver not resolved"}` +
-              (step.decided_at ? `\nDecided ${step.decided_at.slice(0, 10)}` : "") +
+              (step.decided_at ? `\nDecided ${formatDate(step.decided_at)}` : "") +
               (step.decision_comment ? `\n"${step.decision_comment}"` : "")
             }
             style={{

@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { assetDeleteMessage, linkedRiskCount } from "@/lib/assetImpact";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
+import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
+import BusinessUnitSelect from "@/components/BusinessUnitSelect";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import { type Page } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
@@ -19,6 +26,7 @@ import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import ImportExport from "@/components/ImportExport";
 import GenerateRisks from "@/components/GenerateRisks";
 import { InlineLookupCreate } from "@/components/LookupManager";
+import { titleCase } from "@/lib/text";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -58,6 +66,7 @@ type Asset = {
   effective_criticality: string;
   review_frequency: string;
   next_review_date: string | null;
+  /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
   dependencies: DependencyRow[];
   created_at: string;
@@ -83,17 +92,16 @@ type ClassificationType = {
   id: string; name: string; description: string;
   classifications: { id: string; name: string; value: number; criteria: string }[];
 };
-type BusinessUnit = { id: string; name: string };
 type Summary = { total: number; high_or_critical_value: number; self_assessed_pct: number; with_pii: number };
 
 /* ----------------------------------------------------------------- helpers */
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const CRIT = opts(["low", "medium", "high", "critical"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const RELATIONSHIP = opts(["hosts", "stores", "processes", "transmits", "backs_up"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
 
 const CRIT_TONE: Record<string, Tone> = { low: "low", medium: "medium", high: "high", critical: "critical" };
 const RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
@@ -111,14 +119,16 @@ type FormState = {
   name: string; description: string; media_type_id: string; information_owner: string;
   business_value: string; confidentiality: string; integrity: string; availability: string;
   label_id: string; data_categories: string; records_volume: string; self_assessed: boolean;
-  assessed_by: string; assessed_date: string; owner_id: string; guardian_id: string; user_id: string;
-  review_frequency: string; workflow_status: string; classification_ids: string[];
+  assessed_by: string; assessed_date: string;
+  /** Business units (RACI owner / guardian / user). */
+  owner_id: string | null; guardian_id: string | null; user_id: string | null;
+  review_frequency: string; classification_ids: string[];
 };
 const BLANK: FormState = {
   name: "", description: "", media_type_id: "", information_owner: "", business_value: "medium",
   confidentiality: "medium", integrity: "medium", availability: "medium", label_id: "",
   data_categories: "", records_volume: "", self_assessed: false, assessed_by: "", assessed_date: "",
-  owner_id: "", guardian_id: "", user_id: "", review_frequency: "annual", workflow_status: "draft",
+  owner_id: null, guardian_id: null, user_id: null, review_frequency: "annual",
   classification_ids: [],
 };
 function fromAsset(a: Asset): FormState {
@@ -129,8 +139,8 @@ function fromAsset(a: Asset): FormState {
     availability: a.availability || "medium", label_id: a.label?.id || "",
     data_categories: a.data_categories || "", records_volume: a.records_volume || "",
     self_assessed: !!a.self_assessed, assessed_by: a.assessed_by || "", assessed_date: a.assessed_date || "",
-    owner_id: a.owner?.id || "", guardian_id: a.guardian?.id || "", user_id: a.user?.id || "",
-    review_frequency: a.review_frequency || "annual", workflow_status: a.workflow_status || "draft",
+    owner_id: a.owner?.id ?? null, guardian_id: a.guardian?.id ?? null, user_id: a.user?.id ?? null,
+    review_frequency: a.review_frequency || "annual",
     classification_ids: (a.classifications || []).map((c) => c.id),
   };
 }
@@ -141,8 +151,8 @@ function toPayload(f: FormState): Record<string, unknown> {
     business_value: f.business_value, confidentiality: f.confidentiality, integrity: f.integrity,
     availability: f.availability, label_id: f.label_id || null, data_categories: f.data_categories,
     records_volume: f.records_volume, self_assessed: f.self_assessed, assessed_by: f.assessed_by,
-    assessed_date: f.assessed_date || null, owner_id: f.owner_id || null, guardian_id: f.guardian_id || null,
-    user_id: f.user_id || null, review_frequency: f.review_frequency, workflow_status: f.workflow_status,
+    assessed_date: f.assessed_date || null, owner_id: f.owner_id, guardian_id: f.guardian_id,
+    user_id: f.user_id, review_frequency: f.review_frequency,
     classification_ids: f.classification_ids,
   };
 }
@@ -153,12 +163,12 @@ function InformationAssetsInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const { formatDate } = useFormat();
 
   // small lookup tables (bounded) for the form Selects
   const [mediaTypes, setMediaTypes] = useState<MediaType[]>([]);
   const [labels, setLabels] = useState<LabelRow[]>([]);
   const [classTypes, setClassTypes] = useState<ClassificationType[]>([]);
-  const [units, setUnits] = useState<BusinessUnit[]>([]);
 
   // form
   const [showForm, setShowForm] = useState(false);
@@ -182,7 +192,7 @@ function InformationAssetsInner() {
     apiCall<MediaType[]>("GET", "/asset-media-types").then(setMediaTypes).catch(ignore);
     apiCall<LabelRow[]>("GET", "/asset-labels").then(setLabels).catch(ignore);
     apiCall<ClassificationType[]>("GET", "/asset-classification-types").then(setClassTypes).catch(ignore);
-    apiCall<Page<BusinessUnit>>("GET", "/business-units").then((r) => setUnits(r.items)).catch(ignore);
+
     loadSummary();
   }, [loadSummary]);
 
@@ -229,17 +239,19 @@ function InformationAssetsInner() {
   }
 
   async function remove(a: Asset) {
-    if (!(await confirmDialog({ title: `Archive information asset "${a.name}"?`, message: "It will be removed from the inventory.", confirmLabel: "Archive", danger: true }))) return;
-    setError(null);
+    const ok = await confirmDeleteWithImpact("asset", a.id, a.name, {
+      typeLabel: "information asset", confirmLabel: "Archive", note: "Linked risks stay in the risk register and are flagged for review.",
+    });
+    if (!ok) return;
     try {
       await apiCall<void>("DELETE", `/assets/${a.id}`);
       setShowForm(false);
       if (openId === a.id) setOpenId(null);
       setRefreshKey((k) => k + 1);
       loadSummary();
-      toast("Archived");
+      toast(`Archived ${a.name}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete information asset");
+      toast(deleteErrorText(e, "Failed to delete the information asset"), "error");
     }
   }
 
@@ -280,7 +292,7 @@ function InformationAssetsInner() {
       ),
     [classTypes],
   );
-  const unitOpts: Option[] = useMemo(() => units.map((u) => ({ value: u.id, label: u.name })), [units]);
+
 
 
   /* Inline relation chips. The asset list returns {id,label} refs for its links. */
@@ -303,31 +315,30 @@ function InformationAssetsInner() {
     { key: "data_categories", header: "Data categories", hidden: true, render: (a) => <span className="muted">{a.data_categories || "—"}</span> },
     { key: "records_volume", header: "Records", hidden: true, render: (a) => <span className="muted">{a.records_volume || "—"}</span> },
     { key: "self_assessed", header: "Self-assessed", sortable: true, render: (a) => (a.self_assessed ? <Badge tone="low">Self-assessed</Badge> : <Badge tone="neutral">Pending</Badge>), text: (a) => a.self_assessed ? "Yes" : "Pending" },
-    { key: "assessed_by", header: "Assessed by", hidden: true, render: (a) => <span className="muted">{a.assessed_by ? `${a.assessed_by}${a.assessed_date ? ` · ${a.assessed_date}` : ""}` : "—"}</span>, text: (a) => a.assessed_by ?? "" },
+    { key: "assessed_by", header: "Assessed by", hidden: true, render: (a) => <span className="muted">{a.assessed_by ? `${a.assessed_by}${a.assessed_date ? ` · ${formatDate(a.assessed_date)}` : ""}` : "—"}</span>, text: (a) => a.assessed_by ?? "" },
     { key: "hosted", header: "Hosted on", align: "center", render: (a) => <span className="muted">{a.dependencies?.length || "—"}</span>, text: (a) => String(a.dependencies?.length ?? 0) },
     { key: "risks", header: "Risks", hidden: true, render: (a) => linkChips(a.risks, "/risks"), text: (a) => names(a.risks) },
     { key: "processes", header: "Processes", hidden: true, render: (a) => linkChips(a.processes, "/processes"), text: (a) => names(a.processes) },
     { key: "requirements", header: "Requirements", hidden: true, render: (a) => linkChips(a.requirements, "/compliance"), text: (a) => names(a.requirements) },
-    { key: "next_review_date", header: "Next review", hidden: true, render: (a) => <span className="muted">{a.next_review_date || "—"}</span> },
-    { key: "workflow_status", header: "Workflow", hidden: true, render: (a) => <span className="muted">{cap(a.workflow_status)}</span>, text: (a) => cap(a.workflow_status) },
-    { key: "created_at", header: "Created", hidden: true, render: (a) => <span className="muted">{a.created_at?.slice(0, 10) || "—"}</span>, text: (a) => a.created_at?.slice(0, 10) ?? "" },
+    { key: "next_review_date", header: "Next review", hidden: true, render: (a) => <span className="muted">{formatDate(a.next_review_date)}</span>, text: (a) => (a.next_review_date ? formatDate(a.next_review_date) : "") },
+    { key: "workflow_status", header: "Approval", hidden: true, render: (a) => <span className="muted">{workflowLabel(a.workflow_status)}</span>, text: (a) => workflowLabel(a.workflow_status) },
+    { key: "created_at", header: "Created", hidden: true, render: (a) => <span className="muted">{formatDate(a.created_at)}</span>, text: (a) => (a.created_at ? formatDate(a.created_at) : "") },
   ];
 
   /** Delete every selected asset after one confirmation, then drop the selection. */
   async function removeMany(rowsToDelete: { id: string }[], clear: () => void) {
+    const linked = await linkedRiskCount(rowsToDelete.map((r) => r.id));
     const ok = await confirmDialog({
       title: `Delete ${rowsToDelete.length} asset${rowsToDelete.length === 1 ? "" : "s"}?`,
-      message: "Links from other records are kept and the activity trail records who removed them.",
+      message: assetDeleteMessage(linked, rowsToDelete.length),
       confirmLabel: "Delete", danger: true,
     });
     if (!ok) return;
-    let failed = 0;
-    for (const r of rowsToDelete) {
-      try { await apiCall("DELETE", `/assets/${r.id}`); } catch { failed += 1; }
-    }
+    const res = await deleteEach(rowsToDelete, (r) => apiCall("DELETE", `/assets/${r.id}`));
     clear();
     setRefreshKey((k) => k + 1);
-    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+    loadSummary();
+    toastDeleteSummary(res, "information asset");
   }
 
   /* --------------------------------------------------------------- form tabs (unchanged) */
@@ -409,13 +420,12 @@ function InformationAssetsInner() {
   const governanceTab = (
     <>
       <div className="field-row">
-        <Field label="Owner" help="Business unit accountable for this asset (RACI owner)."><Select value={f.owner_id} onChange={(v) => set("owner_id", v)} options={unitOpts} placeholder="— none —" /></Field>
-        <Field label="Guardian" help="Business unit that safeguards / maintains the asset."><Select value={f.guardian_id} onChange={(v) => set("guardian_id", v)} options={unitOpts} placeholder="— none —" /></Field>
-        <Field label="User" help="Business unit that uses the asset day to day."><Select value={f.user_id} onChange={(v) => set("user_id", v)} options={unitOpts} placeholder="— none —" /></Field>
+        <Field label="Owner" help="Business unit accountable for this asset (RACI owner)."><BusinessUnitSelect value={f.owner_id} onChange={(id) => set("owner_id", id)} placeholder="— none —" /></Field>
+        <Field label="Guardian" help="Business unit that safeguards / maintains the asset."><BusinessUnitSelect value={f.guardian_id} onChange={(id) => set("guardian_id", id)} placeholder="— none —" /></Field>
+        <Field label="User" help="Business unit that uses the asset day to day."><BusinessUnitSelect value={f.user_id} onChange={(id) => set("user_id", id)} placeholder="— none —" /></Field>
       </div>
       <div className="field-row">
-        <Field label="Review frequency" help="How often this asset's value / classification is re-attested."><Select value={f.review_frequency} onChange={(v) => set("review_frequency", v)} options={FREQ} /></Field>
-        <Field label="Workflow status" help="Approval lifecycle for this asset record."><Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} /></Field>
+        <Field label="Review frequency" help="How often this asset's value / classification is re-attested. Approval is separate: submit the asset for review from its detail view."><Select value={f.review_frequency} onChange={(v) => set("review_frequency", v)} options={FREQ} /></Field>
       </div>
     </>
   );
@@ -445,6 +455,7 @@ function InformationAssetsInner() {
       </div>
 
       <DataTable<Asset>
+        toolbarRight={<ArchivedRecords entityType="asset" noun="assets" onRestored={() => { setRefreshKey((k) => k + 1); loadSummary(); }} refreshKey={refreshKey} />}
         tableKey="information-assets"
         statusModel="asset"
         bulkActions={(rows, clear) => (
@@ -505,8 +516,20 @@ function InformationAssetsInner() {
                 <strong>Self-assessment</strong>
                 {detail.self_assessed ? <Badge tone="low">Completed</Badge> : <Badge tone="neutral">Pending</Badge>}
                 {detail.assessed_by && <span className="muted" style={{ fontSize: 13 }}>by {detail.assessed_by}</span>}
-                {detail.assessed_date && <span className="muted" style={{ fontSize: 13 }}>on {detail.assessed_date}</span>}
+                {detail.assessed_date && <span className="muted" style={{ fontSize: 13 }}>on {formatDate(detail.assessed_date)}</span>}
               </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16, fontSize: 13.5 }}>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Owning unit</div><div style={{ marginTop: 3 }}>{detail.owner?.label || <span className="muted">—</span>}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Guardian</div><div style={{ marginTop: 3 }}>{detail.guardian?.label || <span className="muted">—</span>}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>User</div><div style={{ marginTop: 3 }}>{detail.user?.label || <span className="muted">—</span>}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Next review</div><div style={{ marginTop: 3 }}>{formatDate(detail.next_review_date)}</div></div>
+            </div>
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13, display: "block", marginBottom: 10 }}>Approval</strong>
+              <WorkflowFields entityType="asset" entityId={detail.id} onChanged={() => { setRefreshKey((k) => k + 1); loadDetail(detail.id); }} />
             </div>
 
             <strong>Hosted on (IT assets)</strong>

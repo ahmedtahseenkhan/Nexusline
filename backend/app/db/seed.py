@@ -1,4 +1,11 @@
-"""First-run seeding: bootstrap org/admin plus a few sample GRC records."""
+"""First-run seeding: bootstrap org/admin plus a few sample GRC records.
+
+The demo org gets two people so segregation of duties is visible rather than switched
+off: the seeded admin (checker) and a risk manager, Ayesha Siddiqui (maker). Ayesha
+entered the sample controls and policies, owns the sample risks and raised APR-002, so
+the admin can legitimately test, publish and approve them; APR-001 was raised by the
+admin, who therefore sees it as their own and cannot decide it.
+"""
 from __future__ import annotations
 
 from datetime import date
@@ -33,7 +40,7 @@ from app.models.awareness import (
     AwarenessQuestion,
     TrainingRecord,
 )
-from app.models.compliance import Framework, Requirement, requirement_crosswalks
+from app.models.compliance import Requirement, requirement_crosswalks
 from app.models.continuity import ContinuityPlan, ContinuityTask, ContinuityTest
 from app.models.control import Control, ControlAudit, ControlMaintenance
 from app.models.enums import (
@@ -68,13 +75,158 @@ from app.models.project import Project, ProjectExpense, ProjectTask
 from app.models.risk import Risk
 from app.models.threat import Threat, Vulnerability
 from app.models.vendor import Vendor
+from app.models.audit import AuditLog
 from app.models.base import WorkflowState
+from app.models.identity import Role, User
 from app.models.tenant import Tenant
 from app.services.risk_scoring import next_review_date
 
+#: The demo maker. Email is built on the seed admin's domain; password is the seed
+#: admin's (a dev default — the demo seed must never run for a client, SEED_DATA=false).
+DEMO_MAKER_NAME = "Ayesha Siddiqui"
+DEMO_MAKER_ROLE = "Risk Manager"
 
-async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
+
+def demo_maker_email(admin_email: str) -> str:
+    domain = admin_email.rsplit("@", 1)[-1] if "@" in admin_email else "example.com"
+    return f"ayesha.siddiqui@{domain}"
+
+
+async def _seed_demo_maker(db: AsyncSession, tenant_id) -> User:
+    """The second demo user (risk manager, the maker). Idempotent by e-mail."""
+    from app.core.security import hash_password
+
+    email = demo_maker_email(settings.seed_admin_email)
+    existing = await db.scalar(select(User).where(User.email == email))
+    if existing is not None:
+        return existing
+    role = await db.scalar(select(Role).where(Role.name == DEMO_MAKER_ROLE))
+    user = User(
+        tenant_id=tenant_id,
+        email=email,
+        full_name=DEMO_MAKER_NAME,
+        hashed_password=hash_password(settings.seed_admin_password),
+        roles=[role] if role is not None else [],
+    )
+    db.add(user)
+    await db.flush()
+    return user
+
+
+def _created_by(tenant_id, maker: User, entity_type: str, entity_id, label: str) -> AuditLog:
+    """The ``create`` trail entry a record would have had if the maker had typed it in.
+
+    Four-eyes resolves the maker of a record from this entry (``dual_control.maker_of``);
+    without it every seeded record has no maker and the check silently never fires."""
+    return AuditLog(
+        tenant_id=tenant_id,
+        actor_id=maker.id,
+        actor_email=maker.email,
+        action="create",
+        entity_type=entity_type,
+        entity_id=entity_id,
+        summary=f"Created {entity_type} {label} (demo data)",
+        changes={"source": "demo_seed"},
+    )
+
+
+#: Default approval routes, seeded DISABLED so behaviour does not change until an admin
+#: switches one on under Workflows. (entity_type, name, description, stages) where each
+#: stage is (name, approver_mode, approver_ref).
+DEFAULT_WORKFLOWS: tuple[tuple[str, str, str, tuple[tuple[str, str, str], ...]], ...] = (
+    (
+        "policy",
+        "Policy approval",
+        "Policy owner, then Compliance, then the CISO sign off before a policy is published.",
+        (
+            ("Policy owner review", "record_owner", ""),
+            ("Compliance review", "role", "Compliance Manager"),
+            ("CISO sign-off", "role", "CISO"),
+        ),
+    ),
+    (
+        "risk",
+        "Risk acceptance",
+        "Risk owner, then the department head, then the CRO approve accepting a risk.",
+        (
+            ("Risk owner confirmation", "record_owner", ""),
+            ("Department head approval", "line_manager", ""),
+            ("CRO approval", "role", "CRO"),
+        ),
+    ),
+)
+
+
+async def seed_default_workflows(db: AsyncSession, tenant_id) -> int:
+    """Insert the default routes a tenant does not already have one for. Idempotent:
+    an entity type with any definition (enabled or not) is left alone."""
+    from app.models.workflow import ApproverMode, WorkflowDefinition, WorkflowStage
+
+    have = set((await db.scalars(select(WorkflowDefinition.entity_type))).all())
+    added = 0
+    for entity_type, name, description, stages in DEFAULT_WORKFLOWS:
+        if entity_type in have:
+            continue
+        definition = WorkflowDefinition(
+            tenant_id=tenant_id,
+            entity_type=entity_type,
+            name=name,
+            description=description,
+            enabled=False,
+        )
+        definition.stages = [
+            WorkflowStage(
+                tenant_id=tenant_id,
+                order_index=i,
+                name=stage_name,
+                approver_mode=ApproverMode(mode),
+                approver_ref=ref,
+                required_approvals=1,
+            )
+            for i, (stage_name, mode, ref) in enumerate(stages, start=1)
+        ]
+        db.add(definition)
+        added += 1
+    await db.flush()
+    return added
+
+
+#: Default KPI tiles, (metric_key, viz). Titles come from the metric catalogue.
+DEFAULT_WIDGETS: tuple[tuple[str, str], ...] = (
+    ("risks_total", "number"),
+    ("risks_above_tolerance", "number"),
+    ("incidents_open", "number"),
+    ("approvals_pending", "number"),
+    ("risks_by_severity", "bar"),
+    ("compliance_by_status", "donut"),
+    ("controls_by_status", "bar"),
+)
+
+
+async def seed_default_widgets(db: AsyncSession, tenant_id) -> int:
+    """Add the default dashboard tiles whose metric the tenant has no tile for yet.
+    Idempotent, and never collides with the (tenant, metric_key, viz) unique index."""
+    from app.models.widget import DashboardWidget
+    from app.services.metrics import CATALOG
+
+    have = set((await db.scalars(select(DashboardWidget.metric_key))).all())
+    order = (await db.scalar(select(func.max(DashboardWidget.order_index)))) or 0
+    added = 0
+    for key, viz in DEFAULT_WIDGETS:
+        if key in have:
+            continue
+        order += 1
+        title = CATALOG[key][0] if key in CATALOG else key.replace("_", " ").capitalize()
+        db.add(DashboardWidget(tenant_id=tenant_id, title=title, metric_key=key, viz=viz, order_index=order))
+        have.add(key)
+        added += 1
+    await db.flush()
+    return added
+
+
+async def _seed_sample_data(db: AsyncSession, tenant_id, admin: User) -> None:
     today = date.today()
+    maker = await _seed_demo_maker(db, tenant_id)
 
     # Baseline lookups (media types, vendor types, labels) were already inserted by
     # create_organization -> ensure_reference_data; index them by name for the sample
@@ -96,13 +248,16 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
 
     C = Criticality
     db_objs: dict[str, Asset] = {}
+    # Each CIA axis grades on its own scale (reference_data.py). A key that does not
+    # resolve — a tenant that renamed a value, or a scheme mid-migration — is skipped
+    # rather than crashing the seed.
     for name, mtype, crit, conf, integ, avail, lbl, cls_keys in [
         ("Customer Database", "Data Asset", C.critical, C.critical, C.high, C.high, "Restricted",
-         ["Confidentiality:Restricted", "Integrity:Confidential", "Availability:Confidential"]),
+         ["Confidentiality:Restricted", "Integrity:High", "Availability:Business-critical"]),
         ("Payroll System", "Software", C.high, C.high, C.high, C.medium, "Confidential",
-         ["Confidentiality:Confidential", "Integrity:Confidential"]),
+         ["Confidentiality:Confidential", "Integrity:High"]),
         ("Corporate Network", "Network", C.medium, C.medium, C.medium, C.high, "Internal",
-         ["Availability:Restricted"]),
+         ["Availability:Business-critical"]),
     ]:
         a = Asset(
             tenant_id=tenant_id,
@@ -113,13 +268,13 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
             confidentiality=conf,
             integrity=integ,
             availability=avail,
-            label_id=labels[lbl].id,
+            label_id=labels[lbl].id if lbl in labels else None,
             review_frequency=ReviewFrequency.annual,
             next_review_date=next_review_date(ReviewFrequency.annual, today),
             workflow_status=WorkflowStatus.approved,
         )
         # assign the M2M while the object is still pending (no IO) to avoid lazy-load
-        a.classifications = [classif[k] for k in cls_keys]
+        a.classifications = [classif[k] for k in cls_keys if k in classif]
         db.add(a)
         db_objs[name] = a
     await db.flush()
@@ -157,6 +312,10 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
         db.add(c)
         ctrls[name] = c
     await db.flush()
+    # Ayesha entered the controls, so the admin may test them and she may not.
+    db.add_all(
+        [_created_by(tenant_id, maker, "control", c.id, f"{c.reference} {c.name}") for c in ctrls.values()]
+    )
 
     # A completed audit + maintenance on the access-control policy
     acp = ctrls["Access Control Policy"]
@@ -313,69 +472,54 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
             vulnerabilities=[vulns["Excessive privileges"]],
         ),
     ]
+    # Ayesha, the risk manager, owns the register's sample risks.
+    for r in risks:
+        r.owner_id = maker.id
     db.add_all(risks)
     await db.flush()
 
-    # --- Compliance: an ISO 27001 framework mapped to the controls above ---
-    iso = Framework(
-        tenant_id=tenant_id,
-        name="ISO/IEC 27001:2022",
-        version="2022",
-        authority="ISO/IEC",
-        description="Information security management system requirements.",
-    )
-    db.add(iso)
-    await db.flush()
+    # --- Compliance: the full library ISO 27001:2022 (clauses + 93 Annex A controls) ---
+    # Installed through the same path as the Content Library, so the demo never carries
+    # a shallow copy whose name blocks the real one. The controls pack links the three
+    # sample controls above by reference (A.5.15, A.8.24, A.8.13) instead of duplicating
+    # them; the remaining Annex A controls arrive as planned / not assessed.
+    from app.services import framework_library
+
+    iso = (await framework_library.install_template(db, admin, "iso-27001-2022")).framework
+    iso_reqs = await _requirements_by_ref(db, iso.id)
 
     C = ComplianceStatus
-    iso_reqs: dict[str, Requirement] = {}
-    for ref, title, st, mapped in [
-        ("A.5.15", "Access control", C.compliant, [ctrls["Access Control Policy"]]),
-        ("A.8.24", "Use of cryptography", C.partially_compliant, [ctrls["Encryption at Rest"]]),
-        ("A.8.13", "Information backup", C.compliant, [ctrls["Backup & Recovery"]]),
-        ("A.5.7", "Threat intelligence", C.not_assessed, []),
-        ("A.8.16", "Monitoring activities", C.non_compliant, []),
+    for ref, st, mapped in [
+        ("A.5.15", C.compliant, [ctrls["Access Control Policy"]]),
+        ("A.8.24", C.partially_compliant, [ctrls["Encryption at Rest"]]),
+        ("A.8.13", C.compliant, [ctrls["Backup & Recovery"]]),
+        ("A.5.7", C.not_assessed, []),
+        ("A.8.16", C.non_compliant, []),
     ]:
-        r = Requirement(
-            tenant_id=tenant_id,
-            framework_id=iso.id,
-            reference=ref,
-            title=title,
-            domain="Annex A",
-            status=st,
-            controls=mapped,
-        )
-        db.add(r)
-        iso_reqs[ref] = r
+        req = iso_reqs.get(ref)
+        if req is None:
+            continue
+        req.status = st
+        for ctrl in mapped:
+            if ctrl not in req.controls:
+                req.controls.append(ctrl)
     await db.flush()
 
-    # Second framework (SOC 2) reusing the same control, then crosswalk the equivalents.
-    soc2 = Framework(
-        tenant_id=tenant_id,
-        name="SOC 2",
-        version="2017",
-        authority="AICPA",
-        description="Trust Services Criteria.",
-    )
-    db.add(soc2)
-    await db.flush()
-    cc61 = Requirement(
-        tenant_id=tenant_id,
-        framework_id=soc2.id,
-        reference="CC6.1",
-        title="Logical and physical access controls",
-        domain="Common Criteria",
-        status=C.compliant,
-        controls=[ctrls["Access Control Policy"]],
-    )
-    db.add(cc61)
-    await db.flush()
-    # Crosswalk: ISO A.5.15 ≡ SOC 2 CC6.1
-    await db.execute(
-        requirement_crosswalks.insert().values(
-            requirement_id=iso_reqs["A.5.15"].id, related_requirement_id=cc61.id
-        )
-    )
+    # Second framework (SOC 2, also from the library) reusing the same control, then
+    # crosswalk the equivalents: ISO A.5.15 ≡ SOC 2 CC6.1.
+    soc2 = (await framework_library.install_template(db, admin, "soc-2-2017")).framework
+    cc61 = (await _requirements_by_ref(db, soc2.id)).get("CC6.1")
+    if cc61 is not None:
+        cc61.status = C.compliant
+        if ctrls["Access Control Policy"] not in cc61.controls:
+            cc61.controls.append(ctrls["Access Control Policy"])
+        await db.flush()
+        if "A.5.15" in iso_reqs:
+            await db.execute(
+                requirement_crosswalks.insert().values(
+                    requirement_id=iso_reqs["A.5.15"].id, related_requirement_id=cc61.id
+                )
+            )
 
     # Evidence attached to controls (demonstrates every requirement those controls map to).
     db.add_all(
@@ -469,6 +613,15 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
                 review_frequency=ReviewFrequency.annual,
                 next_review_date=next_review_date(ReviewFrequency.annual, today),
             ),
+        ]
+    )
+
+    await db.flush()
+    # Ayesha drafted the policies, so the admin may publish them and she may not.
+    db.add_all(
+        [
+            _created_by(tenant_id, maker, "policy", p.id, f"{p.reference} {p.title}")
+            for p in (await db.scalars(select(Policy))).all()
         ]
     )
 
@@ -922,7 +1075,9 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
                 entity_label="POL-002 Acceptable Use Policy",
                 link="/policies",
                 approver="CISO",
-                requested_by_email=settings.seed_admin_email,
+                # Raised by the admin: they see it as their own and cannot decide it.
+                requested_by=admin.id,
+                requested_by_email=admin.email,
                 due_date=_date(2025, 12, 1),  # past -> overdue
             ),
             ApprovalRequest(
@@ -936,7 +1091,9 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
                 entity_label="R-002 Ransomware",
                 link="/risks",
                 approver="Head of Risk",
-                requested_by_email=settings.seed_admin_email,
+                # Raised by Ayesha (the maker): the admin is an independent checker.
+                requested_by=maker.id,
+                requested_by_email=maker.email,
                 due_date=next_review_date(ReviewFrequency.monthly, today),
             ),
         ]
@@ -985,21 +1142,11 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
     )
     await db.flush()
 
-    # --- Default KPI dashboard widgets ---
-    from app.models.widget import DashboardWidget
+    # --- Default KPI dashboard widgets (idempotent; catalogue titles) ---
+    await seed_default_widgets(db, tenant_id)
 
-    db.add_all(
-        [
-            DashboardWidget(tenant_id=tenant_id, title="Total Risks", metric_key="risks_total", viz="number", order_index=1),
-            DashboardWidget(tenant_id=tenant_id, title="Risks Above Tolerance", metric_key="risks_above_tolerance", viz="number", order_index=2),
-            DashboardWidget(tenant_id=tenant_id, title="Open Incidents", metric_key="incidents_open", viz="number", order_index=3),
-            DashboardWidget(tenant_id=tenant_id, title="Pending Approvals", metric_key="approvals_pending", viz="number", order_index=4),
-            DashboardWidget(tenant_id=tenant_id, title="Risks by Severity", metric_key="risks_by_severity", viz="bar", order_index=5),
-            DashboardWidget(tenant_id=tenant_id, title="Compliance by Status", metric_key="compliance_by_status", viz="donut", order_index=6),
-            DashboardWidget(tenant_id=tenant_id, title="Controls by Status", metric_key="controls_by_status", viz="bar", order_index=7),
-        ]
-    )
-    await db.flush()
+    # --- Default approval routes (disabled until an admin switches one on) ---
+    await seed_default_workflows(db, tenant_id)
 
     # --- Collaboration (comments / tags / attachments on the seeded project) ---
     from app.models.collab import Attachment, Comment, EntityTag, Tag
@@ -1118,9 +1265,20 @@ async def _seed_sample_data(db: AsyncSession, tenant_id) -> None:
     await db.flush()
 
 
+async def _requirements_by_ref(db: AsyncSession, framework_id) -> dict[str, Requirement]:
+    rows = (await db.scalars(select(Requirement).where(Requirement.framework_id == framework_id))).all()
+    return {r.reference: r for r in rows}
+
+
 async def seed_if_empty() -> None:
-    """Create the bootstrap org + sample data if no tenants exist yet."""
-    if not settings.seed_data:
+    """Create the bootstrap org (+ demo data when ``seed_data``) if no tenants exist yet.
+
+    ``seed_data`` → the demo: bootstrap org, admin, sample records, the second maker
+    user, default tiles and (disabled) approval routes, plus the empty isolation-demo org.
+    ``seed_bootstrap`` alone → a clean first organisation and its admin, nothing else —
+    what a client installation gets.
+    """
+    if not (settings.seed_data or settings.seed_bootstrap):
         return
 
     async with tenant_session(None) as db:
@@ -1139,10 +1297,19 @@ async def seed_if_empty() -> None:
         # The bootstrap admin operates the deployment as well as this org — somebody has
         # to be able to create the second one, and on a fresh install there is nobody else.
         _admin.is_platform_admin = True
-        await _seed_sample_data(db, tenant.id)
+        if not settings.seed_data:
+            print(
+                f"Bootstrapped org '{tenant.name}' (slug={tenant.slug}) with admin "
+                f"{settings.seed_admin_email} (platform administrator); no demo data. "
+                "Change the admin password on first login."
+            )
+            return
+
+        await _seed_sample_data(db, tenant.id, _admin)
         print(
             f"Seeded org '{tenant.name}' (slug={tenant.slug}) "
-            f"with admin {settings.seed_admin_email} (platform administrator)."
+            f"with admin {settings.seed_admin_email} (platform administrator) "
+            f"and maker {demo_maker_email(settings.seed_admin_email)} ({DEMO_MAKER_ROLE})."
         )
 
         if settings.seed_second_org:

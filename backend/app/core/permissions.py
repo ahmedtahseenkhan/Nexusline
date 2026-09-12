@@ -53,6 +53,10 @@ PERMISSION_CATALOG: dict[str, str] = {
     # edit a risk.
     "sla:manage": "Set turnaround-time (TAT) targets and escalation",
     "sso:manage": "Configure single sign-on (SSO)",
+    # Organisation-wide locale and retention. Held apart from ``org:write`` (which risk
+    # managers hold to maintain business units): the retention window decides when
+    # archived records are purged for good, so it is an administrator's decision.
+    "settings:manage": "Change organisation settings: currency, timezone, date format, fiscal year, retention",
     "asset:read": "View assets",
     "asset:write": "Create and edit assets",
     "user:read": "View users",

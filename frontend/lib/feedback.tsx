@@ -26,7 +26,14 @@ export function toast(message: string, kind: ToastKind = "success") {
 }
 
 /* ========================================================= Confirm dialog === */
-type ConfirmOpts = { title: string; message?: string; confirmLabel?: string; danger?: boolean };
+type ConfirmOpts = {
+  title: string;
+  message?: string;
+  /** Extra content under the message — e.g. the list of records a delete would touch. */
+  details?: ReactNode;
+  confirmLabel?: string;
+  danger?: boolean;
+};
 type PendingConfirm = ConfirmOpts & { resolve: (ok: boolean) => void };
 
 let confirmSub: ((c: PendingConfirm | null) => void) | null = null;
@@ -94,6 +101,7 @@ export function FeedbackHost() {
             <div className="modal-body" style={{ padding: "22px 24px" }}>
               <h2 style={{ margin: "0 0 8px", fontSize: 17 }}>{confirm.title}</h2>
               {confirm.message && <p className="muted" style={{ margin: 0, fontSize: 14, lineHeight: 1.55 }}>{confirm.message}</p>}
+              {confirm.details && <div style={{ marginTop: 12, fontSize: 13.5, lineHeight: 1.55 }}>{confirm.details}</div>}
             </div>
             <div className="modal-foot">
               <button className="btn secondary" onClick={() => close(false)} autoFocus>Cancel</button>

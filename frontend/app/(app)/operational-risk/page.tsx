@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   api,
   apiCall,
@@ -12,6 +12,9 @@ import {
 } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact } from "@/lib/records";
+import type { LookupRef, UnitRef, UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
@@ -20,10 +23,17 @@ import RelatedChips from "@/components/RelatedChips";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import FormModal from "@/components/FormModal";
+import UserPicker, { UserName } from "@/components/UserPicker";
+import LookupSelect from "@/components/LookupSelect";
+import BusinessUnitSelect, { UnitName } from "@/components/BusinessUnitSelect";
+import ProcessSelect from "@/components/ProcessSelect";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -31,10 +41,55 @@ type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 // ------------------------------------------------------------------ graph-link types
 // The shared lib/api types don't carry the new relation fields yet, so we extend
 // them locally (all optional, so plain records stay assignable) and cast where read.
+// The phase-1 picker fields (`*_id` sent on write, `*_ref` resolved on read) are typed
+// here too; the legacy text columns (owner, business_unit …) still hold the display name.
 type Ref = { id: string; reference?: string; title?: string; name?: string };
-type RcsaRiskExt = RcsaRisk & { risk?: Ref | null; control?: Ref | null };
-type KriExt = KeyRiskIndicator & { risks?: Ref[] };
-type LossEventExt = LossEvent & { incident?: Ref | null; risks?: Ref[] };
+type RcsaRiskExt = RcsaRisk & {
+  risk?: Ref | null;
+  control?: Ref | null;
+  category_id?: string | null;
+  category_ref?: LookupRef | null;
+  action_owner_id?: string | null;
+  action_owner_ref?: UserRef | null;
+};
+type RcsaExt = RcsaAssessment & {
+  business_unit_id?: string | null;
+  business_unit_ref?: UnitRef | null;
+  process_id?: string | null;
+  process_ref?: UnitRef | null;
+  assessor_id?: string | null;
+  assessor_ref?: UserRef | null;
+};
+type KriExt = KeyRiskIndicator & {
+  risks?: Ref[];
+  owner_id?: string | null;
+  owner_ref?: UserRef | null;
+  business_unit_id?: string | null;
+  business_unit_ref?: UnitRef | null;
+  category_id?: string | null;
+  category_ref?: LookupRef | null;
+};
+type LossEventExt = LossEvent & {
+  incident?: Ref | null;
+  risks?: Ref[];
+  business_unit_id?: string | null;
+  business_unit_ref?: UnitRef | null;
+  action_owner_id?: string | null;
+  action_owner_ref?: UserRef | null;
+};
+
+const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
+/** Shown under a picker while the record still carries only the old free text. */
+const legacy = (id: string | null | undefined, text: string | null | undefined) => (id ? null : text || null);
+
+function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="muted" style={{ fontSize: 12 }}>{label}</div>
+      <div style={{ marginTop: 2, fontSize: 13 }}>{children}</div>
+    </div>
+  );
+}
 
 const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
 
@@ -45,13 +100,12 @@ const linkSearch = (path: string) => (q: string) =>
     r.items.map((x): AsyncOption => ({ value: x.id, label: x.name || x.title || x.reference || x.id, sub: x.reference })),
   );
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 
 // ------------------------------------------------------------------ enum lists
 const RCSA_STATUS = opts(["planned", "in_progress", "completed"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const KRI_FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const KRI_DIRECTION = opts(["higher_is_worse", "lower_is_worse"]);
 const CONTROL_EFF = ["not_assessed", "ineffective", "partially_effective", "effective"];
@@ -105,56 +159,52 @@ function EffBadge({ value }: { value: string | null }) {
 // ------------------------------------------------------------------ form state
 type RcsaForm = {
   title: string;
-  business_unit: string;
-  process: string;
-  assessor: string;
+  business_unit_id: string | null;
+  process_id: string | null;
+  assessor_id: string | null;
   status: string;
   period: string;
   due_date: string;
   completed_date: string;
-  workflow_status: string;
 };
 const BLANK_RCSA: RcsaForm = {
   title: "",
-  business_unit: "",
-  process: "",
-  assessor: "",
+  business_unit_id: null,
+  process_id: null,
+  assessor_id: null,
   status: "planned",
   period: "",
   due_date: "",
   completed_date: "",
-  workflow_status: "draft",
 };
-function fromRcsa(r: RcsaAssessment): RcsaForm {
+function fromRcsa(r: RcsaExt): RcsaForm {
   return {
     title: r.title,
-    business_unit: r.business_unit || "",
-    process: r.process || "",
-    assessor: r.assessor || "",
+    business_unit_id: r.business_unit_id ?? null,
+    process_id: r.process_id ?? null,
+    assessor_id: r.assessor_id ?? null,
     status: r.status || "planned",
     period: r.period || "",
     due_date: r.due_date || "",
     completed_date: r.completed_date || "",
-    workflow_status: r.workflow_status || "draft",
   };
 }
 function rcsaPayload(f: RcsaForm): Record<string, unknown> {
   return {
     title: f.title,
-    business_unit: f.business_unit,
-    process: f.process,
-    assessor: f.assessor,
+    business_unit_id: f.business_unit_id,
+    process_id: f.process_id,
+    assessor_id: f.assessor_id,
     status: f.status,
     period: f.period,
     due_date: f.due_date || null,
     completed_date: f.completed_date || null,
-    workflow_status: f.workflow_status,
   };
 }
 
 type RiskDraft = {
   title: string;
-  category: string;
+  category_id: string | null;
   inherent_likelihood: string;
   inherent_impact: string;
   control_description: string;
@@ -162,7 +212,7 @@ type RiskDraft = {
   residual_likelihood: string;
   residual_impact: string;
   action: string;
-  action_owner: string;
+  action_owner_id: string | null;
   due_date: string;
   risk_id: string;
   risk_label: string;
@@ -171,7 +221,7 @@ type RiskDraft = {
 };
 const BLANK_RISK: RiskDraft = {
   title: "",
-  category: "",
+  category_id: null,
   inherent_likelihood: "3",
   inherent_impact: "3",
   control_description: "",
@@ -179,7 +229,7 @@ const BLANK_RISK: RiskDraft = {
   residual_likelihood: "2",
   residual_impact: "2",
   action: "",
-  action_owner: "",
+  action_owner_id: null,
   due_date: "",
   risk_id: "",
   risk_label: "",
@@ -189,61 +239,57 @@ const BLANK_RISK: RiskDraft = {
 
 type KriForm = {
   name: string;
-  category: string;
-  business_area: string;
-  owner: string;
+  category_id: string | null;
+  business_unit_id: string | null;
+  owner_id: string | null;
   unit: string;
   frequency: string;
   direction: string;
   warning_threshold: string;
   limit_threshold: string;
   description: string;
-  workflow_status: string;
   risk_ids: AsyncOption[];
 };
 const BLANK_KRI: KriForm = {
   name: "",
-  category: "",
-  business_area: "",
-  owner: "",
+  category_id: null,
+  business_unit_id: null,
+  owner_id: null,
   unit: "",
   frequency: "monthly",
   direction: "higher_is_worse",
   warning_threshold: "",
   limit_threshold: "",
   description: "",
-  workflow_status: "draft",
   risk_ids: [],
 };
-function fromKri(k: KeyRiskIndicator): KriForm {
+function fromKri(k: KriExt): KriForm {
   return {
     name: k.name,
-    category: k.category || "",
-    business_area: k.business_area || "",
-    owner: k.owner || "",
+    category_id: k.category_id ?? null,
+    business_unit_id: k.business_unit_id ?? null,
+    owner_id: k.owner_id ?? null,
     unit: k.unit || "",
     frequency: k.frequency || "monthly",
     direction: k.direction || "higher_is_worse",
     warning_threshold: k.warning_threshold != null ? String(k.warning_threshold) : "",
     limit_threshold: k.limit_threshold != null ? String(k.limit_threshold) : "",
     description: k.description || "",
-    workflow_status: k.workflow_status || "draft",
-    risk_ids: ((k as KriExt).risks || []).map(refToOpt),
+    risk_ids: (k.risks || []).map(refToOpt),
   };
 }
 function kriPayload(f: KriForm): Record<string, unknown> {
   return {
     name: f.name,
-    category: f.category,
-    business_area: f.business_area,
-    owner: f.owner,
+    category_id: f.category_id,
+    business_unit_id: f.business_unit_id,
+    owner_id: f.owner_id,
     unit: f.unit,
     frequency: f.frequency,
     direction: f.direction,
     warning_threshold: f.warning_threshold === "" ? null : Number(f.warning_threshold),
     limit_threshold: f.limit_threshold === "" ? null : Number(f.limit_threshold),
     description: f.description,
-    workflow_status: f.workflow_status,
     risk_ids: f.risk_ids.map((o) => o.value),
   };
 }
@@ -258,7 +304,7 @@ const BLANK_MEASURE: MeasureDraft = { value: "", as_of_date: "", notes: "" };
 type LossForm = {
   title: string;
   basel_event_type: string;
-  business_line: string;
+  business_unit_id: string | null;
   gross_loss: string;
   recovery: string;
   currency: string;
@@ -267,46 +313,44 @@ type LossForm = {
   discovery_date: string;
   accounting_date: string;
   root_cause: string;
-  action_owner: string;
-  workflow_status: string;
+  action_owner_id: string | null;
   incident_id: string;
   incident_label: string;
   risk_ids: AsyncOption[];
 };
-const BLANK_LOSS: LossForm = {
+/** A new loss event starts in the organisation's currency (passed in from useFormat). */
+const blankLoss = (currency: string): LossForm => ({
   title: "",
   basel_event_type: "internal_fraud",
-  business_line: "",
+  business_unit_id: null,
   gross_loss: "",
   recovery: "",
-  currency: "PKR",
+  currency,
   status: "open",
   occurrence_date: "",
   discovery_date: "",
   accounting_date: "",
   root_cause: "",
-  action_owner: "",
-  workflow_status: "draft",
+  action_owner_id: null,
   incident_id: "",
   incident_label: "",
   risk_ids: [],
-};
-function fromLoss(l: LossEvent): LossForm {
-  const lx = l as LossEventExt;
+});
+function fromLoss(l: LossEventExt, tenantCurrency: string): LossForm {
+  const lx = l;
   return {
     title: l.title,
     basel_event_type: l.basel_event_type || "internal_fraud",
-    business_line: l.business_line || "",
+    business_unit_id: l.business_unit_id ?? null,
     gross_loss: l.gross_loss != null ? String(l.gross_loss) : "",
     recovery: l.recovery != null ? String(l.recovery) : "",
-    currency: l.currency || "PKR",
+    currency: l.currency || tenantCurrency,
     status: l.status || "open",
     occurrence_date: l.occurrence_date || "",
     discovery_date: l.discovery_date || "",
     accounting_date: l.accounting_date || "",
     root_cause: l.root_cause || "",
-    action_owner: l.action_owner || "",
-    workflow_status: l.workflow_status || "draft",
+    action_owner_id: l.action_owner_id ?? null,
     incident_id: lx.incident?.id || "",
     incident_label: lx.incident ? refToOpt(lx.incident).label : "",
     risk_ids: (lx.risks || []).map(refToOpt),
@@ -316,7 +360,7 @@ function lossPayload(f: LossForm): Record<string, unknown> {
   return {
     title: f.title,
     basel_event_type: f.basel_event_type,
-    business_line: f.business_line,
+    business_unit_id: f.business_unit_id,
     gross_loss: f.gross_loss === "" ? 0 : Number(f.gross_loss),
     recovery: f.recovery === "" ? 0 : Number(f.recovery),
     currency: f.currency,
@@ -325,8 +369,7 @@ function lossPayload(f: LossForm): Record<string, unknown> {
     discovery_date: f.discovery_date || null,
     accounting_date: f.accounting_date || null,
     root_cause: f.root_cause,
-    action_owner: f.action_owner,
-    workflow_status: f.workflow_status,
+    action_owner_id: f.action_owner_id,
     incident_id: f.incident_id || null,
     risk_ids: f.risk_ids.map((o) => o.value),
   };
@@ -340,6 +383,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 ];
 
 function OperationalRiskInner() {
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const [section, setSection] = useState<SectionId>("rcsa");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -351,38 +395,44 @@ function OperationalRiskInner() {
   const [openId, setOpenId] = useRecordParam("id");
 
   // ---- RCSA dialog + drawer detail ----
-  const [editingRcsa, setEditingRcsa] = useState<RcsaAssessment | null>(null);
+  const [editingRcsa, setEditingRcsa] = useState<RcsaExt | null>(null);
   const [showRcsaForm, setShowRcsaForm] = useState(false);
   const [savingRcsa, setSavingRcsa] = useState(false);
   const [af, setAf] = useState<RcsaForm>(BLANK_RCSA);
   const setA = <K extends keyof RcsaForm>(k: K, v: RcsaForm[K]) => setAf((p) => ({ ...p, [k]: v }));
 
-  const [rcsaDetail, setRcsaDetail] = useState<RcsaAssessment | null>(null);
+  const [rcsaDetail, setRcsaDetail] = useState<RcsaExt | null>(null);
   const [rd, setRd] = useState<RiskDraft>(BLANK_RISK);
   const setRD = <K extends keyof RiskDraft>(k: K, v: RiskDraft[K]) => setRd((p) => ({ ...p, [k]: v }));
 
   // ---- KRI dialog + drawer detail ----
-  const [editingKri, setEditingKri] = useState<KeyRiskIndicator | null>(null);
+  const [editingKri, setEditingKri] = useState<KriExt | null>(null);
   const [showKriForm, setShowKriForm] = useState(false);
   const [savingKri, setSavingKri] = useState(false);
   const [kf, setKf] = useState<KriForm>(BLANK_KRI);
   const setK = <K extends keyof KriForm>(k: K, v: KriForm[K]) => setKf((p) => ({ ...p, [k]: v }));
 
-  const [kriDetail, setKriDetail] = useState<KeyRiskIndicator | null>(null);
+  const [kriDetail, setKriDetail] = useState<KriExt | null>(null);
   const [md, setMd] = useState<MeasureDraft>(BLANK_MEASURE);
   const setMD = <K extends keyof MeasureDraft>(k: K, v: MeasureDraft[K]) => setMd((p) => ({ ...p, [k]: v }));
 
   // ---- Loss dialog ----
-  const [editingLoss, setEditingLoss] = useState<LossEvent | null>(null);
+  const [editingLoss, setEditingLoss] = useState<LossEventExt | null>(null);
   const [showLossForm, setShowLossForm] = useState(false);
   const [savingLoss, setSavingLoss] = useState(false);
-  const [lf, setLf] = useState<LossForm>(BLANK_LOSS);
+  const [lf, setLf] = useState<LossForm>(() => blankLoss(currency));
   const setL = <K extends keyof LossForm>(k: K, v: LossForm[K]) => setLf((p) => ({ ...p, [k]: v }));
 
   // ------------------------------------------------------------- fetchers
-  const fetchRcsa = useCallback((qs: string) => apiCall<PagedList<RcsaAssessment>>("GET", `/rcsa?${qs}`), []);
-  const fetchKris = useCallback((qs: string) => apiCall<PagedList<KeyRiskIndicator>>("GET", `/kris?${qs}`), []);
-  const fetchLosses = useCallback((qs: string) => apiCall<PagedList<LossEvent>>("GET", `/loss-events?${qs}`), []);
+  const fetchRcsa = useCallback((qs: string) => apiCall<PagedList<RcsaExt>>("GET", `/rcsa?${qs}`), []);
+  const fetchKris = useCallback((qs: string) => apiCall<PagedList<KriExt>>("GET", `/kris?${qs}`), []);
+  const fetchLosses = useCallback((qs: string) => apiCall<PagedList<LossEventExt>>("GET", `/loss-events?${qs}`), []);
+  const loadKri = useCallback((id: string) => {
+    apiCall<KriExt>("GET", `/kris/${id}`).then(setKriDetail).catch(() => setKriDetail(null));
+  }, []);
+  const loadRcsa = useCallback((id: string) => {
+    api.rcsaGet(id).then(setRcsaDetail).catch(() => setRcsaDetail(null));
+  }, []);
 
   async function loadSummary() {
     try {
@@ -404,12 +454,12 @@ function OperationalRiskInner() {
     }
     if (section === "rcsa") {
       setRd(BLANK_RISK);
-      api.rcsaGet(openId).then(setRcsaDetail).catch(() => setRcsaDetail(null));
+      loadRcsa(openId);
     } else if (section === "kris") {
       setMd(BLANK_MEASURE);
-      apiCall<KeyRiskIndicator>("GET", `/kris/${openId}`).then(setKriDetail).catch(() => setKriDetail(null));
+      loadKri(openId);
     }
-  }, [openId, section]);
+  }, [openId, section, loadRcsa, loadKri]);
 
   // Switching section closes any open drawer (the id belongs to the old section).
   function switchSection(id: SectionId) {
@@ -426,7 +476,7 @@ function OperationalRiskInner() {
     setError(null);
     setShowRcsaForm(true);
   }
-  function openEditRcsa(r: RcsaAssessment) {
+  function openEditRcsa(r: RcsaExt) {
     setEditingRcsa(r);
     setAf(fromRcsa(r));
     setError(null);
@@ -449,26 +499,26 @@ function OperationalRiskInner() {
       setSavingRcsa(false);
     }
   }
-  async function removeRcsa(r: RcsaAssessment) {
-    if (!(await confirmDialog({ title: `Delete RCSA ${r.reference || r.title}?`, danger: true }))) return;
-    setError(null);
+  async function removeRcsa(r: RcsaExt) {
+    if (!(await confirmDeleteWithImpact("rcsa_assessment", r.id, `${r.reference || ""} ${r.title}`.trim(), { typeLabel: "RCSA" }))) return;
     try {
       await api.deleteRcsa(r.id);
       setShowRcsaForm(false);
       if (openId === r.id) setOpenId(null);
       reload();
-      toast("Deleted");
+      toast(`Deleted ${r.reference || "RCSA"}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      // A 403 is segregation of duties: the server's message says who may delete it.
+      toast(errMsg(e, "Failed to delete"), "error");
     }
   }
   async function addRisk() {
     if (!rcsaDetail) return;
     setError(null);
     try {
-      const updated = await api.addRcsaRisk(rcsaDetail.id, {
+      const updated: RcsaExt = await api.addRcsaRisk(rcsaDetail.id, {
         title: rd.title,
-        category: rd.category,
+        category_id: rd.category_id,
         inherent_likelihood: rd.inherent_likelihood === "" ? 0 : Number(rd.inherent_likelihood),
         inherent_impact: rd.inherent_impact === "" ? 0 : Number(rd.inherent_impact),
         control_description: rd.control_description,
@@ -476,7 +526,7 @@ function OperationalRiskInner() {
         residual_likelihood: rd.residual_likelihood === "" ? 0 : Number(rd.residual_likelihood),
         residual_impact: rd.residual_impact === "" ? 0 : Number(rd.residual_impact),
         action: rd.action,
-        action_owner: rd.action_owner,
+        action_owner_id: rd.action_owner_id,
         due_date: rd.due_date || null,
         risk_id: rd.risk_id || null,
         control_id: rd.control_id || null,
@@ -511,7 +561,7 @@ function OperationalRiskInner() {
     setError(null);
     setShowKriForm(true);
   }
-  function openEditKri(k: KeyRiskIndicator) {
+  function openEditKri(k: KriExt) {
     setEditingKri(k);
     setKf(fromKri(k));
     setError(null);
@@ -526,7 +576,7 @@ function OperationalRiskInner() {
       else await api.createKri(payload);
       setShowKriForm(false);
       reload();
-      if (openId) apiCall<KeyRiskIndicator>("GET", `/kris/${openId}`).then(setKriDetail).catch(() => {});
+      if (openId) loadKri(openId);
       toast(editingKri ? "Changes saved" : "KRI created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save KRI");
@@ -534,17 +584,17 @@ function OperationalRiskInner() {
       setSavingKri(false);
     }
   }
-  async function removeKri(k: KeyRiskIndicator) {
-    if (!(await confirmDialog({ title: `Delete KRI ${k.reference || k.name}?`, danger: true }))) return;
-    setError(null);
+  async function removeKri(k: KriExt) {
+    if (!(await confirmDeleteWithImpact("key_risk_indicator", k.id, `${k.reference || ""} ${k.name}`.trim(), { typeLabel: "KRI" }))) return;
     try {
       await api.deleteKri(k.id);
       setShowKriForm(false);
       if (openId === k.id) setOpenId(null);
       reload();
-      toast("Deleted");
+      toast(`Deleted ${k.reference || "KRI"}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      // A 403 is segregation of duties: the server's message says who may delete it.
+      toast(errMsg(e, "Failed to delete"), "error");
     }
   }
   async function addMeasurement() {
@@ -568,13 +618,13 @@ function OperationalRiskInner() {
   // ------------------------------------------------------------- Loss CRUD
   function openNewLoss() {
     setEditingLoss(null);
-    setLf(BLANK_LOSS);
+    setLf(blankLoss(currency));
     setError(null);
     setShowLossForm(true);
   }
-  function openEditLoss(l: LossEvent) {
+  function openEditLoss(l: LossEventExt) {
     setEditingLoss(l);
-    setLf(fromLoss(l));
+    setLf(fromLoss(l, currency));
     setError(null);
     setShowLossForm(true);
   }
@@ -595,36 +645,38 @@ function OperationalRiskInner() {
       setSavingLoss(false);
     }
   }
-  async function removeLoss(l: LossEvent) {
-    if (!(await confirmDialog({ title: `Delete loss event ${l.reference || l.title}?`, danger: true }))) return;
-    setError(null);
+  async function removeLoss(l: LossEventExt) {
+    if (!(await confirmDeleteWithImpact("loss_event", l.id, `${l.reference || ""} ${l.title}`.trim()))) return;
     try {
       await api.deleteLossEvent(l.id);
       setShowLossForm(false);
       reload();
       await loadSummary();
-      toast("Deleted");
+      toast(`Deleted ${l.reference || "loss event"}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      // A 403 is segregation of duties: the server's message says who may delete it.
+      toast(errMsg(e, "Failed to delete"), "error");
     }
   }
 
   // ------------------------------------------------------------- columns
-  const rcsaColumns: Column<RcsaAssessment>[] = [
+  const rcsaColumns: Column<RcsaExt>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
     { key: "title", header: "Title", sortable: true, render: (r) => <span className="cell-title">{r.title}</span> },
-    { key: "business_unit", header: "Business unit", sortable: true, render: (r) => <span className="muted">{r.business_unit || "—"}</span> },
+    { key: "business_unit", header: "Business unit", sortable: true, render: (r) => <span className="muted"><UnitName unit={r.business_unit_ref} fallback={r.business_unit} /></span>, text: (r) => r.business_unit_ref?.name || r.business_unit || "" },
+    { key: "assessor", header: "Assessor", render: (r) => <span className="muted"><UserName user={r.assessor_ref} fallback={r.assessor} /></span>, text: (r) => r.assessor_ref?.full_name || r.assessor || "" },
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={RCSA_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
     { key: "risks", header: "Risks", render: (r) => <span className="muted">{r.risk_count}</span> },
-    { key: "due_date", header: "Due", sortable: true, render: (r) => (r.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.due_date || "—"}</span>) },
+    { key: "due_date", header: "Due", sortable: true, render: (r) => (r.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(r.due_date)}</span>), text: (r) => (r.due_date ? formatDate(r.due_date) : "") },
     { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditRcsa(r)}>Edit</button> <button className="btn secondary sm" onClick={() => removeRcsa(r)}>Delete</button></div> },
   ];
 
-  const kriColumns: Column<KeyRiskIndicator>[] = [
+  const kriColumns: Column<KriExt>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (k) => <span className="ref">{k.reference || "—"}</span> },
     { key: "name", header: "Name", sortable: true, render: (k) => <span className="cell-title">{k.name}</span> },
-    { key: "category", header: "Category", sortable: true, render: (k) => <span className="muted">{k.category || "—"}</span> },
-    { key: "owner", header: "Owner", sortable: true, render: (k) => <span className="muted">{k.owner || "—"}</span> },
+    { key: "category", header: "Category", sortable: true, render: (k) => <span className="muted">{k.category_ref?.label || k.category || "—"}</span>, text: (k) => k.category_ref?.label || k.category || "" },
+    { key: "business_area", header: "Business unit", hidden: true, render: (k) => <span className="muted"><UnitName unit={k.business_unit_ref} fallback={k.business_area} /></span>, text: (k) => k.business_unit_ref?.name || k.business_area || "" },
+    { key: "owner", header: "Owner", sortable: true, render: (k) => <span className="muted"><UserName user={k.owner_ref} fallback={k.owner} /></span>, text: (k) => k.owner_ref?.full_name || k.owner || "" },
     { key: "current_value", header: "Current", sortable: true, render: (k) => <span className="muted">{k.current_value != null ? `${num(k.current_value)}${k.unit ? " " + k.unit : ""}` : "—"}</span> },
     { key: "thresholds", header: "Warn / Limit", render: (k) => <span className="muted">{num(k.warning_threshold)} / {num(k.limit_threshold)}</span> },
     { key: "status", header: "RAG status", render: (k) => (
@@ -636,16 +688,17 @@ function OperationalRiskInner() {
     { key: "actions", header: "", render: (k) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditKri(k)}>Edit</button> <button className="btn secondary sm" onClick={() => removeKri(k)}>Delete</button></div> },
   ];
 
-  const lossColumns: Column<LossEvent>[] = [
+  const lossColumns: Column<LossEventExt>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (l) => <span className="ref">{l.reference || "—"}</span> },
     { key: "title", header: "Title", sortable: true, render: (l) => <span className="cell-title">{l.title}</span> },
     { key: "basel_event_type", header: "Basel event type", sortable: true, render: (l) => <Badge tone="info">{cap(l.basel_event_type)}</Badge> },
-    { key: "business_line", header: "Business line", sortable: true, render: (l) => <span className="muted">{l.business_line || "—"}</span> },
-    { key: "gross_loss", header: "Gross", sortable: true, render: (l) => <span className="muted">{num(l.gross_loss)} {l.currency}</span> },
-    { key: "recovery", header: "Recovery", sortable: true, render: (l) => <span className="muted">{num(l.recovery)}</span> },
-    { key: "net", header: "Net", render: (l) => <span className="muted">{num(l.net_loss)}</span> },
+    { key: "business_line", header: "Business unit", sortable: true, render: (l) => <span className="muted"><UnitName unit={l.business_unit_ref} fallback={l.business_line} /></span>, text: (l) => l.business_unit_ref?.name || l.business_line || "" },
+    { key: "action_owner", header: "Action owner", hidden: true, render: (l) => <span className="muted"><UserName user={l.action_owner_ref} fallback={l.action_owner} /></span>, text: (l) => l.action_owner_ref?.full_name || l.action_owner || "" },
+    { key: "gross_loss", header: "Gross", sortable: true, align: "right", render: (l) => <span className="muted">{formatMoney(l.gross_loss, l.currency)}</span>, text: (l) => formatMoney(l.gross_loss, l.currency) },
+    { key: "recovery", header: "Recovery", sortable: true, align: "right", render: (l) => <span className="muted">{formatMoney(l.recovery, l.currency)}</span>, text: (l) => formatMoney(l.recovery, l.currency) },
+    { key: "net", header: "Net", align: "right", render: (l) => <span className="muted">{formatMoney(l.net_loss, l.currency)}</span>, text: (l) => formatMoney(l.net_loss, l.currency) },
     { key: "status", header: "Status", sortable: true, render: (l) => <Badge tone={LOSS_STATUS_TONE[l.status] || "neutral"}>{cap(l.status)}</Badge> },
-    { key: "occurrence_date", header: "Occurred", sortable: true, render: (l) => <span className="muted">{l.occurrence_date || "—"}</span> },
+    { key: "occurrence_date", header: "Occurred", sortable: true, render: (l) => <span className="muted">{formatDate(l.occurrence_date)}</span>, text: (l) => (l.occurrence_date ? formatDate(l.occurrence_date) : "") },
     { key: "actions", header: "", render: (l) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeLoss(l)}>Delete</button></div> },
   ];
 
@@ -657,15 +710,30 @@ function OperationalRiskInner() {
       </Field>
       <div className="field-row">
         <Field label="Business unit" help="The unit or department being assessed.">
-          <TextInput value={af.business_unit} onChange={(v) => setA("business_unit", v)} placeholder="Payments" />
+          <BusinessUnitSelect
+            value={af.business_unit_id}
+            onChange={(id) => setA("business_unit_id", id)}
+            legacyText={editingRcsa ? legacy(editingRcsa.business_unit_id, editingRcsa.business_unit) : null}
+          />
         </Field>
-        <Field label="Process" help="The process under assessment.">
-          <TextInput value={af.process} onChange={(v) => setA("process", v)} placeholder="Wire transfers" />
+        <Field label="Process" help="The process under assessment (narrowed to the unit when one is chosen).">
+          <ProcessSelect
+            value={af.process_id}
+            businessUnitId={af.business_unit_id}
+            onChange={(id) => setA("process_id", id)}
+            legacyText={editingRcsa ? legacy(editingRcsa.process_id, editingRcsa.process) : null}
+          />
         </Field>
       </div>
       <div className="field-row">
         <Field label="Assessor">
-          <TextInput value={af.assessor} onChange={(v) => setA("assessor", v)} placeholder="Name" />
+          <UserPicker
+            value={af.assessor_id}
+            onChange={(id) => setA("assessor_id", id)}
+            selected={editingRcsa?.assessor_ref ?? null}
+            legacyText={editingRcsa ? legacy(editingRcsa.assessor_id, editingRcsa.assessor) : null}
+            placeholder="Who runs the assessment…"
+          />
         </Field>
         <Field label="Status">
           <Select value={af.status} onChange={(v) => setA("status", v)} options={RCSA_STATUS} />
@@ -686,9 +754,6 @@ function OperationalRiskInner() {
           <TextInput type="date" value={af.completed_date} onChange={(v) => setA("completed_date", v)} />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this campaign record.">
-        <Select value={af.workflow_status} onChange={(v) => setA("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -700,15 +765,31 @@ function OperationalRiskInner() {
       </Field>
       <div className="field-row">
         <Field label="Category">
-          <TextInput value={kf.category} onChange={(v) => setK("category", v)} placeholder="Operational" />
+          <LookupSelect
+            lookupKey="kri_category"
+            value={kf.category_id}
+            onChange={(id) => setK("category_id", id)}
+            legacyText={editingKri ? legacy(editingKri.category_id, editingKri.category) : null}
+            allowCreate
+          />
         </Field>
-        <Field label="Business area">
-          <TextInput value={kf.business_area} onChange={(v) => setK("business_area", v)} placeholder="Payments" />
+        <Field label="Business unit" help="The unit or area the indicator measures.">
+          <BusinessUnitSelect
+            value={kf.business_unit_id}
+            onChange={(id) => setK("business_unit_id", id)}
+            legacyText={editingKri ? legacy(editingKri.business_unit_id, editingKri.business_area) : null}
+          />
         </Field>
       </div>
       <div className="field-row">
         <Field label="Owner">
-          <TextInput value={kf.owner} onChange={(v) => setK("owner", v)} placeholder="Risk owner" />
+          <UserPicker
+            value={kf.owner_id}
+            onChange={(id) => setK("owner_id", id)}
+            selected={editingKri?.owner_ref ?? null}
+            legacyText={editingKri ? legacy(editingKri.owner_id, editingKri.owner) : null}
+            placeholder="Indicator owner…"
+          />
         </Field>
         <Field label="Unit" help='Unit of measure, e.g. "%", "count", "PKR".'>
           <TextInput value={kf.unit} onChange={(v) => setK("unit", v)} placeholder="%" />
@@ -736,9 +817,6 @@ function OperationalRiskInner() {
       <Field label="Indicates risks" help="Register risks this indicator monitors.">
         <AsyncMultiSelect search={linkSearch("risks")} value={kf.risk_ids} onChange={(v) => setK("risk_ids", v)} />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this KRI record.">
-        <Select value={kf.workflow_status} onChange={(v) => setK("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -752,8 +830,12 @@ function OperationalRiskInner() {
         <Field label="Basel event type" help="Basel II level-1 loss category.">
           <Select value={lf.basel_event_type} onChange={(v) => setL("basel_event_type", v)} options={BASEL_TYPES} />
         </Field>
-        <Field label="Business line">
-          <TextInput value={lf.business_line} onChange={(v) => setL("business_line", v)} placeholder="Retail banking" />
+        <Field label="Business unit" help="The business line / unit that suffered the loss.">
+          <BusinessUnitSelect
+            value={lf.business_unit_id}
+            onChange={(id) => setL("business_unit_id", id)}
+            legacyText={editingLoss ? legacy(editingLoss.business_unit_id, editingLoss.business_line) : null}
+          />
         </Field>
       </div>
       <div className="field-row">
@@ -765,8 +847,13 @@ function OperationalRiskInner() {
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Currency">
-          <TextInput value={lf.currency} onChange={(v) => setL("currency", v)} placeholder="PKR" />
+        <Field label="Currency" help="Currency the amounts above are in.">
+          <Select
+            value={lf.currency}
+            onChange={(v) => setL("currency", v || currency)}
+            options={currencyOptions.some((o) => o.value === lf.currency) ? currencyOptions : [{ value: lf.currency, label: lf.currency }, ...currencyOptions]}
+            placeholder="Choose a currency…"
+          />
         </Field>
         <Field label="Status">
           <Select value={lf.status} onChange={(v) => setL("status", v)} options={LOSS_STATUS} />
@@ -791,7 +878,13 @@ function OperationalRiskInner() {
         <TextArea value={lf.root_cause} onChange={(v) => setL("root_cause", v)} rows={3} placeholder="Underlying cause of the loss." />
       </Field>
       <Field label="Action owner">
-        <TextInput value={lf.action_owner} onChange={(v) => setL("action_owner", v)} placeholder="Owner" />
+        <UserPicker
+          value={lf.action_owner_id}
+          onChange={(id) => setL("action_owner_id", id)}
+          selected={editingLoss?.action_owner_ref ?? null}
+          legacyText={editingLoss ? legacy(editingLoss.action_owner_id, editingLoss.action_owner) : null}
+          placeholder="Who owns the follow-up…"
+        />
       </Field>
       <Field label="Related incident" help="The incident this loss event stemmed from.">
         <AsyncSelect
@@ -805,10 +898,15 @@ function OperationalRiskInner() {
       <Field label="Affected risks" help="Register risks this loss materialised against.">
         <AsyncMultiSelect search={linkSearch("risks")} value={lf.risk_ids} onChange={(v) => setL("risk_ids", v)} />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this loss record.">
-        <Select value={lf.workflow_status} onChange={(v) => setL("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
+  );
+  // Loss events open straight into the form (no drawer), so their approval lives here.
+  const lossApproval = (
+    <WorkflowFields
+      entityType="loss_event"
+      entityId={editingLoss?.id ?? null}
+      onChanged={() => { reload(); loadSummary(); }}
+    />
   );
 
   // ------------------------------------------------------------- render
@@ -864,7 +962,7 @@ function OperationalRiskInner() {
 
       {/* ============================================= RCSA */}
       {section === "rcsa" && (
-        <DataTable<RcsaAssessment>
+        <DataTable<RcsaExt>
           columns={rcsaColumns}
           fetcher={fetchRcsa}
           rowKey={(r) => r.id}
@@ -872,6 +970,7 @@ function OperationalRiskInner() {
           activeKey={openId}
           searchPlaceholder="Search RCSA by title, reference or unit…"
           defaultSort={{ by: "created_at", dir: "desc" }}
+          toolbarRight={<ArchivedRecords entityType="rcsa_assessment" noun="RCSA assessments" refreshKey={refreshKey} onRestored={reload} />}
           emptyMessage="No RCSA campaigns. Launch a risk & control self-assessment to score inherent and residual risk."
           refreshKey={refreshKey}
         />
@@ -879,7 +978,7 @@ function OperationalRiskInner() {
 
       {/* ============================================= KRIs */}
       {section === "kris" && (
-        <DataTable<KeyRiskIndicator>
+        <DataTable<KriExt>
           columns={kriColumns}
           fetcher={fetchKris}
           rowKey={(k) => k.id}
@@ -887,6 +986,7 @@ function OperationalRiskInner() {
           activeKey={openId}
           searchPlaceholder="Search KRIs by name, reference, category or owner…"
           defaultSort={{ by: "name", dir: "asc" }}
+          toolbarRight={<ArchivedRecords entityType="key_risk_indicator" noun="KRIs" refreshKey={refreshKey} onRestored={reload} />}
           emptyMessage="No KRIs. Define key risk indicators and record measurements to monitor RAG status."
           refreshKey={refreshKey}
         />
@@ -904,25 +1004,26 @@ function OperationalRiskInner() {
             </div>
             <div className="card stat">
               <div className="stat-top">
-                <span className="n">{summary ? summary.total_gross.toLocaleString() : "—"}</span>
+                <span className="n">{summary ? formatMoney(summary.total_gross, currency, { compact: "auto" }) : "—"}</span>
               </div>
               <span className="l">Total gross loss</span>
             </div>
             <div className="card stat">
               <div className="stat-top">
-                <span className="n">{summary ? summary.total_net.toLocaleString() : "—"}</span>
+                <span className="n">{summary ? formatMoney(summary.total_net, currency, { compact: "auto" }) : "—"}</span>
               </div>
               <span className="l">Total net loss</span>
             </div>
           </div>
 
-          <DataTable<LossEvent>
+          <DataTable<LossEventExt>
             columns={lossColumns}
             fetcher={fetchLosses}
             rowKey={(l) => l.id}
             onRowClick={(l) => openEditLoss(l)}
             searchPlaceholder="Search loss events by title, reference or business line…"
             defaultSort={{ by: "occurrence_date", dir: "desc" }}
+            toolbarRight={<ArchivedRecords entityType="loss_event" noun="loss events" refreshKey={refreshKey} onRestored={() => { reload(); loadSummary(); }} />}
             emptyMessage="No loss events. Log operational losses against Basel event types to build the loss database."
             refreshKey={refreshKey}
           />
@@ -935,7 +1036,7 @@ function OperationalRiskInner() {
         open={section === "rcsa" && !!openId && !!rcsaDetail}
         onClose={() => setOpenId(null)}
         title={rcsaDetail ? `${rcsaDetail.reference || ""} ${rcsaDetail.title}`.trim() : "…"}
-        subtitle={rcsaDetail ? `${cap(rcsaDetail.status)} · ${rcsaDetail.business_unit || "no unit"}${rcsaDetail.assessor ? " · assessor " + rcsaDetail.assessor : ""}` : ""}
+        subtitle={rcsaDetail ? `${cap(rcsaDetail.status)} · ${rcsaDetail.business_unit_ref?.name || rcsaDetail.business_unit || "no unit"}${(rcsaDetail.assessor_ref?.full_name || rcsaDetail.assessor) ? " · assessor " + (rcsaDetail.assessor_ref?.full_name || rcsaDetail.assessor) : ""}` : ""}
         width={860}
         actions={rcsaDetail && (
           <>
@@ -946,6 +1047,22 @@ function OperationalRiskInner() {
       >
         {rcsaDetail && (
           <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <Fact label="Business unit"><UnitName unit={rcsaDetail.business_unit_ref} fallback={rcsaDetail.business_unit} /></Fact>
+              <Fact label="Process">{rcsaDetail.process_ref?.name || rcsaDetail.process || <span className="muted">—</span>}</Fact>
+              <Fact label="Assessor"><UserName user={rcsaDetail.assessor_ref} fallback={rcsaDetail.assessor} /></Fact>
+              <Fact label="Period">{rcsaDetail.period || <span className="muted">—</span>}</Fact>
+              <Fact label="Due">{formatDate(rcsaDetail.due_date)}{rcsaDetail.is_overdue && <> <Badge tone="high">Overdue</Badge></>}</Fact>
+              <Fact label="Completed">{formatDate(rcsaDetail.completed_date)}</Fact>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Approval</h3></div>
+              <div className="card-pad">
+                <WorkflowFields entityType="rcsa_assessment" entityId={rcsaDetail.id} onChanged={() => { loadRcsa(rcsaDetail.id); reload(); }} />
+              </div>
+            </div>
+
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-pad">
                 <strong>Risk &amp; control lines</strong>
@@ -960,9 +1077,9 @@ function OperationalRiskInner() {
                     <label className="label">Title</label>
                     <input className="input" value={rd.title} onChange={(ev) => setRD("title", ev.target.value)} placeholder="Risk title" required />
                   </div>
-                  <div style={{ width: 130 }}>
+                  <div style={{ width: 190 }}>
                     <label className="label">Category</label>
-                    <input className="input" value={rd.category} onChange={(ev) => setRD("category", ev.target.value)} placeholder="Category" />
+                    <LookupSelect lookupKey="risk_category" value={rd.category_id} onChange={(id) => setRD("category_id", id)} placeholder="Risk category…" />
                   </div>
                   <div style={{ width: 90 }}>
                     <label className="label">Inh. L</label>
@@ -1014,9 +1131,9 @@ function OperationalRiskInner() {
                     <label className="label">Action</label>
                     <input className="input" value={rd.action} onChange={(ev) => setRD("action", ev.target.value)} placeholder="Remediation action" />
                   </div>
-                  <div style={{ width: 140 }}>
+                  <div style={{ width: 200 }}>
                     <label className="label">Action owner</label>
-                    <input className="input" value={rd.action_owner} onChange={(ev) => setRD("action_owner", ev.target.value)} placeholder="Owner" />
+                    <UserPicker value={rd.action_owner_id} onChange={(id) => setRD("action_owner_id", id)} placeholder="Action owner…" />
                   </div>
                   <div style={{ width: 150 }}>
                     <label className="label">Due date</label>
@@ -1045,14 +1162,14 @@ function OperationalRiskInner() {
                       {rcsaDetail.risks.map((ri: RcsaRiskExt) => (
                         <tr key={ri.id}>
                           <td className="cell-title">{ri.title}</td>
-                          <td className="muted">{ri.category || "—"}</td>
+                          <td className="muted">{ri.category_ref?.label || ri.category || "—"}</td>
                           <td className="muted">{ri.inherent_likelihood}×{ri.inherent_impact} ({ri.inherent_score})</td>
                           <td><EffBadge value={ri.control_effectiveness} /></td>
                           <td className="muted">{ri.residual_likelihood}×{ri.residual_impact} ({ri.residual_score})</td>
                           <td><RelatedChips label="" items={ri.risk ? [ri.risk] : []} href="/risks" /></td>
                           <td><RelatedChips label="" items={ri.control ? [ri.control] : []} href="/controls" /></td>
-                          <td className="muted">{ri.action_owner || "—"}</td>
-                          <td className="muted">{ri.due_date || "—"}</td>
+                          <td className="muted"><UserName user={ri.action_owner_ref} fallback={ri.action_owner} /></td>
+                          <td className="muted">{formatDate(ri.due_date)}</td>
                           <td>
                             <button className="btn secondary sm" onClick={() => removeRisk(ri.id)}>Remove</button>
                           </td>
@@ -1077,7 +1194,7 @@ function OperationalRiskInner() {
         open={section === "kris" && !!openId && !!kriDetail}
         onClose={() => setOpenId(null)}
         title={kriDetail ? `${kriDetail.reference || ""} ${kriDetail.name}`.trim() : "…"}
-        subtitle={kriDetail ? `${RAG_LABEL[kriDetail.status] || cap(kriDetail.status)} · ${cap(kriDetail.direction)}${kriDetail.last_measured_date ? " · last measured " + kriDetail.last_measured_date : ""}` : ""}
+        subtitle={kriDetail ? `${RAG_LABEL[kriDetail.status] || cap(kriDetail.status)} · ${cap(kriDetail.direction)}${kriDetail.last_measured_date ? " · last measured " + formatDate(kriDetail.last_measured_date) : ""}` : ""}
         width={720}
         actions={kriDetail && (
           <>
@@ -1096,8 +1213,24 @@ function OperationalRiskInner() {
               </span>
             </div>
 
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <Fact label="Owner"><UserName user={kriDetail.owner_ref} fallback={kriDetail.owner} /></Fact>
+              <Fact label="Business unit"><UnitName unit={kriDetail.business_unit_ref} fallback={kriDetail.business_area} /></Fact>
+              <Fact label="Category">{kriDetail.category_ref?.label || kriDetail.category || <span className="muted">—</span>}</Fact>
+              <Fact label="Frequency">{cap(kriDetail.frequency)}</Fact>
+              <Fact label="Warn / limit">{num(kriDetail.warning_threshold)} / {num(kriDetail.limit_threshold)}{kriDetail.unit ? " " + kriDetail.unit : ""}</Fact>
+              <Fact label="Last measured">{formatDate(kriDetail.last_measured_date)}</Fact>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Approval</h3></div>
+              <div className="card-pad">
+                <WorkflowFields entityType="key_risk_indicator" entityId={kriDetail.id} onChanged={() => { loadKri(kriDetail.id); reload(); }} />
+              </div>
+            </div>
+
             <div style={{ marginBottom: 16 }}>
-              <RelatedChips label="Risks" items={(kriDetail as KriExt).risks} href="/risks" />
+              <RelatedChips label="Risks" items={kriDetail.risks} href="/risks" />
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
@@ -1139,7 +1272,7 @@ function OperationalRiskInner() {
                         .sort((a, b) => (b.as_of_date || "").localeCompare(a.as_of_date || ""))
                         .map((m) => (
                           <tr key={m.id}>
-                            <td className="muted">{m.as_of_date || "—"}</td>
+                            <td className="muted">{formatDate(m.as_of_date)}</td>
                             <td className="cell-title">{num(m.value)}{kriDetail.unit ? " " + kriDetail.unit : ""}</td>
                             <td className="muted">{m.notes || "—"}</td>
                           </tr>
@@ -1220,6 +1353,7 @@ function OperationalRiskInner() {
           tabs={[
             { id: "general", label: "General", content: lossGeneral, required: true },
             { id: "details", label: "Details", content: lossDetails },
+            { id: "approval", label: "Approval", content: lossApproval },
           ]}
           onClose={() => setShowLossForm(false)}
           onSave={saveLoss}

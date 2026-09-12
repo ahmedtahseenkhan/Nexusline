@@ -46,6 +46,9 @@ class ApprovalRead(BaseModel):
     entity_label: str
     link: str
     approver: str
+    #: The maker's user id — lets the UI withhold Approve/Reject from the person who
+    #: raised the request (the server refuses it regardless).
+    requested_by: uuid.UUID | None = None
     requested_by_email: str
     required_approvals: int
     approvals_received: int

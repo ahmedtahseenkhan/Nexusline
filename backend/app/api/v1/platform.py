@@ -25,8 +25,9 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 
+from app.core.config import settings
 from app.core.database import set_session_tenant, system_session, tenant_session
 from app.core.deps import CurrentUser, require_platform_admin
 from app.db.provisioning import create_organization
@@ -71,6 +72,19 @@ class OrganizationUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=200)
     #: Suspending blocks every login for the organisation. Its data is untouched.
     is_active: bool | None = None
+
+
+class DemoResetRequest(BaseModel):
+    #: Must equal the organisation's identifier (slug) — typed, not clicked.
+    confirm: str
+
+
+class DemoResetResult(BaseModel):
+    organization: str
+    prefixes: list[str]
+    #: Records archived, per table. Tables with nothing to archive are omitted.
+    archived: dict[str, int]
+    total: int
 
 
 class PlatformSummary(BaseModel):
@@ -236,3 +250,117 @@ async def summary() -> PlatformSummary:
         deployment=info.deployment or "on-premise",
         license=info.to_public(),
     )
+
+
+# ------------------------------------------------------------------ demo reset ---
+def archivable_models() -> list[tuple[type, str]]:
+    """Every tenant-scoped, soft-deletable model (``SoftDeleteMixin``, or its own
+    ``deleted``/``deleted_date`` pair as ``assets`` has) with a ``title`` or ``name``
+    column, paired with that column's name (``title`` preferred)."""
+    from app.models.base import Base
+
+    found: list[tuple[type, str]] = []
+    for mapper in Base.registry.mappers:
+        cls = mapper.class_
+        columns = cls.__table__.c
+        if "tenant_id" not in columns or "deleted" not in columns or "deleted_date" not in columns:
+            continue
+        label = "title" if "title" in columns else "name" if "name" in columns else None
+        if label is not None:
+            found.append((cls, label))
+    return sorted(found, key=lambda pair: pair[0].__tablename__)
+
+
+def demo_reset_refusal(
+    tenant_slug: str, confirm: str, demo_slug: str, prefixes: list[str]
+) -> tuple[int, str] | None:
+    """``(status code, reason)`` when a reset must be refused, or None when it may run."""
+    if not demo_slug or tenant_slug != demo_slug:
+        return (
+            status.HTTP_403_FORBIDDEN,
+            f"Only the demo organisation ('{demo_slug or 'none configured'}') can be reset; "
+            f"'{tenant_slug}' is not it.",
+        )
+    if (confirm or "").strip() != tenant_slug:
+        return (
+            422,
+            f"Type the organisation identifier '{tenant_slug}' in \"confirm\" to reset it.",
+        )
+    if not prefixes:
+        return status.HTTP_409_CONFLICT, "No test-data prefixes are configured (DEMO_RESET_PREFIXES)."
+    return None
+
+
+@router.post("/organizations/{tenant_id}/reset-demo", response_model=DemoResetResult)
+async def reset_demo(tenant_id: uuid.UUID, body: DemoResetRequest, user: CurrentUser) -> DemoResetResult:
+    """Clear test debris out of the demo organisation in one call.
+
+    **What it does:** archives (``deleted = true``, ``deleted_date = now``) every live
+    record whose ``title`` — or ``name`` where the table has no title — starts with one
+    of ``settings.demo_reset_prefixes`` (default ``NL-E2E-TEST``), across every
+    soft-deletable table. Matching is case-sensitive and literal (``%`` and ``_`` in a
+    prefix match themselves). Returns the count archived per table.
+
+    **What it does not do:** hard-delete anything, touch records without the prefix,
+    reseed, or undo edits made to seeded records. Archived rows stay in the database and
+    can be restored by clearing ``deleted``.
+
+    **Guards:** platform administrators only (router dependency); refused (403) for any
+    organisation but the configured demo org (``DEMO_ORG_SLUG``, else ``SEED_ORG_SLUG`` on an
+    install with ``SEED_DATA=true``; a client install has no demo org and always refuses);
+    the body must be ``{"confirm": "<org slug>"}`` (422 otherwise). Every archived record
+    gets its own audit entry in the organisation's trail, plus one summary entry.
+    """
+    async with system_session() as db:
+        tenant = await db.get(Tenant, tenant_id)
+        if tenant is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organisation not found")
+        slug, name = tenant.slug, tenant.name
+
+    prefixes = [p for p in settings.demo_reset_prefixes if p and p.strip()]
+    refusal = demo_reset_refusal(slug, body.confirm, settings.demo_org, prefixes)
+    if refusal is not None:
+        raise HTTPException(status_code=refusal[0], detail=refusal[1])
+
+    now = datetime.now(timezone.utc)
+    archived: dict[str, int] = {}
+    # Scoped to the demo org alone: row-level security confines every UPDATE below to it.
+    async with tenant_session(tenant_id) as db:
+        for model, label in archivable_models():
+            column = getattr(model, label)
+            rows = (
+                await db.execute(
+                    update(model)
+                    .where(
+                        model.deleted.is_(False),
+                        or_(*[column.startswith(p, autoescape=True) for p in prefixes]),
+                    )
+                    .values(deleted=True, deleted_date=now)
+                    .returning(model.id, column)
+                    .execution_options(synchronize_session=False)
+                )
+            ).all()
+            if not rows:
+                continue
+            archived[model.__tablename__] = len(rows)
+            for row_id, row_label in rows:
+                await audit.record_system(
+                    db,
+                    tenant_id=tenant_id,
+                    action="archive",
+                    entity_type=model.__tablename__,
+                    entity_id=row_id,
+                    summary=f"Archived test record '{str(row_label)[:200]}' (demo reset by {user.email})"[:500],
+                    changes={"deleted": True, "by": user.email, "reason": "demo_reset"},
+                )
+        total = sum(archived.values())
+        await audit.record_system(
+            db,
+            tenant_id=tenant_id,
+            action="reset_demo",
+            entity_type="organization",
+            entity_id=tenant_id,
+            summary=f"Demo reset by {user.email}: archived {total} test record(s)",
+            changes={"prefixes": prefixes, "archived": archived, "by": user.email},
+        )
+    return DemoResetResult(organization=name, prefixes=prefixes, archived=archived, total=total)

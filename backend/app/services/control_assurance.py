@@ -17,9 +17,12 @@ engine and the compliance gap analysis all read the same answer:
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import Iterable
 
-from app.models.enums import ControlEffectiveness, TestResult
+from app.models.control import UNTESTABLE_CONTROL_STATUSES
+from app.models.enums import ControlEffectiveness, ControlStatus, ReviewFrequency, TestResult
+from app.services.risk_scoring import next_review_date
 
 #: Coverage states, weakest to strongest. A clause takes the strongest its controls reach.
 UNMAPPED = "unmapped"
@@ -79,3 +82,65 @@ def is_assured(effectivenesses: Iterable[ControlEffectiveness | None]) -> bool:
 
 #: Effectiveness values that count as assurance, for the SQL side of the gap filter.
 ASSURED_EFFECTIVENESS: tuple[ControlEffectiveness, ...] = tuple(_ASSURED)
+
+
+# ---------------------------------------------------------------------------
+# The test clock
+# ---------------------------------------------------------------------------
+# A planned control has nothing to test: scheduling its first test from the day it was
+# written down made every freshly created (or pack-installed) control "due" on day one,
+# and flooded the alerts with controls nobody could test yet. The clock starts when the
+# control goes live (implemented / operational) and stops when it is retired. The same
+# rule drives both cycles — audits (``audit_frequency``) and maintenance
+# (``maintenance_frequency``).
+def carries_test_clock(status: ControlStatus | None) -> bool:
+    """Only an implemented or operational control has a next test / maintenance date."""
+    return status not in UNTESTABLE_CONTROL_STATUSES
+
+
+def next_cycle_date(
+    status: ControlStatus,
+    frequency: ReviewFrequency,
+    *,
+    current: date | None = None,
+    explicit: date | None = None,
+    explicit_given: bool = False,
+    frequency_changed: bool = False,
+    became_testable: bool = False,
+    last_done: date | None = None,
+    today: date | None = None,
+) -> date | None:
+    """The next due date for one cycle of a control after a create or an edit.
+
+    * Planned / retired → ``None``, whatever was sent: an explicit date is ignored.
+    * An explicit date wins.
+    * A control that has just gone live (new, or planned/retired → implemented /
+      operational) is scheduled a cycle from today — not from a test run years ago,
+      which would make it overdue the moment it went live, and not from a stale date
+      it carried while it had no clock.
+    * An explicit *blank* or a changed frequency re-derives from the last time the
+      cycle ran (or today).
+    * Otherwise the current date stands.
+    """
+    if not carries_test_clock(status):
+        return None
+    today = today or date.today()
+    if explicit_given and explicit is not None:
+        return explicit
+    if became_testable:
+        return next_review_date(frequency, today)
+    if explicit_given or frequency_changed:
+        return next_review_date(frequency, last_done or today)
+    return current
+
+
+def after_test_date(status: ControlStatus, frequency: ReviewFrequency, conducted: date) -> date | None:
+    """The next due date once a test (or maintenance) has been recorded."""
+    if not carries_test_clock(status):
+        return None
+    return next_review_date(frequency, conducted)
+
+
+def is_cycle_overdue(status: ControlStatus, due: date | None, today: date | None = None) -> bool:
+    """Past its due date — and only for a control that carries a clock at all."""
+    return carries_test_clock(status) and due is not None and due < (today or date.today())

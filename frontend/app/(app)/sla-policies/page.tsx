@@ -5,6 +5,7 @@ import Link from "next/link";
 import { api, apiCall, type SlaPolicy, type TatSummary } from "@/lib/api";
 import { Badge } from "@/components/badges";
 import { IconGauge } from "@/components/icons";
+import { useFormat } from "@/lib/format";
 
 /* The bank's remediation standard, expressed as something the platform can measure.
    Until this clock exists, "critical findings within 15 days" lives in a policy document
@@ -25,6 +26,7 @@ type Draft = Record<string, SlaPolicy>;
 const keyOf = (p: { entity_type: string; severity: string }) => `${p.entity_type}/${p.severity}`;
 
 export default function SlaPoliciesPage() {
+  const { formatDate } = useFormat();
   const [rows, setRows] = useState<SlaPolicy[]>([]);
   const [draft, setDraft] = useState<Draft>({});
   const [summary, setSummary] = useState<TatSummary | null>(null);
@@ -265,7 +267,7 @@ export default function SlaPoliciesPage() {
                       <Link href={r.link}>{r.label}</Link>
                     </td>
                     <td><Badge tone={SEVERITY_TONE[r.severity] ?? "neutral"}>{r.severity}</Badge></td>
-                    <td className="muted">{r.due ?? "—"}</td>
+                    <td className="muted">{formatDate(r.due)}</td>
                     <td>
                       {r.days_overdue > 0 ? (
                         <Badge tone="critical">{r.days_overdue}d over</Badge>

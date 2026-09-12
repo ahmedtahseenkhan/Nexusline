@@ -3,7 +3,13 @@
 import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
+import { assetDeleteMessage, linkedRiskCount } from "@/lib/assetImpact";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
+import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import { type Page } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
@@ -19,6 +25,7 @@ import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import ImportExport from "@/components/ImportExport";
 import GenerateRisks from "@/components/GenerateRisks";
 import { InlineLookupCreate } from "@/components/LookupManager";
+import { titleCase } from "@/lib/text";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -55,15 +62,14 @@ type MediaType = { id: string; name: string; description: string; editable: bool
 type Summary = { total: number; production: number; total_replacement_value: number; effective_critical: number };
 
 /* ----------------------------------------------------------------- helpers */
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-const money = (n: number | null | undefined, cur = "PKR") => `${cur} ${Number(n || 0).toLocaleString()}`;
+const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
 
 const CRIT = opts(["low", "medium", "high", "critical"]);
 const ENVIRONMENT = opts(["production", "dr", "uat", "staging", "development", "not_applicable"]);
 const DISCOVERY = opts(["manual", "active_directory", "intune_mdm", "cmdb", "network_scan", "cloud_connector", "edr", "import_csv"]);
 const RELATIONSHIP = opts(["hosts", "stores", "processes", "transmits", "backs_up"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const CRIT_TONE: Record<string, Tone> = { low: "low", medium: "medium", high: "high", critical: "critical" };
 
 function CritBadge({ value }: { value: string | null | undefined }) {
@@ -76,35 +82,36 @@ type FormState = {
   name: string; description: string; media_type_id: string; replacement_cost: string; currency: string;
   availability: string; rto_hours: string; rpo_hours: string; environment: string; location: string;
   hostname: string; ip_address: string; serial_number: string; manufacturer: string; model_number: string;
-  os_version: string; tag_ids: string[]; discovery_source: string; external_id: string; workflow_status: string;
+  os_version: string; tag_ids: string[]; discovery_source: string; external_id: string;
 };
+/** `currency` is filled with the organisation's currency when the form opens. */
 const BLANK: FormState = {
-  name: "", description: "", media_type_id: "", replacement_cost: "", currency: "PKR", availability: "medium",
+  name: "", description: "", media_type_id: "", replacement_cost: "", currency: "", availability: "medium",
   rto_hours: "", rpo_hours: "", environment: "production", location: "", hostname: "", ip_address: "",
   serial_number: "", manufacturer: "", model_number: "", os_version: "", tag_ids: [], discovery_source: "manual",
-  external_id: "", workflow_status: "draft",
+  external_id: "",
 };
 function fromAsset(a: Asset): FormState {
   return {
     name: a.name, description: a.description || "", media_type_id: a.media_type?.id || "",
-    replacement_cost: a.replacement_cost != null ? String(a.replacement_cost) : "", currency: a.currency || "PKR",
+    replacement_cost: a.replacement_cost != null ? String(a.replacement_cost) : "", currency: a.currency || "",
     availability: a.availability || "medium", rto_hours: a.rto_hours != null ? String(a.rto_hours) : "",
     rpo_hours: a.rpo_hours != null ? String(a.rpo_hours) : "", environment: a.environment || "production",
     location: a.location || "", hostname: a.hostname || "", ip_address: a.ip_address || "",
     serial_number: a.serial_number || "", manufacturer: a.manufacturer || "", model_number: a.model_number || "",
     os_version: a.os_version || "", tag_ids: a.tags.map((t) => t.id), discovery_source: a.discovery_source || "manual",
-    external_id: a.external_id || "", workflow_status: a.workflow_status || "draft",
+    external_id: a.external_id || "",
   };
 }
-function toPayload(f: FormState): Record<string, unknown> {
+function toPayload(f: FormState, tenantCurrency: string): Record<string, unknown> {
   return {
     asset_class: "it_asset", name: f.name, description: f.description, media_type_id: f.media_type_id || null,
-    replacement_cost: f.replacement_cost === "" ? 0 : Number(f.replacement_cost), currency: f.currency || "PKR",
+    replacement_cost: f.replacement_cost === "" ? 0 : Number(f.replacement_cost), currency: f.currency || tenantCurrency,
     availability: f.availability, rto_hours: f.rto_hours === "" ? null : Number(f.rto_hours),
     rpo_hours: f.rpo_hours === "" ? null : Number(f.rpo_hours), environment: f.environment, location: f.location,
     hostname: f.hostname, ip_address: f.ip_address, serial_number: f.serial_number, manufacturer: f.manufacturer,
     model_number: f.model_number, os_version: f.os_version, tag_ids: f.tag_ids, discovery_source: f.discovery_source,
-    external_id: f.external_id, workflow_status: f.workflow_status,
+    external_id: f.external_id,
   };
 }
 
@@ -114,6 +121,7 @@ function ITAssetsInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const { currency, currencyOptions, formatDate, formatMoney } = useFormat();
 
   const [mediaTypes, setMediaTypes] = useState<MediaType[]>([]);
   const [tags, setTags] = useState<TagRow[]>([]);
@@ -159,13 +167,13 @@ function ITAssetsInner() {
     [],
   );
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
-  function openEdit(a: Asset) { setEditing(a); setF(fromAsset(a)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF({ ...BLANK, currency }); setError(null); setShowForm(true); }
+  function openEdit(a: Asset) { setEditing(a); setF({ ...fromAsset(a), currency: a.currency || currency }); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
-      const payload = toPayload(f);
+      const payload = toPayload(f, currency);
       if (editing) await apiCall<Asset>("PATCH", `/assets/${editing.id}`, payload);
       else await apiCall<Asset>("POST", "/assets", payload);
       setShowForm(false); setRefreshKey((k) => k + 1); loadSummary();
@@ -176,12 +184,14 @@ function ITAssetsInner() {
     } finally { setSaving(false); }
   }
   async function remove(a: Asset) {
-    if (!(await confirmDialog({ title: `Archive IT asset "${a.name}"?`, message: "It will be removed from the inventory.", confirmLabel: "Archive", danger: true }))) return;
-    setError(null);
+    const ok = await confirmDeleteWithImpact("asset", a.id, a.name, {
+      typeLabel: "IT asset", confirmLabel: "Archive", note: "Linked risks stay in the risk register and are flagged for review.",
+    });
+    if (!ok) return;
     try {
       await apiCall<void>("DELETE", `/assets/${a.id}`);
-      setShowForm(false); if (openId === a.id) setOpenId(null); setRefreshKey((k) => k + 1); loadSummary(); toast("Archived");
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete IT asset"); }
+      setShowForm(false); if (openId === a.id) setOpenId(null); setRefreshKey((k) => k + 1); loadSummary(); toast(`Archived ${a.name}`);
+    } catch (e) { toast(deleteErrorText(e, "Failed to delete the IT asset"), "error"); }
   }
   async function createTag() {
     const name = newTag.trim(); if (!name) return; setCreatingTag(true);
@@ -222,28 +232,27 @@ function ITAssetsInner() {
     { key: "os_version", header: "OS", hidden: true, render: (a) => <span className="muted">{a.os_version || "—"}</span> },
     { key: "serial_number", header: "Serial", hidden: true, render: (a) => <span className="ref">{a.serial_number || "—"}</span> },
     { key: "rto", header: "RTO / RPO (h)", hidden: true, render: (a) => <span className="muted">{a.rto_hours ?? "—"} / {a.rpo_hours ?? "—"}</span>, text: (a) => `${a.rto_hours ?? ""}/${a.rpo_hours ?? ""}` },
-    { key: "replacement_cost_value", header: "Replacement cost", hidden: true, align: "right", render: (a) => <span className="muted">{a.replacement_cost ? `${a.currency} ${a.replacement_cost.toLocaleString()}` : "—"}</span>, text: (a) => String(a.replacement_cost ?? "") },
+    { key: "replacement_cost_value", header: "Replacement cost", hidden: true, align: "right", render: (a) => <span className="muted">{a.replacement_cost ? formatMoney(a.replacement_cost, a.currency) : "—"}</span>, text: (a) => (a.replacement_cost ? formatMoney(a.replacement_cost, a.currency) : "") },
     { key: "discovery_source", header: "Discovered via", hidden: true, render: (a) => <span className="muted">{cap(a.discovery_source)}</span>, text: (a) => cap(a.discovery_source) },
     { key: "tags", header: "Tags", hidden: true, render: (a) => a.tags?.length ? <div className="chips">{a.tags.map((t) => <span key={t.id} className="chip">{t.name}</span>)}</div> : <span className="muted">—</span>, text: (a) => (a.tags ?? []).map((t) => t.name).join(", ") },
-    { key: "workflow_status", header: "Workflow", hidden: true, render: (a) => <span className="muted">{cap(a.workflow_status)}</span>, text: (a) => cap(a.workflow_status) },
-    { key: "created_at", header: "Created", hidden: true, render: (a) => <span className="muted">{a.created_at?.slice(0, 10) || "—"}</span>, text: (a) => a.created_at?.slice(0, 10) ?? "" },
+    { key: "workflow_status", header: "Approval", hidden: true, render: (a) => <span className="muted">{workflowLabel(a.workflow_status)}</span>, text: (a) => workflowLabel(a.workflow_status) },
+    { key: "created_at", header: "Created", hidden: true, render: (a) => <span className="muted">{formatDate(a.created_at)}</span>, text: (a) => (a.created_at ? formatDate(a.created_at) : "") },
   ];
 
   /** Delete every selected asset after one confirmation, then drop the selection. */
   async function removeMany(rowsToDelete: { id: string }[], clear: () => void) {
+    const linked = await linkedRiskCount(rowsToDelete.map((r) => r.id));
     const ok = await confirmDialog({
       title: `Delete ${rowsToDelete.length} asset${rowsToDelete.length === 1 ? "" : "s"}?`,
-      message: "Links from other records are kept and the activity trail records who removed them.",
+      message: assetDeleteMessage(linked, rowsToDelete.length),
       confirmLabel: "Delete", danger: true,
     });
     if (!ok) return;
-    let failed = 0;
-    for (const r of rowsToDelete) {
-      try { await apiCall("DELETE", `/assets/${r.id}`); } catch { failed += 1; }
-    }
+    const res = await deleteEach(rowsToDelete, (r) => apiCall("DELETE", `/assets/${r.id}`));
     clear();
     setRefreshKey((k) => k + 1);
-    toast(failed ? `${rowsToDelete.length - failed} deleted, ${failed} failed.` : `${rowsToDelete.length} deleted.`);
+    loadSummary();
+    toastDeleteSummary(res, "IT asset");
   }
 
   /* --------------------------------------------------------------- form tabs (unchanged) */
@@ -267,7 +276,9 @@ function ITAssetsInner() {
       <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>IT assets are judged on cost and availability only. Business-criticality is inherited from the information assets they host — a backup server is critical because of the data on it, not on its own.</p>
       <div className="field-row">
         <Field label="Replacement cost" help="Cost to replace this asset — drives its cost band."><TextInput type="number" value={f.replacement_cost} onChange={(v) => set("replacement_cost", v)} placeholder="0" /></Field>
-        <Field label="Currency"><TextInput value={f.currency} onChange={(v) => set("currency", v)} placeholder="PKR" /></Field>
+        <Field label="Currency" help="Defaults to the organisation's currency.">
+          <Select value={f.currency} onChange={(v) => set("currency", v)} options={currencyOptions} placeholder={`Organisation default (${currency})`} />
+        </Field>
         <Field label="Availability" help="How available this asset must be (SLA tier)."><Select value={f.availability} onChange={(v) => set("availability", v)} options={CRIT} /></Field>
       </div>
       <div className="field-row">
@@ -310,7 +321,6 @@ function ITAssetsInner() {
         <Field label="Discovery source" help="How this asset was brought into the inventory."><Select value={f.discovery_source} onChange={(v) => set("discovery_source", v)} options={DISCOVERY} /></Field>
         <Field label="External ID" help="Identifier in the source system (CMDB, AD, Intune…)."><TextInput value={f.external_id} onChange={(v) => set("external_id", v)} placeholder="CMDB-00123" /></Field>
       </div>
-      <Field label="Workflow status" help="Approval lifecycle for this asset record."><Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} /></Field>
     </>
   );
 
@@ -335,10 +345,11 @@ function ITAssetsInner() {
         <div className="card stat"><div className="stat-top"><span className="n">{(summary?.total ?? 0).toLocaleString()}</span></div><span className="l">IT assets</span></div>
         <div className="card stat"><div className="stat-top"><span className="n">{(summary?.effective_critical ?? 0).toLocaleString()}</span></div><span className="l">Effective-critical</span></div>
         <div className="card stat"><div className="stat-top"><span className="n">{(summary?.production ?? 0).toLocaleString()}</span></div><span className="l">Production assets</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{money(summary?.total_replacement_value)}</span></div><span className="l">Total replacement value</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{formatMoney(summary?.total_replacement_value ?? 0, null, { compact: "auto" })}</span></div><span className="l">Total replacement value</span></div>
       </div>
 
       <DataTable<Asset>
+        toolbarRight={<ArchivedRecords entityType="asset" noun="assets" onRestored={() => { setRefreshKey((k) => k + 1); loadSummary(); }} refreshKey={refreshKey} />}
         tableKey="it-assets"
         statusModel="asset"
         bulkActions={(rows, clear) => (
@@ -374,7 +385,12 @@ function ITAssetsInner() {
               <div><div className="muted" style={{ fontSize: 12 }}>Intrinsic (cost + availability)</div><div style={{ marginTop: 4 }}><CritBadge value={detail.intrinsic_criticality} /></div></div>
               <div><div className="muted" style={{ fontSize: 12 }}>Derived (from hosted data)</div><div style={{ marginTop: 4 }}><CritBadge value={detail.derived_criticality} /></div></div>
               <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Effective</div><div style={{ marginTop: 4 }}><CritBadge value={detail.effective_criticality} /></div></div>
-              <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Replacement cost · band</div><div style={{ marginTop: 4 }}><strong>{money(detail.replacement_cost, detail.currency)}</strong> <CritBadge value={detail.cost_band} /></div></div>
+              <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Replacement cost · band</div><div style={{ marginTop: 4 }}><strong>{formatMoney(detail.replacement_cost ?? 0, detail.currency)}</strong> <CritBadge value={detail.cost_band} /></div></div>
+            </div>
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13, display: "block", marginBottom: 10 }}>Approval</strong>
+              <WorkflowFields entityType="asset" entityId={detail.id} onChanged={() => { setRefreshKey((k) => k + 1); loadDetail(detail.id); }} />
             </div>
 
             <strong>Hosted information assets</strong>

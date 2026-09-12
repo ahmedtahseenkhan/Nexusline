@@ -81,7 +81,6 @@ class PlanBase(BaseModel):
     bia: str = ""
     invocation: str = ""
     status: ContinuityStatus = ContinuityStatus.draft
-    workflow_status: WorkflowState = WorkflowState.draft
     owner: str = ""
     business_unit_id: uuid.UUID | None = None
     process_id: uuid.UUID | None = None
@@ -104,7 +103,6 @@ class PlanUpdate(BaseModel):
     bia: str | None = None
     invocation: str | None = None
     status: ContinuityStatus | None = None
-    workflow_status: WorkflowState | None = None
     owner: str | None = None
     business_unit_id: uuid.UUID | None = None
     process_id: uuid.UUID | None = None
@@ -119,6 +117,8 @@ class PlanUpdate(BaseModel):
 
 
 class PlanRead(PlanBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

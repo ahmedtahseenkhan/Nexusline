@@ -29,7 +29,6 @@ class AuditableUnitBase(BaseModel):
     audit_frequency: ReviewFrequency = ReviewFrequency.annual
     last_audited_date: date | None = None
     next_audit_due: date | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class AuditableUnitCreate(AuditableUnitBase):
@@ -45,10 +44,11 @@ class AuditableUnitUpdate(BaseModel):
     audit_frequency: ReviewFrequency | None = None
     last_audited_date: date | None = None
     next_audit_due: date | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class AuditableUnitRead(AuditableUnitBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -197,7 +197,6 @@ class EngagementBase(BaseModel):
     actual_end: date | None = None
     conclusion: str = ""
     rating: Severity | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class EngagementCreate(EngagementBase):
@@ -224,10 +223,11 @@ class EngagementUpdate(BaseModel):
     actual_end: date | None = None
     conclusion: str | None = None
     rating: Severity | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class EngagementRead(EngagementBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

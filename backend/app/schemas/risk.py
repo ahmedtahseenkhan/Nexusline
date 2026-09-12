@@ -3,10 +3,10 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from app.models.base import WorkflowState
-from app.schemas.common import GraphRef
+from app.schemas.common import GraphRef, LookupRef, UserRef
 from app.models.enums import (
     AcceptanceStatus,
     ReviewFrequency,
@@ -37,24 +37,36 @@ class RiskLinkRef(BaseModel):
     title: str = ""
 
 
+_LEGACY = "Legacy free text, accepted for one release; send the *_id instead. "
+
+
 class RiskBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     description: str = ""
-    category: str = ""
+    # Phase 1: the category is picked from the ``risk_category`` list. ``category`` text
+    # is kept in step with it (and matched onto it when sent alone) — see services.ref_fields.
+    category_id: uuid.UUID | None = None
+    category: str = Field(default="", description=_LEGACY + "Matched onto a risk category.")
     status: RiskStatus = RiskStatus.draft
     inherent_likelihood: int = _Scale
     inherent_impact: int = _Scale
     # Residual scoring (after controls) — optional on create, set on assessment too
     residual_likelihood: int | None = _OptionalScale
     residual_impact: int | None = _OptionalScale
+    # Why the residual is higher than inherent (or departs from the suggestion). A
+    # residual above inherent is refused without it — see services.risk_integrity.
+    residual_override_reason: str = ""
     treatment_strategy: TreatmentStrategy | None = None
     treatment_description: str = ""
-    treatment_owner: str = ""
+    treatment_owner_id: uuid.UUID | None = None
+    treatment_owner: str = Field(default="", description=_LEGACY + "Matched onto a user by email or name.")
     treatment_deadline: date | None = None
     treatment_cost: float | None = Field(default=None, ge=0)
     review_frequency: ReviewFrequency = ReviewFrequency.annual
-    workflow_status: WorkflowState = WorkflowState.draft
-    workflow_owner: str = ""
+    # ``workflow_status`` is not writable here: it moves only through the record
+    # lifecycle (``POST /records/risk/{id}/workflow/{action}``). The approval owner is
+    # picked (``workflow_owner_id``); its ``workflow_owner`` text is read-only.
+    workflow_owner_id: uuid.UUID | None = None
     owner_id: uuid.UUID | None = None
     # Quantitative (FAIR): events/year and $ per event
     annual_loss_frequency: float | None = Field(default=None, ge=0)
@@ -77,20 +89,22 @@ class RiskCreate(RiskBase):
 class RiskUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
-    category: str | None = None
+    category_id: uuid.UUID | None = None
+    category: str | None = Field(default=None, description=_LEGACY)
     status: RiskStatus | None = None
     inherent_likelihood: int | None = _OptionalScale
     inherent_impact: int | None = _OptionalScale
     residual_likelihood: int | None = _OptionalScale
     residual_impact: int | None = _OptionalScale
+    residual_override_reason: str | None = None
     treatment_strategy: TreatmentStrategy | None = None
     treatment_description: str | None = None
-    treatment_owner: str | None = None
+    treatment_owner_id: uuid.UUID | None = None
+    treatment_owner: str | None = Field(default=None, description=_LEGACY)
     treatment_deadline: date | None = None
     treatment_cost: float | None = Field(default=None, ge=0)
     review_frequency: ReviewFrequency | None = None
-    workflow_status: WorkflowState | None = None
-    workflow_owner: str | None = None
+    workflow_owner_id: uuid.UUID | None = None
     owner_id: uuid.UUID | None = None
     annual_loss_frequency: float | None = Field(default=None, ge=0)
     single_loss_expectancy: float | None = Field(default=None, ge=0)
@@ -109,6 +123,8 @@ class RiskAssessment(BaseModel):
 
     residual_likelihood: int = _Scale
     residual_impact: int = _Scale
+    # Required (with ``risk:accept``) only when the residual is above inherent.
+    residual_override_reason: str | None = None
 
 
 class RiskAcceptanceCreate(BaseModel):
@@ -141,9 +157,12 @@ class RiskRead(BaseModel):
     reference: str
     title: str
     description: str
-    category: str
+    category: str  # legacy text, kept equal to category_ref.label while both exist
+    category_id: uuid.UUID | None = None
+    category_ref: LookupRef | None = None
     status: RiskStatus
     owner_id: uuid.UUID | None
+    owner_ref: UserRef | None = None
 
     inherent_likelihood: int
     inherent_impact: int
@@ -158,7 +177,9 @@ class RiskRead(BaseModel):
 
     treatment_strategy: TreatmentStrategy | None
     treatment_description: str
-    treatment_owner: str
+    treatment_owner: str  # legacy text
+    treatment_owner_id: uuid.UUID | None = None
+    treatment_owner_ref: UserRef | None = None
     treatment_deadline: date | None
     treatment_cost: float | None
     review_frequency: ReviewFrequency
@@ -166,7 +187,9 @@ class RiskRead(BaseModel):
     next_review_date: date | None
     expired_reviews: int
     workflow_status: WorkflowState
-    workflow_owner: str
+    workflow_owner: str  # legacy text
+    workflow_owner_id: uuid.UUID | None = None
+    workflow_owner_ref: UserRef | None = None
 
     business_units: list[NamedRef] = []
     processes: list[NamedRef] = []
@@ -198,6 +221,11 @@ class RiskRead(BaseModel):
     suggested_residual_impact: int | None = None
     residual_accepted_at: date | None = None
     residual_override_reason: str = ""
+
+    # Raised when something the risk depended on changed underneath it (an asset was
+    # deleted, the scores contradict each other). One reason per line.
+    needs_review: bool = False
+    review_reason: str = ""
 
     created_at: datetime
     updated_at: datetime
@@ -336,7 +364,7 @@ class RiskAggregate(BaseModel):
 
 
 class OrphanedRisk(BaseModel):
-    """A live risk whose every linked asset has since been deleted."""
+    """A live risk whose linked assets were all deleted and that reaches nothing else live."""
 
     id: uuid.UUID
     reference: str
@@ -345,24 +373,44 @@ class OrphanedRisk(BaseModel):
     status: str
     inherent_score: int | None
     deleted_asset_names: list[str]
+    # Live records still linked, per kind (``services.risk_integrity.LINK_KINDS``). Zero
+    # for everything listed; shown so the reviewer can see it rather than trust it.
+    live_links: dict[str, int] = Field(default_factory=dict)
+    live_link_total: int = 0
 
 
 class OrphanedRiskPage(BaseModel):
     items: list[OrphanedRisk]
     total: int
+    # Risks whose assets were all deleted but that still link to something live, so
+    # are not listed and cannot be archived from here.
+    kept_with_links: int = 0
 
 
 class OrphanPurgeRequest(BaseModel):
-    """Archive these orphaned risks; omit ``risk_ids`` to archive every orphan.
+    """Archive exactly these risks, for a stated reason.
 
-    Ids that are not actually orphaned are ignored, never archived — the server
-    re-derives the orphan set at purge time so a stale preview cannot delete a
-    risk that meanwhile gained a live asset.
+    ``risk_ids`` is required and must name at least one risk: there is no "archive every
+    orphan" form. Ids that are not orphaned at purge time are skipped, never archived —
+    the server re-derives the orphan set, so a stale preview cannot archive a risk that
+    meanwhile gained a live link. ``reason`` is written to the audit trail on every
+    archived risk.
     """
 
-    risk_ids: list[uuid.UUID] = []
+    risk_ids: list[uuid.UUID] = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Give a reason for archiving these risks")
+        return v
 
 
 class OrphanPurgeResult(BaseModel):
     archived: int
     references: list[str]
+    # Requested ids left alone because they are no longer orphaned.
+    skipped: int = 0

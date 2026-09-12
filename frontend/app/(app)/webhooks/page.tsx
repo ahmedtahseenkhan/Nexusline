@@ -7,8 +7,10 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { useFormat } from "@/lib/format";
 
 export default function WebhooksPage() {
+  const { formatDateTime } = useFormat();
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [showForm, setShowForm] = useState(false);
@@ -150,7 +152,7 @@ export default function WebhooksPage() {
                 <Badge tone={d.success ? "low" : "high"}>{d.success ? "ok" : "fail"}</Badge>
                 <code>{d.event}</code>
                 <span className="muted">{d.status_code ?? (d.error || "no response")}</span>
-                <span className="muted" style={{ marginLeft: "auto" }}>{new Date(d.created_at).toLocaleString()}</span>
+                <span className="muted" style={{ marginLeft: "auto" }}>{formatDateTime(d.created_at)}</span>
               </div>
             ))}
           </div>

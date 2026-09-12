@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Aegis GRC — modern multi-tenant Governance, Risk & Compliance platform"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.115",
+    "fastapi>=0.121",  # Depends(scope="function"): commit before the response is sent
     "uvicorn[standard]>=0.30",
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29",

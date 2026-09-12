@@ -4,15 +4,20 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact } from "@/lib/records";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
 
 // ------------------------------------------------------------------ local types
 interface OutsourcingReview {
@@ -51,6 +56,7 @@ interface OutsourcingArrangement {
   concentration_note: string;
   status: string;
   owner: string;
+  /** Read-only: moved by the approval lifecycle (WorkflowFields). */
   workflow_status: string;
   review_count: number;
   is_contract_expiring: boolean;
@@ -75,7 +81,7 @@ interface VendorOption {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
@@ -93,7 +99,6 @@ const MATERIALITY = opts(["material", "non_material"]);
 const CLOUD_MODEL = opts(["iaas", "paas", "saas", "not_applicable"]);
 const SBP_STATUS = opts(["not_required", "pending", "approved", "rejected"]);
 const STATUS = opts(["proposed", "active", "under_review", "terminated"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const REVIEW_STATUS = opts(["planned", "completed"]);
 
 // ------------------------------------------------------------------ tones
@@ -142,7 +147,6 @@ type ArrForm = {
   concentration_note: string;
   status: string;
   owner: string;
-  workflow_status: string;
 };
 const BLANK_ARR: ArrForm = {
   title: "",
@@ -166,7 +170,6 @@ const BLANK_ARR: ArrForm = {
   concentration_note: "",
   status: "proposed",
   owner: "",
-  workflow_status: "draft",
 };
 function fromArr(a: OutsourcingArrangement): ArrForm {
   return {
@@ -191,7 +194,6 @@ function fromArr(a: OutsourcingArrangement): ArrForm {
     concentration_note: a.concentration_note || "",
     status: a.status || "proposed",
     owner: a.owner || "",
-    workflow_status: a.workflow_status || "draft",
   };
 }
 function arrPayload(f: ArrForm): Record<string, unknown> {
@@ -217,7 +219,6 @@ function arrPayload(f: ArrForm): Record<string, unknown> {
     concentration_note: f.concentration_note,
     status: f.status,
     owner: f.owner,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -240,6 +241,7 @@ const BLANK_REVIEW: ReviewDraft = {
 };
 
 function OutsourcingInner() {
+  const { formatDate } = useFormat();
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<OutsourcingArrangement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -326,16 +328,16 @@ function OutsourcingInner() {
     }
   }
   async function removeArr(a: OutsourcingArrangement) {
-    if (!(await confirmDialog({ title: `Delete outsourcing arrangement ${a.reference || a.title}?`, danger: true }))) return;
-    setError(null);
+    if (!(await confirmDeleteWithImpact("outsourcing_arrangement", a.id, `${a.reference || ""} ${a.title}`.trim()))) return;
     try {
       await apiCall<void>("DELETE", `/outsourcing/${a.id}`);
       setShowArrForm(false);
       if (openId === a.id) setOpenId(null);
       reload();
-      toast("Deleted");
+      toast(`Deleted ${a.reference || "arrangement"}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      // A 403 is segregation of duties: the server's message says who may delete it.
+      toast(e instanceof Error && e.message ? e.message : "Failed to delete", "error");
     }
   }
 
@@ -401,14 +403,9 @@ function OutsourcingInner() {
           <Select value={af.status} onChange={(v) => setA("status", v)} options={STATUS} />
         </Field>
       </div>
-      <div className="field-row">
-        <Field label="Owner" help="Accountable business / risk owner.">
-          <TextInput value={af.owner} onChange={(v) => setA("owner", v)} placeholder="Owner" />
-        </Field>
-        <Field label="Workflow" help="Approval lifecycle for this arrangement record.">
-          <Select value={af.workflow_status} onChange={(v) => setA("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-      </div>
+      <Field label="Owner" help="Accountable business / risk owner.">
+        <TextInput value={af.owner} onChange={(v) => setA("owner", v)} placeholder="Owner" />
+      </Field>
     </>
   );
   const materialityTab = (
@@ -500,11 +497,12 @@ function OutsourcingInner() {
         a.is_contract_expiring ? (
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <Badge tone="high">Expiring</Badge>
-            <span className="muted">{a.contract_end}</span>
+            <span className="muted">{formatDate(a.contract_end)}</span>
           </div>
         ) : (
-          <span className="muted">{a.contract_end || "—"}</span>
+          <span className="muted">{formatDate(a.contract_end)}</span>
         ),
+      text: (a) => (a.contract_end ? formatDate(a.contract_end) : ""),
     },
     {
       key: "actions",
@@ -537,6 +535,7 @@ function OutsourcingInner() {
         <option value="">All statuses</option>
         {STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
       </select>
+      <ArchivedRecords entityType="outsourcing_arrangement" noun="arrangements" refreshKey={refreshKey} onRestored={() => { reload(); loadSummary(); }} />
     </>
   );
 
@@ -643,8 +642,16 @@ function OutsourcingInner() {
               </p>
               <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
                 {detail.sbp_approval_ref ? `NOC ref ${detail.sbp_approval_ref} · ` : ""}
-                Contract {detail.contract_start || "—"} → {detail.contract_end || "—"}
+                Contract {formatDate(detail.contract_start)} → {formatDate(detail.contract_end)}
                 {detail.vendor_id ? ` · linked vendor ${vendorName(detail.vendor_id)}` : ""}
+                {detail.owner ? ` · owner ${detail.owner}` : ""}
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Approval</h3></div>
+              <div className="card-pad">
+                <WorkflowFields entityType="outsourcing_arrangement" entityId={detail.id} onChanged={() => { loadDetail(detail.id); reload(); }} />
               </div>
             </div>
 
@@ -706,7 +713,7 @@ function OutsourcingInner() {
                         .map((rv) => (
                           <tr key={rv.id}>
                             <td className="ref">{rv.reference || "—"}</td>
-                            <td className="muted">{rv.review_date || "—"}</td>
+                            <td className="muted">{formatDate(rv.review_date)}</td>
                             <td className="muted">{rv.reviewer || "—"}</td>
                             <td><Badge tone={REVIEW_STATUS_TONE[rv.status] || "neutral"}>{cap(rv.status)}</Badge></td>
                             <td>{rv.sla_met ? <Badge tone="low">Met</Badge> : <Badge tone="critical">Breached</Badge>}</td>

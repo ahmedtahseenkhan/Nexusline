@@ -150,6 +150,7 @@ export const NAV: NavSection[] = [
     icon: <IconSettings />,
     items: [
       { href: "/settings", label: "General Settings", icon: <IconSettings /> },
+      { href: "/organisation-settings", label: "Organisation Settings", icon: <IconGauge /> },
       { href: "/integrations", label: "Integrations & CCM", icon: <IconActivity /> },
       { href: "/custom-fields", label: "Custom Fields", icon: <IconLayers /> },
       { href: "/lookups", label: "Lookups & Dropdowns", icon: <IconLayers /> },

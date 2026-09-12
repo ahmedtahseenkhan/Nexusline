@@ -134,6 +134,15 @@ function csvCell(v: string): string {
   return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
 }
 
+// A page passes its filter object even when nothing is selected; only a filter that
+// holds a value narrows the list, so only then is "no match" the right thing to say.
+function hasActiveFilter(filters: Record<string, unknown> | undefined): boolean {
+  if (!filters) return false;
+  return Object.values(filters).some(
+    (v) => v !== undefined && v !== null && v !== "" && !(Array.isArray(v) && v.length === 0),
+  );
+}
+
 export default function DataTable<T>({
   columns,
   fetcher,
@@ -495,7 +504,7 @@ export default function DataTable<T>({
               <tr>
                 <td colSpan={colSpan}>
                   <div className="empty" style={{ padding: 28 }}>
-                    <p>{search || filters ? "No records match your filters." : emptyMessage}</p>
+                    <p>{search || hasActiveFilter(filters) ? "No records match your filters." : emptyMessage}</p>
                   </div>
                 </td>
               </tr>

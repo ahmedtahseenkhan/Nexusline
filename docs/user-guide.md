@@ -82,7 +82,7 @@ Nearly every record — on top of its own business status (e.g. a Risk's `draft 
 draft → in_review → approved → retired
 ```
 
-This is a lightweight "is this record itself finalized" tracker, independent of the record's operational status. A `Workflow Owner` field usually goes with it.
+It says whether the record itself has been approved, independently of its operational status. Since September 2026 it is not an editable field: it moves only through the **Submit for review / Approve / Reject / Revise / Retire** buttons on the record, and the person who submitted a record can't approve it. The **approval owner** is picked from the user list. See [3e](#3e-picked-not-typed-owners-lists-and-the-approval-lifecycle).
 
 ### 3.2 RecordPanels — the shared toolkit on every record
 
@@ -137,6 +137,54 @@ The dashboard is built around the five questions a risk function is judged on, i
 5. **What happened?** — open incidents by severity with the regulator-reportable count and the change against the prior period; KRIs as red / amber / green / no data with the breaching ones listed; risks **by segment** with breaches; third parties; and **Movement** — what was added, closed, tested and lapsed in the period — with recent activity.
 
 The **30 days / Quarter / YTD** toggle sets the period for the movement and incident comparisons. **Executive summary** exports the board pack.
+
+**When there is no data.** A measure with nothing to count is left out of the score, not scored as 100%, and the other measures' weights are scaled back up. Under the gauge the dashboard says how much of the score is real — *Scored on 2 of 4 measures (55% of weight)* — and a measure with no data reads "— no data". An organisation with nothing assessed shows no score at all. **How this is calculated**, under the list of measures, gives each weight and formula in words. Only frameworks that are obligations count towards *compliance assured*; maturity self-assessments such as ISO 31000 are listed separately. Planned and retired controls are not counted as tested, untested or overdue: a control that is not operating yet has nothing to test.
+
+## 3d. Rules that keep the numbers honest
+
+These rules were added in September 2026 after a product review found places where the product contradicted itself once real data was in it. Each one refuses a save or flags a record; none of them changes a number silently.
+
+- **Residual can't be higher than inherent.** Controls only reduce a risk. Saving a residual score above the inherent score is refused unless you write an **override reason**, and only a user who can accept risk may record one. On the risk form, residual options above inherent are marked *(above inherent)*. Risks saved like this before the rule are flagged **Needs review** and stay flagged until the residual is lowered or a reason is recorded.
+- **Needs review.** A risk is flagged when something it depended on changed underneath it: its residual contradicts its inherent score, or an asset it was written against was deleted (*Asset removed – review: Core Banking*). Flagged risks show a banner on the record, a **Review flag** column and filter on the register, and a marker in the dashboard's top risks. **Mark reviewed** clears the flag once the cause is dealt with.
+- **Deleting an asset never removes risks.** The delete confirmation says how many risks link to the asset; those risks are flagged for review and stay in the register.
+- **Review risks with no live links** (Risk Register → More) lists risks whose every asset was deleted *and* that link to nothing else — no controls, units, processes, policies, incidents, issues, KRIs, requirements or findings. Nothing is ticked for you; you choose each risk and write the reason. Archiving is a four-eyes action (*risk / bulk_archive*): while segregation of duties is on and no rule is configured it is refused, so add a rule for module *risk*, action *bulk_archive* under **Delegation of Authority → Maker-Checker Rules** to allow it. Archived risks are hidden from the register and kept in the database; each one gets its own audit entry.
+- **Planned controls have no test clock.** A control's next test and maintenance dates are set when it becomes *implemented* or *operational*, one cycle from that day. A planned control shows *No test scheduled until the control is implemented* and never raises an overdue alert.
+- **Recording a control test.** There is no preselected result. A passed or failed test needs the date it was performed and the tester's conclusion.
+- **Evidence starts pending.** Evidence can be marked *valid* only once it has a collected date. Evidence with no collected date reads *Not collected*, and collected evidence with no expiry reads *No expiry set*.
+- **One framework per name.** Two live frameworks can't share a name (ignoring case). Installing a library framework over an older, shallower copy of the same standard **upgrades** it: missing clauses are added and the existing clauses, statuses and links are kept. Duplicate copies left from older releases are merged on the next restart. The install message reports the requirement links it wrote (*93 requirement links*).
+- **Maturity frameworks.** ISO 31000, ISO 27005 and the Basel operational-risk principles are guidance a bank measures itself against, not obligations. They carry a *Maturity self-assessment* badge, show clauses self-assessed instead of a compliance percentage, and stay out of the dashboard's compliance figures.
+- **Alerts stay current and readable.** An alert's text is rewritten when the record changes, so it never quotes an old score. When one routine family produces more than five alerts — tests overdue, reviews due — they are shown as one line (*36 controls have tests overdue*) linking to the list. Tolerance breaches, missed turnaround times, approvals, attestations, regulatory deadlines and suspicious-activity reports are never grouped.
+- **One review clock per record.** Attesting a risk, policy or third party uses that record's own review cycle and moves its next review date; it no longer starts a second, separate schedule.
+- **Attestation is independent.** You can't attest a record you own or entered, or a record still in Draft. The attestation records the statement you signed (pre-filled per record type) and an optional scope, and a second person can **Confirm** it.
+- **Approvals.** A request you raised shows *You submitted this — an independent checker must decide* instead of Approve and Reject; the server refuses it too, matching you by account or by email.
+- **Two-factor authentication.** Users with the Admin role, or any permission to approve, must set up two-factor authentication. The first sign-in starts a 7-day grace period with a reminder banner; after it, the session can only open the setup screen. Single sign-on users are exempt, because their identity provider handles it. Administrators set the roles and grace period with `MFA_REQUIRED_ROLES` and `MFA_GRACE_DAYS`.
+- **Evaluation builds** show a banner saying the build is unlicensed and not for production use.
+
+## 3e. Picked, not typed: owners, lists and the approval lifecycle
+
+These changes, added in September 2026, replace free text with governed choices and give every record one approval lifecycle.
+
+**Organisation settings** (Settings → Organisation). Choose the currency money is shown in, the timezone dates belong to, the date format, the month your financial year starts, the phone country, and how many days an archived record is kept before it is purged for good. The defaults are PKR, Asia/Karachi, DD/MM/YYYY, January, Pakistan and 90 days. Only an administrator can change them.
+
+**Governed lists** (Settings → Lookups → Governed lists). Risk category (two levels, such as *Operational › Fraud*), incident type, incident classification, regulator, country, control classification, and the issue, KRI, policy, legal and third-party categories are managed lists, not free text. Add, rename, reorder, re-parent or deactivate values; a value in use can't be deleted, so deactivate it instead. When your organisation upgraded, every category already typed into a record became a value in its list, so nothing you entered was lost.
+
+**Pickers.** Owners, managers, testers, reviewers, assignees and reporters are picked from the user list; business units and processes from the organisation tree; categories from their list. Anyone who can edit a record can pick an owner, without needing user-administration rights. Where an old record still holds text that matched nobody (*Was: CISO — pick a value*), the form shows it beside the picker until someone picks a real person.
+
+**One approval lifecycle.** Every record moves Draft → In review → Approved → Retired through buttons on the record, not a dropdown: **Submit for review**, **Approve**, **Reject** (with a reason, back to draft), **Revise** (an approved record back to draft for rework) and **Retire**. The person who entered or submitted a record can't approve or reject it; the record says so and names why. If an approval route is switched on for that record type (Settings → Workflows), Submit starts the route and the record waits for it. Every move is kept in the record's history with who, when and why.
+
+**Policies.** A policy becomes *under review* and *approved* through that lifecycle, and **Publish** is available only once it is approved. A published policy stays published while a revision is drafted, until it is retired.
+
+**Deleting and restoring.** Before you delete a record, the confirmation lists what it is linked to (*12 controls, 3 policies and 1 KRI*). Deleting a risk, control, policy, business unit, process, issue, incident or third party is a four-eyes action: you can't delete a record you entered yourself while segregation of duties is on. Deleted records go to **Archived (N)** on their register, where anyone who can edit that register can restore them. Restoring an asset clears the *Asset removed* flag it put on its risks. After the retention period set under Organisation settings, archived records are purged for good.
+
+**Statement of Applicability.** Each compliance framework has a **Statement of Applicability** tab: every clause, whether it applies, why, which controls implement it and how they last tested. Excluding a clause needs a justification. Export it as XLSX or PDF for your certification body.
+
+**SBP frameworks bring their controls.** Installing SBP ETGRM, SBP Outsourcing or SBP BCP now creates their controls in the catalogue, and generated risks map to them as well as to ISO and CIS controls. For a framework you installed earlier, **Create controls** on the Framework Library adds them.
+
+**Reusing your own controls.** Before a framework's controls are created, a preview shows which clauses will reuse a control you already have (by reference, or by the same name) and which will create a new one; you can switch any row. For a control you wrote yourself, **Suggested clauses** on the control lists the clauses it most likely implements across your installed frameworks, with the reason for each (*MFA → ISO A.8.5*). Tick and accept them, or use **Suggest mappings** on several selected controls at once.
+
+**Importing.** Owner, unit and category columns in a spreadsheet can hold an email, a name or a list value; they are matched to the right person, unit or value. A value that matches nothing is kept on the record as text and reported as a warning for that row. A spreadsheet can bring records in already approved (a migration from another tool), but only when the person importing could approve those records in the app; otherwise the row is refused and the rest import.
+
+**KRI breach alerts** now fire. Before this release a KRI past its limit never raised an alert.
 
 ## 4. How the sidebar is organized
 
