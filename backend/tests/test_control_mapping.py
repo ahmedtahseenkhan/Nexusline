@@ -114,3 +114,65 @@ def test_the_catalogue_copies_the_mapping_into_scenario_specs():
     refs = cm.references_for("RS-003")
     assert _split_refs(", ".join(refs)) == refs
     assert _split_refs("") == ()
+
+
+# ------------------------------------------------ SBP frameworks as control frameworks ---
+@pytest.mark.parametrize("key", ["sbp-etgrm", "sbp-outsourcing", "sbp-bcp"])
+def test_the_sbp_frameworks_are_control_frameworks(key):
+    assert cm.is_control_framework(key)
+    controls = cm.control_requirements(TEMPLATES[key], key)
+    assert 0 < len(controls) < len(TEMPLATES[key]["requirements"])
+
+
+def test_etgrm_splits_governance_from_controls():
+    assert cm.is_control_requirement("sbp-etgrm", "ETGRM-3.4")  # identity and access management
+    assert cm.is_control_requirement("sbp-etgrm", "ETGRM-4.6")  # backup management
+    assert cm.is_control_requirement("sbp-etgrm", "ETGRM-1.6")  # segregation of duties
+    assert not cm.is_control_requirement("sbp-etgrm", "ETGRM-1.1")  # board oversight
+    assert not cm.is_control_requirement("sbp-etgrm", "ETGRM-2.1")  # IT risk framework
+    assert not cm.is_control_requirement("sbp-etgrm", "ETGRM-8.1")  # IT audit function
+
+
+def test_outsourcing_and_bcp_split_governance_from_controls():
+    assert cm.is_control_requirement("sbp-outsourcing", "OS-6.2")
+    assert cm.is_control_requirement("sbp-outsourcing", "OS-10.1")
+    assert cm.is_control_requirement("sbp-outsourcing", "OS-1.5")  # the outsourcing register
+    assert not cm.is_control_requirement("sbp-outsourcing", "OS-1.1")  # board-approved policy
+    assert cm.is_control_requirement("sbp-bcp", "BCP-9.4")
+    assert cm.is_control_requirement("sbp-bcp", "BCP-8.3")
+    assert not cm.is_control_requirement("sbp-bcp", "BCP-1.1")
+    assert not cm.is_control_requirement("sbp-bcp", "BCP-8.4")
+
+
+def test_exact_control_refs_do_not_act_as_prefixes():
+    assert cm.is_control_requirement("sbp-outsourcing", "OS-1.5")
+    assert not cm.is_control_requirement("sbp-outsourcing", "OS-1.50")
+
+
+def test_sbp_references_are_spelled_as_the_framework_spells_them():
+    assert cm.catalogue_reference("sbp-etgrm", "ETGRM-3.4") == "ETGRM-3.4"
+    assert cm.template_for_reference("ETGRM-3.4") == ("sbp-etgrm", "ETGRM-3.4")
+    assert cm.template_for_reference("BCP-9.4") == ("sbp-bcp", "BCP-9.4")
+    # Two letters and a dash, but SBP Outsourcing's namespace, not a NIST family.
+    assert cm.template_for_reference("OS-6.2") == ("sbp-outsourcing", "OS-6.2")
+
+
+def test_every_scenario_also_maps_to_etgrm_outsourcing_or_bcp():
+    """A Pakistani bank that installed only the SBP set still gets its risks linked."""
+    for s in CATALOGUE:
+        refs = cm.references_for(s.reference)
+        assert any(r.startswith(("ETGRM-", "OS-", "BCP-")) for r in refs), s.reference
+
+
+def test_scenario_mappings_have_no_duplicates():
+    for scenario, refs in cm.SCENARIO_CONTROLS.items():
+        assert len(refs) == len(set(refs)), scenario
+
+
+def test_an_untouched_stored_mapping_takes_the_sbp_additions():
+    previous = cm._PREVIOUS_SCENARIO_CONTROLS["RS-003"]
+    assert cm.upgraded_references("RS-003", previous) == cm.references_for("RS-003")
+    assert cm.upgraded_references("RS-003", cm.references_for("RS-003")) is None
+    # A retuned row is the tenant's decision and is left alone.
+    assert cm.upgraded_references("RS-003", ("A.8.5", "CTL-014")) is None
+    assert cm.upgraded_references("RS-003", ()) is None

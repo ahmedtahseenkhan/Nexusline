@@ -237,6 +237,11 @@ async def download_file(file_id: uuid.UUID, db: DbSession, user: CurrentUser) ->
     sf = await db.scalar(select(StoredFile).where(StoredFile.id == file_id))
     if sf is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    # The same permission as listing the record's files: a file belongs to a record, and
+    # someone who can't read that record (a board pack, restricted evidence) must not be
+    # able to fetch its files by id. Previously any signed-in user of the organisation
+    # could download any file whose id they had.
+    entity_types.require_read(user, sf.entity_type)
     path = storage.resolve_path(user.tenant_id, sf.storage_key)
     return FileResponse(
         path,

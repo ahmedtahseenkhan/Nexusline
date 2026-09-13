@@ -23,6 +23,9 @@ class ImportResult(BaseModel):
     created: int
     skipped: int
     errors: list[ImportError]
+    # Rows that were created but kept a value as text because it named no user, unit or
+    # list value (services.ref_fields) — someone should pick the real one.
+    warnings: list[ImportError] = []
 
 
 class ImportRequest(BaseModel):

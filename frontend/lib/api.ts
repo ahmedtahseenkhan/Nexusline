@@ -176,16 +176,12 @@ export async function downloadBlob(path: string, filename: string): Promise<void
   const res = await fetch(`${API_BASE}/api/v1${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
-  if (!res.ok) throw new Error(`Download failed (${res.status})`);
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename || "download";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  if (!res.ok) {
+    let message = `Download failed (${res.status})`;
+    try { message = formatDetail((await res.json()).detail, message); } catch { /* ignore */ }
+    throw new Error(message);
+  }
+  saveBlob(await res.blob(), filename);
 }
 
 export interface LoginResponse {
@@ -201,6 +197,10 @@ export interface LoginResult {
   token_type: string;
   expires_in: number | null;
   user: LoginResponse["user"] | null;
+  /** MFA grace period is over: the token can only be used to enrol. */
+  mfa_enrolment_required?: boolean;
+  /** MFA is required and not yet set up; full access continues until this time. */
+  mfa_enrolment_due?: string | null;
 }
 export interface MfaSetup {
   secret: string;
@@ -354,6 +354,51 @@ export interface RiskSetting {
   appetite_score: number;
   tolerance_score: number;
   matrix_size: number;
+  /** How impact-dimension scores combine: the highest, or the average rounded up. */
+  impact_mode?: "max" | "average";
+}
+/** Configured band thresholds: the highest score that is low, medium and high. */
+export interface SeverityBands {
+  low_max: number;
+  medium_max: number;
+  high_max: number;
+}
+/** One matrix cell with its effective band (its override, or its score's band). */
+export interface MatrixCellBand {
+  likelihood: number;
+  impact: number;
+  score: number;
+  band: string;
+  overridden: boolean;
+}
+/** Appetite and tolerance for one top-level risk category. */
+export interface RiskAppetite {
+  id: string;
+  category_id: string;
+  category_ref: { id: string; key: string; value: string; label: string } | null;
+  appetite_score: number;
+  tolerance_score: number;
+  statement: string;
+  created_at: string;
+  updated_at: string;
+  risks: number;
+  breaches: number;
+}
+/** One action of a risk's treatment plan. */
+export interface TreatmentAction {
+  id: string;
+  risk_id: string;
+  title: string;
+  description: string;
+  owner_id: string | null;
+  owner_ref: { id: string; full_name: string; email: string } | null;
+  due_date: string | null;
+  status: "open" | "in_progress" | "done" | "cancelled";
+  percent_complete: number;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  overdue: boolean;
 }
 
 /** One rung of the likelihood or impact scale, in the organisation's own words. */
@@ -376,6 +421,13 @@ export interface RiskMatrixConfig {
   likelihood_levels: MatrixLevel[];
   impact_levels: MatrixLevel[];
   bands: MatrixBand[];
+  /** Configured thresholds; null = derived from the matrix size. */
+  severity_bands?: SeverityBands | null;
+  /** Per-cell overrides, keyed "likelihood,impact". */
+  matrix_cells?: Record<string, string>;
+  /** Every cell with its effective band. */
+  cells?: MatrixCellBand[];
+  impact_mode?: "max" | "average";
 }
 export interface ResidualPolicy {
   enabled: boolean;
@@ -465,6 +517,18 @@ export interface RiskProposal {
   control_labels: string[];
   /** Controls the scenario calls for that this catalogue does not have (by reference). */
   unmapped_references: string[];
+  /** Phase 3: pairs with the same key become one candidate (scenario + process + unit). */
+  dedupe_key: string;
+  /** The candidate's scope, e.g. "Payments · Retail Banking". */
+  scope_label: string;
+  /** The candidate's title when it covers several assets. */
+  group_title: string;
+  /** A pending candidate with this key is already in the queue; the pair joins it. */
+  queued_proposal_id: string | null;
+  queued_title: string;
+  /** The key's last candidate was rejected, and why. */
+  rejected_note: string;
+  rejected_at: string | null;
 }
 export interface GenerateRisksResponse {
   proposals: RiskProposal[];
@@ -472,9 +536,15 @@ export interface GenerateRisksResponse {
   scenarios_considered: number;
   duplicates_skipped: number;
   truncated: boolean;
+  /** Distinct candidates the proposals would make. */
+  candidates: number;
+  /** Proposals that would join a candidate already in the queue. */
+  queued: number;
 }
 export interface GeneratedRiskCommitItem {
   asset_id: string;
+  scenario_id?: string;
+  scenario_reference?: string;
   title: string;
   description: string;
   category: string;
@@ -485,14 +555,67 @@ export interface GeneratedRiskCommitItem {
   treatment_description: string;
   control_ids: string[];
 }
+/** Sending proposals to the risk candidate queue: every pair created a candidate, joined
+ *  one (merged — some into candidates already waiting), was skipped as already in the
+ *  register, or failed. */
 export interface GenerateRisksCommitResult {
+  run_id: string;
   created: number;
+  merged: number;
+  merged_into_existing: number;
   skipped: number;
-  references: string[];
+  proposals: string[];
+  skipped_items: { title: string; asset_name: string; risk_reference: string }[];
   errors: { title: string; message: string }[];
 }
+/** A risk candidate in the queue (/risk-proposals). */
+export interface RiskCandidate {
+  id: string;
+  run_id: string | null;
+  scenario_reference: string;
+  scenario_title: string;
+  scenario_category: string;
+  title: string;
+  description: string;
+  dedupe_key: string;
+  status: "pending" | "accepted" | "rejected" | "merged";
+  business_unit_id: string | null;
+  business_unit_ref: { id: string; name: string } | null;
+  process_id: string | null;
+  process_ref: { id: string; name: string } | null;
+  category_id: string | null;
+  category_ref: { id: string; key: string; value: string; label: string } | null;
+  inherent_likelihood: number | null;
+  inherent_impact: number | null;
+  inherent_score: number | null;
+  inherent_severity: string | null;
+  control_references: string[];
+  controls: { id: string; reference: string; name: string }[];
+  unmapped_references: string[];
+  assets: { id: string; name: string; asset_class: string }[];
+  archived_assets: number;
+  merged_into_id: string | null;
+  merged_into: { id: string; reference?: string; title?: string } | null;
+  promoted_risk_id: string | null;
+  promoted_risk: { id: string; reference?: string; title?: string } | null;
+  promoted_risk_archived: boolean;
+  created_by_ref: { id: string; full_name: string; email: string } | null;
+  decided_by_ref: { id: string; full_name: string; email: string } | null;
+  decided_at: string | null;
+  decision_note: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface RiskCandidatePage {
+  items: RiskCandidate[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** Candidates per status under the same filters (the status filter ignored). */
+  counts: Record<string, number>;
+}
 
-/** A live risk whose every linked asset has since been deleted. */
+/** A live risk whose linked assets were all deleted and that has no other live link. */
 export interface OrphanedRisk {
   id: string;
   reference: string;
@@ -501,14 +624,20 @@ export interface OrphanedRisk {
   status: string;
   inherent_score: number | null;
   deleted_asset_names: string[];
+  /** Live records still linked, per kind — zero for every listed risk. */
+  live_links: Record<string, number>;
+  live_link_total: number;
 }
 export interface OrphanedRiskPage {
   items: OrphanedRisk[];
   total: number;
+  /** Risks that lost their assets but still link to something live, so are not listed. */
+  kept_with_links: number;
 }
 export interface OrphanPurgeResult {
   archived: number;
   references: string[];
+  skipped: number;
 }
 
 /** A proposal only — nothing is recorded until the risk owner accepts or overrides it. */
@@ -617,15 +746,18 @@ export interface Page<T> {
 }
 
 // --- dashboard overview (the redesigned page's single payload) ---------------------
-export interface HealthComponent { key: string; label: string; value: number; weight: number; detail: string }
+/** `value` is null and `population` 0 when a measure has no data: it is left out of the score. */
+export interface HealthComponent { key: string; label: string; value: number | null; weight: number; detail: string; population: number; formula: string }
+export interface HealthCoverage { scored: number; total: number; weight_pct: number }
 export interface TopRisk {
   id: string; reference: string; title: string; score: number | null; severity: string | null;
   appetite_status: string | null; owner: string; business_units: string[]; status: string;
   treatment_strategy: string | null; next_review_date: string | null; review_overdue: boolean; control_count: number;
+  needs_review?: boolean; review_reason?: string;
 }
 export interface FrameworkPosture {
   id: string; name: string; total: number; applicable: number; assured: number; unassessed: number;
-  failing: number; unmapped: number; compliant_pct: number; gaps: number;
+  failing: number; unmapped: number; compliant_pct: number; gaps: number; kind?: string;
 }
 export interface ActionItem { key: string; label: string; count: number; href: string; tone: "critical" | "warning" | "info" }
 export interface KriItem {
@@ -635,16 +767,19 @@ export interface KriItem {
 export interface DashboardOverview {
   as_of: string;
   period_days: number;
-  health: { score: number; band: string; components: HealthComponent[] };
+  health: { score: number; band: string; components: HealthComponent[]; coverage?: HealthCoverage | null };
   posture: {
     total_risks: number; appetite_score: number; tolerance_score: number; within_appetite: number; elevated: number;
     breach: number; by_inherent_severity: Record<string, number>; by_residual_severity: Record<string, number>; top_risks: TopRisk[];
+    /** Per top-level category appetite (present when any category has its own); the null row is the default. */
+    by_category?: { category_id: string | null; label: string; appetite_score: number; tolerance_score: number; risks: number; within_appetite: number; elevated: number; breach: number }[];
   };
   assurance: {
     total: number; effective: number; partially_effective: number; ineffective: number; not_assessed: number;
     tests_overdue: number; tests_due_30d: number; last_test_failed: number; tests_in_period: number;
+    not_operating?: number;
   };
-  compliance: { frameworks: FrameworkPosture[]; overall_assured_pct: number };
+  compliance: { frameworks: FrameworkPosture[]; overall_assured_pct: number; other_frameworks?: FrameworkPosture[] };
   actions: ActionItem[];
   incidents: { open: number; open_by_severity: Record<string, number>; reportable_open: number; opened_in_period: number; opened_prior_period: number; tat_breached: number };
   kris: { green: number; amber: number; red: number; no_data: number; red_items: KriItem[] };
@@ -673,6 +808,8 @@ export interface Dashboard {
 export interface Framework {
   id: string;
   name: string;
+  /** compliance | maturity | guidance — only compliance frameworks carry a compliance %. */
+  kind?: string;
   version: string;
   authority: string;
   requirement_count: number;
@@ -872,6 +1009,24 @@ export interface Me {
   auth_source?: string;
   /** Operator of the deployment, not of this organisation — gates the Organisations console. */
   is_platform_admin?: boolean;
+  /** This session may only enrol in MFA (grace period over). */
+  mfa_enrolment_required?: boolean;
+  /** MFA is required for this user and not yet set up; due by this time. */
+  mfa_enrolment_due?: string | null;
+  /** The MFA policy applies to this user (they cannot switch MFA off). */
+  mfa_required_for_user?: boolean;
+  /** Every permission code the user's roles grant (e.g. "org:write"). */
+  permission_codes?: string[];
+}
+
+/** Auth-only deployment status for the app shell (licence banner). */
+export interface SystemStatus {
+  license_status: string;
+  /** Dev/self-host build running without a licence — everything unlocked. */
+  evaluation_build: boolean;
+  enforce_license: boolean;
+  app_version: string;
+  deployment_mode: string;
 }
 
 /** One organisation on this deployment. Counts are read inside that organisation's own
@@ -906,10 +1061,25 @@ export interface Notification {
   link: string;
   created_at: string;
   seen: boolean;
+  /** Who it is addressed to: a person, a role, both, or neither (everyone). */
+  user_id?: string | null;
+  role_name?: string;
+  /** How it reached the signed-in user. */
+  audience?: "me" | "role" | "everyone";
 }
 export interface NotificationList {
   items: Notification[];
   unseen_count: number;
+  /** Of the unseen, how many are addressed to the user or one of their roles. */
+  unseen_mine?: number;
+  /** The feed was narrowed to alerts addressed to the user (`?mine=true`). */
+  mine?: boolean;
+  /** Rows in the whole feed; `items` is one page of it. */
+  total: number;
+  limit: number;
+  offset: number;
+  /** critical / warning / info tallies across the whole feed. */
+  counts: Record<string, number>;
 }
 
 export interface ApprovalAction {
@@ -929,6 +1099,8 @@ export interface ApprovalRequest {
   entity_label: string;
   link: string;
   approver: string;
+  /** Maker's user id (null for requests that only carry an e-mail). */
+  requested_by?: string | null;
   requested_by_email: string;
   required_approvals: number;
   approvals_received: number;
@@ -1234,6 +1406,48 @@ export interface KeyRiskIndicator {
   is_breached: boolean;
   created_at: string;
   measurements: KriMeasurement[];
+  // Phase 2 (F-14): definition, lineage, within-range band, appetite, escalation, feed.
+  definition?: string;
+  numerator?: string;
+  denominator?: string;
+  data_source?: string;
+  data_provider_id?: string | null;
+  data_provider_ref?: { id: string; full_name: string; email: string } | null;
+  indicator_type?: "leading" | "lagging" | null;
+  lower_bound?: number | null;
+  upper_bound?: number | null;
+  appetite_id?: string | null;
+  appetite_ref?: KriAppetiteRef | null;
+  escalations?: KriEscalation[];
+  has_feed_token?: boolean;
+}
+/** The risk appetite a KRI measures (per top-level risk category). */
+export interface KriAppetiteRef {
+  id: string;
+  category_id: string;
+  category_label: string;
+  appetite_score: number;
+  tolerance_score: number;
+  statement: string;
+}
+/** Who is told, and what they do, when a KRI turns amber or red. */
+export interface KriEscalation {
+  id: string;
+  kri_id: string;
+  level: "amber" | "red";
+  escalate_to_id: string | null;
+  escalate_to_ref: { id: string; full_name: string; email: string } | null;
+  escalate_to_role: string;
+  action: string;
+  created_at: string;
+}
+/** Returned once by POST /kris/{id}/feed-token; only a hash is kept server-side. */
+export interface KriFeedToken {
+  kri_id: string;
+  token: string;
+  endpoint: string;
+  header: string;
+  note: string;
 }
 export interface LossEvent {
   id: string;
@@ -1334,6 +1548,8 @@ export interface RiskMatrixCell {
   likelihood: number;
   impact: number;
   score: number;
+  /** The cell's band — its override, or its score's band. Colour from this. */
+  band?: string;
   inherent_count: number;
   residual_count: number;
   inherent_refs: string[];
@@ -1413,11 +1629,17 @@ export interface FieldInfo {
 
 export interface Attestation {
   id: string;
+  attested_by_id: string | null;
   attested_by_email: string;
   attested_at: string;
   comment: string;
   frequency: string;
   next_due: string | null;
+  statement: string;
+  scope: string;
+  confirmed_by_id: string | null;
+  confirmed_by_email: string | null;
+  confirmed_at: string | null;
   created_at: string;
 }
 export interface AttestationStatus {
@@ -1427,6 +1649,9 @@ export interface AttestationStatus {
   next_due: string | null;
   frequency: string | null;
   history: Attestation[];
+  /** The record carries its own review cycle (risk, policy, vendor). */
+  native_review: boolean;
+  default_statement: string;
 }
 
 export interface FilterCondition {
@@ -1697,9 +1922,13 @@ export interface AuditEntry {
 export interface FrameworkSummary {
   framework_id: string;
   name: string;
+  /** compliance | maturity | guidance */
+  kind?: string;
   total_requirements: number;
   compliant: number;
   compliant_pct: number;
+  /** Clauses assessed (self-assessment progress for maturity frameworks). */
+  assessed?: number;
 }
 
 export interface ComplianceSummary {
@@ -1726,8 +1955,21 @@ export interface Incident {
   severity: string;
   status: string;
   assignee: string;
+  /** ISO 8601 timestamps with offset since phase 2 (were dates): use formatDateTime. */
   detected_at: string | null;
+  occurred_at?: string | null;
+  contained_at?: string | null;
   resolved_at: string | null;
+  near_miss?: boolean;
+  personal_data_breach?: boolean;
+  /** Regulator-notification clock (the initial report's deadline / submission). */
+  notification_deadline?: string | null;
+  notified_at?: string | null;
+  hours_to_deadline?: number | null;
+  notified_on_time?: boolean | null;
+  mttd_hours?: number | null;
+  mttc_hours?: number | null;
+  mttr_hours?: number | null;
   stage_count: number;
   completed_stages: number;
   lifecycle_complete: boolean;
@@ -1768,6 +2010,27 @@ export interface Policy {
   controls: PolicyLink[];
   requirements: PolicyLink[];
   risks: PolicyLink[];
+  // Phase 2: governance and applicability.
+  approving_authority_id?: string | null;
+  approving_authority_ref?: PolicyLink | null;
+  effective_date?: string | null;
+  supersedes_id?: string | null;
+  supersedes_ref?: PolicyLink | null;
+  superseded_by?: PolicyLink[];
+  business_units?: PolicyLink[];
+  roles?: PolicyLink[];
+}
+/** GET /policies/{id}/acknowledgement-status — who must acknowledge, and who has. */
+export interface PolicyAckStatus {
+  policy_id: string;
+  scope: "roles" | "everyone";
+  roles: string[];
+  note: string;
+  total: number;
+  acknowledged: number;
+  pending: number;
+  outside_scope: number;
+  users: { user_id: string; full_name: string; email: string; roles: string[]; acknowledged: boolean; acknowledged_at: string | null }[];
 }
 
 export interface Vendor {
@@ -1808,16 +2071,17 @@ export const api = {
     request<LdapConfig>("/auth/ldap/config", { method: "PUT", body: JSON.stringify(payload) }),
   systemInfo: () => request<SystemInfo>("/system/info"),
   systemModules: () => request<ModuleState[]>("/system/modules"),
+  systemStatus: () => request<SystemStatus>("/system/status"),
   systemHealth: () => request<SystemHealth>("/system/health"),
   listBackups: () => request<BackupItem[]>("/system/backups"),
   createBackup: () => request<BackupItem>("/system/backups", { method: "POST" }),
   downloadSupportBundle: () => downloadBlob("/system/support-bundle", "nexusline-support-bundle.zip"),
   risks: () => request<Page<Risk>>("/risks?limit=200"),
   orphanedRisks: () => request<OrphanedRiskPage>("/risks/orphaned"),
-  purgeOrphanedRisks: (riskIds: string[]) =>
+  purgeOrphanedRisks: (riskIds: string[], reason: string) =>
     request<OrphanPurgeResult>("/risks/orphaned/purge", {
       method: "POST",
-      body: JSON.stringify({ risk_ids: riskIds }),
+      body: JSON.stringify({ risk_ids: riskIds, reason }),
     }),
   dashboard: () => request<Dashboard>("/dashboard"),
   dashboardOverview: (days = 30) => request<DashboardOverview>(`/dashboard/overview?days=${days}`),
@@ -1847,7 +2111,8 @@ export const api = {
   updateOrganization: (id: string, body: { name?: string; is_active?: boolean }) =>
     request<Organization>(`/platform/organizations/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   platformSummary: () => request<PlatformSummary>("/platform/summary"),
-  notifications: () => request<NotificationList>("/notifications"),
+  /** `query` adds filters, e.g. "&mine=true" or "&fresh=false" (the bell). */
+  notifications: (limit = 100, offset = 0, query = "") => request<NotificationList>(`/notifications?limit=${limit}&offset=${offset}${query}`),
   markNotificationsSeen: () => request<void>("/notifications/seen", { method: "POST" }),
   approvals: () => request<Page<ApprovalRequest>>("/approvals?limit=200"),
   submitApproval: (payload: Record<string, unknown>) =>
@@ -1923,6 +2188,8 @@ export const api = {
     request<AttestationStatus>(`/attestations/${entityType}/${entityId}`),
   attest: (entityType: string, entityId: string, payload: Record<string, unknown>) =>
     request<AttestationStatus>(`/attestations/${entityType}/${entityId}`, { method: "POST", body: JSON.stringify(payload) }),
+  confirmAttestation: (attestationId: string) =>
+    request<AttestationStatus>(`/attestations/${attestationId}/confirm`, { method: "POST" }),
   filterFields: (model: string) => request<FieldInfo[]>(`/filters/fields/${model}`),
   filters: (model?: string) =>
     request<Page<SavedFilter>>(`/filters?limit=200${model ? `&model=${model}` : ""}`).then((r) => r.items),
@@ -1965,6 +2232,8 @@ export const api = {
     request<Incident>(`/incidents/${id}/stages/${stageId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   policies: () => request<Page<Policy>>("/policies?limit=200"),
   policy: (id: string) => request<Policy>(`/policies/${id}`),
+  policyOptions: () => request<{ committees: PolicyLink[]; roles: PolicyLink[] }>("/policies/options"),
+  policyAckStatus: (id: string) => request<PolicyAckStatus>(`/policies/${id}/acknowledgement-status`),
   createPolicy: (payload: Record<string, unknown>) =>
     request<Policy>("/policies", { method: "POST", body: JSON.stringify(payload) }),
   updatePolicy: (id: string, payload: Record<string, unknown>) =>
@@ -1990,7 +2259,27 @@ export const api = {
     size: number;
     likelihood_levels: MatrixLevel[];
     impact_levels: MatrixLevel[];
+    /** Omit to keep; null returns to the derived bands. */
+    severity_bands?: SeverityBands | null;
+    /** Omit to keep; {} removes every override. */
+    matrix_cells?: Record<string, string>;
+    impact_mode?: "max" | "average";
   }) => request<RiskMatrixConfig>("/risk-matrix-config", { method: "PUT", body: JSON.stringify(payload) }),
+  // Appetite per top-level risk category (the organisation's is the fallback).
+  riskAppetites: () => request<RiskAppetite[]>("/risk-appetites"),
+  createRiskAppetite: (payload: { category_id: string; appetite_score: number; tolerance_score: number; statement?: string }) =>
+    request<RiskAppetite>("/risk-appetites", { method: "POST", body: JSON.stringify(payload) }),
+  updateRiskAppetite: (id: string, payload: { appetite_score?: number; tolerance_score?: number; statement?: string }) =>
+    request<RiskAppetite>(`/risk-appetites/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteRiskAppetite: (id: string) => request<unknown>(`/risk-appetites/${id}`, { method: "DELETE" }),
+  // A risk's treatment actions.
+  treatmentActions: (riskId: string) => request<TreatmentAction[]>(`/risks/${riskId}/treatment-actions`),
+  createTreatmentAction: (riskId: string, payload: Partial<Pick<TreatmentAction, "title" | "description" | "owner_id" | "due_date" | "status" | "percent_complete">>) =>
+    request<TreatmentAction>(`/risks/${riskId}/treatment-actions`, { method: "POST", body: JSON.stringify(payload) }),
+  updateTreatmentAction: (riskId: string, actionId: string, payload: Partial<Pick<TreatmentAction, "title" | "description" | "owner_id" | "due_date" | "status" | "percent_complete">>) =>
+    request<TreatmentAction>(`/risks/${riskId}/treatment-actions/${actionId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteTreatmentAction: (riskId: string, actionId: string) =>
+    request<unknown>(`/risks/${riskId}/treatment-actions/${actionId}`, { method: "DELETE" }),
   residualPolicy: () => request<ResidualPolicy>("/residual-policy"),
   updateResidualPolicy: (payload: ResidualPolicy) =>
     request<ResidualPolicy>("/residual-policy", { method: "PUT", body: JSON.stringify(payload) }),
@@ -2085,6 +2374,15 @@ export const api = {
     request<RcsaRisk>(`/rcsa-risks/${lineId}`, { method: "PATCH", body: JSON.stringify(p) }),
   deleteRcsaRisk: (lineId: string) => request<void>(`/rcsa-risks/${lineId}`, { method: "DELETE" }),
   kris: () => request<Page<KeyRiskIndicator>>("/kris?limit=200"),
+  kriEscalationRoles: () => request<{ id: string; name: string }[]>("/kri-escalation-roles"),
+  createKriEscalation: (id: string, p: Record<string, unknown>) =>
+    request<KriEscalation>(`/kris/${id}/escalations`, { method: "POST", body: JSON.stringify(p) }),
+  updateKriEscalation: (id: string, escalationId: string, p: Record<string, unknown>) =>
+    request<KriEscalation>(`/kris/${id}/escalations/${escalationId}`, { method: "PATCH", body: JSON.stringify(p) }),
+  deleteKriEscalation: (id: string, escalationId: string) =>
+    request<void>(`/kris/${id}/escalations/${escalationId}`, { method: "DELETE" }),
+  issueKriFeedToken: (id: string) => request<KriFeedToken>(`/kris/${id}/feed-token`, { method: "POST" }),
+  revokeKriFeedToken: (id: string) => request<void>(`/kris/${id}/feed-token`, { method: "DELETE" }),
   createKri: (p: Record<string, unknown>) =>
     request<KeyRiskIndicator>("/kris", { method: "POST", body: JSON.stringify(p) }),
   updateKri: (id: string, p: Record<string, unknown>) =>

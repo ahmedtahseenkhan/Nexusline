@@ -1,0 +1,228 @@
+{
+  "_source": "INC-002 as the dev stack returns it on 2026-09-13 (GET /api/v1/incidents/f40b5542-…): resolved, 5 of 5 stages marked done, detected and resolved entered as the same date (00:00 in the tenant's clock; shifted here from 19:00Z to 00:00Z because the check runs in UTC), occurrence and containment times not set, no root cause or lessons, handler the free text \"Network Team\" with no person picked. Pins: the Response times tile names exactly the missing times and never calls a resolved incident uncontained; date-only times read as 'the day it was detected', not '0 h'; the Response stage tile is not green while no root cause or lessons are recorded; the text-only handler note.",
+  "type": "incident",
+  "input": {
+    "incident": {
+      "title": "Brief DDoS against public website",
+      "description": "",
+      "category": "Availability",
+      "category_id": "9b0d0b73-fd91-41db-a985-a72381a599c8",
+      "classification": "",
+      "classification_id": null,
+      "severity": "medium",
+      "status": "resolved",
+      "assignee": "Network Team",
+      "assignee_id": null,
+      "reported_by": "",
+      "reported_by_id": null,
+      "impact": "",
+      "root_cause": "",
+      "lessons_learned": "",
+      "cost": null,
+      "detected_at": "2026-07-03T00:00:00Z",
+      "occurred_at": null,
+      "contained_at": null,
+      "resolved_at": "2026-07-03T00:00:00Z",
+      "customers_affected": null,
+      "records_affected": null,
+      "near_miss": false,
+      "personal_data_breach": false,
+      "is_reportable": false,
+      "regulator": "",
+      "regulator_id": null,
+      "workflow_owner_id": null,
+      "id": "f40b5542-2096-41f4-9a56-4fc438c69493",
+      "reference": "INC-002",
+      "workflow_status": "draft",
+      "workflow_owner": "",
+      "assignee_ref": null,
+      "reported_by_ref": null,
+      "category_ref": {
+        "id": "9b0d0b73-fd91-41db-a985-a72381a599c8",
+        "key": "incident_type",
+        "value": "availability",
+        "label": "Availability"
+      },
+      "classification_ref": null,
+      "regulator_ref": null,
+      "workflow_owner_ref": null,
+      "stage_count": 5,
+      "completed_stages": 5,
+      "lifecycle_complete": true,
+      "current_stage": null,
+      "stages": [
+        {
+          "id": "1e68c415-835c-4198-be00-80b7f907d54d",
+          "incident_id": "f40b5542-2096-41f4-9a56-4fc438c69493",
+          "name": "Identification",
+          "order_index": 0,
+          "status": "done",
+          "notes": "",
+          "completed_at": "2026-07-03"
+        },
+        {
+          "id": "439ef4c9-c9c6-441d-8c5a-666268660f16",
+          "incident_id": "f40b5542-2096-41f4-9a56-4fc438c69493",
+          "name": "Containment",
+          "order_index": 1,
+          "status": "done",
+          "notes": "",
+          "completed_at": "2026-07-03"
+        },
+        {
+          "id": "2148b7ab-e4c1-448c-8712-4d8ee47aee32",
+          "incident_id": "f40b5542-2096-41f4-9a56-4fc438c69493",
+          "name": "Eradication",
+          "order_index": 2,
+          "status": "done",
+          "notes": "",
+          "completed_at": "2026-07-03"
+        },
+        {
+          "id": "748dc4c4-c16e-4550-965c-1cba5ebda4ec",
+          "incident_id": "f40b5542-2096-41f4-9a56-4fc438c69493",
+          "name": "Recovery",
+          "order_index": 3,
+          "status": "done",
+          "notes": "",
+          "completed_at": "2026-07-03"
+        },
+        {
+          "id": "5e3c28bf-f2d5-4dd5-84a7-97e5e593a9f2",
+          "incident_id": "f40b5542-2096-41f4-9a56-4fc438c69493",
+          "name": "Lessons Learned",
+          "order_index": 4,
+          "status": "done",
+          "notes": "",
+          "completed_at": "2026-07-03"
+        }
+      ],
+      "regulatory_reports": [],
+      "controls": [],
+      "vendors": [],
+      "assets": [],
+      "risks": [],
+      "loss_events": [],
+      "data_breaches": [],
+      "notification_deadline": null,
+      "notified_at": null,
+      "regulator_reference": null,
+      "hours_to_deadline": null,
+      "notified_on_time": null,
+      "mttd_hours": null,
+      "mttc_hours": null,
+      "mttr_hours": 0.0,
+      "created_at": "2026-07-03T20:35:46.947782Z"
+    }
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "draft",
+      "approvalSteps": 0,
+      "lastStep": null,
+      "lastSubmitAt": null,
+      "attestation": null
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "severity",
+        "value": "Medium",
+        "because": "Availability · classification not set.",
+        "basis": {
+          "kind": "declared",
+          "text": "Set by hand"
+        }
+      },
+      {
+        "key": "regclock",
+        "value": "Not reportable",
+        "because": "Not marked reportable.",
+        "basis": {
+          "kind": "declared",
+          "text": "Reportability set by hand"
+        }
+      },
+      {
+        "key": "impact",
+        "value": "Not recorded",
+        "because": "No impact assessment written.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "loss",
+        "value": "Not recorded",
+        "because": "No cost estimate or loss event recorded.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "response",
+        "value": "Resolved",
+        "tone": null,
+        "because": "Resolved the day it was detected (dates only); occurrence and containment times not recorded.",
+        "basis": {
+          "kind": "missing",
+          "text": "2 times not recorded"
+        }
+      },
+      {
+        "key": "stage",
+        "value": "Complete",
+        "tone": "medium",
+        "because": "5 of 5 stages marked done, but root cause and lessons learned are not recorded.",
+        "basis": {
+          "kind": "declared",
+          "text": "Stages marked done by hand"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "incident.resolved_without_analysis",
+        "level": "gap",
+        "text": "Resolved without a root cause or lessons learned.",
+        "action": {
+          "kind": "edit",
+          "target": "analysis"
+        }
+      },
+      {
+        "id": "incident.handler_text",
+        "level": "note",
+        "text": "Handler is a text label (“Network Team”), not a person",
+        "action": {
+          "kind": "edit",
+          "target": "general"
+        }
+      },
+      {
+        "id": "incident.times_not_recorded",
+        "level": "note",
+        "text": "Occurrence and containment times not recorded",
+        "action": {
+          "kind": "edit",
+          "target": "timeline"
+        }
+      },
+      {
+        "id": "incident.no_loss_recorded",
+        "level": "note",
+        "text": "No loss recorded",
+        "action": {
+          "kind": "section",
+          "target": "impact"
+        }
+      }
+    ],
+    "headline": "Medium incident; not reportable; all stages marked done, analysis not recorded."
+  }
+}

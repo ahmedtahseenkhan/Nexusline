@@ -22,7 +22,6 @@ class AuthorityMatrixBase(BaseModel):
     conditions: str = ""
     effective_date: date | None = None
     status: AuthorityStatus = AuthorityStatus.active
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class AuthorityMatrixCreate(AuthorityMatrixBase):
@@ -41,10 +40,11 @@ class AuthorityMatrixUpdate(BaseModel):
     conditions: str | None = None
     effective_date: date | None = None
     status: AuthorityStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class AuthorityMatrixRead(AuthorityMatrixBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -64,7 +64,6 @@ class DualControlRuleBase(BaseModel):
     description: str = ""
     enabled: bool = True
     status: DualControlStatus = DualControlStatus.active
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class DualControlRuleCreate(DualControlRuleBase):
@@ -82,10 +81,11 @@ class DualControlRuleUpdate(BaseModel):
     description: str | None = None
     enabled: bool | None = None
     status: DualControlStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class DualControlRuleRead(DualControlRuleBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

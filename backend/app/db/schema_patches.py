@@ -216,6 +216,324 @@ def fortnightly_ddl_statements() -> list[str]:
     ]
 
 
+# --- product review, phase 0 --------------------------------------------------
+# Columns added to pre-existing tables by the 11 Sep 2026 product-review remediation.
+PHASE0_COLUMNS: list[tuple[str, str, str, str | None]] = [
+    # (table, column, DDL type, server default or None for nullable)
+    ("risks", "needs_review", "BOOLEAN", "false"),
+    ("risks", "review_reason", "TEXT", "''"),
+    ("frameworks", "kind", "VARCHAR(16)", "'compliance'"),
+    ("attestations", "statement", "TEXT", "''"),
+    ("attestations", "scope", "TEXT", "''"),
+    ("attestations", "confirmed_by_id", "UUID", None),
+    ("attestations", "confirmed_at", "DATE", None),
+    ("users", "mfa_grace_until", "TIMESTAMPTZ", None),
+]
+
+
+def phase0_ddl_statements() -> list[str]:
+    """Idempotent DDL for the product-review phase-0 columns and the residual check.
+
+    The residual check is added ``NOT VALID``: it binds every write from now on without
+    failing the upgrade on a register that already holds a residual above inherent. Those
+    rows are flagged for review by ``app.db.data_repairs`` instead of being rewritten, and
+    the check lets a flagged row through (see ``RESIDUAL_NOT_ABOVE_INHERENT``).
+
+    The two uniqueness rules (one framework per name, one tile per metric) are *not*
+    here: existing duplicates have to be merged first, which needs tenant-scoped ORM
+    work, so ``data_repairs`` creates those indexes after it has cleaned up.
+    """
+    statements: list[str] = []
+    for table, col, ddl_type, default in PHASE0_COLUMNS:
+        default_clause = f" DEFAULT {default}" if default is not None else ""
+        not_null = " NOT NULL" if default is not None else ""
+        statements.append(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl_type}{default_clause}{not_null}"
+        )
+    statements.append("CREATE INDEX IF NOT EXISTS ix_risks_needs_review ON risks (needs_review)")
+    from app.models.risk import RESIDUAL_NOT_ABOVE_INHERENT
+
+    # Drop and re-add so a changed expression reaches existing installs; a NOT VALID
+    # check is added without scanning the table, so this is cheap on every boot.
+    statements.append("ALTER TABLE risks DROP CONSTRAINT IF EXISTS ck_risk_residual_le_inherent")
+    statements.append(
+        "ALTER TABLE risks ADD CONSTRAINT ck_risk_residual_le_inherent "
+        f"CHECK ({RESIDUAL_NOT_ABOVE_INHERENT}) NOT VALID"
+    )
+    return statements
+
+
+# --- product review, phase 1: structured data ------------------------------------
+# A picker-backed foreign key beside every free-text owner, unit and category column.
+# The free-text column stays for one release: existing values are matched onto the new
+# key by ``app.db.fk_backfill`` on start-up, and anything that doesn't match is kept as
+# text so nothing a user typed is lost.
+PHASE1_FK_COLUMNS = [
+    ("risks", "treatment_owner_id", "users", "treatment_owner"),
+    ("risks", "category_id", "lookups", "category"),
+    ("controls", "owner_id", "users", "owner"),
+    ("controls", "operator_id", "users", "owner"),
+    ("controls", "classification_id", "lookups", "classification"),
+    ("control_audits", "tested_by_id", "users", "auditor"),
+    ("issues", "owner_id", "users", "owner"),
+    ("issues", "business_unit_id", "business_units", "business_unit"),
+    ("issues", "category_id", "lookups", "category"),
+    ("issue_actions", "owner_id", "users", "owner"),
+    ("issue_updates", "author_id", "users", "author"),
+    ("incidents", "assignee_id", "users", "assignee"),
+    ("incidents", "reported_by_id", "users", "reported_by"),
+    ("incidents", "category_id", "lookups", "category"),
+    ("incidents", "classification_id", "lookups", "classification"),
+    ("incidents", "regulator_id", "lookups", "regulator"),
+    ("regulatory_reports", "submitted_by_id", "users", "submitted_by"),
+    ("key_risk_indicators", "owner_id", "users", "owner"),
+    ("key_risk_indicators", "business_unit_id", "business_units", "business_area"),
+    ("key_risk_indicators", "category_id", "lookups", "category"),
+    ("policies", "owner_id", "users", "owner"),
+    ("policies", "category_id", "lookups", "category"),
+    ("policy_reviews", "reviewer_id", "users", "reviewer"),
+    ("business_units", "manager_id", "users", "manager"),
+    ("processes", "owner_id", "users", "owner"),
+    ("legals", "category_id", "lookups", "category"),
+    ("goals", "owner_id", "users", "owner"),
+    ("loss_events", "action_owner_id", "users", "action_owner"),
+    ("loss_events", "business_unit_id", "business_units", "business_line"),
+    ("rcsa_assessments", "assessor_id", "users", "assessor"),
+    ("rcsa_assessments", "business_unit_id", "business_units", "business_unit"),
+    ("rcsa_assessments", "process_id", "processes", "process"),
+    ("rcsa_risks", "action_owner_id", "users", "action_owner"),
+    ("rcsa_risks", "category_id", "lookups", "category"),
+    ("vendors", "category_id", "lookups", "category"),
+    ("vendors", "country_id", "lookups", "location"),
+]
+
+
+PHASE1_TEXT_COLUMNS: list[tuple[str, str, str]] = [
+    # (table, column, DDL) — plain columns
+    ("requirements", "applicability_justification", "TEXT DEFAULT '' NOT NULL"),
+]
+
+
+def workflow_tables() -> list[str]:
+    """Every table whose model carries ``WorkflowMixin`` (and so ``workflow_owner_id``)."""
+    import app.models  # noqa: F401 - registers every mapper
+    from app.core.database import Base
+    from app.models.base import WorkflowMixin
+
+    return sorted(
+        m.class_.__tablename__
+        for m in Base.registry.mappers
+        if issubclass(m.class_, WorkflowMixin) and hasattr(m.class_, "__tablename__")
+    )
+
+
+def phase1_ddl_statements() -> list[str]:
+    """Idempotent DDL for the phase-1 columns on pre-existing tables.
+
+    New tables (``tenant_settings``, ``lookups``) come from ``create_all``. Foreign keys
+    are added ``NOT VALID`` and guarded by name, so the upgrade never scans or fails on a
+    large table, and re-running it is a no-op.
+    """
+    statements: list[str] = []
+
+    def fk(table: str, col: str, target: str) -> None:
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} UUID")
+        name = f"fk_{table}_{col}"[:63]
+        statements.append(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{name}') THEN ALTER TABLE {table} ADD CONSTRAINT {name} "
+            f"FOREIGN KEY ({col}) REFERENCES {target}(id) ON DELETE SET NULL NOT VALID; "
+            "END IF; END $$;"
+        )
+        statements.append(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table} ({col})"[:200])
+
+    for table, col, target, _anchor in PHASE1_FK_COLUMNS:
+        fk(table, col, target)
+    for table in workflow_tables():
+        fk(table, "workflow_owner_id", "users")
+    for table, col, ddl in PHASE1_TEXT_COLUMNS:
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}")
+    return statements
+
+
+# --- product review, phase 2: record depth -------------------------------------------
+# (table, column, DDL). Foreign keys use PHASE2_FK_COLUMNS below.
+PHASE2_COLUMNS: list[tuple[str, str, str]] = [
+    ("controls", "nature", "VARCHAR(16)"),
+    ("controls", "automation", "VARCHAR(24)"),
+    ("controls", "is_key", "BOOLEAN DEFAULT false NOT NULL"),
+    ("controls", "operating_frequency", "VARCHAR(16)"),
+    ("controls", "iso27002_attributes", "JSONB DEFAULT '{}'::jsonb NOT NULL"),
+    ("controls", "design_effectiveness", "control_effectiveness DEFAULT 'not_assessed' NOT NULL"),
+    ("controls", "operating_effectiveness", "control_effectiveness DEFAULT 'not_assessed' NOT NULL"),
+    ("controls", "effectiveness_override_reason", "TEXT DEFAULT '' NOT NULL"),
+    ("controls", "test_procedure", "TEXT DEFAULT '' NOT NULL"),
+    ("controls", "evidence_expected", "TEXT DEFAULT '' NOT NULL"),
+    ("control_audits", "test_type", "VARCHAR(16)"),
+    ("control_audits", "period_start", "DATE"),
+    ("control_audits", "period_end", "DATE"),
+    ("control_audits", "population_size", "INTEGER"),
+    ("control_audits", "sample_size", "INTEGER"),
+    ("control_audits", "sample_method", "VARCHAR(32) DEFAULT '' NOT NULL"),
+    ("control_audits", "exceptions_count", "INTEGER DEFAULT 0 NOT NULL"),
+    ("control_audits", "exceptions_detail", "TEXT DEFAULT '' NOT NULL"),
+    ("control_audits", "conclusion", "TEXT DEFAULT '' NOT NULL"),
+    # Tests recorded before reviews existed are "legacy", not "pending" (see below).
+    ("control_audits", "review_status", "VARCHAR(16) DEFAULT 'legacy' NOT NULL"),
+    ("control_audits", "reviewed_at", "TIMESTAMPTZ"),
+    ("control_audits", "review_note", "TEXT DEFAULT '' NOT NULL"),
+    ("issues", "validated_at", "TIMESTAMPTZ"),
+    ("issues", "validation_result", "VARCHAR(16)"),
+    ("issues", "validation_note", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "cause", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "event", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "consequence", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "risk_type", "VARCHAR(24)"),
+    ("risks", "velocity", "VARCHAR(16)"),
+    ("risks", "identified_date", "DATE"),
+    ("risks", "source", "VARCHAR(24)"),
+    ("risks", "target_likelihood", "INTEGER"),
+    ("risks", "target_impact", "INTEGER"),
+    ("risks", "assessment_rationale", "TEXT DEFAULT '' NOT NULL"),
+    ("risks", "last_assessed_at", "TIMESTAMPTZ"),
+    ("risk_settings", "severity_bands", "JSONB DEFAULT '{}'::jsonb NOT NULL"),
+    ("risk_settings", "matrix_cells", "JSONB DEFAULT '{}'::jsonb NOT NULL"),
+    ("risk_settings", "impact_mode", "VARCHAR(16) DEFAULT 'max' NOT NULL"),
+    ("incidents", "contained_at", "TIMESTAMPTZ"),
+    ("incidents", "customers_affected", "INTEGER"),
+    ("incidents", "records_affected", "INTEGER"),
+    ("incidents", "personal_data_breach", "BOOLEAN DEFAULT false NOT NULL"),
+    ("incidents", "near_miss", "BOOLEAN DEFAULT false NOT NULL"),
+    ("key_risk_indicators", "definition", "TEXT DEFAULT '' NOT NULL"),
+    ("key_risk_indicators", "numerator", "TEXT DEFAULT '' NOT NULL"),
+    ("key_risk_indicators", "denominator", "TEXT DEFAULT '' NOT NULL"),
+    ("key_risk_indicators", "data_source", "TEXT DEFAULT '' NOT NULL"),
+    ("key_risk_indicators", "indicator_type", "VARCHAR(16)"),
+    ("key_risk_indicators", "lower_bound", "NUMERIC(18,4)"),
+    ("key_risk_indicators", "upper_bound", "NUMERIC(18,4)"),
+    ("key_risk_indicators", "feed_token_hash", "VARCHAR(128) DEFAULT '' NOT NULL"),
+    ("policies", "effective_date", "DATE"),
+    ("vendors", "legal_name", "VARCHAR(255) DEFAULT '' NOT NULL"),
+    ("vendors", "registration_number", "VARCHAR(120) DEFAULT '' NOT NULL"),
+    ("vendors", "annual_spend", "NUMERIC(18,2)"),
+    ("vendors", "spend_currency", "VARCHAR(3) DEFAULT '' NOT NULL"),
+    ("vendors", "inherent_tier", "VARCHAR(16)"),
+    ("vendors", "tier_override_reason", "TEXT DEFAULT '' NOT NULL"),
+    ("service_contracts", "currency", "VARCHAR(3) DEFAULT '' NOT NULL"),
+]
+
+PHASE2_FK_COLUMNS: list[tuple[str, str, str]] = [
+    # (table, column, target table)
+    ("control_audits", "reviewed_by_id", "users"),
+    ("control_audits", "raised_issue_id", "issues"),
+    ("evidence", "control_audit_id", "control_audits"),
+    ("issues", "root_cause_category_id", "lookups"),
+    ("issues", "validated_by_id", "users"),
+    ("risks", "identified_by_id", "users"),
+    ("risks", "last_assessed_by_id", "users"),
+    ("regulatory_reports", "regulator_id", "lookups"),
+    ("key_risk_indicators", "data_provider_id", "users"),
+    ("key_risk_indicators", "appetite_id", "risk_appetites"),
+    ("policies", "approving_authority_id", "committees"),
+    ("policies", "supersedes_id", "policies"),
+    ("vendors", "relationship_owner_id", "users"),
+    ("vendors", "data_classification_id", "lookups"),
+    ("outsourcing_arrangements", "owner_id", "users"),
+    ("outsourcing_arrangements", "country_id", "lookups"),
+]
+
+#: Date columns that become timezone-aware timestamps: (table, column, time of day the
+#: stored date is taken to mean). A regulator's clock runs in hours, not days. Existing
+#: dates are read in Asia/Karachi, the default organisation timezone; a deadline keeps
+#: its whole day, so no deadline moves earlier.
+PHASE2_TIMESTAMP_COLUMNS: list[tuple[str, str, str]] = [
+    ("incidents", "occurred_at", "00:00"),
+    ("incidents", "detected_at", "00:00"),
+    ("incidents", "resolved_at", "00:00"),
+    ("regulatory_reports", "deadline", "23:59"),
+    ("regulatory_reports", "submitted_at", "00:00"),
+]
+
+#: New enum values: (type, value, position clause).
+PHASE2_ENUM_VALUES: list[tuple[str, str, str]] = [
+    ("test_result", "passed_with_exceptions", "AFTER 'passed'"),
+    ("review_frequency", "daily", "BEFORE 'fortnightly'"),
+    ("review_frequency", "weekly", "BEFORE 'fortnightly'"),
+    ("kri_direction", "within_range", ""),
+]
+
+
+def phase2_ddl_statements() -> list[str]:
+    """Idempotent DDL for phase 2 on pre-existing tables. New tables (link tables, risk
+    appetite/impact/actions, KRI escalations, vendor certifications, issue date changes)
+    come from ``create_all``."""
+    statements: list[str] = []
+    for type_name, value, position in PHASE2_ENUM_VALUES:
+        statements.append(
+            f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{value}' {position}".rstrip()
+        )
+    for table, col, ddl in PHASE2_COLUMNS:
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}")
+    # Existing tests were added as "legacy" above; tests recorded from now on need review.
+    statements.append("ALTER TABLE control_audits ALTER COLUMN review_status SET DEFAULT 'pending'")
+    for table, col, target in PHASE2_FK_COLUMNS:
+        name = f"fk_{table}_{col}"[:63]
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} UUID")
+        statements.append(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{name}') THEN ALTER TABLE {table} ADD CONSTRAINT {name} "
+            f"FOREIGN KEY ({col}) REFERENCES {target}(id) ON DELETE SET NULL NOT VALID; "
+            "END IF; END $$;"
+        )
+        statements.append(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table} ({col})")
+    for table, col, time_of_day in PHASE2_TIMESTAMP_COLUMNS:
+        statements.append(
+            "DO $$ BEGIN IF (SELECT data_type FROM information_schema.columns "
+            f"WHERE table_schema = 'public' AND table_name = '{table}' AND column_name = '{col}') = 'date' "
+            f"THEN ALTER TABLE {table} ALTER COLUMN {col} TYPE TIMESTAMPTZ USING "
+            f"(({col} + time '{time_of_day}')::timestamp AT TIME ZONE 'Asia/Karachi'); "
+            "END IF; END $$;"
+        )
+    return statements
+
+
+# --- product review, phase 3: differentiate -------------------------------------------
+PHASE3_COLUMNS: list[tuple[str, str, str]] = [
+    ("risks", "level", "INTEGER"),
+    ("notifications", "role_name", "VARCHAR(64) DEFAULT '' NOT NULL"),
+    ("tenant_settings", "enabled_modules", "JSONB"),
+    ("tenant_settings", "onboarding_completed_at", "TIMESTAMPTZ"),
+    ("committees", "board_pack_days_before", "INTEGER"),
+    ("connectors", "ingest_token_hash", "VARCHAR(128) DEFAULT '' NOT NULL"),
+]
+
+PHASE3_FK_COLUMNS: list[tuple[str, str, str, str]] = [
+    # (table, column, target, on delete)
+    ("risks", "parent_id", "risks", "SET NULL"),
+    ("notifications", "user_id", "users", "CASCADE"),
+]
+
+
+def phase3_ddl_statements() -> list[str]:
+    """Idempotent DDL for phase 3 on pre-existing tables; new tables (risk proposals,
+    action tokens, board packs) come from ``create_all``."""
+    statements: list[str] = []
+    for table, col, ddl in PHASE3_COLUMNS:
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}")
+    for table, col, target, on_delete in PHASE3_FK_COLUMNS:
+        name = f"fk_{table}_{col}"[:63]
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} UUID")
+        statements.append(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{name}') THEN ALTER TABLE {table} ADD CONSTRAINT {name} "
+            f"FOREIGN KEY ({col}) REFERENCES {target}(id) ON DELETE {on_delete} NOT VALID; "
+            "END IF; END $$;"
+        )
+        statements.append(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table} ({col})")
+    statements.append("CREATE INDEX IF NOT EXISTS ix_risks_level ON risks (level)")
+    return statements
+
+
 def asset_split_ddl_statements() -> list[str]:
     """Idempotent DDL: create the enum types, then add the new asset columns.
 

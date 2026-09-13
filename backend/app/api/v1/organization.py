@@ -26,8 +26,23 @@ from app.schemas.organization import (
     ProcessUpdate,
 )
 from app.services import audit as audit_log
+from app.services import delete_guard, master_data, ref_fields
 
 router = APIRouter(tags=["organization"])
+
+#: Picked fields per register (phase 1). See services.ref_fields.
+BU_REFS: tuple[ref_fields.RefField, ...] = (
+    ref_fields.user("manager_id", "manager"),
+    ref_fields.WORKFLOW_OWNER,
+)
+PROCESS_REFS: tuple[ref_fields.RefField, ...] = (
+    ref_fields.user("owner_id", "owner"),
+    ref_fields.WORKFLOW_OWNER,
+)
+LEGAL_REFS: tuple[ref_fields.RefField, ...] = (
+    ref_fields.lookup(Legal, "category_id", "category"),
+    ref_fields.WORKFLOW_OWNER,
+)
 
 
 async def _get(db, model, obj_id: uuid.UUID, name: str):
@@ -76,10 +91,19 @@ async def _bu_name_map(db) -> dict:
     return dict((await db.execute(select(BusinessUnit.id, BusinessUnit.name))).all())
 
 
-def _bu_read(obj: BusinessUnit, names: dict) -> BusinessUnitRead:
-    rd = BusinessUnitRead.model_validate(obj)
-    rd.parent_name = names.get(obj.parent_id) if obj.parent_id else None
-    return rd
+async def _bu_reads(db, objs) -> list[BusinessUnitRead]:
+    names = await _bu_name_map(db)
+    items = []
+    for obj in objs:
+        rd = BusinessUnitRead.model_validate(obj)
+        rd.parent_name = names.get(obj.parent_id) if obj.parent_id else None
+        items.append(rd)
+    await ref_fields.fill_refs(db, list(zip(objs, items)), BU_REFS)
+    return items
+
+
+async def _bu_read(db, obj: BusinessUnit) -> BusinessUnitRead:
+    return (await _bu_reads(db, [obj]))[0]
 
 
 _BU_SORTABLE = {
@@ -95,6 +119,7 @@ _BU_SORTABLE = {
 async def list_business_units(
     db: DbSession,
     search: Annotated[str | None, Query()] = None,
+    manager_id: uuid.UUID | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
@@ -103,29 +128,32 @@ async def list_business_units(
     params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(BusinessUnit).where(BusinessUnit.deleted.is_(False))
     stmt = apply_search(stmt, params, [BusinessUnit.name, BusinessUnit.manager, BusinessUnit.location])
+    if manager_id is not None:
+        stmt = stmt.where(BusinessUnit.manager_id == manager_id)
     stmt = apply_sort(stmt, params, _BU_SORTABLE, default=BusinessUnit.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    names = await _bu_name_map(db)
-    return Page(items=[_bu_read(r, names) for r in rows], total=total, limit=limit, offset=offset)
+    rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
+    return Page(items=await _bu_reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post("/business-units", response_model=BusinessUnitRead, status_code=201, dependencies=[Depends(require("org:write"))])
 async def create_business_unit(body: BusinessUnitCreate, db: DbSession, user: CurrentUser) -> BusinessUnitRead:
     data = body.model_dump()
+    await ref_fields.apply_refs(db, BusinessUnit, data, BU_REFS)
+    await master_data.check_unit(db, data.get("parent_id"), "parent_id")
     legal_ids = data.pop("legal_ids", [])
     obj = BusinessUnit(tenant_id=user.tenant_id, **data)
     obj.legals = await _load_many(db, Legal, legal_ids)  # assign while pending
     db.add(obj)
     await db.flush()
     await _audit(db, user, "create", "business_unit", obj, "business unit")
-    return _bu_read(await _get(db, BusinessUnit, obj.id, "Business unit"), await _bu_name_map(db))
+    return await _bu_read(db, await _get(db, BusinessUnit, obj.id, "Business unit"))
 
 
 @router.get("/business-units/{obj_id}", response_model=BusinessUnitRead, dependencies=[Depends(require("org:read"))])
 async def get_business_unit(obj_id: uuid.UUID, db: DbSession) -> BusinessUnitRead:
     obj = await _get(db, BusinessUnit, obj_id, "Business unit")
-    return _bu_read(obj, await _bu_name_map(db))
+    return await _bu_read(db, obj)
 
 
 @router.patch("/business-units/{obj_id}", response_model=BusinessUnitRead, dependencies=[Depends(require("org:write"))])
@@ -134,8 +162,10 @@ async def update_business_unit(
 ) -> BusinessUnitRead:
     obj = await _get(db, BusinessUnit, obj_id, "Business unit")
     data = body.model_dump(exclude_unset=True)
+    await ref_fields.apply_refs(db, BusinessUnit, data, BU_REFS, record=obj)
     legal_ids = data.pop("legal_ids", None)
     if "parent_id" in data and data["parent_id"] is not None:
+        await master_data.check_unit(db, data["parent_id"], "parent_id")
         # Walk the proposed parent's ancestry; reject if this unit appears, which would
         # create a cycle (A→B→A) that any tree rollup would loop on.
         cursor = data["parent_id"]
@@ -157,12 +187,17 @@ async def update_business_unit(
         obj.legals = await _load_many(db, Legal, legal_ids)
     await db.flush()
     await _audit(db, user, "update", "business_unit", obj, "business unit", data)
-    return _bu_read(await _get(db, BusinessUnit, obj.id, "Business unit"), await _bu_name_map(db))
+    return await _bu_read(db, await _get(db, BusinessUnit, obj.id, "Business unit"))
 
 
 @router.delete("/business-units/{obj_id}", status_code=204, dependencies=[Depends(require("org:write"))])
 async def delete_business_unit(obj_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    """Archive a business unit. Dual control ``business_unit / delete``: whoever entered
+    it cannot also archive it while segregation of duties applies (403)."""
     obj = await _get(db, BusinessUnit, obj_id, "Business unit")
+    await delete_guard.enforce(
+        db, entity_type="business_unit", record=obj, user=user, label="business unit"
+    )
     await _audit(db, user, "delete", "business_unit", obj, "business unit")
     await _soft_delete(db, obj)
 
@@ -190,10 +225,19 @@ async def _process_assets_map(db, process_ids) -> dict:
     return out
 
 
-def _process_read(obj: Process, assets_map: dict) -> ProcessRead:
-    rd = ProcessRead.model_validate(obj)
-    rd.assets = assets_map.get(obj.id, [])
-    return rd
+async def _process_reads(db, objs) -> list[ProcessRead]:
+    assets_map = await _process_assets_map(db, [o.id for o in objs])
+    items = []
+    for obj in objs:
+        rd = ProcessRead.model_validate(obj)
+        rd.assets = assets_map.get(obj.id, [])
+        items.append(rd)
+    await ref_fields.fill_refs(db, list(zip(objs, items)), PROCESS_REFS)
+    return items
+
+
+async def _process_read(db, obj: Process) -> ProcessRead:
+    return (await _process_reads(db, [obj]))[0]
 
 
 async def _validate_assets(db, asset_ids) -> None:
@@ -236,6 +280,8 @@ _PROCESS_SORTABLE = {
 async def list_processes(
     db: DbSession,
     search: Annotated[str | None, Query()] = None,
+    owner_id: uuid.UUID | None = None,
+    business_unit_id: uuid.UUID | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
@@ -244,16 +290,21 @@ async def list_processes(
     params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(Process).where(Process.deleted.is_(False))
     stmt = apply_search(stmt, params, [Process.name, Process.owner])
+    if owner_id is not None:
+        stmt = stmt.where(Process.owner_id == owner_id)
+    if business_unit_id is not None:
+        stmt = stmt.where(Process.business_unit_id == business_unit_id)
     stmt = apply_sort(stmt, params, _PROCESS_SORTABLE, default=Process.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    assets_map = await _process_assets_map(db, [r.id for r in rows])
-    return Page(items=[_process_read(r, assets_map) for r in rows], total=total, limit=limit, offset=offset)
+    rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
+    return Page(items=await _process_reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post("/processes", response_model=ProcessRead, status_code=201, dependencies=[Depends(require("org:write"))])
 async def create_process(body: ProcessCreate, db: DbSession, user: CurrentUser) -> ProcessRead:
     data = body.model_dump()
+    await ref_fields.apply_refs(db, Process, data, PROCESS_REFS)
+    await master_data.check_unit(db, data.get("business_unit_id"))
     asset_ids = data.pop("asset_ids", [])
     obj = Process(tenant_id=user.tenant_id, **data)
     db.add(obj)
@@ -261,14 +312,12 @@ async def create_process(body: ProcessCreate, db: DbSession, user: CurrentUser) 
     await _audit(db, user, "create", "process", obj, "process")
     await _set_process_assets(db, obj.id, asset_ids)
     await db.flush()
-    obj = await _get(db, Process, obj.id, "Process")
-    return _process_read(obj, await _process_assets_map(db, [obj.id]))
+    return await _process_read(db, await _get(db, Process, obj.id, "Process"))
 
 
 @router.get("/processes/{obj_id}", response_model=ProcessRead, dependencies=[Depends(require("org:read"))])
 async def get_process(obj_id: uuid.UUID, db: DbSession) -> ProcessRead:
-    obj = await _get(db, Process, obj_id, "Process")
-    return _process_read(obj, await _process_assets_map(db, [obj.id]))
+    return await _process_read(db, await _get(db, Process, obj_id, "Process"))
 
 
 @router.patch("/processes/{obj_id}", response_model=ProcessRead, dependencies=[Depends(require("org:write"))])
@@ -277,6 +326,9 @@ async def update_process(
 ) -> ProcessRead:
     obj = await _get(db, Process, obj_id, "Process")
     data = body.model_dump(exclude_unset=True)
+    await ref_fields.apply_refs(db, Process, data, PROCESS_REFS, record=obj)
+    if data.get("business_unit_id") is not None:
+        await master_data.check_unit(db, data["business_unit_id"])
     asset_ids = data.pop("asset_ids", None)
     for f, v in data.items():
         setattr(obj, f, v)
@@ -284,13 +336,15 @@ async def update_process(
     await _set_process_assets(db, obj.id, asset_ids)
     await _audit(db, user, "update", "process", obj, "process", data)
     await db.flush()
-    obj = await _get(db, Process, obj.id, "Process")
-    return _process_read(obj, await _process_assets_map(db, [obj.id]))
+    return await _process_read(db, await _get(db, Process, obj.id, "Process"))
 
 
 @router.delete("/processes/{obj_id}", status_code=204, dependencies=[Depends(require("org:write"))])
 async def delete_process(obj_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    """Archive a process. Dual control ``process / delete``: whoever entered it cannot
+    also archive it while segregation of duties applies (403)."""
     obj = await _get(db, Process, obj_id, "Process")
+    await delete_guard.enforce(db, entity_type="process", record=obj, user=user, label="process")
     await _audit(db, user, "delete", "process", obj, "process")
     await _soft_delete(db, obj)
 
@@ -318,10 +372,19 @@ async def _legal_assets_map(db, legal_ids) -> dict:
     return out
 
 
-def _legal_read(obj: Legal, assets_map: dict) -> LegalRead:
-    rd = LegalRead.model_validate(obj)  # business_units is a real relationship -> auto
-    rd.assets = assets_map.get(obj.id, [])
-    return rd
+async def _legal_reads(db, objs) -> list[LegalRead]:
+    assets_map = await _legal_assets_map(db, [o.id for o in objs])
+    items = []
+    for obj in objs:
+        rd = LegalRead.model_validate(obj)  # business_units is a real relationship -> auto
+        rd.assets = assets_map.get(obj.id, [])
+        items.append(rd)
+    await ref_fields.fill_refs(db, list(zip(objs, items)), LEGAL_REFS)
+    return items
+
+
+async def _legal_read(db, obj: Legal) -> LegalRead:
+    return (await _legal_reads(db, [obj]))[0]
 
 
 async def _set_legal_assets(db, legal_id, asset_ids) -> None:
@@ -352,6 +415,7 @@ _LEGAL_SORTABLE = {
 async def list_legals(
     db: DbSession,
     search: Annotated[str | None, Query()] = None,
+    category_id: uuid.UUID | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
@@ -360,16 +424,18 @@ async def list_legals(
     params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(Legal).where(Legal.deleted.is_(False))
     stmt = apply_search(stmt, params, [Legal.name, Legal.reference, Legal.jurisdiction])
+    if category_id is not None:
+        stmt = stmt.where(Legal.category_id == category_id)
     stmt = apply_sort(stmt, params, _LEGAL_SORTABLE, default=Legal.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    assets_map = await _legal_assets_map(db, [r.id for r in rows])
-    return Page(items=[_legal_read(r, assets_map) for r in rows], total=total, limit=limit, offset=offset)
+    rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
+    return Page(items=await _legal_reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post("/legals", response_model=LegalRead, status_code=201, dependencies=[Depends(require("org:write"))])
 async def create_legal(body: LegalCreate, db: DbSession, user: CurrentUser) -> LegalRead:
     data = body.model_dump()
+    await ref_fields.apply_refs(db, Legal, data, LEGAL_REFS)
     business_unit_ids = data.pop("business_unit_ids", [])
     asset_ids = data.pop("asset_ids", [])
     obj = Legal(tenant_id=user.tenant_id, **data)
@@ -379,14 +445,12 @@ async def create_legal(body: LegalCreate, db: DbSession, user: CurrentUser) -> L
     await _set_legal_assets(db, obj.id, asset_ids)
     await _audit(db, user, "create", "legal", obj, "legal register entry")
     await db.flush()
-    obj = await _get(db, Legal, obj.id, "Legal")
-    return _legal_read(obj, await _legal_assets_map(db, [obj.id]))
+    return await _legal_read(db, await _get(db, Legal, obj.id, "Legal"))
 
 
 @router.get("/legals/{obj_id}", response_model=LegalRead, dependencies=[Depends(require("org:read"))])
 async def get_legal(obj_id: uuid.UUID, db: DbSession) -> LegalRead:
-    obj = await _get(db, Legal, obj_id, "Legal")
-    return _legal_read(obj, await _legal_assets_map(db, [obj.id]))
+    return await _legal_read(db, await _get(db, Legal, obj_id, "Legal"))
 
 
 @router.patch("/legals/{obj_id}", response_model=LegalRead, dependencies=[Depends(require("org:write"))])
@@ -395,6 +459,7 @@ async def update_legal(
 ) -> LegalRead:
     obj = await _get(db, Legal, obj_id, "Legal")
     data = body.model_dump(exclude_unset=True)
+    await ref_fields.apply_refs(db, Legal, data, LEGAL_REFS, record=obj)
     business_unit_ids = data.pop("business_unit_ids", None)
     asset_ids = data.pop("asset_ids", None)
     for f, v in data.items():
@@ -405,8 +470,7 @@ async def update_legal(
     await _set_legal_assets(db, obj.id, asset_ids)
     await _audit(db, user, "update", "legal", obj, "legal register entry", data)
     await db.flush()
-    obj = await _get(db, Legal, obj.id, "Legal")
-    return _legal_read(obj, await _legal_assets_map(db, [obj.id]))
+    return await _legal_read(db, await _get(db, Legal, obj.id, "Legal"))
 
 
 @router.delete("/legals/{obj_id}", status_code=204, dependencies=[Depends(require("org:write"))])

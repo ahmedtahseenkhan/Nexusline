@@ -4,7 +4,13 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
-import { confirmDialog, toast } from "@/lib/feedback";
+import { toast } from "@/lib/feedback";
+import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
+import { deleteErrorText } from "@/lib/bulkDelete";
+import type { LookupRef } from "@/lib/masterData";
+import LookupSelect from "@/components/LookupSelect";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
@@ -12,10 +18,11 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
-import RichText from "@/components/RichText";
-import { Field, TextInput, Select, NumberInput, type Option } from "@/components/fields";
+import RichText, { RichTextView } from "@/components/RichText";
+import { Field, TextInput, NumberInput } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
@@ -24,13 +31,16 @@ type Legal = {
   id: string;
   name: string;
   description: string;
+  /** Legacy free text, kept in step with the picked category. */
   category: string;
+  category_id: string | null;
+  category_ref: (LookupRef & { path?: string }) | null;
   jurisdiction: string;
   reference: string;
   countries: string;
   risk_magnifier: number;
+  /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
-  workflow_owner: string;
   business_units: Ref[];
   assets: Ref[];
 };
@@ -42,31 +52,28 @@ const WORKFLOW_TONE: Record<string, "low" | "medium" | "high" | "critical" | "ne
   retired: "neutral",
 };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
-// Common obligation domains — eramba seeds similar categories; freeform via the picker too.
-const CATEGORY = opts(["privacy", "security", "financial", "employment", "environmental", "industry", "contractual", "other"]);
+const cap = titleCase;
+const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
+/** The picked category ("Parent › Child"), else the legacy text. */
+const categoryText = (l: Pick<Legal, "category" | "category_ref">) =>
+  l.category_ref ? l.category_ref.path || l.category_ref.label : l.category ? cap(l.category) : "";
 const refToOpt = (r: Ref): AsyncOption => ({ value: r.id, label: r.name });
 
 type FormState = {
   name: string;
   description: string;
-  category: string;
+  category_id: string | null;
   jurisdiction: string;
   reference: string;
   countries: string;
   risk_magnifier: number | "";
-  workflow_status: string;
-  workflow_owner: string;
   business_unit_ids: AsyncOption[];
   asset_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
-  name: "", description: "", category: "", jurisdiction: "", reference: "",
-  countries: "", risk_magnifier: 1, workflow_status: "draft", workflow_owner: "",
+  name: "", description: "", category_id: null, jurisdiction: "", reference: "",
+  countries: "", risk_magnifier: 1,
   business_unit_ids: [], asset_ids: [],
 };
 
@@ -74,13 +81,11 @@ function fromLegal(l: Legal): FormState {
   return {
     name: l.name,
     description: l.description || "",
-    category: l.category || "",
+    category_id: l.category_id ?? null,
     jurisdiction: l.jurisdiction || "",
     reference: l.reference || "",
     countries: l.countries || "",
     risk_magnifier: l.risk_magnifier,
-    workflow_status: l.workflow_status,
-    workflow_owner: l.workflow_owner || "",
     business_unit_ids: l.business_units.map(refToOpt),
     asset_ids: l.assets.map(refToOpt),
   };
@@ -142,13 +147,11 @@ function LegalInner() {
     const payload = {
       name: f.name,
       description: f.description,
-      category: f.category,
+      category_id: f.category_id,
       jurisdiction: f.jurisdiction,
       reference: f.reference,
       countries: f.countries,
       risk_magnifier: f.risk_magnifier === "" ? 1.0 : f.risk_magnifier,
-      workflow_status: f.workflow_status,
-      workflow_owner: f.workflow_owner,
       business_unit_ids: f.business_unit_ids.map((o) => o.value),
       asset_ids: f.asset_ids.map((o) => o.value),
     };
@@ -167,15 +170,14 @@ function LegalInner() {
   }
 
   async function remove(l: Legal) {
-    if (!(await confirmDialog({ title: `Delete legal obligation "${l.name}"?`, danger: true }))) return;
-    setError(null);
+    if (!(await confirmDeleteWithImpact("legal", l.id, l.name, { typeLabel: "legal obligation" }))) return;
     try {
       await apiCall<void>("DELETE", `/legals/${l.id}`);
       if (recordId === l.id) setRecordId(null);
       reload();
-      toast("Deleted");
+      toast(`Archived ${l.name}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      toast(deleteErrorText(e, "Failed to delete the obligation"), "error");
     }
   }
 
@@ -184,11 +186,11 @@ function LegalInner() {
   const columns: Column<Legal>[] = [
     { key: "reference", header: "Reference", sortable: true, render: (l) => <span className="ref">{l.reference || "—"}</span> },
     { key: "name", header: "Name", sortable: true, render: (l) => <span className="cell-title">{l.name}</span> },
-    { key: "category", header: "Category", sortable: true, render: (l) => (l.category ? <Badge tone="neutral" plain>{cap(l.category)}</Badge> : <span className="muted">—</span>) },
+    { key: "category", header: "Category", sortable: true, render: (l) => (categoryText(l) ? <Badge tone="neutral" plain>{categoryText(l)}</Badge> : <span className="muted">—</span>), text: (l) => categoryText(l) },
     { key: "jurisdiction", header: "Jurisdiction", sortable: true, render: (l) => <span className="muted">{l.jurisdiction || "—"}</span> },
     { key: "risk_magnifier", header: "Risk magnifier", sortable: true, render: (l) => <Badge tone={l.risk_magnifier > 1 ? "medium" : "neutral"} plain>×{l.risk_magnifier}</Badge> },
     { key: "links", header: "Links", align: "center", render: (l) => <span className="muted">{linkCount(l) || "—"}</span> },
-    { key: "workflow_status", header: "Workflow", sortable: true, render: (l) => <Badge tone={WORKFLOW_TONE[l.workflow_status] || "neutral"}>{cap(l.workflow_status)}</Badge> },
+    { key: "workflow_status", header: "Approval", sortable: true, render: (l) => <Badge tone={WORKFLOW_TONE[l.workflow_status] || "neutral"}>{workflowLabel(l.workflow_status)}</Badge>, text: (l) => workflowLabel(l.workflow_status) },
     { key: "actions", header: "", render: (l) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(l)}>Delete</button></div> },
   ];
 
@@ -201,8 +203,15 @@ function LegalInner() {
         <RichText value={f.description} onChange={(v) => set("description", v)} placeholder="What this obligation requires and how it applies…" />
       </Field>
       <div className="field-row">
-        <Field label="Category" help="Obligation domain. Pick one or type your own value.">
-          <Select value={f.category} onChange={(v) => set("category", v)} options={CATEGORY} placeholder="— Select —" />
+        <Field label="Category" help="Obligation domain, from the organisation's legal category list.">
+          <LookupSelect
+            lookupKey="legal_category"
+            value={f.category_id}
+            onChange={(id) => set("category_id", id)}
+            legacyText={editing?.category_id ? null : editing?.category}
+            placeholder="Choose a category…"
+            allowCreate
+          />
         </Field>
         <Field label="Jurisdiction" help="The governing body or legal jurisdiction (e.g. EU, US Federal, California).">
           <TextInput value={f.jurisdiction} onChange={(v) => set("jurisdiction", v)} placeholder="US Federal" />
@@ -213,18 +222,12 @@ function LegalInner() {
           <TextInput value={f.reference} onChange={(v) => set("reference", v)} placeholder="45 CFR Part 160" />
         </Field>
         <Field label="Applicable Countries" help="Comma-separated list of countries where this obligation applies.">
-          <TextInput value={f.countries} onChange={(v) => set("countries", v)} placeholder="United States, Canada" />
+          <TextInput value={f.countries} onChange={(v) => set("countries", v)} placeholder="Pakistan, United Arab Emirates" />
         </Field>
       </div>
       <div className="field-row">
         <Field label="Risk Magnifier" help="Multiplier (≥ 0) that amplifies the score of risks linked to this obligation. 1.0 = no change.">
           <NumberInput value={f.risk_magnifier} onChange={(v) => set("risk_magnifier", v)} min={0} step={0.1} placeholder="1.0" />
-        </Field>
-        <Field label="Workflow Status">
-          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-        <Field label="Workflow Owner" help="Person accountable for moving this record through approval.">
-          <TextInput value={f.workflow_owner} onChange={(v) => set("workflow_owner", v)} placeholder="Compliance Lead" />
         </Field>
       </div>
     </>
@@ -277,6 +280,7 @@ function LegalInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<Legal>
+        toolbarRight={<ArchivedRecords entityType="legal" noun="obligations" onRestored={reload} refreshKey={refreshKey} />}
         columns={columns}
         fetcher={fetchLegals}
         rowKey={(l) => l.id}
@@ -294,7 +298,7 @@ function LegalInner() {
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? detail.name : "…"}
-        subtitle={detail ? (detail.reference ? `${detail.reference} · ` : "") + cap(detail.workflow_status) : ""}
+        subtitle={detail ? (detail.reference ? `${detail.reference} · ` : "") + workflowLabel(detail.workflow_status) : ""}
         width={640}
         actions={detail && (
           <>
@@ -307,21 +311,24 @@ function LegalInner() {
           <>
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Reference", detail.reference || "—")}
-              {field("Category", detail.category ? <Badge tone="neutral" plain>{cap(detail.category)}</Badge> : "—")}
+              {field("Category", categoryText(detail) ? <Badge tone="neutral" plain>{categoryText(detail)}</Badge> : "—")}
               {field("Jurisdiction", detail.jurisdiction || "—")}
               {field("Applicable countries", detail.countries || "—")}
             </div>
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Risk magnifier", <Badge tone={detail.risk_magnifier > 1 ? "medium" : "neutral"} plain>×{detail.risk_magnifier}</Badge>)}
-              {field("Workflow", <Badge tone={WORKFLOW_TONE[detail.workflow_status] || "neutral"}>{cap(detail.workflow_status)}</Badge>)}
-              {field("Workflow owner", detail.workflow_owner || "—")}
+            </div>
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13, display: "block", marginBottom: 10 }}>Approval</strong>
+              <WorkflowFields entityType="legal" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
             </div>
 
             {detail.description && (
               <div style={{ marginBottom: 16 }}>
                 <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
-                <div style={{ fontSize: 14, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: detail.description }} />
+                <RichTextView html={detail.description} style={{ fontSize: 14, lineHeight: 1.5 }} />
               </div>
             )}
 

@@ -7,6 +7,7 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconShield } from "@/components/icons";
+import { useFormat } from "@/lib/format";
 
 /* The operator's console: which organisations exist on this deployment, and the button
    that creates the next one.
@@ -36,6 +37,7 @@ function slugify(name: string): string {
 }
 
 export default function OrganizationsPage() {
+  const { formatDate } = useFormat();
   const [me, setMe] = useState<Me | null>(null);
   const [rows, setRows] = useState<Organization[] | null>(null);
   const [summary, setSummary] = useState<PlatformSummary | null>(null);
@@ -183,7 +185,7 @@ export default function OrganizationsPage() {
               <div style={{ fontSize: 13 }}>
                 <Badge tone={licence.status === "valid" ? "low" : "medium"}>{licence.status ?? "unknown"}</Badge>{" "}
                 {licence.licensed_to && <span className="muted">{licence.licensed_to}</span>}
-                {licence.expires && <span className="muted"> · expires {licence.expires}</span>}
+                {licence.expires && <span className="muted"> · expires {formatDate(licence.expires)}</span>}
               </div>
             </div>
           )}
@@ -224,7 +226,7 @@ export default function OrganizationsPage() {
                   </td>
                   <td style={{ textAlign: "center" }} className="muted">{org.risks}</td>
                   <td style={{ textAlign: "center" }} className="muted">{org.controls}</td>
-                  <td className="muted">{org.created_at?.slice(0, 10)}</td>
+                  <td className="muted">{formatDate(org.created_at)}</td>
                   <td>
                     <Badge tone={org.is_active ? "low" : "neutral"}>
                       {org.is_active ? "Active" : "Suspended"}

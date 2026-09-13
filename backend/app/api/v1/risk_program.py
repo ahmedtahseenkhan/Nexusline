@@ -1,7 +1,9 @@
-"""Enterprise risk program: appetite/tolerance, the configurable matrix, breach alerts,
-the residual-suggestion policy, and the category roll-up."""
+"""Enterprise risk program: appetite/tolerance (organisation-wide and per top-level
+category), the configurable matrix (size, scale wording, band thresholds, cell-by-cell
+bands), breach alerts, the residual-suggestion policy, and the category roll-up."""
 from __future__ import annotations
 
+import uuid
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -9,28 +11,47 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession, require
-from app.models.risk import Risk, RiskMatrixLevel
+from app.models.lookup import Lookup
+from app.models.risk import Risk, RiskAppetite, RiskImpactDimension, RiskMatrixLevel
 from app.schemas.risk import (
     MatrixBand,
+    MatrixCellBand,
     MatrixLevel,
     ResidualPolicyRead,
     ResidualPolicyUpdate,
     RiskAggregate,
     RiskAggregateRow,
+    RiskAppetiteCreate,
+    RiskAppetiteRead,
+    RiskAppetiteUpdate,
     RiskMatrixConfig,
     RiskMatrixConfigUpdate,
     RiskRead,
     RiskSettingRead,
     RiskSettingUpdate,
+    SeverityBands,
 )
 from app.services import audit as audit_log
-from app.services.risk_scoring import band_ranges, effective_score, max_score_for
+from app.services import master_data
+from app.services.risk_scoring import (
+    SeverityScale,
+    cell_key,
+    effective_score,
+    max_score_for,
+    validate_bands,
+    validate_cells,
+)
 from app.services.risk_settings import (
     default_label,
     get_levels,
     get_or_create_residual_policy,
     get_or_create_settings,
+    load_appetite_book,
+    scale_for,
 )
+
+#: Where appetite may be set per category: the permission that guards RiskSetting.
+_APPETITE_WRITE = "risk:write"
 
 router = APIRouter(tags=["risk program"])
 
@@ -39,6 +60,8 @@ class MatrixCell(BaseModel):
     likelihood: int
     impact: int
     score: int
+    # The cell's band: its override (``RiskSetting.matrix_cells``) or its score's band.
+    band: str = "low"
     inherent_count: int
     residual_count: int
     inherent_refs: list[str]
@@ -77,11 +100,42 @@ def _levels_for(
     return out
 
 
-def _bands_for(max_score: int) -> list[MatrixBand]:
+def _bands_for(scale: SeverityScale) -> list[MatrixBand]:
     return [
         MatrixBand(severity=sev, min_score=low, max_score=high)
-        for low, high, sev in band_ranges(max_score)
+        for low, high, sev in scale.ranges()
     ]
+
+
+def _cells_for(size: int, scale: SeverityScale) -> list[MatrixCellBand]:
+    """Every cell of the matrix with its effective band, for the matrix editor."""
+    return [
+        MatrixCellBand(
+            likelihood=likelihood, impact=impact, score=likelihood * impact,
+            band=scale.for_cell(likelihood, impact),
+            overridden=cell_key(likelihood, impact) in scale.cells,
+        )
+        for likelihood in range(1, size + 1)
+        for impact in range(1, size + 1)
+    ]
+
+
+def _check_threshold_pair(appetite: int, tolerance: int, ceiling: int, size: int, what: str = "") -> None:
+    """Appetite <= tolerance <= the matrix maximum (422)."""
+    for name, value in (("Appetite", appetite), ("Tolerance", tolerance)):
+        if value > ceiling:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"{name} score {value}{what} exceeds the maximum score of {ceiling} on a "
+                    f"{size}x{size} matrix"
+                ),
+            )
+    if appetite > tolerance:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Appetite cannot be higher than tolerance — nothing would ever be 'elevated'",
+        )
 
 
 @router.get(
@@ -99,23 +153,20 @@ async def update_risk_settings(
 ) -> RiskSettingRead:
     settings = await get_or_create_settings(db, user.tenant_id)
     ceiling = max_score_for(settings.matrix_size)
-    for name, value in (("Appetite", body.appetite_score), ("Tolerance", body.tolerance_score)):
-        if value > ceiling:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"{name} score {value} exceeds the maximum score of {ceiling} on a "
-                    f"{settings.matrix_size}x{settings.matrix_size} matrix"
-                ),
-            )
-    if body.appetite_score > body.tolerance_score:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Appetite cannot be higher than tolerance — nothing would ever be 'elevated'",
-        )
+    _check_threshold_pair(body.appetite_score, body.tolerance_score, ceiling, settings.matrix_size)
+    before = (settings.appetite_score, settings.tolerance_score)
     settings.appetite_score = body.appetite_score
     settings.tolerance_score = body.tolerance_score
     await db.flush()
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="risk_settings", entity_id=settings.id,
+        summary=(
+            f"Organisation risk appetite set to {body.appetite_score}, tolerance "
+            f"{body.tolerance_score}"
+        ),
+        changes={"appetite_score": f"{before[0]} -> {body.appetite_score}",
+                 "tolerance_score": f"{before[1]} -> {body.tolerance_score}"},
+    )
     return RiskSettingRead.model_validate(settings)
 
 
@@ -132,6 +183,7 @@ async def get_matrix_config(db: DbSession, user: CurrentUser) -> RiskMatrixConfi
     settings = await get_or_create_settings(db, user.tenant_id)
     size = settings.matrix_size
     configured = await get_levels(db, user.tenant_id)
+    scale = scale_for(settings)
     return RiskMatrixConfig(
         size=size,
         max_score=max_score_for(size),
@@ -139,7 +191,14 @@ async def get_matrix_config(db: DbSession, user: CurrentUser) -> RiskMatrixConfi
         tolerance_score=settings.tolerance_score,
         likelihood_levels=_levels_for("likelihood", size, configured),
         impact_levels=_levels_for("impact", size, configured),
-        bands=_bands_for(max_score_for(size)),
+        bands=_bands_for(scale),
+        severity_bands=(
+            SeverityBands(low_max=scale.bands[0], medium_max=scale.bands[1], high_max=scale.bands[2])
+            if scale.bands else None
+        ),
+        matrix_cells=dict(scale.cells),
+        cells=_cells_for(size, scale),
+        impact_mode=settings.impact_mode or "max",
     )
 
 
@@ -169,7 +228,12 @@ async def update_matrix_config(
                     (Risk.inherent_likelihood > size)
                     | (Risk.inherent_impact > size)
                     | (Risk.residual_likelihood > size)
-                    | (Risk.residual_impact > size),
+                    | (Risk.residual_impact > size)
+                    | (Risk.target_likelihood > size)
+                    | (Risk.target_impact > size)
+                    | Risk.id.in_(
+                        select(RiskImpactDimension.risk_id).where(RiskImpactDimension.score > size)
+                    ),
                 )
             )
         ).all()
@@ -184,12 +248,54 @@ async def update_matrix_config(
                 ),
             )
 
+    ceiling = max_score_for(size)
+    changes: dict[str, object] = {"matrix_size": size}
+    # Band thresholds: sent ones are validated against the new maximum; stored ones that
+    # no longer fit a resized matrix are dropped (the derived bands apply again).
+    if "severity_bands" in body.model_fields_set:
+        try:
+            bands = validate_bands(body.severity_bands.model_dump() if body.severity_bands else None, ceiling)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"severity_bands: {exc}") from exc
+        settings.severity_bands = (
+            {"low_max": bands[0], "medium_max": bands[1], "high_max": bands[2]} if bands else {}
+        )
+        changes["severity_bands"] = settings.severity_bands or "derived from the matrix size"
+    elif settings.severity_bands:
+        try:
+            validate_bands(settings.severity_bands, ceiling)
+        except ValueError:
+            settings.severity_bands = {}
+            changes["severity_bands"] = "reset: no longer fit the resized matrix"
+    # Cell overrides: sent ones replace the set; stored ones outside the new size go.
+    if body.matrix_cells is not None:
+        try:
+            settings.matrix_cells = validate_cells(body.matrix_cells, size)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"matrix_cells: {exc}") from exc
+        changes["matrix_cells"] = f"{len(settings.matrix_cells)} cell override(s)"
+    elif settings.matrix_cells:
+        kept = {}
+        for key, band in settings.matrix_cells.items():
+            try:
+                kept.update(validate_cells({key: band}, size))
+            except ValueError:
+                continue
+        if len(kept) != len(settings.matrix_cells):
+            changes["matrix_cells"] = f"{len(settings.matrix_cells) - len(kept)} override(s) outside the matrix removed"
+        settings.matrix_cells = kept
+    if body.impact_mode is not None:
+        settings.impact_mode = body.impact_mode
+        changes["impact_mode"] = body.impact_mode
+
     settings.matrix_size = size
     # Keep appetite/tolerance inside the new scale rather than leaving thresholds no
     # score can ever reach (or, when growing, a tolerance that is now trivially low).
-    ceiling = max_score_for(size)
     settings.appetite_score = min(settings.appetite_score, ceiling)
     settings.tolerance_score = min(settings.tolerance_score, ceiling)
+    for appetite in (await db.scalars(select(RiskAppetite))).all():
+        appetite.appetite_score = min(appetite.appetite_score, ceiling)
+        appetite.tolerance_score = min(appetite.tolerance_score, ceiling)
 
     existing = await get_levels(db, user.tenant_id)
     for axis, levels in (("likelihood", body.likelihood_levels), ("impact", body.impact_levels)):
@@ -207,7 +313,7 @@ async def update_matrix_config(
     await audit_log.record(
         db, actor=user, action="update", entity_type="risk_settings", entity_id=settings.id,
         summary=f"Risk matrix set to {size}x{size}",
-        changes={"matrix_size": size},
+        changes=changes,
     )
     return await get_matrix_config(db, user)
 
@@ -254,18 +360,22 @@ async def update_residual_policy(
     summary="Risks whose effective score breaches the tolerance threshold",
 )
 async def risk_alerts(db: DbSession, user: CurrentUser) -> list[RiskRead]:
+    """Tolerance is the risk's level-1 category's where one is set, else the
+    organisation's."""
     settings = await get_or_create_settings(db, user.tenant_id)
+    book = await load_appetite_book(db, user.tenant_id, settings)
     risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
     breached = [
         r
         for r in risks
         if (eff := effective_score(r.inherent_score, r.residual_score)) is not None
-        and eff > settings.tolerance_score
+        and eff > book.tolerance_for(r.category_id)
     ]
     breached.sort(
         key=lambda r: effective_score(r.inherent_score, r.residual_score) or 0, reverse=True
     )
-    context = {"max_score": max_score_for(settings.matrix_size)}
+    scale = scale_for(settings)
+    context = {"max_score": scale.max_score, "scale": scale, "appetite": book}
     return [RiskRead.model_validate(r, context=context) for r in breached]
 
 
@@ -293,6 +403,7 @@ async def risk_matrix(db: DbSession, user: CurrentUser) -> RiskMatrix:
 
     size = settings.matrix_size
     configured = await get_levels(db, user.tenant_id)
+    scale = scale_for(settings)
     cells: list[MatrixCell] = []
     for likelihood in range(1, size + 1):
         for impact in range(1, size + 1):
@@ -303,6 +414,7 @@ async def risk_matrix(db: DbSession, user: CurrentUser) -> RiskMatrix:
                     likelihood=likelihood,
                     impact=impact,
                     score=likelihood * impact,
+                    band=scale.for_cell(likelihood, impact).value,
                     inherent_count=len(ic),
                     residual_count=len(rc),
                     inherent_refs=ic[:25],
@@ -318,7 +430,7 @@ async def risk_matrix(db: DbSession, user: CurrentUser) -> RiskMatrix:
         max_score=max_score_for(size),
         likelihood_levels=_levels_for("likelihood", size, configured),
         impact_levels=_levels_for("impact", size, configured),
-        bands=_bands_for(max_score_for(size)),
+        bands=_bands_for(scale),
     )
 
 
@@ -330,6 +442,7 @@ async def risk_matrix(db: DbSession, user: CurrentUser) -> RiskMatrix:
 )
 async def risk_aggregate(db: DbSession, user: CurrentUser) -> RiskAggregate:
     settings = await get_or_create_settings(db, user.tenant_id)
+    book = await load_appetite_book(db, user.tenant_id, settings)
     risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
 
     groups: dict[str, dict] = {}
@@ -344,7 +457,7 @@ async def risk_aggregate(db: DbSession, user: CurrentUser) -> RiskAggregate:
         if r.residual_score is not None:
             g["max_res"] = max(g["max_res"] or 0, r.residual_score)
         eff = effective_score(r.inherent_score, r.residual_score)
-        if eff is not None and eff > settings.tolerance_score:
+        if eff is not None and eff > book.tolerance_for(r.category_id):
             g["breaches"] += 1
         if r.annual_loss_expectancy:
             g["exposure"] += r.annual_loss_expectancy
@@ -366,4 +479,162 @@ async def risk_aggregate(db: DbSession, user: CurrentUser) -> RiskAggregate:
         total_exposure=total,
         appetite_score=settings.appetite_score,
         tolerance_score=settings.tolerance_score,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Appetite per top-level category
+# ---------------------------------------------------------------------------
+# The organisation-wide appetite and tolerance (RiskSetting) stay the default; a bank
+# usually states a lower appetite for compliance and conduct than for, say, strategic
+# risk. A risk takes its level-1 category's thresholds (``AppetiteBook``) everywhere
+# appetite is compared: register flags, dashboard, top risks, alerts.
+async def _load_appetite(db, appetite_id: uuid.UUID) -> RiskAppetite:
+    row = await db.get(RiskAppetite, appetite_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Appetite not found")
+    return row
+
+
+async def _check_top_level_category(db, category_id: uuid.UUID) -> Lookup:
+    await master_data.check_lookup(db, category_id, "risk_category", "category_id")
+    row = await db.get(Lookup, category_id)
+    if row.parent_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"category_id: '{row.label}' is a sub-category; appetite is set on a "
+                "top-level risk category and applies to its sub-categories."
+            ),
+        )
+    return row
+
+
+async def _appetite_reads(db, user: CurrentUser, rows) -> list[RiskAppetiteRead]:
+    book = await load_appetite_book(db, user.tenant_id)
+    counts: dict = defaultdict(lambda: [0, 0])
+    for category_id, inherent, residual in (
+        await db.execute(
+            select(Risk.category_id, Risk.inherent_score, Risk.residual_score)
+            .where(Risk.deleted.is_(False), Risk.category_id.is_not(None))
+        )
+    ).all():
+        top = book.source_of(category_id)
+        if top is None:
+            continue
+        counts[top][0] += 1
+        eff = effective_score(inherent, residual)
+        if eff is not None and eff > book.tolerance_for(category_id):
+            counts[top][1] += 1
+    labels = await master_data.lookups_by_id(db, [r.category_id for r in rows])
+    out = []
+    for r in rows:
+        read = RiskAppetiteRead.model_validate(r)
+        read.category_ref = labels.get(r.category_id)
+        read.risks, read.breaches = counts[r.category_id]
+        out.append(read)
+    out.sort(key=lambda a: (a.category_ref.label if a.category_ref else "").lower())
+    return out
+
+
+@router.get(
+    "/risk-appetites",
+    response_model=list[RiskAppetiteRead],
+    dependencies=[Depends(require("risk:read"))],
+    summary="Appetite and tolerance per top-level risk category",
+)
+async def list_risk_appetites(db: DbSession, user: CurrentUser) -> list[RiskAppetiteRead]:
+    return await _appetite_reads(db, user, (await db.scalars(select(RiskAppetite))).all())
+
+
+@router.post(
+    "/risk-appetites",
+    response_model=RiskAppetiteRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require(_APPETITE_WRITE))],
+)
+async def create_risk_appetite(
+    body: RiskAppetiteCreate, db: DbSession, user: CurrentUser
+) -> RiskAppetiteRead:
+    category = await _check_top_level_category(db, body.category_id)
+    settings = await get_or_create_settings(db, user.tenant_id)
+    _check_threshold_pair(
+        body.appetite_score, body.tolerance_score, max_score_for(settings.matrix_size),
+        settings.matrix_size,
+    )
+    existing = await db.scalar(select(RiskAppetite).where(RiskAppetite.category_id == body.category_id))
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"'{category.label}' already has an appetite; edit that one instead.",
+        )
+    row = RiskAppetite(
+        tenant_id=user.tenant_id, category_id=body.category_id,
+        appetite_score=body.appetite_score, tolerance_score=body.tolerance_score,
+        statement=body.statement.strip(),
+    )
+    db.add(row)
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="create", entity_type="risk_appetite", entity_id=row.id,
+        summary=(
+            f"Set risk appetite for {category.label}: appetite {row.appetite_score}, "
+            f"tolerance {row.tolerance_score}"
+        ),
+        changes={"category": category.label, "appetite_score": row.appetite_score,
+                 "tolerance_score": row.tolerance_score, "statement": row.statement},
+    )
+    return (await _appetite_reads(db, user, [row]))[0]
+
+
+@router.patch(
+    "/risk-appetites/{appetite_id}",
+    response_model=RiskAppetiteRead,
+    dependencies=[Depends(require(_APPETITE_WRITE))],
+)
+async def update_risk_appetite(
+    appetite_id: uuid.UUID, body: RiskAppetiteUpdate, db: DbSession, user: CurrentUser
+) -> RiskAppetiteRead:
+    row = await _load_appetite(db, appetite_id)
+    settings = await get_or_create_settings(db, user.tenant_id)
+    data = body.model_dump(exclude_unset=True)
+    appetite = data.get("appetite_score") or row.appetite_score
+    tolerance = data.get("tolerance_score") or row.tolerance_score
+    _check_threshold_pair(appetite, tolerance, max_score_for(settings.matrix_size), settings.matrix_size)
+    changes = {}
+    for name, value in (("appetite_score", appetite), ("tolerance_score", tolerance)):
+        if getattr(row, name) != value:
+            changes[name] = f"{getattr(row, name)} -> {value}"
+            setattr(row, name, value)
+    if data.get("statement") is not None and data["statement"].strip() != row.statement:
+        row.statement = data["statement"].strip()
+        changes["statement"] = row.statement
+    await db.flush()
+    category = await db.get(Lookup, row.category_id)
+    label = category.label if category else str(row.category_id)
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="risk_appetite", entity_id=row.id,
+        summary=f"Updated risk appetite for {label}", changes=changes,
+    )
+    return (await _appetite_reads(db, user, [row]))[0]
+
+
+@router.delete(
+    "/risk-appetites/{appetite_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require(_APPETITE_WRITE))],
+    summary="Remove a category's appetite; its risks fall back to the organisation's",
+)
+async def delete_risk_appetite(appetite_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    row = await _load_appetite(db, appetite_id)
+    category = await db.get(Lookup, row.category_id)
+    label = category.label if category else str(row.category_id)
+    snapshot = {"category": label, "appetite_score": row.appetite_score,
+                "tolerance_score": row.tolerance_score, "statement": row.statement}
+    await db.delete(row)
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="risk_appetite", entity_id=appetite_id,
+        summary=f"Removed the risk appetite for {label}; its risks use the organisation's again",
+        changes=snapshot,
     )

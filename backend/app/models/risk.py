@@ -9,14 +9,16 @@ in the database.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
     Computed,
     Date,
+    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -114,9 +116,44 @@ risk_incidents = Table(
 # raising the ceiling never leaves the schema behind the validators.
 _SCALE = f"BETWEEN 1 AND {MAX_MATRIX_SIZE}"
 
+# A row that breaks the rule is allowed only with a written reason, or while it is
+# flagged for review. The flag matters because PostgreSQL checks even a NOT VALID
+# constraint on every later UPDATE: without it, the start-up repair could not flag a
+# legacy row like R-117 without first "correcting" a number nobody has looked at. The
+# API refuses to clear the flag while the scores still contradict each other.
+RESIDUAL_NOT_ABOVE_INHERENT = (
+    "residual_likelihood IS NULL OR residual_impact IS NULL "
+    "OR residual_likelihood * residual_impact <= inherent_likelihood * inherent_impact "
+    "OR residual_override_reason <> '' OR needs_review"
+)
+
 
 class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "risks"
+    # Phase 3: risk hierarchy — 1 enterprise, 2 category, 3 scenario. The board reads the
+    # top two levels; practitioners work at the scenario level. NULL = not yet placed.
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    level: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # Phase 2: structured risk statement (bow-tie) and assessment trail.
+    cause: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    event: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    consequence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    risk_type: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    velocity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    identified_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    identified_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # who identified the risk
+    source: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    target_likelihood: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_impact: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    assessment_rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_assessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_assessed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # who last changed the scores
     __table_args__ = (
         CheckConstraint(f"inherent_likelihood {_SCALE}", name="ck_risk_inh_likelihood"),
         CheckConstraint(f"inherent_impact {_SCALE}", name="ck_risk_inh_impact"),
@@ -128,12 +165,19 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
             f"residual_impact IS NULL OR residual_impact {_SCALE}",
             name="ck_risk_res_impact",
         ),
+        # Controls can only reduce a risk: a residual above inherent is a data error
+        # unless the owner has written down why (the same reason field that explains a
+        # departure from the suggested residual). The API enforces the permission side.
+        CheckConstraint(RESIDUAL_NOT_ABOVE_INHERENT, name="ck_risk_residual_le_inherent"),
     )
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(100), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     status: Mapped[RiskStatus] = mapped_column(
         SAEnum(RiskStatus, name="risk_status"), default=RiskStatus.draft, nullable=False
     )
@@ -182,6 +226,9 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     )
     treatment_description: Mapped[str] = mapped_column(Text, default="")
     treatment_owner: Mapped[str] = mapped_column(String(200), default="")
+    treatment_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `treatment_owner`
     treatment_deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
     treatment_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
@@ -202,6 +249,12 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     last_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     next_review_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     expired_reviews: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Raised when something the risk depended on changed underneath it — an asset it
+    # was written against was deleted, or its scores contradict each other. The register
+    # keeps the risk and asks a person to look, instead of archiving it or hiding it.
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    review_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
         secondary=risk_assets, lazy="selectin",
@@ -244,6 +297,8 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     )
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
         "ExceptionRecord", secondary="exception_risks", lazy="selectin", viewonly=True,
+        # An archived exception is not on the register: never show it as a live link.
+        secondaryjoin="and_(exception_risks.c.exception_id == ExceptionRecord.id, ExceptionRecord.deleted == False)",
     )
     vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
         "Vendor", secondary="vendor_risks", lazy="selectin", viewonly=True,
@@ -266,6 +321,12 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     loss_events: Mapped[list["LossEvent"]] = relationship(  # noqa: F821
         "LossEvent", secondary="loss_event_risks", lazy="selectin", viewonly=True,
     )
+    # Phase 2: issues raised against this risk (``issue_risks``, written from the issue
+    # side). Live issues only.
+    issues: Mapped[list["Issue"]] = relationship(  # noqa: F821
+        "Issue", secondary="issue_risks", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(issue_risks.c.issue_id == Issue.id, Issue.deleted == False)",
+    )
 
     acceptances: Mapped[list["RiskAcceptance"]] = relationship(
         back_populates="risk",
@@ -277,22 +338,17 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     @property
     def control_health(self) -> str:
         """Live rollup of the mitigating controls' health — the risk-treatment loop.
-        A control audit that fails (or an open audit finding, or an overdue audit) makes
-        this ``issues`` on the very next read, so the risk register reacts automatically.
+        A control whose latest reviewed test failed (or with an open audit finding, or a
+        test overdue) makes this ``issues`` on the very next read, so the risk register
+        reacts automatically. A test awaiting review changes nothing until it is decided.
 
         ``none`` = unmitigated · ``ok`` = controls exist and are healthy · ``issues``.
         """
-        from app.models.enums import AuditFindingStatus, TestResult
-
         if not self.controls:
             return "none"
-        _open = lambda f: f.status not in (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)  # noqa: E731
-        for c in self.controls:
-            if c.last_audit_result == TestResult.failed or c.is_audit_overdue:
-                return "issues"
-            if any(_open(f) for f in c.audit_findings):
-                return "issues"
-        return "ok"
+        # The residual engine's reliance rule (``control_assurance.reliance_note``): the
+        # latest reviewed test failed, the test is overdue, or an audit finding is open.
+        return "issues" if any(c.reliance_note for c in self.controls) else "ok"
 
 
 class RiskAcceptance(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
@@ -321,6 +377,11 @@ class RiskSetting(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     """Per-tenant risk appetite, tolerance and matrix size (single row per org)."""
 
     __tablename__ = "risk_settings"
+    # Phase 2: configurable severity bands and a cell-by-cell heat map; how impact
+    # dimensions combine ("max" = the highest dimension).
+    severity_bands: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    matrix_cells: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    impact_mode: Mapped[str] = mapped_column(String(16), default="max", nullable=False)
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_risk_settings_tenant"),)
 
     appetite_score: Mapped[int] = mapped_column(Integer, default=6, nullable=False)
@@ -377,3 +438,57 @@ class ResidualPolicy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     weight_not_assessed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     applies_to: Mapped[str] = mapped_column(String(16), default="likelihood", nullable=False)
     max_reduction: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+
+
+class RiskImpactDimension(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 2: impact scored per dimension (financial, regulatory, reputational,
+    customer, operational — the ``impact_dimension`` lookup list)."""
+
+    __tablename__ = "risk_impact_dimensions"
+    __table_args__ = (
+        UniqueConstraint("risk_id", "dimension_id", "basis", name="uq_risk_impact_dimension"),
+    )
+
+    risk_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    dimension_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="CASCADE"), nullable=False
+    )
+    basis: Mapped[str] = mapped_column(String(16), default="inherent", nullable=False)  # inherent|residual|target
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class RiskAppetite(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 2: appetite and tolerance per top-level risk category; the tenant-wide
+    ``RiskSetting`` values are the fallback for categories without one."""
+
+    __tablename__ = "risk_appetites"
+    __table_args__ = (UniqueConstraint("tenant_id", "category_id", name="uq_risk_appetite_category"),)
+
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="CASCADE"), nullable=False
+    )
+    appetite_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    tolerance_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    statement: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class RiskTreatmentAction(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 2: a treatment plan as actions with owners and dates, replacing one text blob."""
+
+    __tablename__ = "risk_treatment_actions"
+
+    risk_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # who does it
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", nullable=False)  # open|in_progress|done|cancelled
+    percent_complete: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

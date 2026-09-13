@@ -1,10 +1,25 @@
 """Application configuration, loaded from environment variables."""
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def _string_list(value: object) -> object:
+    """Accept a list from the environment as JSON (``["a","b"]``) or comma-separated
+    (``a,b``) — operators write the second, pydantic-settings only reads the first."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            return json.loads(text)
+        return [part.strip() for part in text.split(",") if part.strip()]
+    return value
 
 
 class Settings(BaseSettings):
@@ -67,9 +82,21 @@ class Settings(BaseSettings):
     # Brute-force protection / account lockout
     max_failed_logins: int = 5
     lockout_minutes: int = 15
-    # MFA (TOTP). When required, all local users must enrol before full access.
+    # MFA (TOTP). When ``mfa_required`` is true every user who signs in with a password
+    # must enrol. Otherwise it is required for *privileged* users only: anyone holding a
+    # role named in ``mfa_required_roles`` (case-insensitive) or any permission ending in
+    # ":approve" (a checker). Unenrolled users get ``mfa_grace_days`` of normal sign-in
+    # from their first such login; after that the session can only enrol. SSO sign-ins
+    # are exempt (the identity provider owns the second factor); LDAP/AD password
+    # sign-ins are not. See app/services/mfa_policy.py.
     mfa_issuer: str = "NexusLine GRC"
     mfa_required: bool = False
+    mfa_required_roles: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["admin"])
+    mfa_grace_days: int = 7
+    # Approve / Reject links in e-mail (phase 3). Deciding from an e-mail skips two-factor
+    # authentication, so a bank whose policy requires 2FA for every approval sets this to
+    # false: no links are issued, and links already sent stop working.
+    email_actions_enabled: bool = True
     # LDAP / Active Directory (per-tenant config in DB; this only gates the feature)
     ldap_enabled: bool = False
 
@@ -95,8 +122,14 @@ class Settings(BaseSettings):
     # AML/CFT — STR/SAR filing SLA (days from detection; verify vs FMU/SBP rules).
     aml_str_filing_days: int = 7
 
-    # Seed
+    # Seed. On an empty database the first org + its admin (a platform administrator)
+    # are created from the seed_org_* / seed_admin_* values when either flag is on.
+    # ``seed_data`` additionally loads the DEMO sample data and the isolation-demo org —
+    # never for a client (docker-compose.prod.yml defaults it to false);
+    # ``seed_bootstrap`` alone gives a client install a clean org and an admin to sign in
+    # with, which is otherwise impossible without the public register endpoint.
     seed_data: bool = True
+    seed_bootstrap: bool = True
     seed_org_name: str = "Acme Corp"
     seed_org_slug: str = "acme"
     seed_admin_email: str = "admin@acme.com"
@@ -110,6 +143,20 @@ class Settings(BaseSettings):
     seed_second_org_name: str = "Second Bank (isolation demo)"
     seed_second_org_slug: str = "second"
     seed_second_admin_email: str = "admin@second.com"
+
+    # Demo-reset (POST /platform/organizations/{id}/reset-demo). Only the demo org may be
+    # reset; blank means the seeded org (``seed_org_slug``) when ``seed_data`` is on, and
+    # no org at all otherwise. The reset archives records whose name/title starts with one
+    # of these prefixes — the markers test runs use.
+    demo_org_slug: str = ""
+    demo_reset_prefixes: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["NL-E2E-TEST"]
+    )
+
+    @field_validator("mfa_required_roles", "demo_reset_prefixes", mode="before")
+    @classmethod
+    def _parse_string_list(cls, value: object) -> object:
+        return _string_list(value)
 
     def _url(self, user: str, password: str) -> str:
         return (
@@ -130,6 +177,15 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def demo_org(self) -> str:
+        """Slug of the one organisation the demo reset may touch: ``demo_org_slug`` if
+        set, else the seeded org — but only on an install that seeds demo data, so a
+        client's bootstrapped org (seed_data=false) can never be "reset"."""
+        if self.demo_org_slug.strip():
+            return self.demo_org_slug.strip()
+        return self.seed_org_slug.strip() if self.seed_data else ""
 
     @property
     def is_production(self) -> bool:

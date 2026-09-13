@@ -8,10 +8,15 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import ConnectorFeed from "@/components/ConnectorFeed";
+import { titleCase } from "@/lib/text";
+import { safeLinkUrl } from "@/lib/sanitize";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ local types
 interface Connector {
@@ -30,6 +35,8 @@ interface Connector {
   workflow_status: string;
   is_stale: boolean;
   created_at: string;
+  /** A monitoring-feed token is live (the token itself is never returned). */
+  has_ingest_token?: boolean;
 }
 interface ControlTestRun {
   id: string;
@@ -74,7 +81,7 @@ interface IntegrationsSummary {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 
@@ -97,7 +104,6 @@ const CONNECTOR_STATUS = opts(["configured", "active", "error", "disabled"]);
 const CCM_RESULT = opts(["passed", "failed", "error", "not_run"]);
 const CCM_STATUS = opts(["active", "paused"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 
 // ------------------------------------------------------------------ tones
 const CONNECTOR_STATUS_TONE: Record<string, Tone> = {
@@ -147,7 +153,6 @@ type ConnectorForm = {
   config_note: string;
   status: string;
   last_sync: string;
-  workflow_status: string;
 };
 const BLANK_CONNECTOR: ConnectorForm = {
   name: "",
@@ -160,7 +165,6 @@ const BLANK_CONNECTOR: ConnectorForm = {
   config_note: "",
   status: "configured",
   last_sync: "",
-  workflow_status: "draft",
 };
 function fromConnector(c: Connector): ConnectorForm {
   return {
@@ -174,7 +178,6 @@ function fromConnector(c: Connector): ConnectorForm {
     config_note: c.config_note || "",
     status: c.status || "configured",
     last_sync: c.last_sync || "",
-    workflow_status: c.workflow_status || "draft",
   };
 }
 function connectorPayload(f: ConnectorForm): Record<string, unknown> {
@@ -189,7 +192,6 @@ function connectorPayload(f: ConnectorForm): Record<string, unknown> {
     config_note: f.config_note,
     status: f.status,
     last_sync: f.last_sync || null,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -203,7 +205,6 @@ type CctForm = {
   frequency: string;
   owner: string;
   status: string;
-  workflow_status: string;
 };
 const BLANK_CCT: CctForm = {
   name: "",
@@ -214,7 +215,6 @@ const BLANK_CCT: CctForm = {
   frequency: "monthly",
   owner: "",
   status: "active",
-  workflow_status: "draft",
 };
 function fromCct(t: AutomatedControlTest): CctForm {
   return {
@@ -226,7 +226,6 @@ function fromCct(t: AutomatedControlTest): CctForm {
     frequency: t.frequency || "monthly",
     owner: t.owner || "",
     status: t.status || "active",
-    workflow_status: t.workflow_status || "draft",
   };
 }
 function cctPayload(f: CctForm): Record<string, unknown> {
@@ -239,7 +238,6 @@ function cctPayload(f: CctForm): Record<string, unknown> {
     frequency: f.frequency,
     owner: f.owner,
     status: f.status,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -267,6 +265,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 
 function IntegrationsInner() {
   const [section, setSection] = useState<SectionId>("connectors");
+  const { formatDate, formatDateTime } = useFormat();
   const [error, setError] = useState<string | null>(null);
   // Read-only detail loaded for the connector view drawer (?id=).
   const [recordId, setRecordId] = useRecordParam("id");
@@ -529,9 +528,6 @@ function IntegrationsInner() {
       <Field label="Config note" help="Secrets are never stored here — connection notes only.">
         <TextArea value={cf.config_note} onChange={(v) => setC("config_note", v)} rows={3} placeholder="Connection notes, scopes, tenant IDs…" />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this connector record.">
-        <Select value={cf.workflow_status} onChange={(v) => setC("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -570,9 +566,6 @@ function IntegrationsInner() {
       <Field label="Owner">
         <TextInput value={tf.owner} onChange={(v) => setT("owner", v)} placeholder="Owner" />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this control-test record.">
-        <Select value={tf.workflow_status} onChange={(v) => setT("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -586,9 +579,10 @@ function IntegrationsInner() {
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <Badge tone={CONNECTOR_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge>
         {c.is_stale && <Badge tone="high">Stale</Badge>}
+        {c.has_ingest_token && <Badge tone="info" plain>Feed</Badge>}
       </div>
     ) },
-    { key: "last_sync", header: "Last sync", sortable: true, render: (c) => <span className="muted">{c.last_sync || "never"}</span> },
+    { key: "last_sync", header: "Last sync", sortable: true, render: (c) => <span className="muted">{c.last_sync ? formatDate(c.last_sync) : "never"}</span> },
     { key: "actions", header: "", render: (c) => (
       <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
         <button className="btn secondary sm" onClick={() => openEditConnector(c)}>Edit</button>
@@ -604,7 +598,7 @@ function IntegrationsInner() {
     { key: "connector", header: "Connector", render: (t) => <span className="muted">{connectorName(t.connector_id)}</span> },
     { key: "last_result", header: "Last result", sortable: true, render: (t) => <ResultBadge value={t.last_result} /> },
     { key: "pass_rate", header: "Pass rate", sortable: true, render: (t) => <PassRateBar value={t.pass_rate} /> },
-    { key: "last_run", header: "Last run", sortable: true, render: (t) => <span className="muted">{t.last_run || "—"}</span> },
+    { key: "last_run", header: "Last run", sortable: true, render: (t) => <span className="muted">{formatDate(t.last_run)}</span> },
     { key: "status", header: "Status", sortable: true, render: (t) => <Badge tone={CCM_STATUS_TONE[t.status] || "neutral"}>{cap(t.status)}</Badge> },
     { key: "actions", header: "", render: (t) => (
       <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
@@ -695,7 +689,12 @@ function IntegrationsInner() {
 
       {/* Read-only connector detail view (?id=) — click a row to see everything; Edit is separate. */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="connector" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="connector" entityId={detail.id} onChanged={() => { reloadConnectors(); loadConnectorDetail(detail.id); }} />
+            <RecordPanels model="connector" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? `${detail.reference || ""} ${detail.name}`.trim() : "…"}
@@ -719,7 +718,6 @@ function IntegrationsInner() {
                 </div>
               ))}
               {field("Owner", detail.owner || "—")}
-              {field("Workflow", cap(detail.workflow_status))}
             </div>
 
             {detail.description && (
@@ -733,11 +731,13 @@ function IntegrationsInner() {
               <strong style={{ fontSize: 13 }}>Connection</strong>
               <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
                 {field("Endpoint URL", detail.endpoint_url ? (
-                  <a href={detail.endpoint_url} target="_blank" rel="noreferrer">{detail.endpoint_url}</a>
+                  safeLinkUrl(detail.endpoint_url)
+                    ? <a href={safeLinkUrl(detail.endpoint_url) ?? undefined} target="_blank" rel="noopener noreferrer">{detail.endpoint_url}</a>
+                    : <span>{detail.endpoint_url}</span>
                 ) : "—")}
                 {field("Auth method", detail.auth_method || "—")}
                 {field("Sync frequency", cap(detail.sync_frequency))}
-                {field("Last sync", detail.last_sync || "never")}
+                {field("Last sync", detail.last_sync ? formatDate(detail.last_sync) : "never")}
               </div>
               {detail.config_note && (
                 <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>
@@ -748,8 +748,10 @@ function IntegrationsInner() {
             </div>
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 8 }}>
-              {field("Created", detail.created_at ? detail.created_at.slice(0, 10) : "—")}
+              {field("Created", formatDateTime(detail.created_at))}
             </div>
+
+            <ConnectorFeed connectorId={detail.id} onChanged={() => { reloadConnectors(); loadConnectorDetail(detail.id); }} />
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
             </div>
@@ -761,7 +763,7 @@ function IntegrationsInner() {
       {section === "ccm" && (
         <>
           <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
-            Runtime execution is manual for now — click a row to record a run; its outcome rolls up onto the test&apos;s last result and pass-rate.
+            Click a row to record a run by hand, or let a connector&apos;s monitoring feed record runs for the test whose control and connector match (Connectors → open the connector → Monitoring feed). The latest run rolls up onto the test&apos;s last result and pass-rate.
           </p>
           <DataTable<AutomatedControlTest>
             columns={testColumns}
@@ -862,7 +864,7 @@ function IntegrationsInner() {
                           .sort((a, b) => (b.run_date || b.created_at || "").localeCompare(a.run_date || a.created_at || ""))
                           .map((r) => (
                             <tr key={r.id}>
-                              <td className="muted">{r.run_date || "—"}</td>
+                              <td className="muted">{formatDate(r.run_date)}</td>
                               <td><ResultBadge value={r.result} /></td>
                               <td><PassRateBar value={r.pass_rate} /></td>
                               <td className="muted">{r.findings || "—"}</td>
@@ -881,6 +883,7 @@ function IntegrationsInner() {
                 </div>
               </div>
 
+              <RecordApproval entityType="automated_control_test" entityId={openTest.id} onChanged={() => { reloadTests(); refreshTest(openTest.id); }} />
               <RecordPanels model="automated_control_test" entityId={openTest.id} />
             </>
           )}

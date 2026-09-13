@@ -1,0 +1,213 @@
+{
+  "type": "control",
+  "note": "A.5.15 with its legacy pass (operating effective) and an open issue ISS-007: the server caps operating at partially effective (operating_capped true), and on a test basis that is the combined rating, so the cap is stated.",
+  "input": {
+    "control": {
+      "name": "Access Control Policy",
+      "reference": "A.5.15",
+      "description": "",
+      "objective": "Ensure least-privilege access to systems and data.",
+      "owner_id": null,
+      "operator_id": null,
+      "owner": "IT Security",
+      "nature": null,
+      "automation": null,
+      "is_key": false,
+      "operating_frequency": null,
+      "iso27002_attributes": {},
+      "test_procedure": "",
+      "evidence_expected": "",
+      "control_type": "production",
+      "classification_id": "4076baac-9d8e-4d5e-afe6-41ebf6ce1efd",
+      "classification": "Technical",
+      "documentation_url": "",
+      "status": "operational",
+      "effectiveness": "partially_effective",
+      "workflow_owner_id": null,
+      "opex": 12000,
+      "capex": 0,
+      "resource_utilization": 15,
+      "audit_frequency": "annual",
+      "audit_metric": "Sample of access grants reviewed against policy.",
+      "audit_success_criteria": "100% of sampled grants comply with least-privilege.",
+      "maintenance_frequency": "quarterly",
+      "id": "7e23bf27-1359-4f31-9768-a70f4d96c4c3",
+      "owner_ref": null,
+      "operator_ref": null,
+      "classification_ref": {
+        "id": "4076baac-9d8e-4d5e-afe6-41ebf6ce1efd",
+        "key": "control_classification",
+        "value": "technical",
+        "label": "Technical"
+      },
+      "workflow_status": "approved",
+      "workflow_owner": "",
+      "workflow_owner_ref": null,
+      "next_audit_date": "2027-07-03",
+      "last_audit_date": "2026-07-03",
+      "next_maintenance_date": "2026-10-03",
+      "last_maintenance_date": null,
+      "audit_count": 1,
+      "last_audit_result": "passed",
+      "is_audit_overdue": false,
+      "maintenance_count": 0,
+      "last_maintenance_result": null,
+      "is_maintenance_overdue": false,
+      "design_effectiveness": "not_assessed",
+      "operating_effectiveness": "partially_effective",
+      "effectiveness_override_reason": "",
+      "effectiveness_basis": "tests",
+      "open_issues": [
+        {
+          "id": "0c6f5a0e-0000-4000-8000-000000000007",
+          "reference": "ISS-007",
+          "title": "Access review found stale accounts",
+          "name": ""
+        }
+      ],
+      "pending_review_count": 0,
+      "business_units": [],
+      "processes": [],
+      "policies": [],
+      "requirements": [
+        {
+          "id": "29867227-0077-4d22-9fbc-ddd042742113",
+          "reference": "A.5.15",
+          "title": "Access control",
+          "name": "",
+          "framework": "ISO/IEC 27001:2022",
+          "framework_id": "2e7a373a-db9b-41be-8b69-dedb5ee70d87"
+        },
+        {
+          "id": "ef6696d6-e4ea-408c-bf92-2dbd9a423c40",
+          "reference": "CC6.1",
+          "title": "Logical and physical access controls",
+          "name": "",
+          "framework": "SOC 2",
+          "framework_id": "cbdbe724-ea15-476b-82ee-6d335d3f68bd"
+        }
+      ],
+      "risks": [
+        {
+          "id": "7c26d242-a956-44e5-bff4-dbb001cb7705",
+          "reference": "R-001",
+          "title": "Unauthorized access to customer data",
+          "name": ""
+        },
+        {
+          "id": "b53183dd-7e9e-4235-a0be-4f9a69655311",
+          "reference": "R-003",
+          "title": "Payroll data exposed by insider",
+          "name": ""
+        }
+      ],
+      "incidents": [],
+      "exceptions": [],
+      "projects": [],
+      "audit_findings": [
+        {
+          "id": "da592dfe-6a2d-4040-bb33-3be6d194bc45",
+          "reference": "IAF-001",
+          "title": "Graph link test finding",
+          "name": ""
+        }
+      ],
+      "assets": [
+        {
+          "id": "72a69d43-130c-4f5a-89b1-681eaf7da072",
+          "reference": "",
+          "title": "",
+          "name": "Corporate Network"
+        }
+      ],
+      "vendors": [],
+      "operating_capped": true
+    },
+    "tests": [
+      {
+        "id": "01349e22-244f-41ca-98a5-213a4eaee5d5",
+        "control_id": "7e23bf27-1359-4f31-9768-a70f4d96c4c3",
+        "result": "passed",
+        "test_type": null,
+        "planned_date": null,
+        "conducted_date": "2026-07-03",
+        "period_start": null,
+        "period_end": null,
+        "population_size": null,
+        "sample_size": null,
+        "sample_method": "",
+        "exceptions_count": 0,
+        "exceptions_detail": "",
+        "metric_description": "",
+        "success_criteria": "",
+        "conclusion": "Annual access review passed with no findings.",
+        "result_description": "Annual access review passed with no findings.",
+        "improvement": "",
+        "auditor": "Internal Audit",
+        "tested_by_id": null,
+        "tested_by_ref": null,
+        "review_status": "legacy",
+        "reviewed_by_id": null,
+        "reviewed_by_ref": null,
+        "reviewed_at": null,
+        "review_note": "",
+        "raised_issue_id": null,
+        "raised_issue": null,
+        "evidence": [],
+        "can_review": false,
+        "review_blocked_reason": "",
+        "can_edit": false,
+        "created_at": "2026-07-03T20:35:46.947782Z"
+      }
+    ],
+    "maints": [],
+    "suggestionCount": 5
+  },
+  "ctx": {
+    "now": "2026-09-12T09:00:00Z",
+    "gov": {
+      "workflowState": "approved",
+      "approvalSteps": 0,
+      "lastStep": {
+        "action": "import",
+        "at": "2026-09-13T01:00:00Z",
+        "actor": "system@nexusline",
+        "reason": ""
+      },
+      "lastSubmitAt": null,
+      "attestation": {
+        "status": "never",
+        "nativeReview": false,
+        "nextDue": null,
+        "canAttest": true,
+        "blockedReason": null
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "effectiveness",
+        "value": "Partially effective",
+        "because": "From the latest reviewed operating test (partially effective); no reviewed design test yet. Operating capped at partially effective by 1 open issue: ISS-007."
+      },
+      {
+        "key": "testing"
+      },
+      {
+        "key": "maintenance"
+      },
+      {
+        "key": "reliedon"
+      },
+      {
+        "key": "issues",
+        "because": "ISS-007 caps operating at partially effective until closed."
+      },
+      {
+        "key": "evidence"
+      }
+    ]
+  }
+}

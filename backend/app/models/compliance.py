@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Column, Date, ForeignKey, Integer, String, Table, Text, Uuid
+from sqlalchemy import Column, Date, ForeignKey, Index, Integer, String, Table, Text, Uuid, func, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -59,10 +59,30 @@ requirement_crosswalks = Table(
 )
 
 
+#: How a framework is scored. ``compliance`` frameworks (ISO 27001, PCI DSS, SBP) are
+#: obligations: each clause is met or not and feeds the compliance percentage. ``maturity``
+#: and ``guidance`` frameworks (ISO 31000, ISO 27005) describe good practice; a bank
+#: self-assesses against them but is never "non-compliant" with them, so they stay out of
+#: the compliance percentage and the health score.
+FRAMEWORK_KINDS: tuple[str, ...] = ("compliance", "maturity", "guidance")
+
+
 class Framework(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "frameworks"
+    __table_args__ = (
+        # One live framework per name per organisation: the same standard loaded twice
+        # counts every gap twice. Case-insensitive, and archived rows don't count.
+        Index(
+            "uq_frameworks_tenant_name",
+            "tenant_id",
+            func.lower(text("name")),
+            unique=True,
+            postgresql_where=text("deleted = false"),
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="compliance", nullable=False)
     version: Mapped[str] = mapped_column(String(50), default="")
     authority: Mapped[str] = mapped_column(String(200), default="")  # e.g. ISO, AICPA
     regulator: Mapped[str] = mapped_column(String(200), default="")  # body enforcing it
@@ -93,6 +113,8 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
     )
     reference: Mapped[str] = mapped_column(String(64), default="", index=True)  # "A.5.1"
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Statement of Applicability: why a clause is in or out of scope.
+    applicability_justification: Mapped[str] = mapped_column(Text, default="", nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     domain: Mapped[str] = mapped_column(String(120), default="", index=True)
     audit_questionnaire: Mapped[str] = mapped_column(Text, default="")  # how to test compliance
@@ -133,6 +155,8 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
     )
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
         "ExceptionRecord", secondary="exception_requirements", lazy="selectin", viewonly=True,
+        # An archived exception is not on the register: never show it as a live link.
+        secondaryjoin="and_(exception_requirements.c.exception_id == ExceptionRecord.id, ExceptionRecord.deleted == False)",
     )
     audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
         "AuditFinding", secondary="audit_finding_requirements", lazy="selectin", viewonly=True,
@@ -152,7 +176,8 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
         if not self.controls:
             return "none"
         for c in self.controls:
-            if c.last_audit_result == TestResult.failed or c.is_audit_overdue:
+            # The latest *reviewed* test, as ratings and the residual engine read it.
+            if c.last_reviewed_result == TestResult.failed or c.is_audit_overdue:
                 return "issues"
         return "ok"
 

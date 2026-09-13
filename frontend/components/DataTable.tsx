@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { apiCall } from "@/lib/api";
 import { type ListQuery, type Page, toQueryString, useDebounced, useLatest } from "@/lib/list";
+import { useEscapeLayer } from "@/lib/escapeLayer";
 
 /* The list workbench every register page shares.
 
@@ -134,6 +135,15 @@ function csvCell(v: string): string {
   return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
 }
 
+// A page passes its filter object even when nothing is selected; only a filter that
+// holds a value narrows the list, so only then is "no match" the right thing to say.
+function hasActiveFilter(filters: Record<string, unknown> | undefined): boolean {
+  if (!filters) return false;
+  return Object.values(filters).some(
+    (v) => v !== undefined && v !== null && v !== "" && !(Array.isArray(v) && v.length === 0),
+  );
+}
+
 export default function DataTable<T>({
   columns,
   fetcher,
@@ -234,19 +244,25 @@ export default function DataTable<T>({
 
   // ---------------------------------------------------------- dynamic status
   const [statuses, setStatuses] = useState<Record<string, StatusLabel[]>>({});
+  // Pages pass `rowKey` inline, so its identity changes on every parent render. Held in a
+  // ref so the loader below doesn't change with it: otherwise a page whose fetcher sets
+  // its own state (counts, say) re-renders, hands in a new rowKey, re-creates the loader,
+  // refetches, and loops — the risk-candidates page fired ~160 requests a second.
+  const rowKeyRef = useRef(rowKey);
+  rowKeyRef.current = rowKey;
   const loadStatuses = useCallback(
     async (items: T[]) => {
       if (!statusModel || items.length === 0) return;
       try {
         const res = await apiCall<Record<string, StatusLabel[]>>(
-          "POST", `/status-rules/evaluate/${statusModel}`, { ids: items.map(rowKey) },
+          "POST", `/status-rules/evaluate/${statusModel}`, { ids: items.map((r) => rowKeyRef.current(r)) },
         );
         setStatuses(res || {});
       } catch {
         setStatuses({});
       }
     },
-    [statusModel, rowKey],
+    [statusModel],
   );
 
   const load = useCallback(async () => {
@@ -495,7 +511,7 @@ export default function DataTable<T>({
               <tr>
                 <td colSpan={colSpan}>
                   <div className="empty" style={{ padding: 28 }}>
-                    <p>{search || filters ? "No records match your filters." : emptyMessage}</p>
+                    <p>{search || hasActiveFilter(filters) ? "No records match your filters." : emptyMessage}</p>
                   </div>
                 </td>
               </tr>
@@ -507,7 +523,23 @@ export default function DataTable<T>({
                 return (
                   <tr
                     key={k}
+                    data-row-key={k}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
+                    // A row that opens its record is reachable by keyboard too: Tab lands on
+                    // it and Enter or Space opens it (a click also focuses it, so the record
+                    // gives focus back to this row when it closes).
+                    tabIndex={onRowClick ? 0 : undefined}
+                    onKeyDown={
+                      onRowClick
+                        ? (e) => {
+                            if (e.target !== e.currentTarget) return; // a button or checkbox in the row
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              onRowClick(row);
+                            }
+                          }
+                        : undefined
+                    }
                     className={[activeKey === k ? "active-row" : "", selected.has(k) ? "selected-row" : ""].join(" ").trim() || undefined}
                     style={{ cursor: onRowClick ? "pointer" : undefined }}
                   >
@@ -576,11 +608,8 @@ function ColumnsPanel<T>({
   const hiddenCols = catalogue.filter((c) => !visible.includes(c.key) && c.key !== "actions");
   const label = (k: string) => catalogue.find((c) => c.key === k)?.header ?? k;
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) { if (e.key === "Escape") onClose(); }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Esc: a layer of the shared escape stack.
+  useEscapeLayer(true, onClose);
 
   const commit = (keys: string[]) => onChange(visible.includes("actions") ? [...keys, "actions"] : keys);
 

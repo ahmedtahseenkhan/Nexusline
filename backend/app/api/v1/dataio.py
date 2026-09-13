@@ -52,7 +52,7 @@ from app.schemas.dataio import (
     PreviewRow,
 )
 from app.services import audit as audit_log
-from app.services import csv_io, import_mapping
+from app.services import csv_io, import_mapping, ref_fields
 from app.services.import_registry import REGISTRY, Column, LinkSpec, ResourceIO
 
 router = APIRouter(prefix="/io", tags=["data-io"])
@@ -281,6 +281,7 @@ async def import_resource(
 
     reader = csv.DictReader(io.StringIO(body.content))
     errors: list[RowError] = []
+    warnings: list[RowError] = []
     total = 0
     created = 0
 
@@ -297,11 +298,13 @@ async def import_resource(
             obj = res.create_schema(**payload)
             # Custom-field values are written inside the row's own savepoint, so a bad
             # value rolls the record back with it rather than leaving a half-imported row.
-            async with db.begin_nested():
-                record = await res.create_func(body=obj, db=db, user=user)
-                if custom_fields:
-                    _write_custom_values(db, user, record, source_row, custom_fields)
+            with ref_fields.collect_warnings() as row_warnings:
+                async with db.begin_nested():
+                    record = await res.create_func(body=obj, db=db, user=user)
+                    if custom_fields:
+                        _write_custom_values(db, user, record, source_row, custom_fields)
             created += 1
+            warnings.extend(RowError(row=row_no, message=m) for m in row_warnings)
         except Exception as exc:  # noqa: BLE001 - row isolation: report & continue
             errors.append(RowError(row=row_no, message=_clean_message(exc)))
 
@@ -315,12 +318,13 @@ async def import_resource(
             "total": total,
             "created": created,
             "failed": len(errors),
+            "warnings": len(warnings),
             "mapped_columns": len(mapping),
             "custom_field_columns": len(custom_fields),
         },
     )
     return ImportResult(
-        total=total, created=created, skipped=total - created, errors=errors
+        total=total, created=created, skipped=total - created, errors=errors, warnings=warnings
     )
 
 

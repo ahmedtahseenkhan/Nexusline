@@ -6,7 +6,9 @@ a new standard without reseeding.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from app.services import control_mapping
 
@@ -850,10 +852,12 @@ _NIST_CSF_2_0 = {
 }
 
 
-# ---------------------------------------------------------------- PCI DSS v4.0
+# ---------------------------------------------------------------- PCI DSS v4.0.1
+# The 93 sub-requirements follow the v4.0.1 (June 2024) numbering. The template key stays
+# "pci-dss-4.0" (control mapping and saved links use it); the old name is a legacy alias.
 _PCI_DSS_4_0 = {
-    "name": "PCI DSS v4.0",
-    "version": "4.0",
+    "name": "PCI DSS v4.0.1",
+    "version": "4.0.1",
     "authority": "PCI SSC",
     "regulator": "Payment Card Industry Security Standards Council",
     "scope": (
@@ -862,7 +866,7 @@ _PCI_DSS_4_0 = {
         "the system components in or connected to the cardholder data environment (CDE)."
     ),
     "description": (
-        "PCI DSS v4.0 is the global standard for protecting payment account data, organized "
+        "PCI DSS v4.0.1 is the global standard for protecting payment account data, organized "
         "into 12 principal requirements grouped under six goals: build and maintain a secure "
         "network, protect account data, maintain a vulnerability management program, implement "
         "strong access control, regularly monitor and test networks, and maintain an "
@@ -2912,6 +2916,9 @@ _SBP_BCP = {
 # the risk matrix to match is the intended pairing.
 _ISO_27005_2022 = {
     "name": "ISO/IEC 27005:2022",
+    # Guidance on the risk process, not a list of obligations: self-assessed, never
+    # "non-compliant", and kept out of the compliance percentage.
+    "kind": "maturity",
     "version": "2022",
     "authority": "ISO/IEC",
     "regulator": "ISO/IEC JTC 1/SC 27",
@@ -3011,6 +3018,8 @@ _ISO_27005_2022 = {
 # market, operational and IT risk baseline the register on this.
 _ISO_31000_2018 = {
     "name": "ISO 31000:2018",
+    # Principles and guidelines ("Risk management — Guidelines"): a maturity yardstick.
+    "kind": "maturity",
     "version": "2018",
     "authority": "ISO",
     "regulator": "ISO/TC 262",
@@ -3104,6 +3113,9 @@ _ISO_31000_2018 = {
 # ------------------------------------- Basel II operational risk (event types + PSMOR)
 _BASEL_OPRISK_FW = {
     "name": "Basel Operational Risk",
+    # A loss-event taxonomy plus the BCBS sound-management *principles*: banks benchmark
+    # themselves against it; the binding rules reach them through SBP's own circulars.
+    "kind": "maturity",
     "version": "2011",
     "authority": "Basel Committee on Banking Supervision",
     "regulator": "",
@@ -3157,6 +3169,9 @@ _BASEL_OPRISK_FW = {
 # --------------------------------------------- SBP / AAOIFI Shariah governance
 _SHARIAH_GOVERNANCE_FW = {
     "name": "SBP/AAOIFI Shariah Governance",
+    # SBP's Shariah Governance Framework is binding on every Islamic bank and window:
+    # each clause is met or not, so it counts towards compliance like the other SBP packs.
+    "kind": "compliance",
     "version": "2018",
     "authority": "State Bank of Pakistan / AAOIFI",
     "regulator": "State Bank of Pakistan",
@@ -3193,6 +3208,151 @@ def _build(meta: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------- ISO/IEC 27002:2022 attributes
+# Each Annex A control's attribute values from ISO/IEC 27002:2022 (§4.2 and the control
+# pages; summarised in its Annex A, table A.1), in the standard's own hashtag spelling so
+# a row can be checked against the text at a glance. Normalised to the stored form
+# (lower case, no "#") by ``_iso_attrs``. Installed onto the controls an ISO 27001 pack
+# creates; a tenant's own edits are never overwritten.
+_CIA = "#Confidentiality #Integrity #Availability"
+_P, _D, _C = "#Preventive", "#Detective", "#Corrective"
+_GE, _PR, _DE, _RE = "#Governance_and_Ecosystem", "#Protection", "#Defence", "#Resilience"
+_IAM = "#Identity_and_access_management"
+_EVENTS = "#Information_security_event_management"
+_SUPPLIER = "#Supplier_relationships_security"
+_APPSYS = "#Application_security #System_and_network_security"
+
+_ISO_27002_RAW: dict[str, tuple[str, str, str, str, str]] = {
+    # ref: (control type, security properties, cybersecurity concepts,
+    #       operational capabilities, security domains)
+    "A.5.1": (_P, _CIA, "#Identify", "#Governance", f"{_GE} {_RE}"),
+    "A.5.2": (_P, _CIA, "#Identify", "#Governance", f"{_GE} {_PR} {_RE}"),
+    "A.5.3": (_P, _CIA, "#Protect", f"#Governance {_IAM}", _GE),
+    "A.5.4": (_P, _CIA, "#Identify", "#Governance", _GE),
+    "A.5.5": (f"{_P} {_C}", _CIA, "#Identify #Protect #Respond #Recover", "#Governance", f"{_DE} {_RE}"),
+    "A.5.6": (f"{_P} {_C}", _CIA, "#Protect #Respond #Recover", "#Governance", _DE),
+    "A.5.7": (f"{_P} {_D} {_C}", _CIA, "#Identify #Detect #Respond", "#Threat_and_vulnerability_management", f"{_DE} {_RE}"),
+    "A.5.8": (_P, _CIA, "#Identify #Protect", "#Governance", f"{_GE} {_PR}"),
+    "A.5.9": (_P, _CIA, "#Identify", "#Asset_management", f"{_GE} {_PR}"),
+    "A.5.10": (_P, _CIA, "#Protect", "#Asset_management #Information_protection", f"{_GE} {_PR}"),
+    "A.5.11": (_P, _CIA, "#Protect", "#Asset_management", _PR),
+    "A.5.12": (_P, _CIA, "#Identify", "#Information_protection", f"{_PR} {_DE}"),
+    "A.5.13": (_P, _CIA, "#Protect", "#Information_protection", f"{_DE} {_PR}"),
+    "A.5.14": (_P, _CIA, "#Protect", "#Asset_management #Information_protection", _PR),
+    "A.5.15": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.5.16": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.5.17": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.5.18": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.5.19": (_P, _CIA, "#Identify", _SUPPLIER, f"{_GE} {_PR}"),
+    "A.5.20": (_P, _CIA, "#Identify", _SUPPLIER, f"{_GE} {_PR}"),
+    "A.5.21": (_P, _CIA, "#Identify", _SUPPLIER, f"{_GE} {_PR}"),
+    "A.5.22": (_P, _CIA, "#Identify", f"{_SUPPLIER} #Information_security_assurance", f"{_GE} {_PR} {_DE}"),
+    "A.5.23": (_P, _CIA, "#Protect", _SUPPLIER, f"{_GE} {_PR}"),
+    "A.5.24": (_C, _CIA, "#Respond #Recover", f"#Governance {_EVENTS}", _DE),
+    "A.5.25": (_D, _CIA, "#Detect #Respond", _EVENTS, _DE),
+    "A.5.26": (_C, _CIA, "#Respond #Recover", _EVENTS, _DE),
+    "A.5.27": (_P, _CIA, "#Identify #Protect", _EVENTS, _DE),
+    "A.5.28": (_C, _CIA, "#Detect #Respond", _EVENTS, _DE),
+    "A.5.29": (f"{_P} {_C}", _CIA, "#Protect #Respond", "#Continuity", f"{_PR} {_RE}"),
+    "A.5.30": (_C, "#Availability", "#Respond", "#Continuity", _RE),
+    "A.5.31": (_P, _CIA, "#Identify", "#Legal_and_compliance", f"{_GE} {_PR}"),
+    "A.5.32": (_P, _CIA, "#Identify", "#Legal_and_compliance", _GE),
+    "A.5.33": (_P, _CIA, "#Identify #Protect", "#Legal_and_compliance #Asset_management #Information_protection", _DE),
+    "A.5.34": (_P, _CIA, "#Identify #Protect", "#Information_protection #Legal_and_compliance", _PR),
+    "A.5.35": (f"{_P} {_C}", _CIA, "#Identify #Protect", "#Information_security_assurance", _GE),
+    "A.5.36": (_P, _CIA, "#Identify #Protect", "#Legal_and_compliance #Information_security_assurance", _GE),
+    "A.5.37": (
+        f"{_P} {_C}", _CIA, "#Protect #Recover",
+        "#Asset_management #Physical_security #System_and_network_security #Application_security "
+        f"#Secure_configuration {_IAM} #Threat_and_vulnerability_management #Continuity {_EVENTS}",
+        f"{_GE} {_PR} {_DE}",
+    ),
+    "A.6.1": (_P, _CIA, "#Protect", "#Human_resource_security", _GE),
+    "A.6.2": (_P, _CIA, "#Protect", "#Human_resource_security", _GE),
+    "A.6.3": (_P, _CIA, "#Protect", "#Human_resource_security", _GE),
+    "A.6.4": (f"{_P} {_C}", _CIA, "#Protect #Respond", "#Human_resource_security", _GE),
+    "A.6.5": (_P, _CIA, "#Protect", "#Human_resource_security #Asset_management", _GE),
+    "A.6.6": (_P, "#Confidentiality", "#Protect", f"#Human_resource_security #Information_protection {_SUPPLIER}", _GE),
+    "A.6.7": (_P, _CIA, "#Protect", "#Asset_management #Information_protection #Physical_security #System_and_network_security", _PR),
+    "A.6.8": (_D, _CIA, "#Detect", _EVENTS, _DE),
+    "A.7.1": (_P, _CIA, "#Protect", "#Physical_security", _PR),
+    "A.7.2": (_P, _CIA, "#Protect", f"#Physical_security {_IAM}", _PR),
+    "A.7.3": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.7.4": (f"{_P} {_D}", _CIA, "#Protect #Detect", "#Physical_security", f"{_PR} {_DE}"),
+    "A.7.5": (_P, _CIA, "#Protect", "#Physical_security", _PR),
+    "A.7.6": (_P, _CIA, "#Protect", "#Physical_security", _PR),
+    "A.7.7": (_P, "#Confidentiality", "#Protect", "#Physical_security", _PR),
+    "A.7.8": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.7.9": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.7.10": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.7.11": (f"{_P} {_D}", "#Integrity #Availability", "#Protect #Detect", "#Physical_security", _PR),
+    "A.7.12": (_P, "#Confidentiality #Availability", "#Protect", "#Physical_security", _PR),
+    "A.7.13": (_P, _CIA, "#Protect", "#Physical_security #Asset_management", f"{_PR} {_RE}"),
+    "A.7.14": (_P, "#Confidentiality", "#Protect", "#Physical_security #Asset_management", _PR),
+    "A.8.1": (_P, _CIA, "#Protect", "#Asset_management #Information_protection", _PR),
+    "A.8.2": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.8.3": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.8.4": (_P, _CIA, "#Protect", f"{_IAM} #Application_security #Secure_configuration", _PR),
+    "A.8.5": (_P, _CIA, "#Protect", _IAM, _PR),
+    "A.8.6": (f"{_P} {_D}", "#Integrity #Availability", "#Identify #Protect #Detect", "#Continuity", f"{_GE} {_PR}"),
+    "A.8.7": (f"{_P} {_D} {_C}", _CIA, "#Protect #Detect", "#System_and_network_security #Information_protection", f"{_PR} {_DE}"),
+    "A.8.8": (_P, _CIA, "#Identify #Protect", "#Threat_and_vulnerability_management", f"{_GE} {_PR} {_DE}"),
+    "A.8.9": (_P, _CIA, "#Protect", "#Secure_configuration", _PR),
+    "A.8.10": (_P, "#Confidentiality", "#Protect", "#Information_protection #Legal_and_compliance", _PR),
+    "A.8.11": (_P, "#Confidentiality", "#Protect", "#Information_protection", _PR),
+    "A.8.12": (f"{_P} {_D}", "#Confidentiality", "#Protect #Detect", "#Information_protection", f"{_PR} {_DE}"),
+    "A.8.13": (_C, "#Integrity #Availability", "#Recover", "#Continuity", _PR),
+    "A.8.14": (_P, "#Availability", "#Protect", "#Continuity #Asset_management", f"{_PR} {_RE}"),
+    "A.8.15": (_D, _CIA, "#Detect", _EVENTS, f"{_PR} {_DE}"),
+    "A.8.16": (f"{_D} {_C}", _CIA, "#Detect #Respond", _EVENTS, _DE),
+    "A.8.17": (_D, "#Integrity", "#Protect #Detect", _EVENTS, f"{_PR} {_DE}"),
+    "A.8.18": (_P, _CIA, "#Protect", "#System_and_network_security #Secure_configuration #Application_security", _PR),
+    "A.8.19": (_P, _CIA, "#Protect", "#Secure_configuration #Application_security", _PR),
+    "A.8.20": (f"{_P} {_D}", _CIA, "#Protect #Detect", "#System_and_network_security", _PR),
+    "A.8.21": (_P, _CIA, "#Protect", "#System_and_network_security", _PR),
+    "A.8.22": (_P, _CIA, "#Protect", "#System_and_network_security", _PR),
+    "A.8.23": (_P, _CIA, "#Protect", "#System_and_network_security", _PR),
+    "A.8.24": (_P, _CIA, "#Protect", "#Secure_configuration", _PR),
+    "A.8.25": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.26": (_P, _CIA, "#Protect", _APPSYS, f"{_PR} {_DE}"),
+    "A.8.27": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.28": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.29": (_P, _CIA, "#Identify", "#Application_security #Information_security_assurance #System_and_network_security", _PR),
+    "A.8.30": (f"{_P} {_D}", _CIA, "#Identify #Protect #Detect", f"#System_and_network_security #Application_security {_SUPPLIER}", f"{_GE} {_PR}"),
+    "A.8.31": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.32": (_P, _CIA, "#Protect", _APPSYS, _PR),
+    "A.8.33": (_P, "#Confidentiality #Integrity", "#Protect", "#Information_protection", _PR),
+    "A.8.34": (_P, _CIA, "#Protect", "#System_and_network_security #Information_protection", f"{_GE} {_PR}"),
+}
+
+_ISO_27002_KEYS = (
+    "control_type", "security_properties", "cybersecurity_concepts",
+    "operational_capabilities", "security_domains",
+)
+
+
+def _iso_attrs(raw: tuple[str, ...]) -> dict[str, list[str]]:
+    """``("#Preventive", "#Confidentiality …", …)`` -> the stored attribute dict, checked
+    against the vocabulary (a typo here fails at import, not on a tenant's install)."""
+    from app.schemas.control import normalize_iso27002
+
+    return normalize_iso27002(dict(zip(_ISO_27002_KEYS, raw)))
+
+
+#: Annex A reference ("A.8.5") -> ISO 27002:2022 attributes, in the stored form.
+ISO27002_ATTRIBUTES: dict[str, dict[str, list[str]]] = {
+    ref: _iso_attrs(raw) for ref, raw in _ISO_27002_RAW.items()
+}
+
+
+def iso27002_attributes_for(template_key: str, reference: str) -> dict[str, list[str]]:
+    """The ISO 27002 attributes a template's clause carries (a copy), or ``{}``."""
+    if template_key != "iso-27001-2022":
+        return {}
+    attrs = ISO27002_ATTRIBUTES.get(reference)
+    return {k: list(v) for k, v in attrs.items()} if attrs else {}
+
+
 TEMPLATES: dict[str, dict] = {
     "iso-27005-2022": _build(_ISO_27005_2022),
     "iso-31000-2018": _build(_ISO_31000_2018),
@@ -3213,15 +3373,37 @@ TEMPLATES: dict[str, dict] = {
     "shariah-governance": _build(_SHARIAH_GOVERNANCE_FW),
 }
 
-#: Names the retired shallow content-library packs used for the SAME standard. A tenant
-#: that installed one of those keeps it as an ordinary framework; while it exists, the
-#: full template is reported as installed and cannot be double-installed — delete the
-#: legacy framework first to load the deeper one.
+# ISO 27001 Annex A rows carry their ISO 27002:2022 attributes.
+for _row in TEMPLATES["iso-27001-2022"]["requirements"]:
+    if _row["reference"] in ISO27002_ATTRIBUTES:
+        _row["iso27002_attributes"] = iso27002_attributes_for("iso-27001-2022", _row["reference"])
+
+#: Other names the SAME standard has been installed under: the retired shallow
+#: content-library packs, and earlier spellings of a template's own name. A framework
+#: carrying one of them *is* that template. Installing the template over it upgrades it in
+#: place (renamed, missing clauses added, statuses and links kept) instead of refusing,
+#: and two live copies are merged into one at start-up by ``merge_duplicate_frameworks``.
 LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
     "iso-27001-2022": ("ISO/IEC 27001:2022 Annex A",),
     "nist-csf-2.0": ("NIST CSF 2.0",),
     "sbp-etgrm": ("SBP ETGRM Framework",),
+    # The template's own name before its 93 rows were aligned to v4.0.1.
+    "pci-dss-4.0": ("PCI DSS v4.0",),
 }
+
+#: The kind a template installs as when it does not say (see ``Framework.kind``).
+DEFAULT_KIND = "compliance"
+
+
+def normalize_name(name: str | None) -> str:
+    """How framework names are compared: trimmed, case-insensitive — the same rule as
+    the ``uq_frameworks_tenant_name`` index (``lower(name)``)."""
+    return (name or "").strip().lower()
+
+
+def normalize_reference(reference: str | None) -> str:
+    """How requirement references are compared across copies of a framework."""
+    return (reference or "").strip().lower()
 
 
 def template_names(key: str) -> tuple[str, ...]:
@@ -3230,27 +3412,241 @@ def template_names(key: str) -> tuple[str, ...]:
     return (tpl["name"], *LEGACY_ALIASES.get(key, ()))
 
 
-async def installed_template_frameworks(db) -> dict[str, uuid.UUID]:
-    """Template key -> id of the live Framework it was installed as (aliases included)."""
-    from sqlalchemy import select
+def template_kind(key: str) -> str:
+    """compliance | maturity | guidance — how frameworks installed from ``key`` score."""
+    return TEMPLATES[key].get("kind", DEFAULT_KIND)
 
-    from app.models.compliance import Framework
 
-    by_name = {
-        name: fid
-        for fid, name in (
-            await db.execute(
-                select(Framework.id, Framework.name).where(Framework.deleted.is_(False))
-            )
-        ).all()
-    }
-    found: dict[str, uuid.UUID] = {}
+def _names_index() -> dict[str, str]:
+    out: dict[str, str] = {}
     for key in TEMPLATES:
         for name in template_names(key):
-            if name in by_name:
-                found[key] = by_name[name]
-                break
-    return found
+            out.setdefault(normalize_name(name), key)
+    return out
+
+
+_NAME_TO_KEY: dict[str, str] = _names_index()
+
+
+def template_key_for_name(name: str | None) -> str | None:
+    """The template a framework name belongs to (canonical or legacy), or None."""
+    return _NAME_TO_KEY.get(normalize_name(name))
+
+
+def _lowered_names(key: str) -> list[str]:
+    return [normalize_name(n) for n in template_names(key)]
+
+
+# ---------------------------------------------------------------- pure decisions
+# Kept free of the database so the rules are unit-testable.
+@dataclass(frozen=True)
+class FrameworkFacts:
+    """What the merge and install rules need to know about one live framework."""
+
+    id: object
+    name: str
+    requirements: int = 0
+    created_at: object = None
+
+
+def keeper_sort_key(f: FrameworkFacts):
+    """Most requirements first; on a tie the oldest; then id, so the choice is stable."""
+    return (-f.requirements, f.created_at is None, f.created_at or 0, str(f.id))
+
+
+def pick_keeper(frameworks) -> FrameworkFacts:
+    """The copy of a standard that survives a merge (and that an install upgrades)."""
+    return sorted(frameworks, key=keeper_sort_key)[0]
+
+
+def merge_group_key(name: str) -> str:
+    """Frameworks with the same group key are one standard: every name a template is
+    known by shares the template's group; any other name groups by itself."""
+    key = template_key_for_name(name)
+    return f"template:{key}" if key else f"name:{normalize_name(name)}"
+
+
+@dataclass
+class MergePlan:
+    keeper: FrameworkFacts
+    losers: list[FrameworkFacts]
+    template_key: str | None = None
+    #: The template's canonical name when the keeper carries another one.
+    rename_to: str | None = None
+
+
+def plan_merges(frameworks) -> list[MergePlan]:
+    """One plan per standard that exists more than once; nothing for a clean tenant."""
+    groups: dict[str, list[FrameworkFacts]] = {}
+    for f in frameworks:
+        groups.setdefault(merge_group_key(f.name), []).append(f)
+    plans: list[MergePlan] = []
+    for group_key, members in groups.items():
+        if len(members) < 2:
+            continue
+        keeper = pick_keeper(members)
+        key = group_key.split(":", 1)[1] if group_key.startswith("template:") else None
+        canonical = TEMPLATES[key]["name"] if key else None
+        plans.append(
+            MergePlan(
+                keeper=keeper,
+                losers=[m for m in sorted(members, key=keeper_sort_key) if m is not keeper],
+                template_key=key,
+                rename_to=canonical if canonical and keeper.name != canonical else None,
+            )
+        )
+    return plans
+
+
+#: What ``install_template`` does with a template, given what the tenant already has.
+INSTALL = "install"
+UPGRADE = "upgrade"
+CONFLICT = "conflict"
+
+
+def install_action(key: str, existing_name: str | None, existing_refs) -> tuple[str, list[dict]]:
+    """(action, template requirements to add).
+
+    * nothing installed → ``install`` every requirement;
+    * installed under a legacy name, or under the canonical name but missing clauses
+      (the demo seeder's five-row ISO 27001 stub) → ``upgrade``: add the missing ones;
+    * the canonical framework already has every clause → ``conflict`` (409).
+    """
+    tpl = TEMPLATES[key]
+    if existing_name is None:
+        return INSTALL, list(tpl["requirements"])
+    have = {normalize_reference(r) for r in existing_refs}
+    missing: list[dict] = []
+    seen: set[str] = set()
+    for r in tpl["requirements"]:
+        ref = normalize_reference(r["reference"])
+        if ref not in have and ref not in seen:
+            missing.append(r)
+            seen.add(ref)
+    if missing or normalize_name(existing_name) != normalize_name(tpl["name"]):
+        return UPGRADE, missing
+    return CONFLICT, []
+
+
+#: A requirement's implementation fields and the value that means "never touched".
+REQUIREMENT_DEFAULTS: dict[str, object] = {
+    "status": "not_assessed",
+    "treatment": None,
+    "implementation": "",
+    "owner": "",
+    "efficacy": None,
+    "legal_id": None,
+}
+
+
+def _plain(value):
+    return getattr(value, "value", value)
+
+
+def _is_default(field: str, value) -> bool:
+    default = REQUIREMENT_DEFAULTS[field]
+    value = _plain(value)
+    if isinstance(default, str) and value is None:
+        return True
+    return value == default
+
+
+def carry_over(keeper: dict, loser: dict) -> dict:
+    """The implementation fields a merged-away requirement hands to the surviving one:
+    each only where the survivor still holds the default and the loser does not — work
+    recorded on either copy is kept, and the survivor's own answer always wins."""
+    out: dict = {}
+    for field in REQUIREMENT_DEFAULTS:
+        if field not in loser:
+            continue
+        if _is_default(field, keeper.get(field)) and not _is_default(field, loser[field]):
+            out[field] = loser[field]
+    return out
+
+
+# ---------------------------------------------------------------- what is installed
+@dataclass
+class TemplateInstall:
+    """How one template is present in this tenant."""
+
+    framework_id: uuid.UUID
+    name: str
+    #: Installed under a legacy / earlier name.
+    legacy: bool = False
+    #: Template requirements this copy lacks (by reference).
+    missing: int = 0
+    requirements: int = 0
+
+    @property
+    def upgrade_available(self) -> bool:
+        return self.legacy or self.missing > 0
+
+
+async def _live_framework_facts(db) -> list[FrameworkFacts]:
+    from sqlalchemy import func, select
+
+    from app.models.compliance import Framework, Requirement
+
+    counts = dict(
+        (
+            await db.execute(
+                select(Requirement.framework_id, func.count())
+                .where(Requirement.deleted.is_(False))
+                .group_by(Requirement.framework_id)
+            )
+        ).all()
+    )
+    rows = (
+        await db.execute(
+            select(Framework.id, Framework.name, Framework.created_at).where(
+                Framework.deleted.is_(False)
+            )
+        )
+    ).all()
+    return [FrameworkFacts(fid, name, counts.get(fid, 0), created) for fid, name, created in rows]
+
+
+async def template_installs(db) -> dict[str, TemplateInstall]:
+    """Template key -> the live framework it is installed as (aliases included, the
+    keeper when there are several), with what an upgrade would add."""
+    from sqlalchemy import select
+
+    from app.models.compliance import Requirement
+
+    by_key: dict[str, list[FrameworkFacts]] = {}
+    for f in await _live_framework_facts(db):
+        key = template_key_for_name(f.name)
+        if key:
+            by_key.setdefault(key, []).append(f)
+    if not by_key:
+        return {}
+    chosen = {key: pick_keeper(members) for key, members in by_key.items()}
+    refs: dict = {}
+    for fid, ref in (
+        await db.execute(
+            select(Requirement.framework_id, Requirement.reference).where(
+                Requirement.framework_id.in_([f.id for f in chosen.values()]),
+                Requirement.deleted.is_(False),
+            )
+        )
+    ).all():
+        refs.setdefault(fid, []).append(ref)
+    out: dict[str, TemplateInstall] = {}
+    for key, f in chosen.items():
+        action, missing = install_action(key, f.name, refs.get(f.id, []))
+        out[key] = TemplateInstall(
+            framework_id=f.id,
+            name=f.name,
+            legacy=normalize_name(f.name) != normalize_name(TEMPLATES[key]["name"]),
+            missing=len(missing) if action == UPGRADE else 0,
+            requirements=f.requirements,
+        )
+    return out
+
+
+async def installed_template_frameworks(db) -> dict[str, uuid.UUID]:
+    """Template key -> id of the live Framework it was installed as (aliases included)."""
+    return {key: inst.framework_id for key, inst in (await template_installs(db)).items()}
 
 
 async def installed_template_keys(db) -> set[str]:
@@ -3258,35 +3654,245 @@ async def installed_template_keys(db) -> set[str]:
     return set(await installed_template_frameworks(db))
 
 
+async def installed_framework_for(db, key: str):
+    """The live Framework this template is installed as (the keeper if several), or None."""
+    from sqlalchemy import func, select
+
+    from app.models.compliance import Framework
+
+    rows = (
+        await db.scalars(
+            select(Framework).where(
+                func.lower(func.trim(Framework.name)).in_(_lowered_names(key)),
+                Framework.deleted.is_(False),
+            )
+        )
+    ).all()
+    if not rows:
+        return None
+    facts = {
+        r.id: FrameworkFacts(r.id, r.name, sum(1 for q in r.requirements if not q.deleted), r.created_at)
+        for r in rows
+    }
+    keeper = pick_keeper(facts.values())
+    return next(r for r in rows if r.id == keeper.id)
+
+
+# ---------------------------------------------------------------- install / upgrade
 @dataclass
 class InstallOutcome:
-    """What installing a template produced. ``framework`` is the new row; the control
-    counts are zero for management-system frameworks (ISO 31000, GDPR, ...) which have
-    clauses but no controls."""
+    """What installing (or upgrading to) a template produced. ``framework`` is the row;
+    the control counts are zero for management-system frameworks (ISO 31000, GDPR, ...)
+    which have clauses but no controls."""
 
     framework: object
+    #: Requirements the framework now has from the template (all of them after an install).
     requirements: int = 0
+    #: Requirements this call created: all of them on install, the missing ones on upgrade.
+    requirements_added: int = 0
     controls_created: int = 0
+    #: Template controls that already existed in the catalogue (matched by reference).
     controls_linked: int = 0
+    #: Requirement ↔ control links this call wrote.
+    requirements_linked: int = 0
+    #: An existing (legacy-named or shallow) copy was upgraded in place.
+    upgraded: bool = False
+    previous_name: str | None = None
 
 
-async def install_template(db, user, key: str, *, create_controls: bool | None = None) -> InstallOutcome:
+class PackResult(NamedTuple):
+    """What a controls pack did."""
+
+    #: New catalogue controls.
+    created: int
+    #: Template controls that already existed in the catalogue — matched by reference,
+    #: by normalised name, or mapped to an existing control by the caller's decision.
+    linked: int
+    #: Requirement ↔ control links actually written (existing links are not counted).
+    requirements_linked: int
+
+
+# ---------------------------------------------------------------- pack planning (pure)
+# Which existing control each clause of a controls pack lands on. Kept free of the
+# database: the preview endpoint shows exactly this plan, and the install executes it,
+# so what the user reviewed is what is written.
+CREATE = "create"
+MATCH_REFERENCE = "match-by-reference"
+MATCH_NAME = "match-by-name"
+#: An existing control the user chose for the clause (a decision naming a control id).
+MAP_EXISTING = "map-to-existing"
+
+#: Words that carry no identity in a control name: "Review of access rights" and
+#: "Access rights review" are still different strings, but "Access Control Policy" and
+#: "access-control policy" are the same control.
+_NAME_STOPWORDS = frozenset(
+    "a an and as at by for from in into of on or the to with within".split()
+)
+_NAME_PUNCT = re.compile(r"[^0-9a-z]+")
+
+
+def normalize_control_name(name: str | None) -> str:
+    """How control names are compared when a pack is installed: lower-cased, every run of
+    punctuation a single space, stop-words dropped. Exact equality of the result is a
+    match — deliberately not fuzzy: "Access control" and "Access control policy" are two
+    controls, and guessing otherwise would link a clause to the wrong one."""
+    words = _NAME_PUNCT.sub(" ", (name or "").lower()).split()
+    return " ".join(w for w in words if w not in _NAME_STOPWORDS)
+
+
+@dataclass(frozen=True)
+class ControlFacts:
+    """What pack planning needs to know about one existing catalogue control."""
+
+    id: object
+    reference: str = ""
+    name: str = ""
+
+
+@dataclass
+class PackStep:
+    """One control-type clause of a pack and what installing it does."""
+
+    #: The reference as the template spells it (``A.8.5``, ``6.3`` for CIS).
+    requirement_ref: str
+    #: The reference the control carries in the catalogue (``A.8.5``, ``CIS 6.3``).
+    catalogue_reference: str
+    title: str
+    description: str
+    action: str
+    #: The existing control it lands on (None when a new one is created).
+    control: ControlFacts | None = None
+    #: The name match that was found, even when a decision overrode it — so a preview
+    #: can offer "reuse" again after the user picked "create".
+    name_match: ControlFacts | None = None
+
+
+class PackDecisionError(ValueError):
+    """A decision the plan cannot honour (unknown clause, unknown control)."""
+
+
+def _control_sort_key(c: ControlFacts):
+    # The organisation's own controls first (a reference no library framework owns):
+    # reusing a bank's "CTL-014 Change management" is the point of name matching; then
+    # by reference and id so the choice among several same-named controls is stable.
+    library = control_mapping.template_for_reference(c.reference or "") is not None
+    return (library, (c.reference or "").lower(), str(c.id))
+
+
+def plan_pack(
+    wanted: list[dict],
+    key: str,
+    controls: list[ControlFacts],
+    decisions: dict[str, str] | None = None,
+) -> list[PackStep]:
+    """The plan for installing ``wanted`` (the pack's control-type requirements).
+
+    Per clause, in order:
+
+    1. a control already carrying the catalogue reference → **match-by-reference**
+       (authoritative — a decision cannot override it, because two controls with one
+       reference would make the reference ambiguous everywhere it is resolved);
+    2. otherwise a decision naming a control id → **map-to-existing**, or ``create`` →
+       **create** even if a same-named control exists;
+    3. otherwise a *pre-existing* control whose normalised name equals the clause's
+       normalised title → **match-by-name**;
+    4. otherwise **create**.
+
+    Name matching only looks at controls that existed before this install and are not
+    already this framework's own: PCI DSS has two clauses titled "Vulnerabilities
+    identified and addressed" (6.3 and 11.3), and neither may be folded into the
+    other's control.
+    Raises :class:`PackDecisionError` for a decision on a clause the pack does not have
+    or naming a control that does not exist.
+    """
+    decisions = dict(decisions or {})
+    by_ref: dict[str, ControlFacts] = {}
+    by_name: dict[str, ControlFacts] = {}
+    by_id: dict[str, ControlFacts] = {}
+    for c in sorted(controls, key=_control_sort_key):
+        by_id[str(c.id)] = c
+        if c.reference:
+            by_ref.setdefault(c.reference.strip().lower(), c)
+        # A control that is already one of *this* framework's own clauses is that
+        # clause's control, never a name match for another of its clauses.
+        located = control_mapping.template_for_reference(c.reference or "")
+        if located is not None and located[0] == key:
+            continue
+        norm = normalize_control_name(c.name)
+        if norm:
+            by_name.setdefault(norm, c)
+
+    refs = {r["reference"] for r in wanted}
+    unknown = sorted(set(decisions) - refs)
+    if unknown:
+        raise PackDecisionError(f"Not a control of this framework: {', '.join(unknown)}")
+    for ref, choice in decisions.items():
+        if choice != CREATE and str(choice) not in by_id:
+            raise PackDecisionError(f"{ref}: unknown control {choice}")
+
+    steps: list[PackStep] = []
+    for r in wanted:
+        cat_ref = control_mapping.catalogue_reference(key, r["reference"])
+        step = PackStep(
+            requirement_ref=r["reference"],
+            catalogue_reference=cat_ref,
+            title=r["title"],
+            description=r.get("description", ""),
+            action=CREATE,
+        )
+        name_match = by_name.get(normalize_control_name(r["title"]))
+        step.name_match = name_match
+        ref_match = by_ref.get(cat_ref.strip().lower())
+        choice = decisions.get(r["reference"])
+        if ref_match is not None:
+            step.action, step.control = MATCH_REFERENCE, ref_match
+        elif choice == CREATE:
+            step.action = CREATE
+        elif choice is not None:
+            step.action, step.control = MAP_EXISTING, by_id[str(choice)]
+        elif name_match is not None:
+            step.action, step.control = MATCH_NAME, name_match
+        steps.append(step)
+    return steps
+
+
+
+def _apply_template_meta(fw, key: str) -> None:
+    tpl = TEMPLATES[key]
+    fw.name = tpl["name"]
+    fw.kind = template_kind(key)
+    for field in ("version", "authority", "regulator", "scope", "description"):
+        setattr(fw, field, tpl.get(field, ""))
+
+
+async def install_template(
+    db, user, key: str, *, create_controls: bool | None = None,
+    decisions: dict[str, str] | None = None,
+) -> InstallOutcome:
     """Create a Framework + all its Requirements from a template, for this tenant —
     and, for a control framework, the Control Catalogue entries behind them.
 
     Single install path shared by ``/content-library`` and ``/framework-templates`` so
     the same standard can never be installed twice under two different names. Raises
-    404 for an unknown key and 409 when the framework (or a legacy alias of it) exists.
+    404 for an unknown key.
+
+    When the standard is already there under a legacy name, or under its own name but
+    with clauses missing (the demo seeder's five-row ISO 27001), the existing framework
+    is **upgraded in place**: renamed and re-described from the template, every missing
+    clause added — existing requirements, their statuses and their links are never
+    touched. Only a canonical framework that already has every clause is a 409.
 
     ``create_controls`` defaults to on for control frameworks (ISO 27001 Annex A, CIS,
     NIST 800-53, PCI DSS, SBP Cybersecurity): a clause like "A.8.5 Secure
     authentication" *is* a control, and a framework installed without its controls is
     a checklist with nothing behind it. Duplicate protection makes the default safe: a
     control whose reference already exists in the catalogue is linked, not recreated,
-    so an organisation with its own catalogue keeps it.
+    so an organisation with its own catalogue keeps it — and so is one whose normalised
+    name matches the clause's title. ``decisions`` overrides that per clause (see
+    :func:`plan_pack`).
     """
     from fastapi import HTTPException, status
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
     from app.models.compliance import Framework, Requirement
     from app.services import audit
@@ -3295,33 +3901,52 @@ async def install_template(db, user, key: str, *, create_controls: bool | None =
     if tpl is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown framework template")
 
-    names = template_names(key)
-    existing = await db.scalar(
-        select(Framework).where(Framework.name.in_(names), Framework.deleted.is_(False))
-    )
+    existing = await installed_framework_for(db, key)
+    existing_refs: list[str] = []
     if existing is not None:
-        detail = (
-            f"{tpl['name']} is already installed."
-            if existing.name == tpl["name"]
-            else (
-                f"An earlier edition of this standard is installed as '{existing.name}'. "
-                "Delete that framework first to load the full version."
-            )
+        existing_refs = list(
+            (
+                await db.scalars(
+                    select(Requirement.reference).where(
+                        Requirement.framework_id == existing.id, Requirement.deleted.is_(False)
+                    )
+                )
+            ).all()
         )
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+    action, to_add = install_action(key, existing.name if existing is not None else None, existing_refs)
+    if action == CONFLICT:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{tpl['name']} is already installed with all {len(tpl['requirements'])} of its requirements.",
+        )
 
-    fw = Framework(
-        tenant_id=user.tenant_id,
-        name=tpl["name"],
-        version=tpl.get("version", ""),
-        authority=tpl.get("authority", ""),
-        regulator=tpl.get("regulator", ""),
-        scope=tpl.get("scope", ""),
-        description=tpl.get("description", ""),
-    )
-    db.add(fw)
+    previous_name = None
+    if action == UPGRADE:
+        fw = existing
+        previous_name = fw.name
+        if normalize_name(fw.name) != normalize_name(tpl["name"]):
+            clash = await db.scalar(
+                select(Framework.name).where(
+                    func.lower(func.trim(Framework.name)) == normalize_name(tpl["name"]),
+                    Framework.deleted.is_(False),
+                    Framework.id != fw.id,
+                )
+            )
+            if clash is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Both '{fw.name}' and '{clash}' are installed. Delete the one you "
+                        "do not use (or restart to merge them), then upgrade."
+                    ),
+                )
+        _apply_template_meta(fw, key)
+    else:
+        fw = Framework(tenant_id=user.tenant_id)
+        _apply_template_meta(fw, key)
+        db.add(fw)
     await db.flush()
-    for r in tpl["requirements"]:
+    for r in to_add:
         db.add(
             Requirement(
                 tenant_id=user.tenant_id,
@@ -3334,31 +3959,44 @@ async def install_template(db, user, key: str, *, create_controls: bool | None =
         )
     await db.flush()
 
-    outcome = InstallOutcome(framework=fw, requirements=len(tpl["requirements"]))
+    have = {normalize_reference(ref) for ref in existing_refs} | {
+        normalize_reference(r["reference"]) for r in to_add
+    }
+    outcome = InstallOutcome(
+        framework=fw,
+        requirements=sum(1 for r in tpl["requirements"] if normalize_reference(r["reference"]) in have),
+        requirements_added=len(to_add),
+        upgraded=action == UPGRADE,
+        previous_name=previous_name,
+    )
     if create_controls is None:
         create_controls = control_mapping.is_control_framework(key)
     if create_controls and control_mapping.is_control_framework(key):
-        outcome.controls_created, outcome.controls_linked = await install_controls_pack(db, user, fw, key)
+        pack = await install_controls_pack(db, user, fw, key, decisions=decisions)
+        outcome.controls_created, outcome.controls_linked, outcome.requirements_linked = pack
 
-    summary = f"Installed framework {fw.name} ({outcome.requirements} requirements"
-    if outcome.controls_created or outcome.controls_linked:
-        summary += f", {outcome.controls_created} controls created, {outcome.controls_linked} linked"
-    await audit.record(
-        db, actor=user, action="create", entity_type="framework", entity_id=fw.id,
-        summary=summary + ") from the library",
-    )
+    controls = ""
+    if outcome.controls_created or outcome.controls_linked or outcome.requirements_linked:
+        controls = (
+            f", {outcome.controls_created} controls created, {outcome.controls_linked} matched "
+            f"to existing controls, {outcome.requirements_linked} requirement links"
+        )
+    if outcome.upgraded:
+        renamed = f" (was '{previous_name}')" if previous_name != fw.name else ""
+        await audit.record(
+            db, actor=user, action="update", entity_type="framework", entity_id=fw.id,
+            summary=f"Upgraded framework {fw.name}{renamed}: +{outcome.requirements_added} requirements"
+            + controls + " from the library",
+            changes={"requirements_added": outcome.requirements_added,
+                     **({"name": {"from": previous_name, "to": fw.name}} if renamed else {})},
+        )
+    else:
+        await audit.record(
+            db, actor=user, action="create", entity_type="framework", entity_id=fw.id,
+            summary=f"Installed framework {fw.name} ({outcome.requirements} requirements"
+            + controls + ") from the library",
+        )
     return outcome
-
-
-async def installed_framework_for(db, key: str):
-    """The live Framework this template is installed as, or None."""
-    from sqlalchemy import select
-
-    from app.models.compliance import Framework
-
-    return await db.scalar(
-        select(Framework).where(Framework.name.in_(template_names(key)), Framework.deleted.is_(False))
-    )
 
 
 async def controls_present(db, fw, key: str) -> tuple[int, int]:
@@ -3373,7 +4011,13 @@ async def controls_present(db, fw, key: str) -> tuple[int, int]:
 
     from app.models.compliance import Requirement, requirement_controls
 
-    rows = (await db.scalars(select(Requirement).where(Requirement.framework_id == fw.id))).all()
+    rows = (
+        await db.scalars(
+            select(Requirement).where(
+                Requirement.framework_id == fw.id, Requirement.deleted.is_(False)
+            )
+        )
+    ).all()
     control_rows = [r for r in rows if control_mapping.is_control_requirement(key, r.reference)]
     if not control_rows:
         return 0, 0
@@ -3385,15 +4029,46 @@ async def controls_present(db, fw, key: str) -> tuple[int, int]:
     return present, len(control_rows)
 
 
-async def install_controls_pack(db, user, fw, key: str) -> tuple[int, int]:
+async def _catalogue_facts(db) -> list[ControlFacts]:
+    from sqlalchemy import select
+
+    from app.models.control import Control
+
+    rows = (
+        await db.execute(
+            select(Control.id, Control.reference, Control.name).where(Control.deleted.is_(False))
+        )
+    ).all()
+    return [ControlFacts(cid, ref or "", name or "") for cid, ref, name in rows]
+
+
+async def preview_controls_pack(db, key: str, decisions: dict[str, str] | None = None) -> list[PackStep]:
+    """What installing ``key``'s controls pack would do against this catalogue, without
+    writing anything. Works whether or not the framework is installed yet."""
+    tpl = TEMPLATES[key]
+    wanted = control_mapping.control_requirements(tpl, key)
+    if not wanted:
+        return []
+    return plan_pack(wanted, key, await _catalogue_facts(db), decisions)
+
+
+async def install_controls_pack(
+    db, user, fw, key: str, *, decisions: dict[str, str] | None = None,
+) -> PackResult:
     """One Control per control-type requirement, linked to it — or linked to the
-    existing control with that reference. Returns (created, linked-to-existing).
+    existing control the plan picked (same reference, same normalised name, or the
+    caller's decision). Returns (created, matched to existing, requirement↔control
+    links actually written).
 
     Every new control starts ``not_assessed`` / ``planned``: a freshly installed
     catalogue must grant no residual credit until somebody has tested something.
-    ``classification`` records the framework, so the catalogue can be grouped by where
-    its controls came from.
+    ``classification`` is left blank: it is the control's governed classification
+    (a ``control_classification`` lookup), not its source, and writing the framework's
+    name there minted a lookup value per framework that then read as a classification
+    (spec B10a). Where a control came from is its requirement links — each clause names
+    its framework. Raises 422 for a decision the plan cannot honour.
     """
+    from fastapi import HTTPException
     from sqlalchemy import select
 
     from app.models.compliance import Requirement
@@ -3403,41 +4078,285 @@ async def install_controls_pack(db, user, fw, key: str) -> tuple[int, int]:
     tpl = TEMPLATES[key]
     wanted = control_mapping.control_requirements(tpl, key)
     if not wanted:
-        return 0, 0
+        return PackResult(0, 0, 0)
 
-    existing = {
-        (c.reference or "").strip().lower(): c
-        for c in (await db.scalars(select(Control).where(Control.deleted.is_(False)))).all()
-        if c.reference
-    }
-    requirements = {
-        r.reference: r
-        for r in (await db.scalars(select(Requirement).where(Requirement.framework_id == fw.id))).all()
-    }
+    try:
+        steps = plan_pack(wanted, key, await _catalogue_facts(db), decisions)
+    except PackDecisionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    created = linked = 0
-    for r in wanted:
-        ref = control_mapping.catalogue_reference(key, r["reference"])
-        control = existing.get(ref.lower())
+    chosen_ids = {s.control.id for s in steps if s.control is not None}
+    loaded: dict = {}
+    if chosen_ids:
+        loaded = {
+            c.id: c
+            for c in (
+                await db.scalars(select(Control).where(Control.id.in_(chosen_ids)))
+            ).all()
+        }
+    requirements: dict[str, object] = {}
+    for r in (
+        await db.scalars(
+            select(Requirement).where(
+                Requirement.framework_id == fw.id, Requirement.deleted.is_(False)
+            )
+        )
+    ).all():
+        requirements.setdefault(normalize_reference(r.reference), r)
+
+    created = linked = requirements_linked = 0
+    for step in steps:
+        control = loaded.get(step.control.id) if step.control is not None else None
         if control is None:
             control = Control(
                 tenant_id=user.tenant_id,
-                reference=ref,
-                name=r["title"],
-                description=r.get("description", ""),
-                objective=r.get("description", ""),
-                classification=tpl["name"],
+                reference=step.catalogue_reference,
+                name=step.title,
+                description=step.description,
+                objective=step.description,
                 control_type=ControlType.production,
                 status=ControlStatus.planned,
                 effectiveness=ControlEffectiveness.not_assessed,
+                iso27002_attributes=iso27002_attributes_for(key, step.requirement_ref),
             )
             db.add(control)
-            existing[ref.lower()] = control
             created += 1
         else:
             linked += 1
-        requirement = requirements.get(r["reference"])
+            # An existing control gains the clause's attributes only if it has none: a
+            # tenant's own classification is never overwritten.
+            if not (control.iso27002_attributes or {}):
+                attrs = iso27002_attributes_for(key, step.requirement_ref)
+                if attrs:
+                    control.iso27002_attributes = attrs
+        requirement = requirements.get(normalize_reference(step.requirement_ref))
         if requirement is not None and control not in requirement.controls:
             requirement.controls.append(control)
+            requirements_linked += 1
     await db.flush()
-    return created, linked
+    return PackResult(created, linked, requirements_linked)
+
+
+# ---------------------------------------------------------------- data repairs
+# Called on every start by ``app.db.data_repairs`` inside a tenant session. Both must be
+# idempotent (a clean tenant returns 0 without writing anything) and flush, never commit.
+def _requirement_fk_columns():
+    """Every (table, column) pointing at ``requirements.id`` — link tables and child rows
+    alike — found from the metadata so a link table added later is merged too."""
+    import app.models  # noqa: F401 - populate the metadata
+    from app.models.base import Base
+
+    out = []
+    for table in Base.metadata.tables.values():
+        if table.name == "requirements":
+            continue
+        for col in table.columns:
+            if any(fk.column.table.name == "requirements" and fk.column.name == "id" for fk in col.foreign_keys):
+                out.append((table, col))
+    return out
+
+
+def _framework_fk_columns():
+    import app.models  # noqa: F401
+    from app.models.base import Base
+
+    out = []
+    for table in Base.metadata.tables.values():
+        if table.name == "requirements":
+            continue
+        for col in table.columns:
+            if any(fk.column.table.name == "frameworks" and fk.column.name == "id" for fk in col.foreign_keys):
+                out.append((table, col))
+    return out
+
+
+async def _repoint_requirement_links(db, loser_id, keeper_id) -> None:
+    """Move every link of one requirement onto another without creating duplicates."""
+    from sqlalchemy import and_, delete, select, update
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    for table, col in _requirement_fk_columns():
+        if not col.primary_key:
+            # A child row (compliance finding, audit-programme step): re-parent it.
+            await db.execute(update(table).where(col == loser_id).values({col.name: keeper_id}))
+            continue
+        # A link table: copy the loser's rows onto the keeper (skipping ones the keeper
+        # already has), then drop the loser's. A crosswalk that would point the keeper at
+        # itself is dropped rather than copied.
+        others = [c for c in table.columns if c is not col]
+        self_ref = [
+            c for c in others
+            if any(fk.column.table.name == "requirements" for fk in c.foreign_keys)
+        ]
+        conds = [col == loser_id] + [c != keeper_id for c in self_ref]
+        rows = (await db.execute(select(*others).where(and_(*conds)))).all()
+        if rows:
+            values = [{col.name: keeper_id, **{c.name: v for c, v in zip(others, row)}} for row in rows]
+            await db.execute(pg_insert(table).values(values).on_conflict_do_nothing())
+        await db.execute(delete(table).where(col == loser_id))
+
+
+async def _repoint_collab(db, entity_type: str, loser_id, keeper_id) -> None:
+    """Comments, attachments and files kept against a merged-away record follow it."""
+    from sqlalchemy import update
+
+    from app.models.collab import Attachment, Comment, StoredFile
+
+    for model in (Comment, Attachment, StoredFile):
+        await db.execute(
+            update(model)
+            .where(model.entity_type == entity_type, model.entity_id == loser_id)
+            .values(entity_id=keeper_id)
+            .execution_options(synchronize_session=False)
+        )
+
+
+async def merge_duplicate_frameworks(db) -> int:
+    """Merge live frameworks that are the same standard — the same name (ignoring case),
+    or a template's name and one of its legacy pack names — into one.
+
+    Within a group the framework with the most requirements survives (a tie goes to the
+    oldest). Each other copy's requirements are matched to the survivor's by reference:
+    a match hands over its links (controls, risks, policies, assets, exceptions,
+    vendors, obligations, audit findings, crosswalks), findings, comments and files,
+    and its implementation answers where the survivor has none, then is archived; a
+    requirement the survivor lacks moves across whole. The emptied copy is archived and
+    the merge is written to the audit trail. The survivor takes the template's name.
+
+    Idempotent: after one run no group has two members, so a second run writes nothing.
+    Flushes, never commits. Returns the number of frameworks archived.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select, update
+
+    from app.models.compliance import Framework, Requirement
+    from app.services import audit
+
+    plans = plan_merges(await _live_framework_facts(db))
+    if not plans:
+        return 0
+
+    fields = [getattr(Requirement, f) for f in REQUIREMENT_DEFAULTS]
+    now = datetime.now(timezone.utc)
+    archived = 0
+
+    async def _reqs(framework_id):
+        return (
+            await db.execute(
+                select(Requirement.id, Requirement.reference, *fields)
+                .where(Requirement.framework_id == framework_id, Requirement.deleted.is_(False))
+                .order_by(Requirement.created_at, Requirement.id)
+            )
+        ).all()
+
+    def _as_dict(row) -> dict:
+        return {name: getattr(row, name) for name in REQUIREMENT_DEFAULTS}
+
+    for plan in plans:
+        keeper = plan.keeper
+        tenant_id = await db.scalar(select(Framework.tenant_id).where(Framework.id == keeper.id))
+        keeper_reqs: dict[str, dict] = {}
+        for row in await _reqs(keeper.id):
+            ref = normalize_reference(row.reference)
+            if ref:
+                keeper_reqs.setdefault(ref, {"id": row.id, **_as_dict(row)})
+
+        for loser in plan.losers:
+            moved = merged = 0
+            for row in await _reqs(loser.id):
+                ref = normalize_reference(row.reference)
+                target = keeper_reqs.get(ref) if ref else None
+                if target is None:
+                    await db.execute(
+                        update(Requirement).where(Requirement.id == row.id)
+                        .values(framework_id=keeper.id)
+                        .execution_options(synchronize_session=False)
+                    )
+                    if ref:
+                        keeper_reqs[ref] = {"id": row.id, **_as_dict(row)}
+                    moved += 1
+                    continue
+                await _repoint_requirement_links(db, row.id, target["id"])
+                await _repoint_collab(db, "requirement", row.id, target["id"])
+                handover = carry_over(target, _as_dict(row))
+                if handover:
+                    await db.execute(
+                        update(Requirement).where(Requirement.id == target["id"])
+                        .values(**handover).execution_options(synchronize_session=False)
+                    )
+                    target.update(handover)
+                await db.execute(
+                    update(Requirement).where(Requirement.id == row.id)
+                    .values(deleted=True, deleted_date=now)
+                    .execution_options(synchronize_session=False)
+                )
+                merged += 1
+
+            for table, col in _framework_fk_columns():
+                await db.execute(update(table).where(col == loser.id).values({col.name: keeper.id}))
+            await _repoint_collab(db, "framework", loser.id, keeper.id)
+            await db.execute(
+                update(Framework).where(Framework.id == loser.id)
+                .values(deleted=True, deleted_date=now)
+                .execution_options(synchronize_session=False)
+            )
+            archived += 1
+            if tenant_id is not None:
+                await audit.record_system(
+                    db, tenant_id=tenant_id, action="merge", entity_type="framework",
+                    entity_id=keeper.id,
+                    summary=(
+                        f"Merged duplicate framework '{loser.name}' into "
+                        f"'{plan.rename_to or keeper.name}': {merged} requirements matched by "
+                        f"reference (links and answers carried over), {moved} moved across; "
+                        "the duplicate was archived"
+                    ),
+                    changes={"archived_framework_id": str(loser.id), "matched": merged, "moved": moved},
+                )
+        # Archive the duplicates before the rename: the survivor may be taking the name
+        # an archived copy held, and the unique name index only ignores archived rows.
+        await db.flush()
+        if plan.rename_to:
+            await db.execute(
+                update(Framework).where(Framework.id == keeper.id)
+                .values(name=plan.rename_to)
+                .execution_options(synchronize_session=False)
+            )
+    # Everything above ran as SQL on columns (no ORM objects were loaded, so none can be
+    # stale); flush so the caller's commit carries the renames with the rest.
+    await db.flush()
+    return archived
+
+
+async def backfill_framework_kinds(db) -> int:
+    """Set ``Framework.kind`` from the library template for frameworks installed before
+    the column existed. Returns rows changed.
+
+    Only a framework still on the column default (``compliance``) is changed, so an
+    organisation that deliberately re-classified a template framework as ``maturity``
+    keeps its choice. (The converse — marking ISO 31000 as ``compliance`` — is reset on
+    the next start; set a different name for a framework you want scored differently.)
+    """
+    from sqlalchemy import select, update
+
+    from app.models.compliance import Framework
+
+    rows = (
+        await db.execute(
+            select(Framework.id, Framework.name, Framework.kind).where(Framework.deleted.is_(False))
+        )
+    ).all()
+    changed = 0
+    for fid, name, kind in rows:
+        key = template_key_for_name(name)
+        if key is None:
+            continue
+        wanted = template_kind(key)
+        if kind != wanted and (kind or DEFAULT_KIND) == DEFAULT_KIND:
+            await db.execute(
+                update(Framework).where(Framework.id == fid).values(kind=wanted)
+                .execution_options(synchronize_session=False)
+            )
+            changed += 1
+    return changed

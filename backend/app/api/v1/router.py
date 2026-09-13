@@ -10,6 +10,11 @@ from fastapi import APIRouter, Depends
 from app.services.modules import require_module
 
 from app.api.v1 import (
+    clause_suggestions,
+    lookups,
+    pickers,
+    records,
+    tenant_settings,
     access_reviews,
     ai_assist,
     aml,
@@ -89,6 +94,13 @@ def _gated(router, module_key: str) -> None:
 
 
 api_router.include_router(auth.router)
+# Phase 1 (structured data): organisation settings, governed lookups, pickers, the
+# generic record lifecycle (archive/restore/impact/workflow) and clause suggestions.
+api_router.include_router(tenant_settings.router)
+api_router.include_router(lookups.router)
+api_router.include_router(pickers.router)
+api_router.include_router(records.router)
+api_router.include_router(clause_suggestions.router)
 api_router.include_router(sso.router)
 api_router.include_router(ldap.router)
 api_router.include_router(dashboard.router)
@@ -165,3 +177,5 @@ api_router.include_router(users.router)
 api_router.include_router(dataio.router)
 api_router.include_router(search.router)
 api_router.include_router(system.router)
+from app.api.v1 import my_work  # noqa: E402 - phase 3: My Work + approve-from-email
+api_router.include_router(my_work.router)

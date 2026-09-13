@@ -44,6 +44,8 @@ from app.models.outsourcing import (
     SbpApprovalStatus,
 )
 from app.models.policy import Policy
+from app.models.governance import Committee  # policies: approving authority
+from app.models.identity import Role, User  # policies: roles; KRIs: data provider
 from app.models.privacy import ProcessingActivity
 from app.models.project import Project
 from app.models.regulatory_change import (
@@ -114,7 +116,7 @@ from app.schemas.goal import GoalCreate
 from app.schemas.icfr import IcfrProcessCreate
 from app.schemas.incident import IncidentCreate
 from app.schemas.internal_audit import EngagementCreate, FindingCreate
-from app.schemas.issue import IssueCreate
+from app.schemas.issue import IssueImport
 from app.schemas.model_risk import ModelCreate
 from app.schemas.operational_risk import KriCreate, LossEventCreate, RcsaCreate
 from app.schemas.organization import BusinessUnitCreate, LegalCreate, ProcessCreate
@@ -123,7 +125,7 @@ from app.schemas.policy import PolicyCreate
 from app.schemas.privacy import RopaCreate
 from app.schemas.project import ProjectCreate
 from app.schemas.regulatory_change import ObligationCreate, RegulatoryChangeCreate
-from app.schemas.risk import RiskCreate
+from app.schemas.risk import RISK_SOURCES, RISK_TYPES, RISK_VELOCITIES, RiskCreate
 from app.schemas.risk_scenario import ScenarioCreate
 from app.schemas.threat import ThreatCreate, VulnerabilityCreate
 from app.schemas.vendor import VendorCreate
@@ -141,7 +143,7 @@ from app.api.v1.goals import create_goal
 from app.api.v1.icfr import create_process as create_icfr_process
 from app.api.v1.incidents import create_incident
 from app.api.v1.internal_audit import create_engagement, create_finding
-from app.api.v1.issues import create_issue
+from app.api.v1.issues import import_issue
 from app.api.v1.model_risk import create_model
 from app.api.v1.operational_risk import create_kri, create_loss_event, create_rcsa
 from app.api.v1.outsourcing import create_arrangement
@@ -293,7 +295,128 @@ REGISTRY: dict[str, ResourceIO] = {}
 
 
 def _register(res: ResourceIO) -> None:
-    REGISTRY[res.resource] = res
+    REGISTRY[res.resource] = _importing_workflow_status(_with_workflow_column(res))
+
+
+def _with_workflow_column(res: ResourceIO) -> ResourceIO:
+    """Give every register with an approval lifecycle a ``workflow_status`` import column.
+
+    The phase-1 registers dropped it when the state left their forms; a migration from a
+    legacy tool still needs it (see :func:`_importing_workflow_status`, which also gates
+    who may import a record past Draft)."""
+    column = res.model.__table__.c.get("workflow_status")
+    enum_cls = getattr(getattr(column, "type", None), "enum_class", None)
+    if enum_cls is None or any(c.field == "workflow_status" for c in res.columns):
+        return res
+    from dataclasses import replace
+
+    return replace(res, columns=[*res.columns, enum_col("workflow_status", enum_cls)])
+
+
+IMPORT_STATE_REFUSAL = (
+    "Importing a record as '{state}' needs approval rights ({perms}). Import it as draft, "
+    "or have someone who can approve {what} run the import."
+)
+
+
+def import_state_refusal(state: str, needed: tuple[str, ...], held: set[str], what: str) -> str | None:
+    """Why this importer may not bring a record in at ``state``, or None. Pure.
+
+    Draft is always fine. Anything past it is a claim that somebody approved the record;
+    only a person who could approve it in the app may make that claim in bulk."""
+    if state in ("", "draft") or set(needed).issubset(held):
+        return None
+    return IMPORT_STATE_REFUSAL.format(state=state, perms=", ".join(needed), what=what)
+
+
+def _importing_workflow_status(res: ResourceIO) -> ResourceIO:
+    """Keep ``workflow_status`` importable once it leaves the module's Create schema.
+
+    The lifecycle state is no longer a form field (``services/record_workflow.py`` is
+    the only thing that moves it), so Create schemas are dropping it. A CSV import is
+    different: a bank migrating from a legacy tool legitimately brings records that were
+    approved there, and re-approving thousands of them by hand is not a control, it is
+    busywork. So on *create* only, the importer still accepts the column: the row is
+    validated against the Create schema plus ``workflow_status``, created through the
+    module's own create function (all its rules apply), and the imported state is then
+    written in an explicit ``record_workflow.system_write()`` block. A resource whose
+    Create schema still carries the field is left untouched.
+    """
+    if not any(c.field == "workflow_status" for c in res.columns):
+        return res
+    if "workflow_status" in res.create_schema.model_fields:
+        return res
+    column = res.model.__table__.c.get("workflow_status")
+    enum_cls = getattr(getattr(column, "type", None), "enum_class", None)
+    if enum_cls is None:
+        return res
+
+    from dataclasses import replace
+
+    from pydantic import create_model
+
+    base_schema, base_func, model = res.create_schema, res.create_func, res.model
+    schema = create_model(
+        f"{base_schema.__name__}Import",
+        __base__=base_schema,
+        workflow_status=(enum_cls | None, None),
+    )
+
+    async def create_func(*, body, db, user):
+        state = getattr(body, "workflow_status", None)
+        fields = {name: getattr(body, name) for name in base_schema.model_fields}
+        base_body = base_schema.model_construct(
+            _fields_set=set(body.model_fields_set) - {"workflow_status"}, **fields
+        )
+        from app.services import audit, record_workflow
+        from app.services.record_registry import entity_type_for_model
+
+        state_value = getattr(state, "value", state) or ""
+        entity_type = entity_type_for_model(model)
+        if state_value not in ("", "draft"):
+            needed = (
+                record_workflow.required_permissions(entity_type, "approve")
+                if entity_type else ("workflow:approve",)
+            )
+            refusal = import_state_refusal(
+                state_value, needed, set(getattr(user, "permission_codes", []) or []),
+                (entity_type or "these records").replace("_", " ") + "s",
+            )
+            if refusal:
+                raise ValueError(refusal)
+        created = await base_func(body=base_body, db=db, user=user)
+        if state is not None and state_value != "draft":
+            record = await db.get(model, getattr(created, "id", None))
+            if record is not None:
+                with record_workflow.system_write():
+                    record.workflow_status = state
+                    await db.flush()
+                await audit.record(
+                    db, actor=user, action="import_state", entity_type=entity_type or res.resource,
+                    entity_id=record.id,
+                    summary=f"Imported as {state_value} (state carried over from the source system)",
+                )
+        return created
+
+    return replace(res, create_schema=schema, create_func=create_func)
+
+
+# Phase 1 picked fields (risks, controls, policies, org registers, goals): the text
+# column is matched onto the new key by the module's own create function
+# (services.ref_fields) — exactly as the start-up backfill matches. Unmatched text is kept
+# on the record as a note ("nothing typed is lost") and reported as a row warning rather
+# than failing the row. ``workflow_owner`` is picked only (no text input), so it is not
+# an import column.
+_PERSON_HELP = "Email or full name of an active user; unmatched text is kept as a note"
+
+
+def _pick_help(list_name: str) -> str:
+    return f"Value or label from the {list_name} list; unmatched text is kept as a note"
+
+
+# Issues, incidents, KRIs, loss events, RCSA and vendors resolve the same way through
+# services.ref_fields, and also report each unmatched value as a row warning.
+_UNIT_HELP = "Name of a business unit; unmatched text is kept as a note"
 
 
 # ----- policies ------------------------------------------------------------
@@ -306,18 +429,28 @@ _register(ResourceIO(
         text("summary"),
         text("body"),
         text("url"),
-        text("category"),
+        text("category", help=_pick_help("policy category")),
         enum_col("document_type", PolicyDocType),
         text("version"),
         enum_col("status", PolicyStatus),
-        text("owner"),
+        text("owner", help=_PERSON_HELP),
         enum_col("review_frequency", ReviewFrequency),
-        enum_col("workflow_status", WorkflowState),
-        # NB: PolicyCreate has no workflow_owner field (unlike most modules), so it is omitted.
+        # workflow_owner is picked only (workflow_owner_id), so it is not a column here.
+        # workflow_status is appended by _with_workflow_column: importable on create,
+        # past Draft only for a user who can approve (see _importing_workflow_status).
         link_col("controls", "controls_ids", Control, "controls", match_field="name"),
         link_col("requirements", "requirements_ids", Requirement, "requirements", match_field="title"),
         link_col("risks", "risks_ids", Risk, "risks", match_field="title"),
         link_col("related_policies", "related_ids", Policy, "related", match_field="title"),
+        # Phase 2: governance and applicability.
+        link_col("approving_authority", "approving_authority_id", Committee, "approving_authority",
+                 match_field="name", multi=False, help="Reference or name of a committee (Governance)"),
+        date_col("effective_date", help="Can't precede approval; empty = the publication date"),
+        link_col("supersedes", "supersedes_id", Policy, "supersedes", match_field="title", multi=False,
+                 help="Reference or title of the policy this one replaces (retired when this is published)"),
+        link_col("business_units", "business_unit_ids", BusinessUnit, "business_units", match_field="name"),
+        link_col("roles", "role_ids", Role, "roles", match_field="name",
+                 help="Comma-separated role names; their members are asked to acknowledge the policy"),
     ],
 ))
 
@@ -327,26 +460,40 @@ _register(ResourceIO(
     create_schema=RiskCreate, create_func=create_risk,
     read_perm="risk:read", write_perm="risk:write", importable=True,
     columns=[
-        text("title", required=True),
+        # Blank titles are composed from event / cause / consequence.
+        text("title", help="Optional when event is given: composed from event and cause"),
         text("description"),
-        text("category"),
-        enum_col("status", RiskStatus),
+        text("cause", help="Risk statement: what could cause the event"),
+        text("event", help="Risk statement: what could happen"),
+        # No "consequence" column: in bank registers that header is the impact score
+        # (likelihood x consequence), and the mapper matches our field name first, so a
+        # statement column would swallow the scores. Add it in the form after import.
+        text("category", help=_pick_help("risk category")),
+        Column(header="risk_type", field="risk_type", kind="enum", enum_values=list(RISK_TYPES)),
+        Column(header="velocity", field="velocity", kind="enum", enum_values=list(RISK_VELOCITIES),
+               help="How fast the impact is felt once the event happens"),
+        Column(header="source", field="source", kind="enum", enum_values=list(RISK_SOURCES),
+               help="Where the risk was identified"),
+        date_col("identified_date"),
+        enum_col("status", RiskStatus,
+                 help="Any status beyond draft needs both inherent scores and an assessment_rationale"),
         # The scale is per-tenant (3x3 up to 10x10), so the help names the range the
         # organisation actually configured rather than a hard-coded 1-5.
         integer("inherent_likelihood", help="1 to your configured matrix size"),
         integer("inherent_impact", help="1 to your configured matrix size"),
         integer("residual_likelihood", help="1 to your configured matrix size (optional)"),
         integer("residual_impact", help="1 to your configured matrix size (optional)"),
+        integer("target_likelihood", help="Where treatment should take it (optional; not above residual)"),
+        integer("target_impact", help="Where treatment should take it (optional; not above residual)"),
+        text("assessment_rationale", help="Why the scores are what they are"),
         enum_col("treatment_strategy", TreatmentStrategy),
         text("treatment_description"),
-        text("treatment_owner"),
+        text("treatment_owner", help=_PERSON_HELP),
         date_col("treatment_deadline"),
         number("treatment_cost"),
         number("annual_loss_frequency", help="FAIR: events per year"),
-        number("single_loss_expectancy", help="FAIR: $ per event"),
+        number("single_loss_expectancy", help="FAIR: loss per event, in your organisation's currency"),
         enum_col("review_frequency", ReviewFrequency),
-        enum_col("workflow_status", WorkflowState),
-        text("workflow_owner"),
         # Segment scoping. A bank's existing register almost always has a department or
         # process column already, so importing it should land the segment too rather
         # than making someone re-tag several hundred rows by hand.
@@ -373,13 +520,26 @@ _register(ResourceIO(
         text("reference", help="External control reference, e.g. A.5.1 / AC-2"),
         text("description"),
         text("objective"),
-        text("owner"),
+        text("owner", help=_PERSON_HELP),
         enum_col("control_type", ControlType),
-        text("classification"),
+        text("classification", help=_pick_help("control classification")),
         text("documentation_url"),
         enum_col("status", ControlStatus),
-        enum_col("effectiveness", ControlEffectiveness),
-        enum_col("workflow_status", WorkflowState),
+        # Phase 2 attributes.
+        Column(header="nature", field="nature", kind="enum",
+               enum_values=["preventive", "detective", "corrective", "directive"]),
+        Column(header="automation", field="automation", kind="enum",
+               enum_values=["manual", "it_dependent_manual", "automated"]),
+        boolean("is_key", help="Key control (true/false)"),
+        Column(header="operating_frequency", field="operating_frequency", kind="enum",
+               enum_values=["continuous", "daily", "weekly", "monthly", "quarterly", "semiannual",
+                            "annual", "per_event", "ad_hoc"]),
+        text("test_procedure"),
+        text("evidence_expected"),
+        enum_col("effectiveness", ControlEffectiveness,
+                 help="Leave blank to derive it from reviewed tests; a value is a manual override "
+                 "and needs effectiveness_override_reason"),
+        text("effectiveness_override_reason", help="Why the effectiveness is set by hand"),
         number("opex"),
         number("capex"),
         integer("resource_utilization", help="0-100"),
@@ -393,6 +553,8 @@ _register(ResourceIO(
         link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
         # Control has no ORM `risks` relationship (write-only via risk_controls join) -> import-only link.
         link_col("risks", "risk_ids", Risk, "risks", match_field="title", exportable=False),
+        link_col("business_units", "business_unit_ids", BusinessUnit, "business_units", match_field="name"),
+        link_col("processes", "process_ids", Process, "processes", match_field="name"),
     ],
 ))
 
@@ -477,12 +639,18 @@ _register(ResourceIO(
     columns=[
         text("name", required=True),
         text("description"),
-        text("category"),
+        text("category", help=_pick_help("third-party category")),
+        text("legal_name", help="Registered legal name, if different from the trading name"),
+        text("registration_number", help="SECP / company registration number"),
+        number("annual_spend"),
+        text("spend_currency", help="ISO 4217 code such as PKR or USD; blank means the organisation's currency"),
         text("contact_name"),
         text("contact_email"),
         text("contact_phone"),
         text("website"),
-        text("location"),
+        # City or address, free text. The country picker (country_id) is not importable
+        # yet: link columns cannot scope a lookup to one list.
+        text("location", help="City or street address (free text)"),
         enum_col("criticality", Criticality),
         enum_col("status", VendorStatus),
         enum_col("risk_rating", Severity),
@@ -493,13 +661,17 @@ _register(ResourceIO(
         date_col("offboarded_at"),
         enum_col("review_frequency", ReviewFrequency),
         date_col("next_review_date"),
-        enum_col("workflow_status", WorkflowState),
+        # workflow_status: appended by _with_workflow_column (see policies).
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
         link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
     ],
 ))
 
 # ----- incidents -----------------------------------------------------------
+_INCIDENT_TS_HELP = (
+    "YYYY-MM-DD (taken as 00:00 in the organisation's timezone) or an ISO date-time, "
+    "e.g. 2026-09-01T14:30 or 2026-09-01T14:30:00+05:00"
+)
 _register(ResourceIO(
     resource="incidents", label="Incidents", model=Incident,
     create_schema=IncidentCreate, create_func=create_incident,
@@ -507,20 +679,28 @@ _register(ResourceIO(
     columns=[
         text("title", required=True),
         text("description"),
-        text("category"),
-        text("classification"),
+        text("category", help=_pick_help("incident type")),
+        text("classification", help=_pick_help("incident classification")),
         enum_col("severity", Severity),
         enum_col("status", IncidentStatus),
-        enum_col("workflow_status", WorkflowState),
-        text("assignee"),
-        text("reported_by"),
+        text("assignee", help=_PERSON_HELP),
+        text("reported_by", help=_PERSON_HELP),
         text("impact"),
         text("root_cause"),
         text("lessons_learned"),
         number("cost"),
-        date_col("detected_at"),
-        date_col("occurred_at"),
-        date_col("resolved_at"),
+        # Phase 2: timestamps. Text columns so a full ISO date-time reaches the schema
+        # intact; a bare date is 00:00 in the organisation's timezone (api.v1.incidents).
+        text("occurred_at", help=_INCIDENT_TS_HELP),
+        text("detected_at", help=_INCIDENT_TS_HELP),
+        text("contained_at", help=_INCIDENT_TS_HELP),
+        text("resolved_at", help=_INCIDENT_TS_HELP),
+        integer("customers_affected"),
+        integer("records_affected"),
+        boolean("near_miss", help="true when nothing was lost (leave cost blank)"),
+        boolean("personal_data_breach", help="true opens a linked data-breach record"),
+        boolean("is_reportable", help="true creates the regulator's initial and final reports"),
+        text("regulator", help=_pick_help("regulator")),
         link_col("controls", "control_ids", Control, "controls", match_field="name"),
         link_col("vendors", "vendor_ids", Vendor, "vendors", match_field="name"),
         link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
@@ -561,14 +741,12 @@ _register(ResourceIO(
     columns=[
         text("name", required=True),
         text("description"),
-        text("category"),
+        text("category", help=_pick_help("legal category")),
         text("jurisdiction"),
         # Legal.reference is a real user-supplied column (regulatory reference).
         text("reference", help="Regulatory reference / citation"),
         text("countries", help="Comma-separated list of applicable countries"),
         number("risk_magnifier", help="Amplifies linked risk scores (default 1.0)"),
-        enum_col("workflow_status", WorkflowState),
-        text("workflow_owner"),
         link_col("business_units", "business_unit_ids", BusinessUnit, "business_units", match_field="name"),
         # Legal has no ORM `assets` relationship (write-only via assets_legals join) -> import-only link.
         link_col("assets", "asset_ids", Asset, "assets", match_field="name", exportable=False),
@@ -583,11 +761,9 @@ _register(ResourceIO(
     columns=[
         text("name", required=True),
         text("description"),
-        text("manager"),
+        text("manager", help=_PERSON_HELP),
         text("email"),
         text("location"),
-        enum_col("workflow_status", WorkflowState),
-        text("workflow_owner"),
         # BusinessUnit exposes parent only as parent_id FK (no `parent` ORM attr) -> import-only link.
         link_col("parent", "parent_id", BusinessUnit, "parent", match_field="name", multi=False,
                  exportable=False, help="Parent business unit name (single value)"),
@@ -603,13 +779,11 @@ _register(ResourceIO(
     columns=[
         text("name", required=True),
         text("description"),
-        text("owner"),
+        text("owner", help=_PERSON_HELP),
         enum_col("criticality", Criticality),
         integer("rto_hours", help="Recovery Time Objective (hours)"),
         integer("rpo_hours", help="Recovery Point Objective (hours)"),
         integer("rpd_hours", help="Max tolerable downtime (hours)"),
-        enum_col("workflow_status", WorkflowState),
-        text("workflow_owner"),
         link_col("business_unit", "business_unit_id", BusinessUnit, "business_unit", match_field="name", multi=False,
                  help="Owning business unit name (single value)"),
         # Process has no ORM `assets` relationship (write-only via assets_processes join) -> import-only link.
@@ -695,13 +869,11 @@ _register(ResourceIO(
     columns=[
         text("name", required=True),
         text("description"),
-        text("owner"),
+        text("owner", help=_PERSON_HELP),
         enum_col("status", GoalStatus),
         text("audit_metric"),
         text("success_criteria"),
         enum_col("audit_frequency", ReviewFrequency),
-        enum_col("workflow_status", WorkflowState),
-        text("workflow_owner"),
         date_col("next_audit_date"),
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
         link_col("projects", "project_ids", Project, "projects", match_field="title"),
@@ -904,26 +1076,32 @@ _register(ResourceIO(
 # ----- issues & actions (CAPA) ---------------------------------------------
 _register(ResourceIO(
     resource="issues", label="Issues & Actions", model=Issue,
-    create_schema=IssueCreate, create_func=create_issue,
+    create_schema=IssueImport, create_func=import_issue,
     read_perm="issue:read", write_perm="issue:write", importable=True,
     columns=[
         text("title", required=True),
         text("description"),
         enum_col("source_type", IssueSource),
         text("source_reference", help="Reference of the finding/audit that raised this"),
-        text("category"),
+        text("category", help=_pick_help("issue category")),
         enum_col("severity", Severity),
         enum_col("status", IssueStatus2),
-        text("owner"),
-        text("business_unit"),
+        text("owner", help=_PERSON_HELP),
+        text("business_unit", help=_UNIT_HELP),
         date_col("identified_date"),
         date_col("due_date"),
-        date_col("closed_date"),
+        # Import only: a closed row keeps its closed date (needs approval rights, see
+        # api.v1.issues.import_issue); in the app the server sets it on Close.
+        date_col("closed_date", help="Only for rows imported closed; set by the server otherwise"),
         text("root_cause"),
         text("management_response"),
         boolean("repeat_finding"),
         boolean("regulator_related"),
-        enum_col("workflow_status", WorkflowState),
+        link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+        link_col("controls", "control_ids", Control, "controls", match_field="name"),
+        link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
+        link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
+        link_col("third_parties", "vendor_ids", Vendor, "vendors", match_field="name"),
     ],
 ))
 
@@ -934,14 +1112,13 @@ _register(ResourceIO(
     read_perm="oprisk:read", write_perm="oprisk:write", importable=True,
     columns=[
         text("title", required=True),
-        text("business_unit"),
-        text("process"),
-        text("assessor"),
+        text("business_unit", help=_UNIT_HELP),
+        text("process", help="Name of a process; unmatched text is kept as a note"),
+        text("assessor", help=_PERSON_HELP),
         enum_col("status", RcsaStatus),
         text("period", help="e.g. FY2026-Q1"),
         date_col("due_date"),
         date_col("completed_date"),
-        enum_col("workflow_status", WorkflowState),
     ],
 ))
 
@@ -953,17 +1130,27 @@ _register(ResourceIO(
     columns=[
         text("name", required=True),
         text("description"),
-        text("category"),
-        text("business_area"),
-        text("owner"),
+        text("category", help=_pick_help("KRI category")),
+        text("business_area", help=_UNIT_HELP),
+        text("owner", help=_PERSON_HELP),
         text("unit", help="Unit of measure, e.g. %, count, PKR"),
         enum_col("frequency", ReviewFrequency),
         enum_col("direction", KriDirection),
-        number("warning_threshold"),
-        number("limit_threshold"),
+        number("warning_threshold", help="Amber; below the limit when higher is worse, above it when lower is worse; empty for within_range"),
+        number("limit_threshold", help="Red; for within_range, the tolerance beyond the range"),
+        # Phase 2 (F-14): definition, lineage and the within-range band.
+        number("lower_bound", help="within_range only: lowest acceptable value"),
+        number("upper_bound", help="within_range only: highest acceptable value"),
         number("current_value"),
         date_col("last_measured_date"),
-        enum_col("workflow_status", WorkflowState),
+        text("definition"),
+        text("numerator"),
+        text("denominator"),
+        text("data_source"),
+        link_col("data_provider", "data_provider_id", User, "data_provider", match_field="email",
+                 multi=False, help="Email of the user who supplies the value"),
+        Column(header="indicator_type", field="indicator_type", kind="enum",
+               enum_values=["leading", "lagging"]),
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
     ],
 ))
@@ -977,7 +1164,7 @@ _register(ResourceIO(
         text("title", required=True),
         text("description"),
         enum_col("basel_event_type", BaselEventType),
-        text("business_line"),
+        text("business_line", help=_UNIT_HELP),
         number("gross_loss"),
         number("recovery"),
         text("currency"),
@@ -986,8 +1173,7 @@ _register(ResourceIO(
         date_col("discovery_date"),
         date_col("accounting_date"),
         text("root_cause"),
-        text("action_owner"),
-        enum_col("workflow_status", WorkflowState),
+        text("action_owner", help=_PERSON_HELP),
         link_col("incident", "incident_id", Incident, "incident", match_field="title", multi=False),
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
     ],

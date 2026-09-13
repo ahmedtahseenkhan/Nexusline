@@ -5,9 +5,11 @@ import { apiCall, type AuditEntry } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 /* ------------------------------------------------------------- option sets */
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 
 // Actions and entity types recorded by the audit service across the platform.
 const ACTIONS = [
@@ -32,6 +34,7 @@ const ENTITY_TYPES = [
 
 /* ================================================================ page ===== */
 function AuditInner() {
+  const { formatDateTime } = useFormat();
   const [entityType, setEntityType] = useState("");
   const [action, setAction] = useState("");
   const [from, setFrom] = useState("");
@@ -56,13 +59,13 @@ function AuditInner() {
       sortable: true,
       render: (a) => (
         <span className="muted" style={{ whiteSpace: "nowrap" }}>
-          {new Date(a.created_at).toLocaleString()}
+          {formatDateTime(a.created_at)}
         </span>
       ),
     },
     { key: "actor_email", header: "Actor", sortable: true, render: (a) => <span className="muted">{a.actor_email || "—"}</span> },
     { key: "action", header: "Action", sortable: true, render: (a) => <Badge tone="info" plain>{a.action.replace(/_/g, " ")}</Badge> },
-    { key: "entity_type", header: "Entity", sortable: true, render: (a) => <span className="muted">{a.entity_type}</span> },
+    { key: "entity_type", header: "Entity", sortable: true, render: (a) => <span className="muted">{cap(a.entity_type)}</span> },
     { key: "summary", header: "Summary", render: (a) => <span>{a.summary}</span> },
   ];
 

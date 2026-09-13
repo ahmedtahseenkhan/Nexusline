@@ -14,8 +14,8 @@ from app.models.enums import AcceptanceStatus
 from app.models.risk import Risk, RiskAcceptance
 from app.core.deps import CurrentUser
 from app.schemas.dashboard import DashboardStats
-from app.services.risk_scoring import appetite_status, effective_score, severity_for_score
-from app.services.risk_settings import get_or_create_settings
+from app.services.risk_scoring import effective_score
+from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -23,6 +23,8 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 @router.get("", response_model=DashboardStats, dependencies=[Depends(require("risk:read"))])
 async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
     settings = await get_or_create_settings(db, user.tenant_id)
+    scale = scale_for(settings)
+    book = await load_appetite_book(db, user.tenant_id, settings)
     today = date.today()
     live = Risk.deleted.is_(False)
 
@@ -51,20 +53,22 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
     by_inherent: Counter[str] = Counter()
     by_residual: Counter[str] = Counter()
     appetite_counts: Counter[str] = Counter()
-    for inherent, residual in (
-        await db.execute(select(Risk.inherent_score, Risk.residual_score).where(live))
+    for r in (
+        await db.execute(
+            select(
+                Risk.inherent_likelihood, Risk.inherent_impact, Risk.inherent_score,
+                Risk.residual_likelihood, Risk.residual_impact, Risk.residual_score,
+                Risk.category_id,
+            ).where(live)
+        )
     ).all():
-        inh = severity_for_score(inherent)
+        inh = scale.for_cell(r.inherent_likelihood, r.inherent_impact)
         if inh:
             by_inherent[inh.value] += 1
-        res = severity_for_score(residual)
+        res = scale.for_cell(r.residual_likelihood, r.residual_impact)
         if res:
             by_residual[res.value] += 1
-        status = appetite_status(
-            effective_score(inherent, residual),
-            settings.appetite_score,
-            settings.tolerance_score,
-        )
+        status = book.status(effective_score(r.inherent_score, r.residual_score), r.category_id)
         if status:
             appetite_counts[status] += 1
 
@@ -109,19 +113,14 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
 # dashboard can never disagree with the page it links to.
 from datetime import timedelta  # noqa: E402
 
-from sqlalchemy import and_, or_  # noqa: E402
-
 from app.api.v1.compliance import _gap_reason  # noqa: E402
 from app.models.compliance import Framework, Requirement  # noqa: E402
 from app.models.control import ControlAudit  # noqa: E402
 from app.models.enums import (  # noqa: E402
     AuditFindingStatus,
     ComplianceStatus,
-    ControlEffectiveness,
-    IncidentStatus,
-    PolicyStatus,
+    Criticality,
     RiskStatus,
-    TestResult,
 )
 from app.models.identity import User  # noqa: E402
 from app.models.incident import Incident  # noqa: E402
@@ -140,6 +139,7 @@ from app.schemas.dashboard import (  # noqa: E402
     FrameworkPosture,
     Health,
     HealthComponent,
+    HealthCoverage,
     IncidentsPosture,
     KriItem,
     KriPosture,
@@ -149,17 +149,56 @@ from app.schemas.dashboard import (  # noqa: E402
     ThirdParties,
     TopRisk,
 )
+from app.models.lookup import Lookup  # noqa: E402
+from app.models.risk import RiskTreatmentAction  # noqa: E402
+from app.schemas.dashboard import CategoryPosture  # noqa: E402
 from app.services import control_assurance, governance_health  # noqa: E402
-from app.services.risk_scoring import max_score_for  # noqa: E402
+from app.services import drill_through as dt  # noqa: E402
 
-_OPEN_INCIDENT = (IncidentStatus.resolved, IncidentStatus.closed)
-_CLOSED_ISSUE_WORDS = {"closed", "resolved", "risk_accepted", "withdrawn", "cancelled"}
+# "Open" issues, incidents and in-force policies, overdue tests and reviews: every
+# predicate behind a number that links to a list comes from services.drill_through, and
+# the list endpoints filter with the same functions — the count and the list it opens
+# cannot disagree. (Issues used to count "remediated" as open here while the register's
+# overdue filter did not.)
 _OPEN_FINDING = (AuditFindingStatus.open, AuditFindingStatus.in_progress)
 _SETTLED_RISK = (RiskStatus.accepted, RiskStatus.closed)
+#: Only compliance frameworks are obligations; maturity/guidance ones never add gaps.
+_COMPLIANCE_KIND = "compliance"
 
 
 async def _count(db, stmt) -> int:
     return await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+
+
+#: The "Needs a decision or is overdue" queue, in priority order:
+#: (key, what is counted, the rest of the line, tone). Each key opens the list behind the
+#: number (``drill_through.ACTION_LINKS``) — a register filtered to exactly those rows.
+QUEUE: tuple[tuple[str, str, str, str], ...] = (
+    ("breach", "risk", "above tolerance", "critical"),
+    ("tat", "record", "past turnaround time", "critical"),
+    ("tests_failed", "control", "failed the last test", "critical"),
+    ("findings_overdue", "audit finding", "past due", "critical"),
+    ("issues_overdue", "issue", "past due", "warning"),
+    ("treatments_overdue", "risk", "with treatment past due", "warning"),
+    ("tests_overdue", "control test", "overdue", "warning"),
+    ("acceptances_expiring", "risk acceptance", "expiring within 30 days", "warning"),
+    ("reviews_overdue", "risk review", "overdue", "warning"),
+    ("policies_overdue", "policy review", "overdue", "warning"),
+    ("acceptances_pending", "risk acceptance", "awaiting a decision", "info"),
+    ("not_assessed", "control", "never tested", "info"),
+)
+
+
+def action_items(counts: dict[str, int]) -> list[ActionItem]:
+    """One queue line per non-zero count ("98 controls never tested"), each linking to
+    its filtered list. Pure."""
+    out: list[ActionItem] = []
+    for key, noun, rest, tone in QUEUE:
+        n = int(counts.get(key, 0) or 0)
+        if n > 0:
+            label = f"{n} {noun if n == 1 else noun + 's'} {rest}"
+            out.append(ActionItem(key=key, label=label, count=n, href=dt.ACTION_LINKS[key], tone=tone))
+    return out
 
 
 @router.get("/overview", response_model=DashboardOverview, dependencies=[Depends(require("risk:read"))])
@@ -167,7 +206,10 @@ async def get_overview(
     db: DbSession, user: CurrentUser, days: int = Query(default=30, ge=7, le=366)
 ) -> DashboardOverview:
     settings = await get_or_create_settings(db, user.tenant_id)
-    max_score = max_score_for(settings.matrix_size)
+    # Severity follows the tenant's bands and cell overrides (the heat map's colours);
+    # appetite and tolerance follow each risk's level-1 category, else the organisation's.
+    scale = scale_for(settings)
+    book = await load_appetite_book(db, user.tenant_id, settings)
     today = date.today()
     start = today - timedelta(days=days)
     prior_start = start - timedelta(days=days)
@@ -180,7 +222,9 @@ async def get_overview(
             select(
                 Risk.id, Risk.reference, Risk.title, Risk.inherent_score, Risk.residual_score,
                 Risk.owner_id, Risk.status, Risk.treatment_strategy, Risk.next_review_date,
-                Risk.treatment_deadline,
+                Risk.treatment_deadline, Risk.needs_review, Risk.review_reason,
+                Risk.category_id, Risk.inherent_likelihood, Risk.inherent_impact,
+                Risk.residual_likelihood, Risk.residual_impact,
             ).where(live)
         )
     ).all()
@@ -189,19 +233,48 @@ async def get_overview(
     by_residual: Counter[str] = Counter()
     appetite_counts: Counter[str] = Counter()
     scored = []
+    # Per-category posture: one bucket per level-1 category with its own appetite, and
+    # one (None) for everything on the organisation's default.
+    by_category: dict = {}
     for r in rows:
-        inh = severity_for_score(r.inherent_score, max_score)
-        res = severity_for_score(r.residual_score, max_score)
+        inh = scale.for_cell(r.inherent_likelihood, r.inherent_impact)
+        res = scale.for_cell(r.residual_likelihood, r.residual_impact)
         if inh:
             by_inherent[inh.value] += 1
         if res:
             by_residual[res.value] += 1
         eff = effective_score(r.inherent_score, r.residual_score)
-        status = appetite_status(eff, settings.appetite_score, settings.tolerance_score)
+        status = book.status(eff, r.category_id)
         if status:
             appetite_counts[status] += 1
-        scored.append((r, eff, status, (severity_for_score(eff, max_score) or None)))
+            bucket = by_category.setdefault(book.source_of(r.category_id), Counter())
+            bucket["risks"] += 1
+            bucket[status] += 1
+        sev = scale.for_risk(r.inherent_likelihood, r.inherent_impact, r.residual_likelihood, r.residual_impact)
+        scored.append((r, eff, status, sev))
     scored.sort(key=lambda t: (-(t[1] or 0), t[0].reference))
+    category_rows: list[CategoryPosture] = []
+    if book.by_category:
+        labels = {
+            lid: label for lid, label in (await db.execute(
+                select(Lookup.id, Lookup.label).where(Lookup.id.in_(list(book.by_category)))
+            )).all()
+        }
+        for cid, (appetite, tolerance) in book.by_category.items():
+            bucket = by_category.get(cid, Counter())
+            category_rows.append(CategoryPosture(
+                category_id=cid, label=labels.get(cid, "Category"), appetite_score=appetite,
+                tolerance_score=tolerance, risks=bucket["risks"], within_appetite=bucket["within_appetite"],
+                elevated=bucket["elevated"], breach=bucket["breach"],
+            ))
+        category_rows.sort(key=lambda c: (-c.breach, c.label.lower()))
+        rest = by_category.get(None, Counter())
+        category_rows.append(CategoryPosture(
+            category_id=None, label="All other categories (organisation default)",
+            appetite_score=settings.appetite_score, tolerance_score=settings.tolerance_score,
+            risks=rest["risks"], within_appetite=rest["within_appetite"],
+            elevated=rest["elevated"], breach=rest["breach"],
+        ))
 
     top = scored[:8]
     top_ids = [t[0].id for t in top]
@@ -233,33 +306,32 @@ async def get_overview(
             next_review_date=r.next_review_date,
             review_overdue=bool(r.next_review_date and r.next_review_date < today),
             control_count=control_counts.get(r.id, 0),
+            needs_review=bool(r.needs_review), review_reason=r.review_reason or "",
         )
         for r, eff, status, sev in top
     ]
 
     # --------------------------------------------------------------- controls
+    # A planned control is not operating yet and a retired one no longer is: neither has
+    # anything to test, so neither counts as overdue, due, never tested or unassured.
+    # They are reported once, as "not in operation", so the bar still adds up.
     live_ctl = Control.deleted.is_(False)
+    testable_ctl = live_ctl & dt.operating_control()
     by_eff: Counter[str] = Counter()
     for eff_val, n in (await db.execute(
-        select(Control.effectiveness, func.count()).where(live_ctl).group_by(Control.effectiveness)
+        select(Control.effectiveness, func.count()).where(testable_ctl).group_by(Control.effectiveness)
     )).all():
         by_eff[eff_val.value] = n
-    controls_total = sum(by_eff.values())
-    tests_overdue = await _count(db, select(Control.id).where(live_ctl, Control.next_audit_date < today))
-    tests_due = await _count(db, select(Control.id).where(
-        live_ctl, Control.next_audit_date >= today, Control.next_audit_date <= soon
+    controls_operating = sum(by_eff.values())
+    not_operating = await _count(db, select(Control.id).where(
+        live_ctl, dt.control_assurance_clause("not_operating")
     ))
-    # Latest test per control, in SQL: one row per control, newest first.
-    latest = (
-        select(ControlAudit.control_id, ControlAudit.result)
-        .distinct(ControlAudit.control_id)
-        .order_by(ControlAudit.control_id, ControlAudit.conducted_date.desc().nulls_last(), ControlAudit.created_at.desc())
-    ).subquery()
-    last_failed = await db.scalar(
-        select(func.count()).select_from(latest)
-        .join(Control, Control.id == latest.c.control_id)
-        .where(live_ctl, latest.c.result == TestResult.failed)
-    ) or 0
+    controls_total = controls_operating + not_operating
+    tests_overdue = await _count(db, select(Control.id).where(live_ctl, dt.control_test_clause("overdue", today)))
+    tests_due = await _count(db, select(Control.id).where(live_ctl, dt.control_test_clause("due_30d", today)))
+    # Latest test per control that counts — reviewed, or recorded before reviews existed
+    # (Phase 2: an unreviewed test changes nothing until a second person signs it off).
+    last_failed = await _count(db, select(Control.id).where(live_ctl, dt.control_test_clause("failed", today)))
     tests_in_period = await _count(db, select(ControlAudit.id).where(ControlAudit.conducted_date >= start))
     assurance = Assurance(
         total=controls_total,
@@ -267,16 +339,23 @@ async def get_overview(
         partially_effective=by_eff.get("partially_effective", 0),
         ineffective=by_eff.get("ineffective", 0),
         not_assessed=by_eff.get("not_assessed", 0),
+        not_operating=not_operating,
         tests_overdue=tests_overdue, tests_due_30d=tests_due,
         last_test_failed=last_failed, tests_in_period=tests_in_period,
     )
     controls_assured = assurance.effective + assurance.partially_effective
 
     # ------------------------------------------------------------- compliance
+    # Only compliance frameworks are obligations. Maturity and guidance frameworks (ISO
+    # 31000, ISO 27005) are listed separately and never add clauses or gaps: a bank is
+    # not "non-compliant" with good-practice guidance.
     frameworks = (await db.scalars(select(Framework).where(Framework.deleted.is_(False)))).all()
     fw_rows: list[FrameworkPosture] = []
+    other_rows: list[FrameworkPosture] = []
     clauses_applicable = clauses_assured = 0
     for fw in frameworks:
+        kind = (getattr(fw, "kind", None) or _COMPLIANCE_KIND).lower()
+        counts = kind == _COMPLIANCE_KIND
         reqs = (await db.scalars(select(Requirement).where(Requirement.framework_id == fw.id))).all()
         by_cov: Counter[str] = Counter()
         applicable = [r for r in reqs if r.status != ComplianceStatus.not_applicable]
@@ -285,30 +364,51 @@ async def get_overview(
         gaps = sum(1 for r in reqs if _gap_reason(r))
         compliant = sum(1 for r in applicable if r.status == ComplianceStatus.compliant)
         assured = by_cov.get(control_assurance.ASSURED, 0)
-        clauses_applicable += len(applicable)
-        clauses_assured += assured
-        fw_rows.append(FrameworkPosture(
+        if counts:
+            clauses_applicable += len(applicable)
+            clauses_assured += assured
+        (fw_rows if counts else other_rows).append(FrameworkPosture(
             id=fw.id, name=fw.name, total=len(reqs), applicable=len(applicable),
             assured=assured, unassessed=by_cov.get(control_assurance.UNASSESSED, 0),
             failing=by_cov.get(control_assurance.FAILING, 0), unmapped=by_cov.get(control_assurance.UNMAPPED, 0),
             compliant_pct=round(100 * compliant / len(applicable), 1) if applicable else 0.0,
-            gaps=gaps,
+            gaps=gaps, kind=kind,
         ))
     fw_rows.sort(key=lambda f: (f.applicable - f.assured), reverse=True)
+    other_rows.sort(key=lambda f: f.name.lower())
     compliance = CompliancePosture(
         frameworks=fw_rows,
         overall_assured_pct=round(100 * clauses_assured / clauses_applicable, 1) if clauses_applicable else 0.0,
+        other_frameworks=other_rows,
     )
 
     # ---------------------------------------------------------------- actions
-    open_issue = Issue.deleted.is_(False) & Issue.status.not_in([s for s in Issue.status.type.enum_class if s.value in _CLOSED_ISSUE_WORDS])  # type: ignore[attr-defined]
-    reviews_overdue = sum(1 for r in rows if r.next_review_date and r.next_review_date < today)
-    treatments_overdue = sum(
-        1 for r in rows if r.treatment_deadline and r.treatment_deadline < today and r.status not in _SETTLED_RISK
+    open_issue = Issue.deleted.is_(False) & dt.issue_open()
+    reviews_overdue = await _count(db, select(Risk.id).where(live, dt.risk_review_overdue(today)))
+    # The queue lists risks (it opens the risk register), so it counts risks whose
+    # treatment is late; the health measure below counts each late action as a deadline.
+    risks_treatment_overdue = await _count(db, select(Risk.id).where(live, dt.risk_treatment_overdue(today)))
+    # Treatment is tracked per action: each open action past its due date is overdue.
+    # A risk with no actions yet is still judged on its single treatment deadline.
+    unsettled = {r.id for r in rows if r.status not in _SETTLED_RISK}
+    with_actions: set = set()
+    open_actions: list = []  # (risk_id, due_date) of open actions on unsettled risks
+    if unsettled:
+        for rid, action_status, due in (await db.execute(
+            select(RiskTreatmentAction.risk_id, RiskTreatmentAction.status, RiskTreatmentAction.due_date)
+        )).all():
+            with_actions.add(rid)
+            if rid in unsettled and action_status in ("open", "in_progress"):
+                open_actions.append((rid, due))
+    treatments_overdue = sum(1 for _rid, due in open_actions if due and due < today) + sum(
+        1 for r in rows
+        if r.id in unsettled and r.id not in with_actions and r.treatment_deadline and r.treatment_deadline < today
+    )
+    treatment_deadlines = sum(1 for _rid, due in open_actions if due) + sum(
+        1 for r in rows if r.id in unsettled and r.id not in with_actions and r.treatment_deadline
     )
     policies_overdue = await _count(db, select(Policy.id).where(
-        Policy.deleted.is_(False), Policy.next_review_date < today,
-        Policy.status.in_((PolicyStatus.approved, PolicyStatus.published)),
+        Policy.deleted.is_(False), dt.policy_review_overdue(today),
     ))
     acceptances_expiring = await _count(db, select(RiskAcceptance.id).join(Risk, Risk.id == RiskAcceptance.risk_id).where(
         live, RiskAcceptance.status == AcceptanceStatus.approved,
@@ -317,41 +417,30 @@ async def get_overview(
     acceptances_pending = await _count(db, select(RiskAcceptance.id).join(Risk, Risk.id == RiskAcceptance.risk_id).where(
         live, RiskAcceptance.status == AcceptanceStatus.pending,
     ))
-    issues_open = await _count(db, select(Issue.id).where(open_issue))
-    issues_overdue = await _count(db, select(Issue.id).where(open_issue, Issue.due_date < today))
+    issues_overdue = await _count(db, select(Issue.id).where(Issue.deleted.is_(False), dt.issue_overdue(today)))
     findings_overdue = await _count(db, select(AuditFinding.id).where(
         AuditFinding.status.in_(_OPEN_FINDING), AuditFinding.due_date < today
     ))
-    incidents_open_stmt = select(Incident.id).where(Incident.deleted.is_(False), Incident.status.not_in(_OPEN_INCIDENT))
+    incidents_open_stmt = select(Incident.id).where(Incident.deleted.is_(False), dt.incident_open())
     tat_breached = (
         await _count(db, select(Risk.id).where(live, Risk.tat_breached_at.is_not(None), Risk.status.not_in(_SETTLED_RISK)))
         + await _count(db, select(Issue.id).where(open_issue, Issue.tat_breached_at.is_not(None)))
         + await _count(db, incidents_open_stmt.where(Incident.tat_breached_at.is_not(None)))
         + await _count(db, select(AuditFinding.id).where(AuditFinding.status.in_(_OPEN_FINDING), AuditFinding.tat_breached_at.is_not(None)))
     )
-    def n_(count: int, singular: str, plural: str | None = None) -> str:
-        return f"{count} {singular if count == 1 else (plural or singular + 's')}"
-
-    candidates = [
-        ("breach", n_(appetite_counts["breach"], "risk") + " above tolerance", appetite_counts["breach"], "/risks", "critical"),
-        ("tat", n_(tat_breached, "record") + " past turnaround time", tat_breached, "/sla-policies", "critical"),
-        ("tests_failed", n_(last_failed, "control") + " failed the last test", last_failed, "/controls", "critical"),
-        ("findings_overdue", n_(findings_overdue, "audit finding") + " past due", findings_overdue, "/internal-audit", "critical"),
-        ("issues_overdue", n_(issues_overdue, "issue") + " past due", issues_overdue, "/issues", "warning"),
-        ("treatments_overdue", n_(treatments_overdue, "risk treatment") + " past deadline", treatments_overdue, "/risks", "warning"),
-        ("tests_overdue", n_(tests_overdue, "control test") + " overdue", tests_overdue, "/controls", "warning"),
-        ("acceptances_expiring", n_(acceptances_expiring, "risk acceptance") + " expiring within 30 days", acceptances_expiring, "/risks", "warning"),
-        ("reviews_overdue", n_(reviews_overdue, "risk review") + " overdue", reviews_overdue, "/risks", "warning"),
-        ("policies_overdue", n_(policies_overdue, "policy review") + " overdue", policies_overdue, "/policies", "warning"),
-        ("acceptances_pending", n_(acceptances_pending, "risk acceptance") + " awaiting a decision", acceptances_pending, "/approvals", "info"),
-        ("not_assessed", n_(assurance.not_assessed, "control") + " never tested", assurance.not_assessed, "/controls", "info"),
-    ]
-    actions = [ActionItem(key=k, label=l, count=n, href=h, tone=t) for k, l, n, h, t in candidates if n > 0]
+    actions = action_items({
+        "breach": appetite_counts["breach"], "tat": tat_breached, "tests_failed": last_failed,
+        "findings_overdue": findings_overdue, "issues_overdue": issues_overdue,
+        "treatments_overdue": risks_treatment_overdue, "tests_overdue": tests_overdue,
+        "acceptances_expiring": acceptances_expiring, "reviews_overdue": reviews_overdue,
+        "policies_overdue": policies_overdue, "acceptances_pending": acceptances_pending,
+        "not_assessed": assurance.not_assessed,
+    })
 
     # -------------------------------------------------------------- incidents
     open_by_sev: Counter[str] = Counter()
     for sev_val, n in (await db.execute(
-        select(Incident.severity, func.count()).where(Incident.deleted.is_(False), Incident.status.not_in(_OPEN_INCIDENT))
+        select(Incident.severity, func.count()).where(Incident.deleted.is_(False), dt.incident_open())
         .group_by(Incident.severity)
     )).all():
         open_by_sev[sev_val.value] = n
@@ -383,16 +472,17 @@ async def get_overview(
     )
 
     # ---------------------------------------------------------- third parties
+    # Counted with the same predicates GET /vendors filters on (?criticality=critical,
+    # ?review=overdue), so each number opens exactly its list.
+    live_vendor = Vendor.deleted.is_(False)
     by_rating: Counter[str] = Counter()
-    vendors_total = critical_vendors = vendors_overdue = 0
-    for v in (await db.scalars(select(Vendor).where(Vendor.deleted.is_(False)))).all():
-        vendors_total += 1
-        rating = getattr(v.risk_rating, "value", v.risk_rating) or "unrated"
-        by_rating[str(rating)] += 1
-        if getattr(v.criticality, "value", v.criticality) == "critical":
-            critical_vendors += 1
-        if v.next_review_date and v.next_review_date < today:
-            vendors_overdue += 1
+    for rating, n in (await db.execute(
+        select(Vendor.risk_rating, func.count()).where(live_vendor).group_by(Vendor.risk_rating)
+    )).all():
+        by_rating[str(getattr(rating, "value", rating) or "unrated")] += n
+    vendors_total = sum(by_rating.values())
+    critical_vendors = await _count(db, select(Vendor.id).where(live_vendor, Vendor.criticality == Criticality.critical))
+    vendors_overdue = await _count(db, select(Vendor.id).where(live_vendor, dt.vendor_review_overdue(today)))
     third_parties = ThirdParties(
         total=vendors_total, by_rating=dict(by_rating), assessments_overdue=vendors_overdue, critical=critical_vendors,
     )
@@ -433,32 +523,37 @@ async def get_overview(
     # ------------------------------------------------------------------ health
     deadlines_total = (
         sum(1 for r in rows if r.next_review_date)
-        + sum(1 for r in rows if r.treatment_deadline and r.status not in _SETTLED_RISK)
-        + await _count(db, select(Control.id).where(live_ctl, Control.next_audit_date.is_not(None)))
+        + treatment_deadlines
+        + await _count(db, select(Control.id).where(testable_ctl, Control.next_audit_date.is_not(None)))
         + await _count(db, select(Policy.id).where(Policy.deleted.is_(False), Policy.next_review_date.is_not(None),
-                                                  Policy.status.in_((PolicyStatus.approved, PolicyStatus.published))))
+                                                  Policy.status.in_(dt.POLICY_IN_FORCE)))
         + await _count(db, select(Issue.id).where(open_issue, Issue.due_date.is_not(None)))
         + await _count(db, select(AuditFinding.id).where(AuditFinding.status.in_(_OPEN_FINDING), AuditFinding.due_date.is_not(None)))
     )
     deadlines_overdue = reviews_overdue + treatments_overdue + tests_overdue + policies_overdue + issues_overdue + findings_overdue
     parts = governance_health.components(
         risks_total=total_risks, risks_within_tolerance=total_risks - appetite_counts["breach"],
-        controls_total=controls_total, controls_assured=controls_assured,
+        controls_total=controls_operating, controls_assured=controls_assured,
         clauses_applicable=clauses_applicable, clauses_assured=clauses_assured,
         deadlines_total=deadlines_total, deadlines_overdue=deadlines_overdue,
     )
     score = governance_health.score(parts)
     scoreable = governance_health.has_data(parts)
+    cov = governance_health.coverage(parts)
 
     return DashboardOverview(
         as_of=today, period_days=days,
-        health=Health(score=score, band=governance_health.band(score, data=scoreable),
-                      components=[HealthComponent(**c.__dict__) for c in parts]),
+        health=Health(
+            score=score, band=governance_health.band(score, data=scoreable),
+            components=[HealthComponent(**c.__dict__) for c in parts],
+            coverage=HealthCoverage(scored=cov.scored, total=cov.total, weight_pct=cov.weight_pct),
+        ),
         posture=Posture(
             total_risks=total_risks, appetite_score=settings.appetite_score, tolerance_score=settings.tolerance_score,
             within_appetite=appetite_counts["within_appetite"], elevated=appetite_counts["elevated"],
             breach=appetite_counts["breach"], by_inherent_severity=dict(by_inherent),
             by_residual_severity=dict(by_residual), top_risks=top_risks,
+            by_category=category_rows,
         ),
         assurance=assurance, compliance=compliance, actions=actions, incidents=incidents,
         kris=kris, third_parties=third_parties, segments=segments, movement=movement,

@@ -35,9 +35,31 @@ from app.schemas.assessment import (
     QuestionnaireUpdate,
     SubmitAnswers,
 )
-from app.services import audit
+from app.services import audit, vendor_tiering
 
 router = APIRouter(tags=["assessments"])
+
+
+async def _tier_vendor(db, assessment: Assessment, user) -> None:
+    """A completed "Inherent risk tiering" assessment of a vendor writes the vendor's
+    inherent tier and proposes its criticality (services/vendor_tiering.py, audited).
+    Every question must be answered: a blank would count as the safest answer, so the
+    completion is refused (422) rather than under-tiering the vendor."""
+    if (
+        assessment.vendor_id is None
+        or not vendor_tiering.is_tiering_questionnaire(assessment.questionnaire)
+        or not vendor_tiering.is_completed(assessment)
+    ):
+        return
+    vendor = await db.scalar(
+        select(Vendor).where(Vendor.id == assessment.vendor_id, Vendor.deleted.is_(False))
+    )
+    if vendor is None:
+        return
+    try:
+        await vendor_tiering.write_back(db, vendor, assessment, user)
+    except vendor_tiering.TieringError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 # ============================================================ questionnaire builder
@@ -296,6 +318,8 @@ async def update_assessment(
     # validate a re-pointed questionnaire belongs to this tenant
     if data.get("questionnaire_id") is not None:
         await _load_questionnaire(db, data["questionnaire_id"])
+    was_completed = vendor_tiering.is_completed(obj)
+    old_vendor = obj.vendor_id
     for field, value in data.items():
         setattr(obj, field, value)
     await db.flush()
@@ -303,7 +327,12 @@ async def update_assessment(
         db, actor=user, action="update", entity_type="assessment", entity_id=obj.id,
         summary=f"Updated vendor assessment '{obj.title}'",
     )
-    return AssessmentRead.model_validate(await _fresh(db, aid))
+    fresh = await _fresh(db, aid)
+    # Completing a tiering assessment (or re-pointing a completed one at another
+    # vendor) writes that vendor's inherent tier.
+    if not was_completed or fresh.vendor_id != old_vendor:
+        await _tier_vendor(db, fresh, user)
+    return AssessmentRead.model_validate(fresh)
 
 
 @router.post(
@@ -351,7 +380,10 @@ async def submit_answers(
         assessment.status = VendorAssessmentStatus.in_progress
 
     await db.flush()
-    return AssessmentRead.model_validate(await _fresh(db, aid))
+    fresh = await _fresh(db, aid)
+    if body.submit:
+        await _tier_vendor(db, fresh, user)
+    return AssessmentRead.model_validate(fresh)
 
 
 @router.post(

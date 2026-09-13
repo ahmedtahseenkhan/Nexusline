@@ -59,7 +59,6 @@ class CampaignBase(BaseModel):
     due_date: date | None = None
     owner: str = ""
     status: CampaignStatus = CampaignStatus.draft
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class CampaignCreate(CampaignBase):
@@ -74,10 +73,11 @@ class CampaignUpdate(BaseModel):
     due_date: date | None = None
     owner: str | None = None
     status: CampaignStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class CampaignRead(CampaignBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

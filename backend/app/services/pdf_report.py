@@ -11,6 +11,8 @@ keeps a filtered export and the screen it came from in agreement.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import io
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -265,12 +267,26 @@ class RiskReportContext:
     owner_names: dict = field(default_factory=dict)
     #: Per-risk detail pages. Off for a quick table-only export.
     include_details: bool = True
+    #: Phase 2: per-category appetite (``risk_scoring.AppetiteBook``) and the tenant's
+    #: banding (``risk_scoring.SeverityScale``). None falls back to the single values above.
+    book: Any = None
+    scale: Any = None
+
+    def thresholds(self, risk) -> tuple[int, int]:
+        """(appetite, tolerance) for this risk: its category's, else the default."""
+        if self.book is not None:
+            return self.book.thresholds(getattr(risk, "category_id", None))
+        return self.appetite, self.tolerance
+
+    @property
+    def bands(self):
+        return self.scale.bands if self.scale is not None else None
 
 
-def _severity_of(score, max_score: int) -> str:
+def _severity_of(score, max_score: int, bands=None) -> str:
     from app.services.risk_scoring import severity_for_score
 
-    band = severity_for_score(score, max_score)
+    band = severity_for_score(score, max_score, bands)
     return band.value if band is not None else ""
 
 
@@ -321,7 +337,7 @@ def _asset_line(asset) -> str:
     return f"{asset.name} — {', '.join(bits)}" if bits else asset.name
 
 
-def _heat_map(ss, risks, matrix_size: int, max_score: int):
+def _heat_map(ss, risks, matrix_size: int, max_score: int, scale=None):
     """Likelihood x impact grid with a count per cell, coloured by severity band.
 
     Impact ascends up the page and likelihood across it, which is the orientation every
@@ -354,7 +370,11 @@ def _heat_map(ss, risks, matrix_size: int, max_score: int):
         row = [Paragraph(f"<font size=7 color='{MUTED}'>{impact}</font>", ss["NxCell"])]
         for col_index, likelihood in enumerate(range(1, matrix_size + 1), start=1):
             count = counts.get((likelihood, impact), 0)
-            colour = _SEV_COLOR.get(_severity_of(likelihood * impact, max_score), MUTED)
+            if scale is not None:  # the tenant's bands and any per-cell override
+                band = scale.for_cell(likelihood, impact)
+                colour = _SEV_COLOR.get(band.value if band else "", MUTED)
+            else:
+                colour = _SEV_COLOR.get(_severity_of(likelihood * impact, max_score), MUTED)
             style.append(("BACKGROUND", (col_index, row_index), (col_index, row_index),
                           colors.HexColor(colour)))
             row.append(Paragraph(
@@ -375,11 +395,12 @@ def _heat_map(ss, risks, matrix_size: int, max_score: int):
     return table
 
 
-def _band_legend(ss, max_score: int) -> str:
+def _band_legend(ss, max_score: int, bands=None) -> str:
     from app.services.risk_scoring import band_ranges
 
     return " · ".join(
-        f"{severity.value.title()} {low}–{high}" for low, high, severity in band_ranges(max_score)
+        f"{severity.value.title()} {low}–{high}"
+        for low, high, severity in band_ranges(max_score, bands)
     )
 
 
@@ -399,9 +420,10 @@ def risk_register_pdf(risks, context: RiskReportContext) -> bytes:
     max_score = context.max_score
     ordered = sorted(risks, key=lambda r: (_effective(r) or 0), reverse=True)
 
-    breaches = [r for r in ordered if (_effective(r) or 0) > context.tolerance]
+    # Each risk against its own category's appetite and tolerance (Phase 2).
+    breaches = [r for r in ordered if (_effective(r) or 0) > context.thresholds(r)[1]]
     elevated = [r for r in ordered
-                if context.appetite < (_effective(r) or 0) <= context.tolerance]
+                if context.thresholds(r)[0] < (_effective(r) or 0) <= context.thresholds(r)[1]]
 
     # ---------------------------------------------------------------- cover
     story = _title_block(
@@ -420,25 +442,28 @@ def risk_register_pdf(risks, context: RiskReportContext) -> bytes:
     story += [_h2(ss, "Methodology"), _kv(ss, [
         ("Scale", f"Likelihood 1–{context.matrix_size} x impact 1–{context.matrix_size}, "
                   f"score 1–{max_score}"),
-        ("Severity bands", _band_legend(ss, max_score)),
-        ("Risk appetite", f"score ≤ {context.appetite}"),
+        ("Severity bands", _band_legend(ss, max_score, context.bands)),
+        ("Risk appetite", f"score ≤ {context.appetite}"
+                          + (" (organisation default; set per category for "
+                             f"{len(context.book.by_category)} categories)"
+                             if context.book is not None and context.book.by_category else "")),
         ("Risk tolerance", f"score ≤ {context.tolerance} (above this is a breach)"),
         ("Exposure shown", "Residual where assessed, otherwise inherent"),
     ])]
 
-    story += [_h2(ss, "Heat map"), _heat_map(ss, ordered, context.matrix_size, max_score)]
+    story += [_h2(ss, "Heat map"), _heat_map(ss, ordered, context.matrix_size, max_score, context.scale)]
 
     # ------------------------------------------------------------- register
     story += [_h2(ss, "Risk register")]
     rows = []
     for risk in ordered:
-        label, colour = _appetite_label(_effective(risk), context.appetite, context.tolerance)
+        label, colour = _appetite_label(_effective(risk), *context.thresholds(risk))
         rows.append([
             risk.reference,
             risk.title,
             _names(risk.business_units) if risk.business_units else "—",
-            _sev_chip(ss, _severity_of(risk.inherent_score, max_score)),
-            _sev_chip(ss, _severity_of(risk.residual_score, max_score)),
+            _sev_chip(ss, _severity_of(risk.inherent_score, max_score, context.bands)),
+            _sev_chip(ss, _severity_of(risk.residual_score, max_score, context.bands)),
             _chip(ss, label, colour),
             context.owner_names.get(risk.owner_id) or "Unassigned",
             str(len(risk.controls)),
@@ -473,7 +498,7 @@ def _risk_detail(ss, risk, context: RiskReportContext) -> list:
     from reportlab.platypus import Paragraph
 
     max_score = context.max_score
-    label, colour = _appetite_label(_effective(risk), context.appetite, context.tolerance)
+    label, colour = _appetite_label(_effective(risk), *context.thresholds(risk))
 
     flow = [
         Paragraph(f"{risk.reference} — {risk.title}", ss["NxH2"]),
@@ -485,19 +510,40 @@ def _risk_detail(ss, risk, context: RiskReportContext) -> list:
             ("Processes", _names(risk.processes)),
             ("Inherent",
              f"L{risk.inherent_likelihood} x I{risk.inherent_impact} = {risk.inherent_score} "
-             f"({_severity_of(risk.inherent_score, max_score).title()})"),
+             f"({_severity_of(risk.inherent_score, max_score, context.bands).title()})"),
             ("Residual",
              f"L{risk.residual_likelihood} x I{risk.residual_impact} = {risk.residual_score} "
-             f"({_severity_of(risk.residual_score, max_score).title()})"
+             f"({_severity_of(risk.residual_score, max_score, context.bands).title()})"
              if risk.residual_score is not None else "Not yet assessed"),
+            ("Target",
+             f"L{risk.target_likelihood} x I{risk.target_impact} = "
+             f"{risk.target_likelihood * risk.target_impact}"
+             if getattr(risk, "target_likelihood", None) and getattr(risk, "target_impact", None)
+             else "Not set"),
             ("Against appetite", label),
+            ("Type · velocity · source", " · ".join(
+                (getattr(risk, name, None) or "—").replace("_", " ").title()
+                for name in ("risk_type", "velocity", "source")
+            )),
             ("Annual loss exposure",
              f"{risk.annual_loss_expectancy:,.2f}" if risk.annual_loss_expectancy else "—"),
             ("Next review", _d(risk.next_review_date)),
         ]),
     ]
+    statement = [
+        (label_, text_) for label_, text_ in (
+            ("Cause", getattr(risk, "cause", "")), ("Event", getattr(risk, "event", "")),
+            ("Consequence", getattr(risk, "consequence", "")),
+        ) if text_
+    ]
+    if statement:
+        flow += [_h2(ss, "Risk statement"), _kv(ss, statement)]
     if risk.description:
         flow += [_h2(ss, "Description"), _body(ss, risk.description)]
+    if getattr(risk, "assessment_rationale", ""):
+        assessed = getattr(risk, "last_assessed_at", None)
+        flow += [_h2(ss, "Assessment rationale" + (f" (assessed {_d(assessed.date())})" if assessed else "")),
+                 _body(ss, risk.assessment_rationale)]
 
     if risk.assets:
         flow += [_h2(ss, "Assets at risk")]
@@ -655,4 +701,74 @@ def executive_summary_pdf(stats: dict, org_name: str) -> bytes:
         story += [_h2(ss, "Risks by status"),
                   _table(ss, ["Status", "Count"], [[k.title(), str(v)] for k, v in by_status.items()],
                          col_widths=[200, 80])]
+    return _render(story, org_name)
+
+
+# ================================================================ board packs ===
+# Phase 3: the committee's board pack. ``board_pack.section_views`` words every section;
+# these functions only lay the words out, in the house style above, so the PDF and the
+# spreadsheet built from the same views say the same thing.
+def _pack_text(value) -> str:
+    from xml.sax.saxutils import escape
+
+    return escape(str(value)) if value not in (None, "") else "—"
+
+
+def _pack_kpis(ss, items: list[tuple[str, str]], width: float = CONTENT_WIDTH):
+    """A row of headline figures, equal widths (values are short phrases, not numbers
+    alone, so the large single-number style of :func:`_kpis` would wrap)."""
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table, TableStyle
+
+    cells = [[Paragraph(f"<font size=12.5 color='{PRIMARY}'><b>{_pack_text(v)}</b></font><br/>"
+                        f"<font size=7.5 color='{MUTED}'>{_pack_text(k)}</font>", ss["NxCell"]) for k, v in items]]
+    t = Table(cells, colWidths=[width / len(items)] * len(items))
+    t.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.3, colors.HexColor(LINE)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor(LINE)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return t
+
+
+def board_pack_pdf(*, title: str, subtitle: str, cover: list[tuple[str, str]], views: list, org_name: str) -> bytes:
+    """The board pack: a cover page (what, for whom, which period, generated when and by
+    whom), then each section — headline figures, facts, tables and the note on how the
+    figures were worked out. ``views`` are ``board_pack.SectionView`` objects."""
+    _require_reportlab()
+    from reportlab.platypus import CondPageBreak, PageBreak, Paragraph, Spacer
+
+    ss = _styles()
+    story = _title_block(ss, _pack_text(title), _pack_text(subtitle), _pack_text(org_name))
+    story += [_kv(ss, [(_pack_text(k), _pack_text(v)) for k, v in cover]), Spacer(1, 8)]
+    story.append(_body(ss, "Position figures (health score, appetite, top risks, control assurance, compliance, "
+                           "issues, KRIs and third parties) are as at the date shown. Risk movement, failed tests "
+                           "and incidents cover the period."))
+    available = CONTENT_WIDTH - 4
+    for index, view in enumerate(views):
+        story.append(PageBreak() if index == 0 else CondPageBreak(180))
+        story.append(_h2(ss, _pack_text(view.title)))
+        if view.kpis:
+            story += [_pack_kpis(ss, list(view.kpis)[:4]), Spacer(1, 6)]
+        if view.facts:
+            story += [_kv(ss, [(_pack_text(k), _pack_text(v)) for k, v in view.facts]), Spacer(1, 6)]
+        for table in view.tables:
+            story.append(Paragraph(f"<b>{_pack_text(table.caption)}</b>", ss["NxBody"]))
+            story.append(Spacer(1, 3))
+            if table.rows:
+                total = float(sum(table.widths) or 1)
+                widths = [max(28, available * w / total) for w in table.widths]
+                story.append(_table(ss, [_pack_text(h) for h in table.headers],
+                                    [[_pack_text(c) for c in row] for row in table.rows], col_widths=widths))
+                if table.total is not None and table.total > len(table.rows):
+                    story.append(Paragraph(
+                        f"<font size=8 color='{MUTED}'>Showing {len(table.rows)} of {table.total}; "
+                        "the spreadsheet version of this pack lists them all.</font>", ss["NxBody"]))
+            else:
+                story.append(Paragraph(f"<font color='{MUTED}'>{_pack_text(table.empty)}</font>", ss["NxBody"]))
+            story.append(Spacer(1, 8))
+        for note in view.notes:
+            story.append(Paragraph(f"<font size=8 color='{MUTED}'>{_pack_text(note)}</font>", ss["NxBody"]))
     return _render(story, org_name)

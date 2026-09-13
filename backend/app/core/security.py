@@ -27,11 +27,15 @@ def create_access_token(
     roles: list[str],
     permissions: list[str],
     expires_minutes: int | None = None,
+    extra_claims: dict[str, Any] | None = None,
 ) -> str:
+    """Issue a session token. ``extra_claims`` narrows a session (e.g. the MFA
+    enrol-only claim); it can never override the standard claims."""
     expire = datetime.now(timezone.utc) + timedelta(
         minutes=expires_minutes or settings.access_token_expire_minutes
     )
     payload: dict[str, Any] = {
+        **(extra_claims or {}),
         "sub": subject,
         "tid": tenant_id,
         "roles": roles,

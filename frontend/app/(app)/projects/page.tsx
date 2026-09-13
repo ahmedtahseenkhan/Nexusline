@@ -16,6 +16,8 @@ import RichText from "@/components/RichText";
 import { Field, TextInput, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconCheck } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ---------------------------------------------------------------- inline types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -71,17 +73,10 @@ const STATUS_TONE: Record<string, "low" | "medium" | "high" | "neutral" | "info"
   cancelled: "neutral",
 };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const STATUS = opts(["planned", "ongoing", "on_hold", "completed", "cancelled"]);
 const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
-
-function money(n: number | null) {
-  if (n == null) return "—";
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
-  return `$${n.toFixed(0)}`;
-}
 
 // --------------------------------------------------------------------- form state
 type FormState = {
@@ -145,6 +140,8 @@ const linkCount = (p: Project) => p.risks.length + p.controls.length + p.policie
 /* ================================================================ page ===== */
 function ProjectsInner() {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate, formatMoney, currency } = useFormat();
+  const money = (n: number | null) => formatMoney(n, null, { compact: "auto" });
   const [detail, setDetail] = useState<Project | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -233,8 +230,8 @@ function ProjectsInner() {
     { key: "title", header: "Title", sortable: true, render: (p) => <span className="cell-title">{p.title}</span> },
     { key: "status", header: "Status", sortable: true, render: (p) => <Badge tone={STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge> },
     { key: "owner", header: "Owner", sortable: true, render: (p) => <span className="muted">{p.owner || "—"}</span> },
-    { key: "start_date", header: "Start", sortable: true, render: (p) => <span className="muted">{p.start_date || "—"}</span> },
-    { key: "deadline", header: "Deadline", sortable: true, render: (p) => <span className="muted">{p.deadline || "—"}{p.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}</span> },
+    { key: "start_date", header: "Start", sortable: true, render: (p) => <span className="muted">{formatDate(p.start_date)}</span> },
+    { key: "deadline", header: "Deadline", sortable: true, render: (p) => <span className="muted">{formatDate(p.deadline)}{p.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}</span> },
     { key: "progress", header: "Progress", render: (p) => <div style={{ minWidth: 110 }}><div className="progress"><span style={{ width: `${p.progress}%` }} /></div><span className="muted" style={{ fontSize: 11 }}>{p.progress}%</span></div> },
     { key: "tasks", header: "Tasks", render: (p) => <span className="muted">{p.open_tasks}/{p.tasks.length}</span> },
     { key: "budget", header: "Budget / Spent", render: (p) => <span className="muted">{money(p.budget)} / <span style={{ color: p.over_budget ? "var(--red)" : "var(--text)" }}>{money(p.spent)}</span></span> },
@@ -266,7 +263,7 @@ function ProjectsInner() {
         <Field label="Deadline">
           <TextInput type="date" value={f.deadline} onChange={(v) => set("deadline", v)} />
         </Field>
-        <Field label="Budget ($)" help="Total approved budget. Spend is tracked from expenses.">
+        <Field label={`Budget (${currency})`} help="Total approved budget. Spend is tracked from expenses.">
           <NumberInput value={f.budget} onChange={(v) => set("budget", v)} min={0} placeholder="0" />
         </Field>
       </div>
@@ -349,7 +346,7 @@ function ProjectsInner() {
                       <div style={{ fontSize: 13 }}>{t.title}</div>
                       <div className="when">
                         {t.assignee ? `${t.assignee} · ` : ""}
-                        {t.due_date ? `due ${t.due_date}` : "no due date"}
+                        {t.due_date ? `due ${formatDate(t.due_date)}` : "no due date"}
                         {t.is_overdue && " · overdue"}
                       </div>
                     </div>
@@ -377,15 +374,15 @@ function ProjectsInner() {
                 {detail.expenses.map((x) => (
                   <div key={x.id} className="activity-item" style={{ alignItems: "center", gap: 10 }}>
                     <div style={{ flex: 1, fontSize: 13 }}>{x.description || "Expense"}</div>
-                    <div className="when">{x.expense_date || "—"}</div>
-                    <div className="muted" style={{ minWidth: 70, textAlign: "right" }}>{money(x.amount)}</div>
+                    <div className="when">{formatDate(x.expense_date)}</div>
+                    <div className="muted" style={{ minWidth: 70, textAlign: "right" }}>{formatMoney(x.amount)}</div>
                     <button className="btn secondary sm" type="button" onClick={() => child(apiCall<void>("DELETE", `/projects/${detail.id}/expenses/${x.id}`))}>Remove</button>
                   </div>
                 ))}
                 {detail.expenses.length === 0 && <span className="muted">No expenses yet.</span>}
                 <div className="field-row" style={{ marginTop: 14, alignItems: "flex-end" }}>
                   <Field label="Description"><TextInput value={expDesc} onChange={setExpDesc} placeholder="What was paid for" /></Field>
-                  <Field label="Amount ($)"><NumberInput value={expAmount} onChange={setExpAmount} min={0} placeholder="0" /></Field>
+                  <Field label={`Amount (${currency})`}><NumberInput value={expAmount} onChange={setExpAmount} min={0} placeholder="0" /></Field>
                   <Field label="Date"><TextInput type="date" value={expDate} onChange={setExpDate} /></Field>
                 </div>
                 <button className="btn sm" type="button" onClick={addExpense} disabled={expAmount === ""} style={{ marginTop: 4 }}><IconPlus width={14} height={14} /> Add expense</button>

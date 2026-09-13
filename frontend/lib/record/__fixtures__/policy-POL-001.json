@@ -1,0 +1,275 @@
+{
+  "type": "policy",
+  "note": "POL-001 from the dev stack (older build, captured 2026-09-13) with its history filled in: published and approved, 36 of 48 acknowledgements, one scheduled review, the review overdue, and two exceptions carrying the B3 status and expiry. B1 says the viewer (the owner) may not attest, so the review_overdue fix points at Sign-off.",
+  "input": {
+    "policy": {
+      "title": "Information Security Policy",
+      "summary": "Sets the bank's rules for protecting customer and business information across people, process and technology.",
+      "body": "<h2>1. Purpose</h2><p>This policy sets the minimum controls for protecting information the bank holds.</p>",
+      "url": "",
+      "category_id": "c1872562-03cd-4c90-9d9e-e6d9dcec84e8",
+      "category": "Security",
+      "document_type": "policy",
+      "version": "2.1",
+      "status": "published",
+      "workflow_owner_id": null,
+      "owner_id": null,
+      "owner": "CISO",
+      "label_id": null,
+      "use_attachments": false,
+      "review_frequency": "annual",
+      "approving_authority_id": "5b0c6f7e-2d7a-4a0e-9d57-8f3f0b7c1a01",
+      "effective_date": "2026-07-15",
+      "supersedes_id": "0f3a8c55-61b2-4c1e-8f0e-1f7f3b9b2c07",
+      "id": "dec3fc2a-365f-44ea-b273-4467ab0a52fd",
+      "reference": "POL-001",
+      "owner_ref": null,
+      "category_ref": {
+        "id": "c1872562-03cd-4c90-9d9e-e6d9dcec84e8",
+        "key": "policy_category",
+        "value": "security",
+        "label": "Security"
+      },
+      "workflow_status": "approved",
+      "workflow_owner": "",
+      "workflow_owner_ref": null,
+      "next_review_date": "2026-09-01",
+      "last_review_date": "2025-09-01",
+      "published_at": "2026-07-03",
+      "expired_reviews": 1,
+      "is_review_overdue": true,
+      "acknowledgment_count": 36,
+      "related": [],
+      "controls": [
+        {
+          "id": "b1a6a0a4-8b8f-4b61-9d6c-0b8cf0f3c104",
+          "reference": "CTL-004",
+          "title": "",
+          "name": "Access control policy enforcement"
+        },
+        {
+          "id": "c2b7b1b5-9c90-4c72-8e7d-1c9d01041211",
+          "reference": "CTL-011",
+          "title": "",
+          "name": "Information classification and labelling"
+        }
+      ],
+      "requirements": [
+        {
+          "id": "d3c8c2c6-0da1-4d83-9f8e-2dae12152301",
+          "reference": "A.5.1",
+          "title": "Policies for information security",
+          "name": ""
+        }
+      ],
+      "risks": [],
+      "reviews": [],
+      "exceptions": [
+        {
+          "id": "e4d9d3d7-1eb2-4e94-8a9f-3ebf23263403",
+          "reference": "EXC-003",
+          "title": "USB storage for the treasury back office",
+          "name": "",
+          "status": "approved",
+          "expires_at": "2026-11-30"
+        },
+        {
+          "id": "f5eae4e8-2fc3-4fa5-9ba0-4fc034374507",
+          "reference": "EXC-007",
+          "title": "Shared admin account on the SWIFT jump host",
+          "name": "",
+          "status": "expired",
+          "expires_at": "2026-06-30"
+        }
+      ],
+      "projects": [],
+      "goals": [],
+      "processing_activities": [],
+      "approving_authority_ref": {
+        "id": "5b0c6f7e-2d7a-4a0e-9d57-8f3f0b7c1a01",
+        "reference": "COM-002",
+        "title": "",
+        "name": "Board Risk Committee"
+      },
+      "supersedes_ref": {
+        "id": "0f3a8c55-61b2-4c1e-8f0e-1f7f3b9b2c07",
+        "reference": "POL-007",
+        "title": "Information Security Policy v2.0",
+        "name": ""
+      },
+      "superseded_by": [],
+      "business_units": [],
+      "roles": [
+        {
+          "id": "a1",
+          "reference": "",
+          "title": "",
+          "name": "Staff"
+        },
+        {
+          "id": "a2",
+          "reference": "",
+          "title": "",
+          "name": "Contractors"
+        }
+      ],
+      "created_at": "2026-07-03T20:35:46.947782Z"
+    },
+    "ack": {
+      "policy_id": "dec3fc2a-365f-44ea-b273-4467ab0a52fd",
+      "scope": "roles",
+      "roles": [
+        "Staff",
+        "Contractors"
+      ],
+      "note": "Members of Staff and Contractors are asked to acknowledge it.",
+      "total": 48,
+      "acknowledged": 36,
+      "pending": 12,
+      "outside_scope": 2,
+      "users": [
+        {
+          "user_id": "1b9dcc72-6c63-47fa-8347-7f317666468f",
+          "full_name": "Lim",
+          "email": "rvw2-lim@acme.com",
+          "roles": [
+            "Viewer"
+          ],
+          "acknowledged": false,
+          "acknowledged_at": null
+        },
+        {
+          "user_id": "2d51cc55-dc6e-4461-bf9f-8643c3e8c133",
+          "full_name": "Lim2",
+          "email": "rvw2-lim2@acme.com",
+          "roles": [],
+          "acknowledged": false,
+          "acknowledged_at": null
+        }
+      ]
+    },
+    "reviews": [
+      {
+        "id": "9a1b",
+        "planned_date": "2026-09-30",
+        "actual_review_date": null,
+        "reviewer": "",
+        "reviewer_id": null,
+        "reviewer_ref": {
+          "id": "u7",
+          "full_name": "Ayesha Khan",
+          "email": "ayesha.khan@bank.pk"
+        },
+        "comments": "Annual review with the Board Risk Committee",
+        "created_at": "2026-08-20T08:00:00Z"
+      }
+    ],
+    "primaryLabel": "Acknowledge"
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "approved",
+      "approvalSteps": 2,
+      "lastStep": {
+        "action": "approve",
+        "at": "2026-07-02T11:20:00Z",
+        "actor": "risk.head@bank.pk",
+        "reason": ""
+      },
+      "lastSubmitAt": "2026-06-28T09:00:00Z",
+      "attestation": {
+        "status": "overdue",
+        "nativeReview": true,
+        "nextDue": "2026-09-01",
+        "canAttest": false,
+        "blockedReason": "Segregation of duties: you own this policy, so someone else must attest it."
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "publication",
+        "value": "Published",
+        "tone": "low",
+        "because": "Published 03 Jul 2026; effective 15 Jul 2026.",
+        "basis": {
+          "kind": "evidenced",
+          "text": "Approval on file"
+        }
+      },
+      {
+        "key": "version",
+        "value": "v2.1",
+        "because": "Supersedes POL-007.",
+        "basis": {
+          "kind": "derived",
+          "text": "From version links"
+        }
+      },
+      {
+        "key": "ack",
+        "value": "36 of 48",
+        "tone": "medium",
+        "because": "12 still to acknowledge; in scope: Staff and Contractors. +2 from outside the scope.",
+        "basis": {
+          "kind": "evidenced",
+          "text": "From acknowledgement records"
+        }
+      },
+      {
+        "key": "review",
+        "value": "Overdue",
+        "because": "Annual cycle; last reviewed 01 Sep 2025; 1 scheduled review open.",
+        "basis": {
+          "kind": "derived",
+          "text": "From the review schedule"
+        }
+      },
+      {
+        "key": "coverage",
+        "value": "2 controls · 1 requirement",
+        "because": "Implemented by CTL-004 and CTL-011.",
+        "basis": {
+          "kind": "derived",
+          "text": "From links"
+        }
+      },
+      {
+        "key": "exceptions",
+        "value": "2 exceptions",
+        "because": "EXC-003 and EXC-007; next expiry 30 Nov 2026; 1 expired.",
+        "basis": {
+          "kind": "derived",
+          "text": "From links"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "policy.review_overdue",
+        "level": "gap",
+        "action": {
+          "kind": "focus",
+          "target": "rec-signoff"
+        }
+      },
+      {
+        "id": "policy.ack_pending",
+        "level": "note"
+      },
+      {
+        "id": "policy.owner_text",
+        "level": "note",
+        "text": "Owner is a text label (“CISO”), not a person",
+        "action": {
+          "kind": "edit",
+          "target": "general"
+        }
+      }
+    ],
+    "headline": "Published v2.1 on 03 Jul 2026; 36 of 48 acknowledged; review overdue since 01 Sep 2026."
+  }
+}

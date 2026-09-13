@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { api, apiCall, type ApprovalRequest } from "@/lib/api";
+import { api, apiCall, type ApprovalRequest, type Me } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
+import { useFormat } from "@/lib/format";
 
 const TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
   approved: "low",
@@ -16,8 +17,23 @@ const TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
   cancelled: "neutral",
 };
 
+/** Whether `me` raised this request — matched on the maker id, or on the e-mail for
+ *  requests that only carry one (the server applies the same rule). */
+function raisedBy(a: ApprovalRequest, me: Me | null): boolean {
+  if (!me) return false;
+  if (a.requested_by && a.requested_by === me.id) return true;
+  const maker = (a.requested_by_email || "").trim().toLowerCase();
+  return !!maker && maker === (me.email || "").trim().toLowerCase();
+}
+
 export default function ApprovalsPage() {
+  const { formatDate } = useFormat();
   const [error, setError] = useState<string | null>(null);
+  // Who is looking: the maker of a request sees it but cannot decide it.
+  const [me, setMe] = useState<Me | null>(null);
+  useEffect(() => {
+    api.me().then(setMe).catch(() => setMe(null));
+  }, []);
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
@@ -106,7 +122,7 @@ export default function ApprovalsPage() {
       sortable: true,
       render: (a) => (
         <span className="muted">
-          {a.due_date || "—"}
+          {formatDate(a.due_date)}
           {a.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}
         </span>
       ),
@@ -116,17 +132,25 @@ export default function ApprovalsPage() {
       header: "",
       render: (a) => (
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true), "Decision recorded")} title="An independent checker approves">
-            <IconCheck width={13} height={13} /> Approve
-          </button>
-          <input
-            className="input"
-            style={{ width: 150 }}
-            placeholder="Rejection reason"
-            value={rejectReason[a.id] || ""}
-            onChange={(e) => setReason(a.id, e.target.value)}
-          />
-          <button className="btn secondary sm" onClick={() => reject(a)}>Reject</button>
+          {raisedBy(a, me) ? (
+            <span className="muted" aria-disabled="true" style={{ fontSize: 12.5 }}>
+              You submitted this — an independent checker must decide
+            </span>
+          ) : (
+            <>
+              <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true), "Decision recorded")} title="An independent checker approves">
+                <IconCheck width={13} height={13} /> Approve
+              </button>
+              <input
+                className="input"
+                style={{ width: 150 }}
+                placeholder="Rejection reason"
+                value={rejectReason[a.id] || ""}
+                onChange={(e) => setReason(a.id, e.target.value)}
+              />
+              <button className="btn secondary sm" onClick={() => reject(a)}>Reject</button>
+            </>
+          )}
           <button className="btn secondary sm" onClick={() => act(api.cancelApproval(a.id), "Request cancelled")}>Cancel</button>
         </div>
       ),

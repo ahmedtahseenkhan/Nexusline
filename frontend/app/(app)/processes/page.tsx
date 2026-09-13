@@ -1,10 +1,17 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
+import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
+import type { UserRef } from "@/lib/masterData";
+import UserPicker, { UserName } from "@/components/UserPicker";
+import BusinessUnitSelect from "@/components/BusinessUnitSelect";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
@@ -15,6 +22,7 @@ import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
@@ -24,23 +32,27 @@ type Process = {
   name: string;
   description: string;
   business_unit_id: string | null;
+  /** Legacy free text ("Billing Lead"); shown only while no owner is picked. */
   owner: string;
+  owner_id: string | null;
+  owner_ref: UserRef | null;
   criticality: string;
   rto_hours: number | null;
   rpo_hours: number | null;
   rpd_hours: number | null;
+  /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
-  workflow_owner: string;
   business_unit: Ref | null;
   assets: Ref[];
 };
 
 // ----------------------------------------------------------------- option sets
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const CRIT = opts(["low", "medium", "high", "critical"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
+const personText = (u: UserRef | null | undefined, fallback?: string) => (u ? u.full_name || u.email : fallback || "");
 
 const WORKFLOW_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
   approved: "low",
@@ -56,11 +68,9 @@ const refToOpt = (a: Ref): AsyncOption => ({ value: a.id, label: a.name });
 type FormState = {
   name: string;
   description: string;
-  business_unit_id: string;
-  owner: string;
+  business_unit_id: string | null;
+  owner_id: string | null;
   criticality: string;
-  workflow_status: string;
-  workflow_owner: string;
   rto_hours: number | "";
   rpo_hours: number | "";
   rpd_hours: number | "";
@@ -68,8 +78,8 @@ type FormState = {
 };
 
 const BLANK: FormState = {
-  name: "", description: "", business_unit_id: "", owner: "",
-  criticality: "medium", workflow_status: "draft", workflow_owner: "",
+  name: "", description: "", business_unit_id: null, owner_id: null,
+  criticality: "medium",
   rto_hours: "", rpo_hours: "", rpd_hours: "", asset_ids: [],
 };
 
@@ -77,11 +87,9 @@ function fromProcess(p: Process): FormState {
   return {
     name: p.name,
     description: p.description || "",
-    business_unit_id: p.business_unit_id || "",
-    owner: p.owner || "",
+    business_unit_id: p.business_unit_id ?? null,
+    owner_id: p.owner_id ?? null,
     criticality: p.criticality,
-    workflow_status: p.workflow_status,
-    workflow_owner: p.workflow_owner || "",
     rto_hours: p.rto_hours ?? "",
     rpo_hours: p.rpo_hours ?? "",
     rpd_hours: p.rpd_hours ?? "",
@@ -93,11 +101,9 @@ function toPayload(f: FormState) {
   return {
     name: f.name,
     description: f.description,
-    business_unit_id: f.business_unit_id || null,
-    owner: f.owner,
+    business_unit_id: f.business_unit_id,
+    owner_id: f.owner_id,
     criticality: f.criticality,
-    workflow_status: f.workflow_status,
-    workflow_owner: f.workflow_owner,
     rto_hours: f.rto_hours === "" ? null : f.rto_hours,
     rpo_hours: f.rpo_hours === "" ? null : f.rpo_hours,
     rpd_hours: f.rpd_hours === "" ? null : f.rpd_hours,
@@ -106,7 +112,6 @@ function toPayload(f: FormState) {
 }
 
 function ProcessesInner() {
-  const [units, setUnits] = useState<Ref[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [recordId, setRecordId] = useRecordParam("id");
@@ -123,9 +128,6 @@ function ProcessesInner() {
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const fetchProcesses = useCallback((qs: string) => apiCall<PagedList<Process>>("GET", `/processes?${qs}`), []);
 
-  useEffect(() => {
-    apiCall<PagedList<Ref>>("GET", "/business-units?limit=200").then((r) => setUnits(r.items)).catch(() => {});
-  }, []);
 
   const searchAssets = (q: string) =>
     apiCall<PagedList<Ref>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map(refToOpt));
@@ -173,33 +175,40 @@ function ProcessesInner() {
   }
 
   async function remove(p: Process) {
-    if (!(await confirmDialog({ title: `Delete process "${p.name}"?`, message: "This cannot be undone.", danger: true }))) return;
-    setError(null);
+    if (!(await confirmDeleteWithImpact("process", p.id, p.name))) return;
     try {
       await apiCall<void>("DELETE", `/processes/${p.id}`);
       if (recordId === p.id) setRecordId(null);
       reload();
-      toast("Deleted");
+      toast(`Archived ${p.name}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      toast(deleteErrorText(e, "Failed to delete the process"), "error");
     }
   }
 
-  const unitOpts: Option[] = useMemo(
-    () => units.map((u) => ({ value: u.id, label: u.name })),
-    [units],
-  );
+  async function removeMany(rowsToDelete: Process[], clear: () => void) {
+    const ok = await confirmDialog({
+      title: `Delete ${rowsToDelete.length} process${rowsToDelete.length === 1 ? "" : "es"}?`,
+      message: "They are archived, not erased: they can be restored from Archived, and the activity trail records who removed them.",
+      confirmLabel: "Delete", danger: true,
+    });
+    if (!ok) return;
+    const res = await deleteEach(rowsToDelete, (p) => apiCall("DELETE", `/processes/${p.id}`));
+    clear();
+    reload();
+    toastDeleteSummary(res, "process");
+  }
 
   const columns: Column<Process>[] = [
     { key: "name", header: "Name", sortable: true, render: (p) => <span className="cell-title">{p.name}</span> },
     { key: "business_unit", header: "Business unit", render: (p) => <span className="muted">{p.business_unit ? p.business_unit.name : "—"}</span> },
-    { key: "owner", header: "Owner", sortable: true, render: (p) => <span className="muted">{p.owner || "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (p) => <span className="muted"><UserName user={p.owner_ref} fallback={p.owner} /></span>, text: (p) => personText(p.owner_ref, p.owner) },
     { key: "criticality", header: "Criticality", sortable: true, render: (p) => <Severity value={p.criticality} /> },
     { key: "rto", header: "RTO", render: (p) => <span className="muted">{hrs(p.rto_hours)}</span> },
     { key: "rpo", header: "RPO", render: (p) => <span className="muted">{hrs(p.rpo_hours)}</span> },
     { key: "mtd", header: "MTD", render: (p) => <span className="muted">{hrs(p.rpd_hours)}</span> },
     { key: "assets", header: "Assets", align: "center", render: (p) => <span className="muted">{p.assets.length || "—"}</span> },
-    { key: "workflow_status", header: "Workflow", sortable: true, render: (p) => <Badge tone={WORKFLOW_TONE[p.workflow_status] || "neutral"}>{cap(p.workflow_status)}</Badge> },
+    { key: "workflow_status", header: "Approval", sortable: true, render: (p) => <Badge tone={WORKFLOW_TONE[p.workflow_status] || "neutral"}>{workflowLabel(p.workflow_status)}</Badge>, text: (p) => workflowLabel(p.workflow_status) },
     { key: "actions", header: "", render: (p) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(p)}>Delete</button></div> },
   ];
 
@@ -213,21 +222,21 @@ function ProcessesInner() {
       </Field>
       <div className="field-row">
         <Field label="Business Unit" help="The unit that runs this process.">
-          <Select value={f.business_unit_id} onChange={(v) => set("business_unit_id", v)} options={unitOpts} placeholder="— none —" />
+          <BusinessUnitSelect value={f.business_unit_id} onChange={(id) => set("business_unit_id", id)} placeholder="— none —" />
         </Field>
         <Field label="Process Owner" help="Person accountable for the process.">
-          <TextInput value={f.owner} onChange={(v) => set("owner", v)} placeholder="Head of Operations" />
+          <UserPicker
+            value={f.owner_id}
+            onChange={(id) => set("owner_id", id)}
+            selected={editing?.owner_ref}
+            legacyText={editing?.owner_id ? null : editing?.owner}
+            placeholder="Search people…"
+          />
         </Field>
       </div>
       <div className="field-row">
         <Field label="Criticality" help="Business impact if this process is disrupted.">
           <Select value={f.criticality} onChange={(v) => set("criticality", v)} options={CRIT} />
-        </Field>
-        <Field label="Workflow">
-          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-        <Field label="Workflow Owner" help="Accountable for approving this record.">
-          <TextInput value={f.workflow_owner} onChange={(v) => set("workflow_owner", v)} placeholder="GRC Manager" />
         </Field>
       </div>
     </>
@@ -294,6 +303,10 @@ function ProcessesInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<Process>
+        toolbarRight={<ArchivedRecords entityType="process" noun="processes" onRestored={reload} refreshKey={refreshKey} />}
+        bulkActions={(rows, clear) => (
+          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+        )}
         columns={columns}
         fetcher={fetchProcesses}
         rowKey={(p) => p.id}
@@ -311,7 +324,7 @@ function ProcessesInner() {
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? detail.name : "…"}
-        subtitle={detail ? cap(detail.workflow_status) + (detail.business_unit ? ` · ${detail.business_unit.name}` : "") : ""}
+        subtitle={detail ? workflowLabel(detail.workflow_status) + (detail.business_unit ? ` · ${detail.business_unit.name}` : "") : ""}
         width={620}
         actions={detail && (
           <>
@@ -324,10 +337,13 @@ function ProcessesInner() {
           <>
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Business unit", detail.business_unit ? detail.business_unit.name : "—")}
-              {field("Owner", detail.owner || "—")}
+              {field("Owner", <UserName user={detail.owner_ref} fallback={detail.owner} />)}
               {field("Criticality", <Severity value={detail.criticality} />)}
-              {field("Workflow", <Badge tone={WORKFLOW_TONE[detail.workflow_status] || "neutral"}>{cap(detail.workflow_status)}</Badge>)}
-              {field("Workflow owner", detail.workflow_owner || "—")}
+            </div>
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13, display: "block", marginBottom: 10 }}>Approval</strong>
+              <WorkflowFields entityType="process" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
             </div>
 
             {detail.description && (

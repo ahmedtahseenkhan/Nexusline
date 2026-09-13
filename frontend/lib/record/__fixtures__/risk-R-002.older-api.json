@@ -1,0 +1,279 @@
+{
+  "type": "risk",
+  "note": "R-002 captured verbatim from the dev stack running the pre-round-2 API: no B2, B3, B6 or B12 fields. Checks the §3.6 degrade path: 'Basis not shown', 'EXC-001 is linked', no untested-credit point, and the headline's '1 linked control'.",
+  "input": {
+    "risk": {
+      "id": "5deaf5aa-734c-4517-9d55-1243ae638d8c",
+      "reference": "R-002",
+      "title": "Ransomware encrypts production systems",
+      "description": "Malware encrypts critical systems, disrupting operations.",
+      "cause": "",
+      "event": "",
+      "consequence": "",
+      "risk_type": null,
+      "velocity": null,
+      "identified_date": null,
+      "identified_by_id": null,
+      "identified_by_ref": null,
+      "source": null,
+      "target_likelihood": null,
+      "target_impact": null,
+      "target_score": null,
+      "target_severity": null,
+      "assessment_rationale": "",
+      "last_assessed_at": null,
+      "last_assessed_by_id": null,
+      "last_assessed_by_ref": null,
+      "impact_dimensions": [],
+      "treatment_actions": [],
+      "treatment_progress": {
+        "done": 0,
+        "total": 0,
+        "open": 0,
+        "overdue": 0,
+        "percent": 0
+      },
+      "appetite_score": 6,
+      "tolerance_score": 12,
+      "appetite_status": "breach",
+      "appetite_category_id": null,
+      "category": "Business Continuity",
+      "category_id": "30fba59f-4611-46ba-abfb-2dfab14caf63",
+      "category_ref": {
+        "id": "30fba59f-4611-46ba-abfb-2dfab14caf63",
+        "key": "risk_category",
+        "value": "business_continuity",
+        "label": "Business Continuity"
+      },
+      "status": "assessed",
+      "owner_id": null,
+      "owner_ref": null,
+      "inherent_likelihood": 4,
+      "inherent_impact": 5,
+      "inherent_score": 20,
+      "residual_likelihood": null,
+      "residual_impact": null,
+      "residual_score": null,
+      "annual_loss_frequency": 0.2,
+      "single_loss_expectancy": 500000.0,
+      "annual_loss_expectancy": 100000.0,
+      "treatment_strategy": "mitigate",
+      "treatment_description": "",
+      "treatment_owner": "",
+      "treatment_owner_id": null,
+      "treatment_owner_ref": null,
+      "treatment_deadline": null,
+      "treatment_cost": null,
+      "review_frequency": "annual",
+      "last_review_date": null,
+      "next_review_date": "2027-07-03",
+      "expired_reviews": 0,
+      "workflow_status": "draft",
+      "workflow_owner": "",
+      "workflow_owner_id": null,
+      "workflow_owner_ref": null,
+      "business_units": [],
+      "processes": [],
+      "assets": [
+        {
+          "id": "72a69d43-130c-4f5a-89b1-681eaf7da072",
+          "name": "Corporate Network"
+        }
+      ],
+      "controls": [
+        {
+          "id": "9314ece7-eb5f-4dac-b2c0-f977a251c6c1",
+          "name": "Backup & Recovery",
+          "reference": "A.8.13"
+        }
+      ],
+      "threats": [
+        {
+          "id": "89e4647b-aa59-4fb5-a3a4-890b16c217ff",
+          "name": "Phishing"
+        },
+        {
+          "id": "d00e0ecc-c08a-4b08-b9c0-a6c35f96ee0f",
+          "name": "Ransomware"
+        }
+      ],
+      "vulnerabilities": [
+        {
+          "id": "07417db8-db6c-4f76-bf64-ffe80e4e101e",
+          "name": "Unpatched software"
+        },
+        {
+          "id": "6f15a406-2fe1-456c-9c39-b93f4773f2fd",
+          "name": "No offline backups"
+        }
+      ],
+      "policies": [],
+      "incidents": [],
+      "acceptances": [],
+      "requirements": [],
+      "exceptions": [
+        {
+          "id": "47f17b4b-0ba0-4e9a-a7ff-82fe880c218a",
+          "reference": "EXC-001",
+          "title": "Accept ransomware risk pending backup overhaul",
+          "name": ""
+        }
+      ],
+      "vendors": [
+        {
+          "id": "86790476-5725-48be-8ab0-43d75309da69",
+          "reference": "",
+          "title": "",
+          "name": "Amazon Web Services"
+        }
+      ],
+      "projects": [
+        {
+          "id": "7df87ca2-eba3-41b0-b740-204f357e87d8",
+          "reference": "PRJ-001",
+          "title": "Immutable backup rollout",
+          "name": ""
+        }
+      ],
+      "goals": [],
+      "processing_activities": [],
+      "audit_findings": [],
+      "kris": [],
+      "loss_events": [],
+      "issues": [],
+      "control_health": "ok",
+      "level": null,
+      "parent_id": null,
+      "parent": null,
+      "children_count": 0,
+      "suggested_residual_likelihood": null,
+      "suggested_residual_impact": null,
+      "residual_accepted_at": null,
+      "residual_override_reason": "",
+      "needs_review": false,
+      "review_reason": "",
+      "created_at": "2026-07-03T20:35:46.947782Z",
+      "updated_at": "2026-09-11T20:38:23.903415Z",
+      "inherent_severity": "critical",
+      "residual_severity": null
+    },
+    "suggestion": {
+      "likelihood": 2,
+      "impact": 5,
+      "score": 10,
+      "reduction": 2,
+      "rationale": [
+        "A.8.13: −2 (effective).",
+        "Applied −2 to likelihood: 4x5 → 2x5.",
+        "Suggested residual score 10 (inherent 20)."
+      ],
+      "inherent_score": 20,
+      "current_residual_score": null,
+      "matches_current": false
+    },
+    "matrixSize": 5,
+    "impactMode": "max"
+  },
+  "ctx": {
+    "now": "2026-09-12T09:00:00Z",
+    "gov": {
+      "workflowState": "draft",
+      "approvalSteps": 0,
+      "lastStep": null,
+      "lastSubmitAt": null,
+      "attestation": {
+        "status": "never",
+        "nativeReview": true,
+        "nextDue": "2027-07-03",
+        "canAttest": null,
+        "blockedReason": null
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "inherent",
+        "value": "Critical",
+        "because": "Likelihood 4 × impact 5 on the 5×5 matrix, before controls.",
+        "basis": {
+          "kind": "declared",
+          "text": "No assessor or rationale on file"
+        }
+      },
+      {
+        "key": "residual",
+        "value": "Not recorded",
+        "because": "Suggested 10 (2×5) from control credit: A.8.13: −2 (effective). Target not set.",
+        "basis": {
+          "kind": "missing",
+          "text": "Awaiting the owner's judgement"
+        }
+      },
+      {
+        "key": "appetite",
+        "value": "Breach",
+        "because": "Measured on inherent 20 because no residual is recorded; appetite 6, tolerance 12 (organisation). At the suggested 10 it would be Elevated.",
+        "basis": {
+          "kind": "derived",
+          "text": "Calculated from score and thresholds"
+        }
+      },
+      {
+        "key": "reliance",
+        "value": "1 control",
+        "because": "Assurance detail isn't available here; open each control.",
+        "basis": {
+          "kind": "missing",
+          "text": "Basis not shown"
+        }
+      },
+      {
+        "key": "exposure",
+        "value": "PKR 100,000",
+        "because": "0.2 events a year × PKR 500,000 per event. A money measure, separate from the matrix score.",
+        "basis": {
+          "kind": "derived",
+          "text": "Calculated: frequency × single loss"
+        }
+      },
+      {
+        "key": "acceptance",
+        "value": "Not accepted",
+        "because": "Above tolerance with no formal acceptance. EXC-001 is linked; an exception is not a risk acceptance.",
+        "basis": {
+          "kind": "missing",
+          "text": "No decision on file"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "risk.owner",
+        "level": "gap"
+      },
+      {
+        "id": "risk.assessed_without_assessment",
+        "level": "gap"
+      },
+      {
+        "id": "risk.breach_untreated",
+        "level": "gap"
+      },
+      {
+        "id": "risk.not_submitted",
+        "level": "note"
+      },
+      {
+        "id": "risk.mitigate_no_actions",
+        "level": "note"
+      },
+      {
+        "id": "risk.no_target",
+        "level": "note"
+      }
+    ],
+    "headline": "Breach on inherent 20 — no residual recorded; 1 linked control; no owner."
+  }
+}

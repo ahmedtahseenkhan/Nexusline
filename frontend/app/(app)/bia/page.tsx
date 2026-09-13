@@ -8,6 +8,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -15,6 +16,8 @@ import { IconPlus } from "@/components/icons";
 import AsyncSelect from "@/components/AsyncSelect";
 import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 // Server typeahead result shape (any linkable register row).
@@ -85,14 +88,13 @@ type BiaSummary = {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 const hrs = (n: number | null | undefined) => (n == null ? "—" : `${num(n)}h`);
 
 // ------------------------------------------------------------------ enum lists
 const BIA_STATUS = opts(["draft", "submitted", "approved", "retired"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const CRITICALITY = opts(["low", "medium", "high", "critical"]);
 const DEP_TYPES = [
   "application",
@@ -140,14 +142,13 @@ type BiaForm = {
   minimum_resources: string;
   recovery_strategy: string;
   workaround: string;
-  workflow_status: string;
 };
 const BLANK_BIA: BiaForm = {
   process_name: "", process_id: "", process_label: "", business_unit: "", owner: "", description: "", criticality: "medium", status: "draft",
   assessment_date: "", next_review_date: "", peak_periods: "", rto_hours: "", rpo_hours: "", mtpd_hours: "",
   financial_impact_24h: "", financial_impact_1week: "", currency: "PKR", operational_impact: "",
   reputational_impact: "", regulatory_impact: "", legal_impact: "", minimum_resources: "",
-  recovery_strategy: "", workaround: "", workflow_status: "draft",
+  recovery_strategy: "", workaround: "",
 };
 function fromBia(b: BiaAssessment): BiaForm {
   return {
@@ -175,7 +176,6 @@ function fromBia(b: BiaAssessment): BiaForm {
     minimum_resources: b.minimum_resources || "",
     recovery_strategy: b.recovery_strategy || "",
     workaround: b.workaround || "",
-    workflow_status: b.workflow_status || "draft",
   };
 }
 function biaPayload(f: BiaForm): Record<string, unknown> {
@@ -204,7 +204,6 @@ function biaPayload(f: BiaForm): Record<string, unknown> {
     minimum_resources: f.minimum_resources,
     recovery_strategy: f.recovery_strategy,
     workaround: f.workaround,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -227,6 +226,7 @@ const BLANK_DEP: DepDraft = {
 /* ================================================================ page ===== */
 function BiaInner() {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const [detail, setDetail] = useState<BiaAssessment | null>(null);
   const [summary, setSummary] = useState<BiaSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -267,7 +267,7 @@ function BiaInner() {
   }, [openId, loadDetail]);
 
   // ------------------------------------------------------------- BIA CRUD
-  function openNew() { setEditing(null); setBf(BLANK_BIA); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setBf({ ...BLANK_BIA, currency }); setError(null); setShowForm(true); }
   function openEdit(b: BiaAssessment) { setEditing(b); setBf(fromBia(b)); setError(null); setShowForm(true); }
 
   async function save() {
@@ -365,9 +365,6 @@ function BiaInner() {
           <TextInput type="date" value={bf.next_review_date} onChange={(v) => setB("next_review_date", v)} />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this BIA record.">
-        <Select value={bf.workflow_status} onChange={(v) => setB("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -392,7 +389,7 @@ function BiaInner() {
           <TextInput type="number" value={bf.financial_impact_1week} onChange={(v) => setB("financial_impact_1week", v)} placeholder="0" />
         </Field>
         <Field label="Currency">
-          <TextInput value={bf.currency} onChange={(v) => setB("currency", v)} placeholder="PKR" />
+          <Select value={bf.currency} onChange={(v) => setB("currency", v)} options={currencyOptions} />
         </Field>
       </div>
       <Field label="Operational impact">
@@ -433,7 +430,7 @@ function BiaInner() {
     { key: "rpo_hours", header: "RPO", sortable: true, render: (b) => <span className="muted">{hrs(b.rpo_hours)}</span> },
     { key: "mtpd", header: "MTPD", render: (b) => <span className="muted">{hrs(b.mtpd_hours)}</span> },
     { key: "status", header: "Status", sortable: true, render: (b) => <Badge tone={BIA_STATUS_TONE[b.status] || "neutral"}>{cap(b.status)}</Badge> },
-    { key: "next_review_date", header: "Review", sortable: true, render: (b) => (b.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{b.next_review_date || "—"}</span>) },
+    { key: "next_review_date", header: "Review", sortable: true, render: (b) => (b.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(b.next_review_date)}</span>) },
     { key: "actions", header: "", render: (b) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(b)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(b)}>Delete</button></div> },
   ];
 
@@ -471,8 +468,8 @@ function BiaInner() {
           <span className="l">RTO ≤ 24h</span>
         </div>
         <div className="card stat">
-          <div className="stat-top"><span className="n">{summary ? summary.total_financial_exposure.toLocaleString() : "—"}</span></div>
-          <span className="l">Total financial exposure (PKR)</span>
+          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_financial_exposure, undefined, { compact: "auto" }) : "—"}</span></div>
+          <span className="l">Total financial exposure</span>
         </div>
       </div>
 
@@ -502,7 +499,12 @@ function BiaInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="bia_assessment" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="bia_assessment" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="bia_assessment" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || "BIA"} — ${detail.process_name}` : "…"}
@@ -521,8 +523,8 @@ function BiaInner() {
               <div className="card stat"><div className="stat-top"><span className="n">{hrs(detail.rto_hours)}</span></div><span className="l">RTO ({detail.rto_band})</span></div>
               <div className="card stat"><div className="stat-top"><span className="n">{hrs(detail.rpo_hours)}</span></div><span className="l">RPO</span></div>
               <div className="card stat"><div className="stat-top"><span className="n">{hrs(detail.mtpd_hours)}</span></div><span className="l">MTPD</span></div>
-              <div className="card stat"><div className="stat-top"><span className="n">{num(detail.financial_impact_24h)}</span></div><span className="l">Impact @ 24h ({detail.currency})</span></div>
-              <div className="card stat"><div className="stat-top"><span className="n">{num(detail.financial_impact_1week)}</span></div><span className="l">Impact @ 1 week ({detail.currency})</span></div>
+              <div className="card stat"><div className="stat-top"><span className="n">{formatMoney(detail.financial_impact_24h, detail.currency, { compact: "auto" })}</span></div><span className="l">Impact @ 24h</span></div>
+              <div className="card stat"><div className="stat-top"><span className="n">{formatMoney(detail.financial_impact_1week, detail.currency, { compact: "auto" })}</span></div><span className="l">Impact @ 1 week</span></div>
             </div>
 
             <div className="table-wrap" style={{ marginBottom: 16 }}>

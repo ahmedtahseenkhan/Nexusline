@@ -13,9 +13,11 @@ import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/
 import RichText from "@/components/RichText";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ----------------------------------------------------------------- enum options
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const STATUS = opts(["draft", "active", "closed"]);
@@ -101,6 +103,7 @@ function fromProgram(p: AwarenessProgram): FormState {
 /* ================================================================ page ===== */
 function AwarenessInner() {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate } = useFormat();
   const [detail, setDetail] = useState<AwarenessProgram | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -383,7 +386,7 @@ function AwarenessInner() {
                       </td>
                       <td><Badge tone={REC_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge></td>
                       <td className="muted">{p.score != null ? `${p.score}%` : "—"}</td>
-                      <td className="muted">{p.completed_at || "—"}</td>
+                      <td className="muted">{formatDate(p.completed_at)}</td>
                       <td>
                         {p.status === "completed"
                           ? <Badge tone={compliant(p, detail) ? "low" : "critical"}>{compliant(p, detail) ? "yes" : "no"}</Badge>

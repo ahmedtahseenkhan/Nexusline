@@ -32,7 +32,7 @@ from app.schemas.workflow import (
     StartResult,
 )
 from app.services import audit as audit_log
-from app.services import entity_types, workflow_engine
+from app.services import entity_types, record_registry, record_workflow, workflow_engine
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -236,6 +236,52 @@ async def delete_stage(stage_id: uuid.UUID, db: DbSession) -> None:
 
 
 # --------------------------------------------------------------- instances ---
+async def _lifecycle_record(db: DbSession, entity_type: str, entity_id: uuid.UUID):
+    """The live record behind a route request, when its type has a lifecycle."""
+    model = record_registry.model_for(entity_type)
+    if model is None or not record_registry.has_workflow(model):
+        return None
+    record = await db.get(model, entity_id)
+    if record is None or getattr(record, "deleted", False):
+        return None
+    return record
+
+
+def route_label(entity_type: str, record) -> str:
+    """How a routed record is named in its route and its audit row: "R-012 Ransomware on
+    core banking", built from the record's own reference and title. Pure.
+
+    The browser used to supply this label, and a stale page once started R-002's route
+    under R-001's name — so the request's ``entity_label`` is ignored. With no record to
+    name, the type's label stands in ("Risk").
+    """
+    label = record_registry.label_of(record) if record is not None else ""
+    return (label or record_registry.type_label(entity_type))[:255]
+
+
+def route_link(record, fallback: str = "") -> str:
+    """The deep link a route's approvers follow: the record's own register link, built on
+    the server like its label. The request's ``link`` is used only when the server knows
+    no register for the record (``fallback``). Pure."""
+    link = record_registry.link_for(record) if record is not None else ""
+    return (link or fallback or "")[:255]
+
+
+async def _record_for_label(db: DbSession, user, entity_type: str, entity_id: uuid.UUID):
+    """The caller's live record of this type, to name it — or None."""
+    model = record_registry.model_for(entity_type)
+    if model is None:
+        return None
+    record = await db.get(model, entity_id)
+    if (
+        record is None
+        or getattr(record, "deleted", False)
+        or getattr(record, "tenant_id", user.tenant_id) != user.tenant_id
+    ):
+        return None
+    return record
+
+
 @router.post("/start", response_model=StartResult, dependencies=[Depends(require("workflow:write"))])
 async def start_workflow(
     body: StartRequest, db: DbSession, user: CurrentUser
@@ -246,13 +292,38 @@ async def start_workflow(
     platform's default and not an error, so callers can offer the button unconditionally.
     """
     entity_types.require_write(user, body.entity_type)
+
+    # A draft record with a lifecycle is *submitted*, not merely routed: the route and
+    # the record's state must agree, so this goes through the one lifecycle service.
+    record = await _lifecycle_record(db, body.entity_type, body.entity_id)
+    if record is not None and record_workflow.state_value(record.workflow_status) == "draft":
+        if await workflow_engine.definition_for(db, body.entity_type) is None:
+            return StartResult(
+                started=False,
+                reason=f"No approval route is enabled for {body.entity_type}",
+            )
+        await record_workflow.apply(db, user, record, body.entity_type, "submit")
+        instance = await workflow_engine.instance_for(db, body.entity_type, body.entity_id)
+        if instance is None:
+            return StartResult(
+                started=False,
+                reason=f"No approval route is enabled for {body.entity_type}",
+            )
+        return StartResult(started=True, instance=InstanceRead.model_validate(instance))
+
+    # The server names the record and links to it (B5): ``body.entity_label`` is ignored,
+    # and ``body.link`` stands in only for a record with no register of its own.
+    named = record if record is not None else await _record_for_label(
+        db, user, body.entity_type, body.entity_id
+    )
+    label = route_label(body.entity_type, named)
     instance = await workflow_engine.start(
         db,
         tenant_id=user.tenant_id,
         entity_type=body.entity_type,
         entity_id=body.entity_id,
-        entity_label=body.entity_label,
-        link=body.link,
+        entity_label=label,
+        link=route_link(named, body.link),
         requested_by=user.id,
         requested_by_email=user.email,
         record_owner_email=body.record_owner_email,
@@ -264,7 +335,7 @@ async def start_workflow(
         )
     await audit_log.record(
         db, actor=user, action="submit", entity_type=body.entity_type, entity_id=body.entity_id,
-        summary=f"Started approval route for {body.entity_label or body.entity_type}",
+        summary=f"Started approval route for {label}"[:500],
     )
     return StartResult(started=True, instance=InstanceRead.model_validate(instance))
 
@@ -318,7 +389,7 @@ async def cancel_instance(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"This route already finished as {instance.status.value}",
         )
-    await workflow_engine.cancel(db, instance)
+    await workflow_engine.cancel(db, instance, actor=user)
     await audit_log.record(
         db, actor=user, action="cancel", entity_type=instance.entity_type,
         entity_id=instance.entity_id,

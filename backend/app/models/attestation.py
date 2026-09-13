@@ -30,3 +30,10 @@ class Attestation(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         nullable=False,
     )
     next_due: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # What was certified, in words, and over what — an attestation that says nothing
+    # about what the signer looked at proves nothing to an examiner.
+    statement: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    scope: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Optional second signature: an independent person confirming the attestation.
+    confirmed_by_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    confirmed_at: Mapped[date | None] = mapped_column(Date, nullable=True)

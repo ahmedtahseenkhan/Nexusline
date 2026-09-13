@@ -1,20 +1,46 @@
 """Integrations & Continuous Controls Monitoring (CCM) API.
 
 A connector registry plus automated control tests that record pass/fail over time.
-Runtime execution is stubbed/manual for now — recording a run updates the parent
-test's last_run / last_result / pass_rate so the UI can trend control health.
+Recording a run updates the parent test's last_run / last_result / pass_rate so the UI
+can trend control health.
+
+**Monitoring feed (phase 3).** ``POST /connectors/{id}/ingest-token`` issues a token for
+one connector, shown once (only its SHA-256 is kept); ``DELETE`` revokes it. The
+monitoring tool then posts each result to ``POST /connectors/ingest`` with
+``Authorization: Bearer <token>`` and no user session. The token is
+``<organisation hex>.<connector hex>.<secret>``, so the endpoint can open that
+organisation's row-level-security scope and find the connector before checking the
+secret in constant time; every authentication failure is the same 401. Each result:
+
+* is recorded as **evidence** on the control (collected when observed, valid), which is
+  how it shows on the control;
+* is recorded as a **run** of the connector's monitoring test for that control, when the
+  connector has exactly one active test for it (or the one ``test_reference`` names);
+* raises a **"Continuous monitoring failed"** alert when it failed — at most one per
+  control and connector per day;
+* never changes the control's **effectiveness**: that moves only on a test a person
+  records and another person reviews (phase 2). The evidence is there to attach to it.
+
+Every write is in the activity trail with the actor ``Connector <name>``.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import secrets
 import uuid
 from collections import defaultdict
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
+from app.core.database import tenant_session
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.integrations import (
@@ -32,8 +58,13 @@ from app.schemas.integrations import (
     CctRead,
     CctUpdate,
     ConnectorCreate,
+    ConnectorFeedRead,
     ConnectorRead,
     ConnectorUpdate,
+    IngestBody,
+    IngestLogItem,
+    IngestResult,
+    IngestTokenIssued,
     RunCreate,
 )
 from app.services.refs import next_reference
@@ -131,21 +162,42 @@ async def get_connector(cid: uuid.UUID, db: DbSession) -> ConnectorRead:
     return ConnectorRead.model_validate(await _load_connector(db, cid))
 
 
+def _changes(obj, data: dict) -> dict:
+    out = {}
+    for k, v in data.items():
+        before = getattr(obj, k)
+        if before != v:
+            out[k] = {"from": str(getattr(before, "value", before)), "to": str(getattr(v, "value", v))}
+    return out
+
+
 @router.patch("/connectors/{cid}", response_model=ConnectorRead, dependencies=[_WRITE])
-async def update_connector(cid: uuid.UUID, body: ConnectorUpdate, db: DbSession) -> ConnectorRead:
+async def update_connector(cid: uuid.UUID, body: ConnectorUpdate, db: DbSession, user: CurrentUser) -> ConnectorRead:
     obj = await _load_connector(db, cid)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    changes = _changes(obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if changes:
+        await audit_log.record(db, actor=user, action="update", entity_type="connector", entity_id=obj.id,
+                               summary=f"Updated connector {obj.reference}: {', '.join(changes)}"[:500],
+                               changes=changes)
     return ConnectorRead.model_validate(await _load_connector(db, cid))
 
 
 @router.delete("/connectors/{cid}", status_code=204, dependencies=[_WRITE])
-async def delete_connector(cid: uuid.UUID, db: DbSession) -> None:
+async def delete_connector(cid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_connector(db, cid)
     obj.deleted = True
     obj.deleted_date = date.today()
+    # An archived connector's feed stops for good: restoring it needs a new token.
+    had_token = bool(obj.ingest_token_hash)
+    obj.ingest_token_hash = ""
     await db.flush()
+    await audit_log.record(db, actor=user, action="delete", entity_type="connector", entity_id=obj.id,
+                           summary=f"Archived connector {obj.reference}: {obj.name}"
+                                   + ("; its monitoring-feed token was revoked" if had_token else ""))
 
 
 # ================================================= automated control tests (CCM) ===
@@ -209,20 +261,28 @@ async def get_test(tid: uuid.UUID, db: DbSession) -> CctRead:
 
 
 @router.patch("/automated-control-tests/{tid}", response_model=CctRead, dependencies=[_WRITE])
-async def update_test(tid: uuid.UUID, body: CctUpdate, db: DbSession) -> CctRead:
+async def update_test(tid: uuid.UUID, body: CctUpdate, db: DbSession, user: CurrentUser) -> CctRead:
     obj = await _load_test(db, tid)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    changes = _changes(obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if changes:
+        await audit_log.record(db, actor=user, action="update", entity_type="automated_control_test",
+                               entity_id=obj.id, summary=f"Updated continuous control test {obj.reference}: "
+                                                         f"{', '.join(changes)}"[:500], changes=changes)
     return CctRead.model_validate(await _load_test(db, tid))
 
 
 @router.delete("/automated-control-tests/{tid}", status_code=204, dependencies=[_WRITE])
-async def delete_test(tid: uuid.UUID, db: DbSession) -> None:
+async def delete_test(tid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_test(db, tid)
     obj.deleted = True
     obj.deleted_date = date.today()
     await db.flush()
+    await audit_log.record(db, actor=user, action="delete", entity_type="automated_control_test",
+                           entity_id=obj.id, summary=f"Archived continuous control test {obj.reference}: {obj.name}")
 
 
 @router.post("/automated-control-tests/{tid}/runs", response_model=CctRead, status_code=201, dependencies=[_WRITE])
@@ -238,15 +298,26 @@ async def add_run(tid: uuid.UUID, body: RunCreate, db: DbSession, user: CurrentU
         test.last_result = body.result
         test.pass_rate = body.pass_rate
     await db.flush()
+    await audit_log.record(db, actor=user, action="record_run", entity_type="automated_control_test",
+                           entity_id=tid, summary=f"Recorded a {body.result.value.replace('_', ' ')} run of "
+                                                  f"{test.reference} dated {run_date}",
+                           changes={"run_id": str(run.id), "result": body.result.value,
+                                    "pass_rate": body.pass_rate, "run_date": run_date.isoformat()})
     return CctRead.model_validate(await _load_test(db, tid))
 
 
 @router.delete("/control-test-runs/{run_id}", status_code=204, dependencies=[_WRITE])
-async def delete_run(run_id: uuid.UUID, db: DbSession) -> None:
+async def delete_run(run_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await db.scalar(select(ControlTestRun).where(ControlTestRun.id == run_id))
     if obj is None:
         raise HTTPException(status_code=404, detail="Record not found")
+    test_id, facts = obj.test_id, {"run_id": str(obj.id), "result": obj.result.value,
+                                   "run_date": obj.run_date.isoformat() if obj.run_date else None}
     await db.delete(obj)
+    await db.flush()
+    await audit_log.record(db, actor=user, action="delete_run", entity_type="automated_control_test",
+                           entity_id=test_id, summary=f"Removed a {facts['result'].replace('_', ' ')} run dated "
+                                                      f"{facts['run_date'] or 'undated'}", changes=facts)
 
 
 # ================================================================== summary ===
@@ -287,3 +358,445 @@ async def integrations_summary(db: DbSession) -> IntegrationsSummary:
         avg_pass_rate=avg_pass,
         failing_tests=failing,
     )
+
+
+
+# ============================================================ monitoring feed ===
+INGEST_ENDPOINT = "/api/v1/connectors/ingest"
+INGEST_TOKEN_BYTES = 32
+#: How far a result's timestamp may run ahead of this server's clock (the monitoring
+#: tool's clock may be a little fast) before it is refused as being in the future.
+CLOCK_SKEW = timedelta(minutes=2)
+#: A connector's result maps onto the test-run result; "passed with exceptions" is a
+#: pass whose pass rate says how much passed (the run keeps the words in its findings).
+RUN_RESULT = {
+    "passed": CcmResult.passed,
+    "failed": CcmResult.failed,
+    "passed_with_exceptions": CcmResult.passed,
+}
+FAILED_FAMILY = "ccm-failed"
+
+
+def connector_actor(name: str) -> str:
+    """The actor written on audit entries a connector makes."""
+    return f"Connector {name}"[:255]
+
+
+def new_ingest_token(tenant_id: uuid.UUID, connector_id: uuid.UUID) -> str:
+    """``<org hex>.<connector hex>.<secret>`` — the prefixes scope the lookup, the whole
+    token (hashed) proves it."""
+    return f"{tenant_id.hex}.{connector_id.hex}.{secrets.token_urlsafe(INGEST_TOKEN_BYTES)}"
+
+
+def ingest_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def parse_ingest_token(token: str | None) -> tuple[uuid.UUID, uuid.UUID] | None:
+    """(organisation id, connector id) of a feed token, or None when it isn't shaped like
+    one. Pure."""
+    parts = (token or "").split(".")
+    if len(parts) != 3 or len(parts[2]) < 20:
+        return None
+    try:
+        return uuid.UUID(hex=parts[0]), uuid.UUID(hex=parts[1])
+    except ValueError:
+        return None
+
+
+def ingest_token_matches(token: str, stored_hash: str) -> bool:
+    """Constant-time check of a presented token against the stored hash. Pure."""
+    if not token or not stored_hash:
+        return False
+    return hmac.compare_digest(ingest_token_hash(token), stored_hash)
+
+
+def observed_refusal(observed: datetime, now: datetime) -> str | None:
+    """A result can't come from the future (beyond :data:`CLOCK_SKEW`). Pure."""
+    if observed > now + CLOCK_SKEW:
+        return f"observed_at: {observed.isoformat()} is in the future; send the time the check ran."
+    return None
+
+
+def run_pass_rate(result: str, pass_rate: float | None) -> float:
+    """The run's pass rate: as sent, else 100 for a pass and 0 for a failure. Pure."""
+    if pass_rate is not None:
+        return float(pass_rate)
+    return 0.0 if result == "failed" else 100.0
+
+
+def _norm(ref: str | None) -> str:
+    return (ref or "").strip().lower()
+
+
+@dataclass
+class TestMatch:
+    test: object | None
+    note: str = ""
+
+
+def match_test(tests, *, connector_id, control_reference: str, test_reference: str | None) -> TestMatch:
+    """The monitoring test a result is recorded on. Pure.
+
+    With ``test_reference``: that test, which must belong to this connector and (when it
+    names a control) monitor this control — otherwise ``ValueError``. Without: the one
+    active test of this connector for this control; none, several or a paused one mean
+    no run is recorded, and the note says why."""
+    live = [t for t in tests if not getattr(t, "deleted", False) and t.connector_id == connector_id]
+    if test_reference:
+        named = [t for t in live if _norm(t.reference) == _norm(test_reference)]
+        if not named:
+            raise ValueError(f"test_reference: this connector has no monitoring test {test_reference}.")
+        test = named[0]
+        if (test.control_ref or "").strip() and _norm(test.control_ref) != _norm(control_reference):
+            raise ValueError(
+                f"test_reference: {test.reference} monitors control {test.control_ref}, not {control_reference}."
+            )
+        if test.status == CcmStatus.paused:
+            return TestMatch(None, f"{test.reference} is paused, so no run was recorded.")
+        return TestMatch(test)
+    mine = [t for t in live if _norm(t.control_ref) == _norm(control_reference) and _norm(control_reference)]
+    active = [t for t in mine if t.status == CcmStatus.active]
+    if len(active) == 1:
+        return TestMatch(active[0])
+    if len(active) > 1:
+        refs = ", ".join(sorted(t.reference for t in active))
+        return TestMatch(None, f"{len(active)} monitoring tests on this connector cover {control_reference} "
+                               f"({refs}); send test_reference to record the run on one.")
+    if mine:
+        return TestMatch(None, f"The monitoring test for {control_reference} on this connector is paused, so no run was recorded.")
+    return TestMatch(None, f"No monitoring test on this connector covers {control_reference}, so no run was recorded; "
+                           "the result is kept as evidence.")
+
+
+def failed_alert(*, connector, control, observed_local: str, summary: str, owner: str, day: date) -> dict:
+    """The event notification a failed result raises. Pure. The dedup key carries the day,
+    so a check that keeps failing raises one alert per control and connector per day."""
+    from app.models.enums import NotificationCategory
+    from app.models.notification import EVENT_PREFIX
+
+    label = " ".join(p for p in (control.reference or "", control.name or "") if p)
+    body = (f"{connector.name} reported a failed check at {observed_local}: {summary}"[:900]
+            + ". The control's effectiveness is unchanged until a person records a test and another "
+              "person reviews it; the result is on the control as evidence.")
+    if owner:
+        body += f" Control owner: {owner}."
+    return {
+        "dedup_key": f"{EVENT_PREFIX}{FAILED_FAMILY}:{connector.id}:{control.id}:{day.isoformat()}",
+        "title": f"Continuous monitoring failed: {label}"[:255],
+        "body": body,
+        "category": NotificationCategory.critical if getattr(control, "is_key", False) else NotificationCategory.warning,
+        "entity_type": "control",
+        "entity_id": control.id,
+        "link": f"/controls?id={control.id}",
+    }
+
+
+async def _token_admin(user: CurrentUser):
+    """Issuing or revoking a feed token: whoever manages connectors (``ccm:write``) or
+    integrations (``integration:manage``)."""
+    if not ({"ccm:write", "integration:manage"} & set(user.permission_codes)):
+        raise HTTPException(status_code=403, detail="Requires permission(s): ccm:write or integration:manage")
+    return user
+
+
+@router.post("/connectors/{cid}/ingest-token", response_model=IngestTokenIssued, status_code=201,
+             summary="Issue (or replace) the connector's monitoring-feed token — shown once")
+async def issue_ingest_token(cid: uuid.UUID, db: DbSession, user=Depends(_token_admin)) -> IngestTokenIssued:
+    connector = await _load_connector(db, cid)
+    rotated = bool(connector.ingest_token_hash)
+    token = new_ingest_token(user.tenant_id, connector.id)
+    connector.ingest_token_hash = ingest_token_hash(token)
+    await db.flush()
+    await audit_log.record(db, actor=user, action="ingest_token_issue", entity_type="connector", entity_id=cid,
+                           summary=f"{'Replaced' if rotated else 'Issued'} the monitoring-feed token of connector "
+                                   f"{connector.reference}", changes={"rotated": rotated})
+    return IngestTokenIssued(
+        connector_id=cid, token=token, endpoint=INGEST_ENDPOINT, header=f"Authorization: Bearer {token}",
+        note=("Copy it now: only a fingerprint is kept, so it can't be shown again. "
+              + ("The previous token stopped working. " if rotated else "")
+              + 'POST {"control_reference": "A.8.5", "result": "passed", "observed_at": "2026-09-12T10:00:00+05:00", '
+                '"summary": "…"} to the endpoint with this header.'),
+    )
+
+
+@router.delete("/connectors/{cid}/ingest-token", status_code=204, summary="Revoke the connector's feed token")
+async def revoke_ingest_token(cid: uuid.UUID, db: DbSession, user=Depends(_token_admin)) -> None:
+    connector = await _load_connector(db, cid)
+    if not connector.ingest_token_hash:
+        return
+    connector.ingest_token_hash = ""
+    await db.flush()
+    await audit_log.record(db, actor=user, action="ingest_token_revoke", entity_type="connector", entity_id=cid,
+                           summary=f"Revoked the monitoring-feed token of connector {connector.reference}")
+
+
+@router.get("/connectors/{cid}/feed", response_model=ConnectorFeedRead, dependencies=[_READ],
+            summary="The connector's feed: token state, last result received, recent results")
+async def connector_feed(cid: uuid.UUID, db: DbSession, limit: Annotated[int, Query(ge=1, le=100)] = 20) -> ConnectorFeedRead:
+    from app.models.audit import AuditLog
+
+    connector = await _load_connector(db, cid)
+    base = select(AuditLog).where(AuditLog.entity_type == "connector", AuditLog.entity_id == cid,
+                                  AuditLog.action == "ingest")
+    rows = (await db.scalars(base.order_by(AuditLog.created_at.desc()).limit(limit))).all()
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    recent_count = await db.scalar(select(func.count()).select_from(base.where(AuditLog.created_at >= since).subquery())) or 0
+
+    def uid(value):
+        try:
+            return uuid.UUID(str(value)) if value else None
+        except ValueError:
+            return None
+
+    return ConnectorFeedRead(
+        connector_id=cid, has_token=connector.has_ingest_token, endpoint=INGEST_ENDPOINT,
+        last_ingest_at=rows[0].created_at if rows else None, ingests_last_30_days=recent_count,
+        recent=[
+            IngestLogItem(
+                at=r.created_at, result=str((r.changes or {}).get("result", "")),
+                control_id=uid((r.changes or {}).get("control_id")),
+                control_reference=str((r.changes or {}).get("control_reference", "")),
+                summary=str((r.changes or {}).get("summary", "")),
+                observed_at=str((r.changes or {}).get("observed_at", "")),
+                evidence_id=uid((r.changes or {}).get("evidence_id")), run_id=uid((r.changes or {}).get("run_id")),
+                test_reference=(r.changes or {}).get("test_reference") or None,
+                alert_raised=bool((r.changes or {}).get("alert")),
+            )
+            for r in rows
+        ],
+    )
+
+
+_INGEST_AUTH = HTTPBearer(
+    auto_error=False, scheme_name="ConnectorFeedToken",
+    description="The connector's feed token from POST /connectors/{id}/ingest-token (not a user session).",
+)
+
+
+def _ingest_denied() -> HTTPException:
+    """One answer for every failure (no token, malformed, unknown organisation or
+    connector, wrong or revoked token, disabled or archived connector, module off), so a
+    caller learns nothing about which part was wrong."""
+    return HTTPException(
+        status_code=http_status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked connector feed token.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def _ccm_enabled(db) -> bool:
+    """Licensed on the installation and switched on for the organisation."""
+    from app.models.settings import TenantSettings
+    from app.services import modules
+
+    if not modules.is_enabled("integrations_ccm"):
+        return False
+    chosen = await db.scalar(select(TenantSettings.enabled_modules))
+    return not isinstance(chosen, list) or "integrations_ccm" in chosen
+
+
+async def _feed_connector(db, token: str, tenant_id: uuid.UUID, connector_id: uuid.UUID) -> Connector:
+    from app.models.tenant import Tenant
+
+    tenant = await db.get(Tenant, tenant_id)
+    connector = None
+    if tenant is not None and tenant.is_active and await _ccm_enabled(db):
+        connector = await db.scalar(
+            select(Connector).where(Connector.id == connector_id, Connector.deleted.is_(False))
+        )
+    if (connector is None or connector.status == ConnectorStatus.disabled
+            or not ingest_token_matches(token, connector.ingest_token_hash)):
+        raise _ingest_denied()
+    return connector
+
+
+@dataclass(frozen=True)
+class _IngestAuth:
+    token: str
+    tenant_id: uuid.UUID
+    connector_id: uuid.UUID
+
+
+async def _verified_ingest(
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_INGEST_AUTH)] = None,
+) -> _IngestAuth:
+    """Authenticate the feed before the body is even read, so every failure is a 401."""
+    token = creds.credentials if creds is not None and (creds.scheme or "").lower() == "bearer" else ""
+    parsed = parse_ingest_token(token)
+    if parsed is None:
+        raise _ingest_denied()
+    async with tenant_session(parsed[0]) as db:
+        await _feed_connector(db, token, *parsed)
+    return _IngestAuth(token, *parsed)
+
+
+async def _connector_audit(db, tenant_id, actor: str, **entry) -> None:
+    """Audit a connector's write under its own name (no user is signed in)."""
+    from app.models.audit import AuditLog
+    from app.services import webhooks
+
+    db.add(AuditLog(tenant_id=tenant_id, actor_id=None, actor_email=actor, **entry))
+    await webhooks.dispatch(
+        db, entity_type=entry["entity_type"], action=entry["action"],
+        payload={"event": f"{entry['entity_type']}.{entry['action']}", "entity_type": entry["entity_type"],
+                 "entity_id": str(entry["entity_id"]), "summary": entry["summary"], "actor": actor,
+                 "changes": entry.get("changes", {})},
+    )
+
+
+async def _resolve_control(db, body: IngestBody):
+    from app.models.control import Control
+
+    if body.control_id is not None:
+        control = await db.scalar(select(Control).where(Control.id == body.control_id, Control.deleted.is_(False)))
+        if control is None:
+            raise HTTPException(status_code=422, detail="control_id: no such control.")
+        if body.control_reference and _norm(body.control_reference) != _norm(control.reference):
+            raise HTTPException(status_code=422, detail=(
+                f"control_reference {body.control_reference} is not the reference of control_id "
+                f"({control.reference or 'no reference'}); send one of them."))
+        return control
+    ref = _norm(body.control_reference)
+    found = (await db.scalars(
+        select(Control).where(func.lower(func.trim(Control.reference)) == ref, Control.deleted.is_(False))
+    )).all()
+    if not found:
+        raise HTTPException(status_code=422, detail=f"control_reference: no control has the reference {body.control_reference}.")
+    if len(found) > 1:
+        raise HTTPException(status_code=422, detail=(
+            f"control_reference: {len(found)} controls share the reference {body.control_reference}; send control_id."))
+    return found[0]
+
+
+@router.post("/connectors/ingest", response_model=IngestResult, status_code=201,
+             summary="Post a control-monitoring result from a connector (feed token, no user session)")
+async def ingest_result(body: IngestBody, auth: Annotated[_IngestAuth, Depends(_verified_ingest)]) -> IngestResult:
+    """Record one monitoring result as evidence on the control, as a run of the
+    connector's test for it (when there is one), and — when it failed — as an alert.
+
+    ``Authorization: Bearer <token>`` from ``POST /connectors/{id}/ingest-token``; the
+    body is ``{"control_reference": "A.8.5" (or "control_id"), "result": "passed" |
+    "failed" | "passed_with_exceptions", "observed_at": "2026-09-12T10:00:00+05:00",
+    "summary": "…", "details": {…}, "pass_rate": 98.5, "test_reference": "CCM-003",
+    "evidence": {"title": "…", "url": "…", "valid_until": "2026-12-31"}}``. A wrong or
+    revoked token is a 401; an unknown control or a time in the future is a 422. The
+    control's effectiveness is never changed here.
+    """
+    from app.models.enums import EvidenceStatus, EvidenceType
+    from app.models.evidence import Evidence
+    from app.models.notification import Notification
+    from app.services import incident_clock, master_data
+
+    async with tenant_session(auth.tenant_id) as db:
+        connector = await _feed_connector(db, auth.token, auth.tenant_id, auth.connector_id)
+        actor = connector_actor(connector.name)
+        tz = await incident_clock.tenant_zone(db, auth.tenant_id)
+        observed = incident_clock.localize(body.observed_at, tz)
+        now = incident_clock.now_utc()
+        refusal = observed_refusal(observed, now)
+        if refusal:
+            raise HTTPException(status_code=422, detail=refusal)
+        observed_day = incident_clock.local_date(observed, tz)
+        observed_text = f"{incident_clock.local_text(observed, tz)} {getattr(tz, 'key', '')}".strip()
+        if body.evidence and body.evidence.valid_until and body.evidence.valid_until < observed_day:
+            raise HTTPException(status_code=422, detail="evidence.valid_until is before the result was observed.")
+        control = await _resolve_control(db, body)
+        control_ref = control.reference or ""
+        tests = (await db.scalars(
+            select(AutomatedControlTest).where(AutomatedControlTest.connector_id == connector.id,
+                                               AutomatedControlTest.deleted.is_(False))
+        )).all()
+        try:
+            match = match_test(tests, connector_id=connector.id, control_reference=control_ref,
+                               test_reference=body.test_reference)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        result_words = body.result.replace("_", " ")
+        pass_rate = run_pass_rate(body.result, body.pass_rate)
+        rate_text = f", {pass_rate:g}% passed" if body.pass_rate is not None else ""
+        ev = body.evidence
+        link = (ev.url or ev.reference) if ev else ""
+        evidence = Evidence(
+            id=uuid.uuid4(), tenant_id=auth.tenant_id, control_id=control.id,
+            title=(ev.title if ev else f"{connector.name}: {result_words} — {body.summary}")[:255],
+            description=(
+                f"Continuous monitoring result from connector {connector.reference} {connector.name}: "
+                f"{result_words}{rate_text}, observed {observed_text}.\n\n{body.summary}"
+                + (f"\n\nDetails:\n{json.dumps(body.details, indent=2, default=str)}" if body.details is not None else "")
+            ),
+            evidence_type=EvidenceType.link if link else EvidenceType.log,
+            reference=(link or f"{connector.reference} monitoring feed")[:500],
+            status=EvidenceStatus.valid, collected_at=observed_day,
+            valid_until=ev.valid_until if ev else None,
+        )
+        db.add(evidence)
+
+        run = None
+        test = match.test
+        if test is not None:
+            run = ControlTestRun(
+                id=uuid.uuid4(), tenant_id=auth.tenant_id, test_id=test.id, run_date=observed_day,
+                result=RUN_RESULT[body.result],
+                findings=(("Passed with exceptions: " if body.result == "passed_with_exceptions" else "")
+                          + body.summary)[:4000],
+                evidence_ref=(link or f"Evidence: {evidence.title}")[:500], pass_rate=pass_rate,
+            )
+            db.add(run)
+            if test.last_run is None or observed_day >= test.last_run:
+                test.last_run, test.last_result, test.pass_rate = observed_day, run.result, pass_rate
+        if connector.last_sync is None or connector.last_sync < observed_day:
+            connector.last_sync = min(observed_day, incident_clock.local_date(now, tz))
+
+        alert_key = ""
+        if body.result == "failed":
+            owners = await master_data.users_by_id(db, [control.owner_id])
+            owner = owners.get(control.owner_id)
+            fields = failed_alert(
+                connector=connector, control=control, observed_local=observed_text, summary=body.summary,
+                owner=(owner.full_name or owner.email) if owner else (control.owner or ""), day=observed_day,
+            )
+            if not await db.scalar(select(Notification.id).where(Notification.dedup_key == fields["dedup_key"]).limit(1)):
+                # Phase 3: to the control's owner; no owner = the whole organisation.
+                db.add(Notification(tenant_id=auth.tenant_id, user_id=control.owner_id, **fields))
+                alert_key = fields["dedup_key"]
+        await db.flush()
+
+        facts = {
+            "result": body.result, "pass_rate": pass_rate, "observed_at": observed.isoformat(),
+            "control_id": str(control.id), "control_reference": control_ref, "summary": body.summary[:500],
+            "evidence_id": str(evidence.id), "run_id": str(run.id) if run else "",
+            "test_reference": test.reference if test is not None else "", "alert": alert_key,
+        }
+        await _connector_audit(
+            db, auth.tenant_id, actor, action="ingest", entity_type="connector", entity_id=connector.id,
+            summary=f"Received a {result_words} result for control {control_ref or control.name}: {body.summary}"[:500],
+            changes=facts,
+        )
+        await _connector_audit(
+            db, auth.tenant_id, actor, action="create", entity_type="evidence", entity_id=evidence.id,
+            summary=f"Collected evidence '{evidence.title}' for control {control_ref or control.name} "
+                    f"from connector {connector.reference}"[:500],
+            changes={"control_id": str(control.id), "collected_at": observed_day.isoformat(), "via": actor},
+        )
+        await _connector_audit(
+            db, auth.tenant_id, actor, action="monitoring", entity_type="control", entity_id=control.id,
+            summary=(f"Continuous monitoring ({connector.name}): {result_words} — {body.summary}. Evidence "
+                     "recorded; effectiveness unchanged until a reviewed test")[:500],
+            changes={k: facts[k] for k in ("result", "pass_rate", "observed_at", "evidence_id", "run_id", "alert")},
+        )
+        if run is not None:
+            await _connector_audit(
+                db, auth.tenant_id, actor, action="record_run", entity_type="automated_control_test",
+                entity_id=test.id,
+                summary=f"Recorded a {result_words} run of {test.reference} from connector {connector.reference}"[:500],
+                changes={"run_id": str(run.id), "result": run.result.value, "pass_rate": pass_rate,
+                         "run_date": observed_day.isoformat()},
+            )
+        await db.flush()
+        return IngestResult(
+            connector_reference=connector.reference, control_id=control.id, control_reference=control_ref,
+            evidence_id=evidence.id, run_id=run.id if run else None,
+            test_reference=test.reference if test is not None else None,
+            alert_raised=bool(alert_key), note=match.note,
+        )

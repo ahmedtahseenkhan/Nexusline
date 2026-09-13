@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.approval import ApprovalRequest
 from app.models.asset import Asset
 from app.models.compliance import Requirement
-from app.models.control import Control
+from app.models.control import UNTESTABLE_CONTROL_STATUSES, Control
 from app.models.enums import (
     ApprovalStatus,
     ComplianceStatus,
@@ -26,8 +26,8 @@ from app.models.policy import Policy
 from app.models.project import Project
 from app.models.risk import Risk, RiskSetting
 from app.models.vendor import Vendor
-from app.services.risk_scoring import effective_score, severity_for_score
-from app.services.risk_settings import get_or_create_settings
+from app.services.risk_scoring import effective_score
+from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
 # key -> (label, description, kind, category)
 CATALOG: dict[str, tuple[str, str, str, str]] = {
@@ -38,7 +38,7 @@ CATALOG: dict[str, tuple[str, str, str, str]] = {
     "risks_by_status": ("Risks by status", "Risk treatment lifecycle distribution", "breakdown", "Risk"),
     "controls_total": ("Total controls", "Count of controls", "scalar", "Control"),
     "controls_operational": ("Operational controls", "Controls in operational state", "scalar", "Control"),
-    "controls_overdue_audit": ("Control audits overdue", "Controls past their next audit date", "scalar", "Control"),
+    "controls_overdue_audit": ("Control audits overdue", "Implemented or operational controls past their next test date", "scalar", "Control"),
     "controls_by_status": ("Controls by status", "Control lifecycle distribution", "breakdown", "Control"),
     "incidents_open": ("Open incidents", "Incidents not yet resolved or closed", "scalar", "Incident"),
     "incidents_by_status": ("Incidents by status", "Incident status distribution", "breakdown", "Incident"),
@@ -89,20 +89,27 @@ async def compute(db: AsyncSession, key: str, tenant_id) -> dict:
 
     if key == "risks_above_tolerance":
         settings: RiskSetting = await get_or_create_settings(db, tenant_id)
+        # Each risk against its own category's tolerance (organisation default otherwise).
+        book = await load_appetite_book(db, tenant_id, settings)
         risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
         n = sum(
             1
             for r in risks
             if (eff := effective_score(r.inherent_score, r.residual_score)) is not None
-            and eff > settings.tolerance_score
+            and eff > book.tolerance_for(r.category_id)
         )
         return {"kind": "scalar", "value": n, "series": None}
 
     if key == "risks_by_severity":
         risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
+        # The organisation's own banding (matrix size, thresholds, cell overrides) — the
+        # same colours the heat map shows. Previously always the 5x5 default.
+        scale = scale_for(await get_or_create_settings(db, tenant_id))
         buckets: dict[str, int] = {}
         for r in risks:
-            sev = severity_for_score(effective_score(r.inherent_score, r.residual_score))
+            sev = scale.for_risk(
+                r.inherent_likelihood, r.inherent_impact, r.residual_likelihood, r.residual_impact
+            )
             name = sev.value if sev else "unscored"
             buckets[name] = buckets.get(name, 0) + 1
         order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unscored": 4}
@@ -117,7 +124,10 @@ async def compute(db: AsyncSession, key: str, tenant_id) -> dict:
         "risks_overdue_review": (Risk, Risk.next_review_date < today),
         "controls_total": (Control,),
         "controls_operational": (Control, Control.status == ControlStatus.operational),
-        "controls_overdue_audit": (Control, Control.next_audit_date < today),
+        # Planned and retired controls carry no test clock, so are never overdue.
+        "controls_overdue_audit": (
+            Control, Control.next_audit_date < today, Control.status.notin_(UNTESTABLE_CONTROL_STATUSES)
+        ),
         "incidents_open": (Incident, Incident.status.notin_([IncidentStatus.resolved, IncidentStatus.closed])),
         "compliance_total": (Requirement,),
         "compliance_compliant": (Requirement, Requirement.status == ComplianceStatus.compliant),

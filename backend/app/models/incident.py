@@ -3,9 +3,21 @@ a configurable set of response stages (NIST IR phases)."""
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, Column, Date, Float, ForeignKey, Integer, String, Table, Text, Uuid
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Table,
+    Text,
+    Uuid,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,12 +56,25 @@ incident_vendors = Table(
 
 class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "incidents"
+    # Phase 2: regulatory clock and impact sizing (occurred/detected/resolved became
+    # timezone-aware timestamps in the same release).
+    contained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    customers_affected: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    records_affected: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    personal_data_breach: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    near_miss: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(100), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     classification: Mapped[str] = mapped_column(String(120), default="")
+    classification_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `classification`
     severity: Mapped[Severity] = mapped_column(
         SAEnum(Severity, name="severity"), default=Severity.medium, nullable=False
     )
@@ -66,18 +91,27 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, 
         nullable=False,
     )
     assignee: Mapped[str] = mapped_column(String(200), default="")
+    assignee_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `assignee`
     reported_by: Mapped[str] = mapped_column(String(200), default="")
+    reported_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `reported_by`
     impact: Mapped[str] = mapped_column(Text, default="")
     root_cause: Mapped[str] = mapped_column(Text, default="")
     lessons_learned: Mapped[str] = mapped_column(Text, default="")
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)  # financial impact
-    detected_at: Mapped[date | None] = mapped_column(Date, nullable=True)
-    occurred_at: Mapped[date | None] = mapped_column(Date, nullable=True)
-    resolved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    detected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Regulatory reporting (e.g. SBP breach notification obligations).
     is_reportable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     regulator: Mapped[str] = mapped_column(String(64), default="")
+    regulator_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `regulator`
 
     regulatory_reports: Mapped[list["RegulatoryReport"]] = relationship(
         back_populates="incident", cascade="all, delete-orphan", lazy="selectin",
@@ -102,6 +136,19 @@ class Incident(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, 
     risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
         "Risk", secondary="risk_incidents", lazy="selectin", viewonly=True,
         secondaryjoin="and_(risk_incidents.c.risk_id == Risk.id, Risk.deleted == False)",
+    )
+    # Phase 2: what the incident led to. Read-only reverse views — the foreign key lives
+    # on the loss event / breach, which own the link (``POST /incidents/{id}/loss-event``
+    # and the personal-data-breach flag create them).
+    loss_events: Mapped[list["LossEvent"]] = relationship(  # noqa: F821
+        "LossEvent", lazy="selectin", viewonly=True,
+        primaryjoin="and_(LossEvent.incident_id == Incident.id, LossEvent.deleted == False)",
+        order_by="LossEvent.created_at",
+    )
+    data_breaches: Mapped[list["DataBreach"]] = relationship(  # noqa: F821
+        "DataBreach", lazy="selectin", viewonly=True,
+        primaryjoin="and_(DataBreach.incident_id == Incident.id, DataBreach.deleted == False)",
+        order_by="DataBreach.created_at",
     )
 
     @property
@@ -150,6 +197,9 @@ class RegulatoryReport(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     """
 
     __tablename__ = "regulatory_reports"
+    regulator_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 2: regulator list; replaces free-text `regulator`
 
     incident_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True
@@ -159,22 +209,24 @@ class RegulatoryReport(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         SAEnum(RegulatoryReportType, name="regulatory_report_type"),
         default=RegulatoryReportType.initial_notification, nullable=False,
     )
-    deadline: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     status: Mapped[RegulatoryReportStatus] = mapped_column(
         SAEnum(RegulatoryReportStatus, name="regulatory_report_status"),
         default=RegulatoryReportStatus.pending, nullable=False,
     )
-    submitted_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reference: Mapped[str] = mapped_column(String(120), default="")  # regulator acknowledgement ref
     summary: Mapped[str] = mapped_column(Text, default="")
     submitted_by: Mapped[str] = mapped_column(String(200), default="")
+    submitted_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `submitted_by`
 
     incident: Mapped[Incident] = relationship(back_populates="regulatory_reports")
 
     @property
     def is_overdue(self) -> bool:
-        return (
-            self.status == RegulatoryReportStatus.pending
-            and self.deadline is not None
-            and self.deadline < date.today()
-        )
+        # The deadline is a timestamp (phase 2): compare with the current instant.
+        from app.services.incident_clock import report_overdue
+
+        return report_overdue(self)

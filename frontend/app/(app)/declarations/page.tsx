@@ -8,10 +8,13 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ local types
 interface Declaration {
@@ -58,10 +61,8 @@ interface DeclarationSummary {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-const pkr = (n: number | null | undefined, ccy = "PKR") =>
-  n == null ? "—" : `${ccy} ${Number(n).toLocaleString()}`;
 
 // ------------------------------------------------------------------ enum lists
 const DECLARATION_TYPE = opts([
@@ -74,7 +75,6 @@ const DECLARATION_TYPE = opts([
 ]);
 const CAMPAIGN_STATUS = opts(["draft", "open", "closed"]);
 const DECL_STATUS = opts(["pending", "submitted", "reviewed", "escalated", "cleared"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 
 // ------------------------------------------------------------------ tones
 const CAMPAIGN_STATUS_TONE: Record<string, Tone> = {
@@ -103,7 +103,6 @@ type CampaignForm = {
   status: string;
   due_date: string;
   description: string;
-  workflow_status: string;
 };
 const BLANK_CAMPAIGN: CampaignForm = {
   title: "",
@@ -113,7 +112,6 @@ const BLANK_CAMPAIGN: CampaignForm = {
   status: "draft",
   due_date: "",
   description: "",
-  workflow_status: "draft",
 };
 function fromCampaign(c: DeclarationCampaign): CampaignForm {
   return {
@@ -124,7 +122,6 @@ function fromCampaign(c: DeclarationCampaign): CampaignForm {
     status: c.status || "draft",
     due_date: c.due_date || "",
     description: c.description || "",
-    workflow_status: c.workflow_status || "draft",
   };
 }
 function campaignPayload(f: CampaignForm): Record<string, unknown> {
@@ -136,7 +133,6 @@ function campaignPayload(f: CampaignForm): Record<string, unknown> {
     status: f.status,
     due_date: f.due_date || null,
     description: f.description,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -181,13 +177,13 @@ const BLANK_DECL: DeclForm = {
   has_disclosure: false,
   disclosure_details: "",
   amount: "",
-  currency: "PKR",
+  currency: "",
   submitted_date: "",
   status: "pending",
   reviewer: "",
   review_notes: "",
 };
-function fromDecl(d: Declaration): DeclForm {
+function fromDecl(d: Declaration, defaultCurrency: string): DeclForm {
   return {
     declarant_name: d.declarant_name || "",
     declarant_role: d.declarant_role || "",
@@ -195,7 +191,7 @@ function fromDecl(d: Declaration): DeclForm {
     has_disclosure: !!d.has_disclosure,
     disclosure_details: d.disclosure_details || "",
     amount: d.amount != null ? String(d.amount) : "",
-    currency: d.currency || "PKR",
+    currency: d.currency || defaultCurrency,
     submitted_date: d.submitted_date || "",
     status: d.status || "pending",
     reviewer: d.reviewer || "",
@@ -227,6 +223,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 
 function DeclarationsInner() {
   const [section, setSection] = useState<SectionId>("campaigns");
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const [error, setError] = useState<string | null>(null);
 
   const [summary, setSummary] = useState<DeclarationSummary | null>(null);
@@ -343,6 +340,7 @@ function DeclarationsInner() {
         has_disclosure: dd.has_disclosure,
         disclosure_details: dd.disclosure_details,
         amount: dd.amount === "" ? null : Number(dd.amount),
+        currency,
         status: dd.status,
       });
       setDd(BLANK_DECL_DRAFT);
@@ -373,7 +371,7 @@ function DeclarationsInner() {
   // ------------------------------------------------------------- declaration edit CRUD
   function openEditDecl(d: Declaration) {
     setEditingDecl(d);
-    setDf(fromDecl(d));
+    setDf(fromDecl(d, currency));
     setError(null);
     setShowDeclForm(true);
   }
@@ -405,7 +403,7 @@ function DeclarationsInner() {
     { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CAMPAIGN_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
     { key: "declaration_count", header: "Declarations", align: "center", render: (c) => <span className="muted">{c.declaration_count}</span> },
     { key: "disclosure_count", header: "Disclosures", align: "center", render: (c) => (c.disclosure_count > 0 ? <Badge tone="high">{c.disclosure_count}</Badge> : <span className="muted">0</span>) },
-    { key: "due_date", header: "Due", sortable: true, render: (c) => <span className="muted">{c.due_date || "—"}</span> },
+    { key: "due_date", header: "Due", sortable: true, render: (c) => <span className="muted">{formatDate(c.due_date)}</span> },
     { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => setOpenId(c.id)}>Manage</button> <button className="btn secondary sm" onClick={() => removeCampaign(c)}>Delete</button></div> },
   ];
 
@@ -415,9 +413,9 @@ function DeclarationsInner() {
     { key: "declarant_name", header: "Declarant", sortable: true, render: (d) => <span className="cell-title">{d.declarant_name || "—"}{d.declarant_role ? <span className="muted"> · {d.declarant_role}</span> : null}</span> },
     { key: "business_unit", header: "Business unit", sortable: true, render: (d) => <span className="muted">{d.business_unit || "—"}</span> },
     { key: "disclosure", header: "Disclosure", render: (d) => <DisclosureBadge has={d.has_disclosure} /> },
-    { key: "amount", header: "Amount", render: (d) => <span className="muted">{d.amount != null ? pkr(d.amount, d.currency) : "—"}</span> },
+    { key: "amount", header: "Amount", render: (d) => <span className="muted">{formatMoney(d.amount, d.currency)}</span> },
     { key: "status", header: "Status", sortable: true, render: (d) => <Badge tone={DECL_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge> },
-    { key: "submitted_date", header: "Submitted", sortable: true, render: (d) => <span className="muted">{d.submitted_date || "—"}</span> },
+    { key: "submitted_date", header: "Submitted", sortable: true, render: (d) => <span className="muted">{formatDate(d.submitted_date)}</span> },
     { key: "actions", header: "", render: (d) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeDeclaration(d.id)}>Remove</button></div> },
   ];
 
@@ -453,9 +451,6 @@ function DeclarationsInner() {
       <Field label="Due date" help="Target date by which all staff must submit.">
         <TextInput type="date" value={cf.due_date} onChange={(v) => setC("due_date", v)} />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this campaign record.">
-        <Select value={cf.workflow_status} onChange={(v) => setC("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -480,11 +475,11 @@ function DeclarationsInner() {
         <TextArea value={df.disclosure_details} onChange={(v) => setD("disclosure_details", v)} rows={3} placeholder="Details of the disclosure." />
       </Field>
       <div className="field-row">
-        <Field label="Amount" help="Value of a declared gift / interest (PKR).">
+        <Field label="Amount" help="Value of a declared gift / interest.">
           <TextInput type="number" value={df.amount} onChange={(v) => setD("amount", v)} placeholder="0" />
         </Field>
         <Field label="Currency">
-          <TextInput value={df.currency} onChange={(v) => setD("currency", v)} placeholder="PKR" />
+          <Select value={df.currency} onChange={(v) => setD("currency", v)} options={currencyOptions} />
         </Field>
       </div>
     </>
@@ -592,7 +587,12 @@ function DeclarationsInner() {
 
       {/* ============================================= CAMPAIGN DRAWER */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="declaration_campaign" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="declaration_campaign" entityId={detail.id} onChanged={() => { reloadCampaigns(); loadDetail(detail.id); }} />
+            <RecordPanels model="declaration_campaign" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.title}`.trim() : "…"}
@@ -644,7 +644,7 @@ function DeclarationsInner() {
                     <input className="input" value={dd.disclosure_details} onChange={(ev) => setDD("disclosure_details", ev.target.value)} placeholder="What is disclosed" />
                   </div>
                   <div style={{ width: 130 }}>
-                    <label className="label">Amount (PKR)</label>
+                    <label className="label">Amount ({currency})</label>
                     <input className="input" type="number" value={dd.amount} onChange={(ev) => setDD("amount", ev.target.value)} placeholder="0" />
                   </div>
                   <div style={{ width: 140 }}>
@@ -677,7 +677,7 @@ function DeclarationsInner() {
                           <td className="cell-title">{d.declarant_name || "—"}{d.declarant_role ? <span className="muted"> · {d.declarant_role}</span> : null}</td>
                           <td className="muted">{d.business_unit || "—"}</td>
                           <td><DisclosureBadge has={d.has_disclosure} /></td>
-                          <td className="muted">{d.amount != null ? pkr(d.amount, d.currency) : "—"}</td>
+                          <td className="muted">{formatMoney(d.amount, d.currency)}</td>
                           <td><Badge tone={DECL_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge></td>
                           <td className="muted">{d.reviewer || "—"}</td>
                           <td>

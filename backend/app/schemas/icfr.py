@@ -115,7 +115,6 @@ class IcfrProcessBase(BaseModel):
     description: str = ""
     key_process: bool = False
     status: IcfrProcessStatus = IcfrProcessStatus.active
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class IcfrProcessCreate(IcfrProcessBase):
@@ -130,10 +129,11 @@ class IcfrProcessUpdate(BaseModel):
     description: str | None = None
     key_process: bool | None = None
     status: IcfrProcessStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class IcfrProcessRead(IcfrProcessBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

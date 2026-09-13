@@ -25,7 +25,7 @@ from app.models.risk import Risk
 from app.models.tenant import Tenant
 from app.services import pdf_report
 from app.services.risk_scoring import max_score_for
-from app.services.risk_settings import get_or_create_settings
+from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
 router = APIRouter(prefix="/reports/pdf", tags=["reports"])
 
@@ -74,6 +74,17 @@ async def risk_register_report(
     process_id: uuid.UUID | None = None,
     asset_id: uuid.UUID | None = None,
     search: str | None = None,
+    owner_id: uuid.UUID | None = None,
+    treatment_owner_id: uuid.UUID | None = None,
+    category_id: uuid.UUID | None = None,
+    level: int | None = None,
+    max_level: int | None = None,
+    parent_id: uuid.UUID | None = None,
+    roots_only: bool | None = None,
+    review: str | None = None,
+    appetite: str | None = None,
+    has_controls: bool | None = None,
+    treatment_overdue: bool | None = None,
     details: Annotated[bool, Query()] = True,
 ) -> Response:
     """The register report, narrowed to whatever the screen was showing.
@@ -84,6 +95,7 @@ async def risk_register_report(
     screen silently: nothing errors, the numbers are just wrong.
     """
     settings = await get_or_create_settings(db, user.tenant_id)
+    book = await load_appetite_book(db, user.tenant_id, settings)
     stmt = build_risk_query(
         status=status_filter,
         category=category,
@@ -91,6 +103,18 @@ async def risk_register_report(
         process_id=process_id,
         asset_id=asset_id,
         search=search,
+        owner_id=owner_id,
+        treatment_owner_id=treatment_owner_id,
+        category_id=category_id,
+        level=level,
+        max_level=max_level,
+        parent_id=parent_id,
+        roots_only=roots_only,
+        review=review,
+        appetite=appetite,
+        appetite_book=book,
+        has_controls=has_controls,
+        treatment_overdue=treatment_overdue,
     )
     risks = list((await db.scalars(stmt.order_by(Risk.reference))).all())
 
@@ -105,6 +129,8 @@ async def risk_register_report(
         ),
         owner_names=await _owner_names(db, risks),
         include_details=details,
+        book=book,
+        scale=scale_for(settings),
     )
     return _pdf(pdf_report.risk_register_pdf(risks, context), "risk-report.pdf")
 

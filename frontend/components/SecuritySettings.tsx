@@ -2,9 +2,23 @@
 
 import { useEffect, useState } from "react";
 import { api, type Me, type MfaSetup } from "@/lib/api";
+// Plain formatter, not useFormat(): this also renders on /mfa-setup, outside the
+// organisation-settings provider, where it falls back to the default settings.
+import { formatDate } from "@/lib/format";
 
-/** Self-service account security: TOTP MFA enrolment and password change. */
-export default function SecuritySettings() {
+
+/** Self-service account security: TOTP MFA enrolment and password change.
+ *
+ *  `enrolOnly` is the forced-enrolment screen (/mfa-setup): the session can do nothing
+ *  but enrol, so the password form and the Disable button are hidden, and `onEnabled`
+ *  runs once MFA is active (the caller signs the user out to sign in with the code). */
+export default function SecuritySettings({
+  enrolOnly = false,
+  onEnabled,
+}: {
+  enrolOnly?: boolean;
+  onEnabled?: () => void;
+} = {}) {
   const [me, setMe] = useState<Me | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -25,6 +39,8 @@ export default function SecuritySettings() {
   }, []);
 
   const local = (me?.auth_source ?? "local") === "local";
+  // The policy requires MFA for this user (privileged role or a checker): no Disable.
+  const required = !!me?.mfa_required_for_user;
 
   async function beginSetup() {
     setErr(null);
@@ -42,6 +58,10 @@ export default function SecuritySettings() {
       setSetup(null);
       setCode("");
       setMsg("Two-factor authentication is now enabled.");
+      if (onEnabled) {
+        onEnabled();
+        return;
+      }
       await refresh();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Invalid code");
@@ -87,10 +107,19 @@ export default function SecuritySettings() {
               <b style={{ fontSize: 14 }}>Two-factor authentication (TOTP)</b>
               <div className="muted" style={{ fontSize: 12.5 }}>
                 Status: {me?.mfa_enabled ? <span style={{ color: "var(--green)", fontWeight: 600 }}>Enabled</span> : "Not enabled"}
+                {required && (
+                  <>
+                    {" · "}
+                    <span style={{ fontWeight: 600 }}>
+                      Required for your role
+                      {!me?.mfa_enabled && me?.mfa_enrolment_due ? ` from ${formatDate(me.mfa_enrolment_due)}` : ""}
+                    </span>
+                  </>
+                )}
               </div>
             </div>
             {me?.mfa_enabled ? (
-              <button className="btn secondary sm" onClick={disable}>Disable</button>
+              required || enrolOnly ? null : <button className="btn secondary sm" onClick={disable}>Disable</button>
             ) : !setup ? (
               <button className="btn sm" onClick={beginSetup}>Enable MFA</button>
             ) : null}
@@ -117,7 +146,8 @@ export default function SecuritySettings() {
           )}
         </div>
 
-        {/* Password change (local accounts only) */}
+        {/* Password change (local accounts only) — not reachable from an enrol-only session */}
+        {!enrolOnly && (
         <div>
           <b style={{ fontSize: 14 }}>Password</b>
           {local ? (
@@ -138,6 +168,7 @@ export default function SecuritySettings() {
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );

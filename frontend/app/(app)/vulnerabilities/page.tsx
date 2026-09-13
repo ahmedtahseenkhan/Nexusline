@@ -8,12 +8,15 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import RelatedChips from "@/components/RelatedChips";
 import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -75,11 +78,11 @@ type Summary = {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+
 const VULN_SEVERITY = ["critical", "high", "medium", "low", "informational"];
 const VULN_SOURCE = ["nessus", "qualys", "openvas", "defender", "manual", "pentest", "bug_bounty"];
 const VULN_STATUS = ["open", "in_progress", "remediated", "risk_accepted", "false_positive"];
@@ -128,7 +131,6 @@ type FindingForm = {
   discovered_date: string;
   due_date: string;
   remediated_date: string;
-  workflow_status: string;
 };
 const BLANK_FINDING: FindingForm = {
   title: "",
@@ -147,7 +149,6 @@ const BLANK_FINDING: FindingForm = {
   discovered_date: "",
   due_date: "",
   remediated_date: "",
-  workflow_status: "draft",
 };
 function fromFinding(v: VulnFinding): FindingForm {
   return {
@@ -167,7 +168,6 @@ function fromFinding(v: VulnFinding): FindingForm {
     discovered_date: v.discovered_date || "",
     due_date: v.due_date || "",
     remediated_date: v.remediated_date || "",
-    workflow_status: v.workflow_status || "draft",
   };
 }
 function findingPayload(f: FindingForm): Record<string, unknown> {
@@ -187,7 +187,6 @@ function findingPayload(f: FindingForm): Record<string, unknown> {
     discovered_date: f.discovered_date || null,
     due_date: f.due_date || null,
     remediated_date: f.remediated_date || null,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -203,7 +202,6 @@ type PatchForm = {
   affected_assets: string;
   owner: string;
   notes: string;
-  workflow_status: string;
 };
 const BLANK_PATCH: PatchForm = {
   title: "",
@@ -216,7 +214,6 @@ const BLANK_PATCH: PatchForm = {
   affected_assets: "",
   owner: "",
   notes: "",
-  workflow_status: "draft",
 };
 function fromPatch(p: PatchRecord): PatchForm {
   return {
@@ -230,7 +227,6 @@ function fromPatch(p: PatchRecord): PatchForm {
     affected_assets: p.affected_assets || "",
     owner: p.owner || "",
     notes: p.notes || "",
-    workflow_status: p.workflow_status || "draft",
   };
 }
 function patchPayload(f: PatchForm): Record<string, unknown> {
@@ -245,7 +241,6 @@ function patchPayload(f: PatchForm): Record<string, unknown> {
     affected_assets: f.affected_assets,
     owner: f.owner,
     notes: f.notes,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -257,6 +252,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 
 /* ================================================================ page ===== */
 function VulnerabilitiesInner() {
+  const { formatDate } = useFormat();
   const [section, setSection] = useState<SectionId>("findings");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -423,7 +419,7 @@ function VulnerabilitiesInner() {
     { key: "asset_name", header: "Asset", sortable: true, render: (v) => <span className="muted">{v.asset_name || v.asset_ip || "—"}</span> },
     { key: "source", header: "Source", render: (v) => <span className="muted">{cap(v.source)}</span> },
     { key: "status", header: "Status", sortable: true, render: (v) => <Badge tone={VULN_STATUS_TONE[v.status] || "neutral"}>{cap(v.status)}</Badge> },
-    { key: "due_date", header: "SLA / Due", sortable: true, render: (v) => (v.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{v.due_date || `${v.sla_days}d SLA`}</span>) },
+    { key: "due_date", header: "SLA / Due", sortable: true, render: (v) => (v.is_overdue ? <Badge tone="critical">Overdue</Badge> : <span className="muted">{v.due_date ? formatDate(v.due_date) : `${v.sla_days}d SLA`}</span>) },
     { key: "actions", header: "", render: (v) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditFinding(v)}>Edit</button> <button className="btn secondary sm" onClick={() => removeFinding(v)}>Delete</button></div> },
   ];
 
@@ -434,8 +430,8 @@ function VulnerabilitiesInner() {
     { key: "patch_ref", header: "Patch ref", render: (p) => <span className="muted">{p.patch_ref || "—"}</span> },
     { key: "category", header: "Category", render: (p) => <span className="muted">{cap(p.category)}</span> },
     { key: "status", header: "Status", sortable: true, render: (p) => <Badge tone={PATCH_STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge> },
-    { key: "released_date", header: "Released", sortable: true, render: (p) => <span className="muted">{p.released_date || "—"}</span> },
-    { key: "deployed_date", header: "Deployed", sortable: true, render: (p) => <span className="muted">{p.deployed_date || "—"}</span> },
+    { key: "released_date", header: "Released", sortable: true, render: (p) => <span className="muted">{formatDate(p.released_date)}</span> },
+    { key: "deployed_date", header: "Deployed", sortable: true, render: (p) => <span className="muted">{formatDate(p.deployed_date)}</span> },
     { key: "actions", header: "", render: (p) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removePatch(p)}>Delete</button></div> },
   ];
 
@@ -504,14 +500,9 @@ function VulnerabilitiesInner() {
           <TextInput type="date" value={ff.due_date} onChange={(v) => setF("due_date", v)} />
         </Field>
       </div>
-      <div className="field-row">
-        <Field label="Remediated date">
-          <TextInput type="date" value={ff.remediated_date} onChange={(v) => setF("remediated_date", v)} />
-        </Field>
-        <Field label="Workflow" help="Approval lifecycle for this finding record.">
-          <Select value={ff.workflow_status} onChange={(v) => setF("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-      </div>
+      <Field label="Remediated date">
+        <TextInput type="date" value={ff.remediated_date} onChange={(v) => setF("remediated_date", v)} />
+      </Field>
     </>
   );
 
@@ -548,6 +539,7 @@ function VulnerabilitiesInner() {
       <Field label="Owner">
         <TextInput value={pf.owner} onChange={(v) => setP("owner", v)} placeholder="Owner" />
       </Field>
+      <RecordApproval entityType="patch_record" entityId={editingPatch?.id ?? null} onChanged={reload} />
     </>
   );
   const patchDetails = (
@@ -557,9 +549,6 @@ function VulnerabilitiesInner() {
       </Field>
       <Field label="Notes">
         <TextArea value={pf.notes} onChange={(v) => setP("notes", v)} rows={3} placeholder="Test results, rollback plan, etc." />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this patch record.">
-        <Select value={pf.workflow_status} onChange={(v) => setP("workflow_status", v)} options={WORKFLOW} />
       </Field>
     </>
   );
@@ -716,7 +705,12 @@ function VulnerabilitiesInner() {
 
       {/* ============================================= FINDING DETAIL DRAWER */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="vuln_finding" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="vuln_finding" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="vuln_finding" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -755,7 +749,7 @@ function VulnerabilitiesInner() {
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Discovered / Due</div>
-                    <div>{detail.discovered_date || "—"} → {detail.due_date || "—"}</div>
+                    <div>{formatDate(detail.discovered_date)} → {formatDate(detail.due_date)}</div>
                   </div>
                 </div>
                 <div style={{ marginTop: 12 }}>

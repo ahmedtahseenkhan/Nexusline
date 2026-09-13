@@ -5,6 +5,13 @@ import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
+import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
+import { invalidateBusinessUnits, type UserRef } from "@/lib/masterData";
+import UserPicker, { UserName } from "@/components/UserPicker";
+import BusinessUnitSelect from "@/components/BusinessUnitSelect";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
@@ -12,9 +19,10 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
-import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
@@ -23,13 +31,16 @@ type BusinessUnit = {
   id: string;
   name: string;
   description: string;
+  /** Legacy free text ("CFO"); shown only while no manager is picked. */
   manager: string;
+  manager_id: string | null;
+  manager_ref: UserRef | null;
   email: string;
   location: string;
   parent_id: string | null;
   parent_name: string | null;
+  /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
-  workflow_owner: string;
   legals: Ref[];
 };
 
@@ -40,39 +51,34 @@ const WORKFLOW_TONE: Record<string, "low" | "medium" | "high" | "critical" | "ne
   retired: "neutral",
 };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+const cap = titleCase;
+const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
+const personText = (u: UserRef | null | undefined, fallback?: string) => (u ? u.full_name || u.email : fallback || "");
 const refToOpt = (l: Ref): AsyncOption => ({ value: l.id, label: l.name });
 
 type FormState = {
   name: string;
   description: string;
-  manager: string;
+  manager_id: string | null;
   email: string;
   location: string;
-  parent_id: string;
-  workflow_status: string;
-  workflow_owner: string;
+  parent_id: string | null;
   legal_ids: AsyncOption[];
 };
 
 const BLANK: FormState = {
-  name: "", description: "", manager: "", email: "", location: "",
-  parent_id: "", workflow_status: "draft", workflow_owner: "", legal_ids: [],
+  name: "", description: "", manager_id: null, email: "", location: "",
+  parent_id: null, legal_ids: [],
 };
 
 function fromUnit(u: BusinessUnit): FormState {
   return {
     name: u.name,
     description: u.description || "",
-    manager: u.manager || "",
+    manager_id: u.manager_id ?? null,
     email: u.email || "",
     location: u.location || "",
-    parent_id: u.parent_id || "",
-    workflow_status: u.workflow_status,
-    workflow_owner: u.workflow_owner || "",
+    parent_id: u.parent_id ?? null,
     legal_ids: u.legals.map(refToOpt),
   };
 }
@@ -141,18 +147,17 @@ function BusinessUnitsInner() {
     const payload = {
       name: f.name,
       description: f.description,
-      manager: f.manager,
+      manager_id: f.manager_id,
       email: f.email,
       location: f.location,
-      parent_id: f.parent_id || null,
-      workflow_status: f.workflow_status,
-      workflow_owner: f.workflow_owner,
+      parent_id: f.parent_id,
       legal_ids: f.legal_ids.map((o) => o.value),
     };
     try {
       if (editing) await apiCall<BusinessUnit>("PATCH", `/business-units/${editing.id}`, payload);
       else await apiCall<BusinessUnit>("POST", "/business-units", payload);
       setShowForm(false);
+      invalidateBusinessUnits();
       reload();
       loadIndex();
       if (recordId) loadDetail(recordId);  // refresh the open view drawer
@@ -164,28 +169,37 @@ function BusinessUnitsInner() {
     }
   }
 
+  /** After units change: the pickers' cached tree, the table and the hierarchy index. */
+  const refreshUnits = useCallback(() => {
+    invalidateBusinessUnits();
+    reload();
+    loadIndex();
+  }, [reload, loadIndex]);
+
   async function remove(u: BusinessUnit) {
-    if (!(await confirmDialog({ title: `Delete business unit "${u.name}"?`, message: "Child units will be detached.", danger: true }))) return;
-    setError(null);
+    if (!(await confirmDeleteWithImpact("business_unit", u.id, u.name, { note: "Child units are detached." }))) return;
     try {
       await apiCall<void>("DELETE", `/business-units/${u.id}`);
       if (recordId === u.id) setRecordId(null);
-      reload();
-      loadIndex();
-      toast("Deleted");
+      refreshUnits();
+      toast(`Archived ${u.name}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      toast(deleteErrorText(e, "Failed to delete the business unit"), "error");
     }
   }
 
-  // Parent options exclude self (prevent a unit being its own parent).
-  const parentOpts: Option[] = useMemo(
-    () =>
-      allUnits
-        .filter((u) => u.id !== editing?.id)
-        .map((u) => ({ value: u.id, label: u.name, sub: u.manager || undefined })),
-    [allUnits, editing],
-  );
+  async function removeMany(rowsToDelete: BusinessUnit[], clear: () => void) {
+    const ok = await confirmDialog({
+      title: `Delete ${rowsToDelete.length} business unit${rowsToDelete.length === 1 ? "" : "s"}?`,
+      message: "They are archived, not erased: child units are detached, they can be restored from Archived, and the activity trail records who removed them.",
+      confirmLabel: "Delete", danger: true,
+    });
+    if (!ok) return;
+    const res = await deleteEach(rowsToDelete, (u) => apiCall("DELETE", `/business-units/${u.id}`));
+    clear();
+    refreshUnits();
+    toastDeleteSummary(res, "business unit");
+  }
 
   // children count is derived from the full index: units whose parent is this one.
   const childCount = useMemo(() => {
@@ -198,11 +212,11 @@ function BusinessUnitsInner() {
 
   const columns: Column<BusinessUnit>[] = [
     { key: "name", header: "Name", sortable: true, render: (u) => <span className="cell-title">{u.name}</span> },
-    { key: "manager", header: "Manager", sortable: true, render: (u) => <span className="muted">{u.manager || "—"}</span> },
+    { key: "manager", header: "Manager", sortable: true, render: (u) => <span className="muted"><UserName user={u.manager_ref} fallback={u.manager} /></span>, text: (u) => personText(u.manager_ref, u.manager) },
     { key: "parent", header: "Parent", render: (u) => <span className="muted">{u.parent_name || "—"}</span> },
     { key: "obligations", header: "Obligations", align: "center", render: (u) => <span className="muted">{u.legals.length || "—"}</span> },
     { key: "subunits", header: "Sub-units", align: "center", render: (u) => <span className="muted">{childCount.get(u.id) || "—"}</span> },
-    { key: "workflow_status", header: "Workflow", sortable: true, render: (u) => <Badge tone={WORKFLOW_TONE[u.workflow_status] || "neutral"}>{cap(u.workflow_status)}</Badge> },
+    { key: "workflow_status", header: "Approval", sortable: true, render: (u) => <Badge tone={WORKFLOW_TONE[u.workflow_status] || "neutral"}>{workflowLabel(u.workflow_status)}</Badge>, text: (u) => workflowLabel(u.workflow_status) },
     { key: "actions", header: "", render: (u) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(u)}>Delete</button></div> },
   ];
 
@@ -220,27 +234,30 @@ function BusinessUnitsInner() {
         />
       </Field>
       <Field label="Parent Unit" help="Place this unit under another to build the organizational hierarchy. A unit cannot be its own parent.">
-        <Select value={f.parent_id} onChange={(v) => set("parent_id", v)} options={parentOpts} placeholder="— Top level —" />
+        <BusinessUnitSelect
+          value={f.parent_id}
+          onChange={(id) => set("parent_id", id)}
+          exclude={editing?.id ?? null}
+          placeholder="— Top level —"
+        />
       </Field>
       <div className="field-row">
-        <Field label="Manager / Head" help="The accountable contact for this unit (RACI head).">
-          <TextInput value={f.manager} onChange={(v) => set("manager", v)} placeholder="Jane Doe" />
+        <Field label="Manager / Head" help="The accountable head of this unit (RACI).">
+          <UserPicker
+            value={f.manager_id}
+            onChange={(id) => set("manager_id", id)}
+            selected={editing?.manager_ref}
+            legacyText={editing?.manager_id ? null : editing?.manager}
+            placeholder="Search people…"
+          />
         </Field>
         <Field label="Contact Email">
           <TextInput value={f.email} onChange={(v) => set("email", v)} type="email" placeholder="head.engineering@example.com" />
         </Field>
       </div>
       <Field label="Location">
-        <TextInput value={f.location} onChange={(v) => set("location", v)} placeholder="London, UK" />
+        <TextInput value={f.location} onChange={(v) => set("location", v)} placeholder="Karachi, PK" />
       </Field>
-      <div className="field-row">
-        <Field label="Workflow Status">
-          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-        <Field label="Workflow Owner" help="The person responsible for moving this record through the approval lifecycle.">
-          <TextInput value={f.workflow_owner} onChange={(v) => set("workflow_owner", v)} placeholder="GRC Lead" />
-        </Field>
-      </div>
     </>
   );
 
@@ -286,6 +303,10 @@ function BusinessUnitsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<BusinessUnit>
+        toolbarRight={<ArchivedRecords entityType="business_unit" noun="business units" onRestored={refreshUnits} refreshKey={refreshKey} />}
+        bulkActions={(rows, clear) => (
+          <button className="btn secondary sm" onClick={() => removeMany(rows, clear)}>Delete selected</button>
+        )}
         columns={columns}
         fetcher={fetchUnits}
         rowKey={(u) => u.id}
@@ -303,7 +324,7 @@ function BusinessUnitsInner() {
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? detail.name : "…"}
-        subtitle={detail ? cap(detail.workflow_status) + (detail.parent_name ? ` · under ${detail.parent_name}` : "") : ""}
+        subtitle={detail ? workflowLabel(detail.workflow_status) + (detail.parent_name ? ` · under ${detail.parent_name}` : "") : ""}
         width={620}
         actions={detail && (
           <>
@@ -315,7 +336,7 @@ function BusinessUnitsInner() {
         {detail && (
           <>
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
-              {field("Manager / Head", detail.manager || "—")}
+              {field("Manager / Head", <UserName user={detail.manager_ref} fallback={detail.manager} />)}
               {field("Contact email", detail.email || "—")}
               {field("Location", detail.location || "—")}
             </div>
@@ -323,8 +344,11 @@ function BusinessUnitsInner() {
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
               {field("Parent unit", detail.parent_name || "— Top level —")}
               {field("Sub-units", String(childCount.get(detail.id) || 0))}
-              {field("Workflow", <Badge tone={WORKFLOW_TONE[detail.workflow_status] || "neutral"}>{cap(detail.workflow_status)}</Badge>)}
-              {field("Workflow owner", detail.workflow_owner || "—")}
+            </div>
+
+            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+              <strong style={{ fontSize: 13, display: "block", marginBottom: 10 }}>Approval</strong>
+              <WorkflowFields entityType="business_unit" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
             </div>
 
             {detail.description && (

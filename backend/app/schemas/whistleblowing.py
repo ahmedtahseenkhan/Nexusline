@@ -45,7 +45,6 @@ class WhistleReportBase(BaseModel):
     tracking_code: str = ""
     confidentiality_note: str = ""
     outcome: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class WhistleReportCreate(WhistleReportBase):
@@ -67,10 +66,11 @@ class WhistleReportUpdate(BaseModel):
     tracking_code: str | None = None
     confidentiality_note: str | None = None
     outcome: str | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class WhistleReportRead(WhistleReportBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

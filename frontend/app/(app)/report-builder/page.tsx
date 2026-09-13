@@ -18,6 +18,7 @@ import FormModal from "@/components/FormModal";
 import { Field, MultiSelect, Select, TextInput, TextArea } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { useFormat } from "@/lib/format";
 
 /* The report builder. A report is a question — which records, shown how, summed up
    how — and the whole screen is generated from the subject registry the server
@@ -30,6 +31,10 @@ import { IconPlus } from "@/components/icons";
    so the monthly pack is re-run live rather than re-built by hand. */
 
 const PAGE_SIZE = 50;
+
+/** The server sends date cells as ISO text (the same values go into the exports). */
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
 type Filters = Record<string, string | string[]>;
 type Named = { id: string; name?: string; title?: string; reference?: string; email?: string; full_name?: string };
@@ -55,6 +60,14 @@ async function nameOf(source: string, id: string): Promise<string> {
 }
 
 export default function ReportBuilderPage() {
+  const { formatDate, formatDateTime } = useFormat();
+  /** A result cell or filter value as shown on screen: ISO dates in the organisation's format. */
+  const show = (v: unknown): string => {
+    const text = String(v);
+    if (ISO_DATE.test(text)) return formatDate(text);
+    if (ISO_DATETIME.test(text)) return formatDateTime(text);
+    return text;
+  };
   const [subjects, setSubjects] = useState<ReportSubject[]>([]);
   const [subjectKey, setSubjectKey] = useState("");
   const [title, setTitle] = useState("");
@@ -443,7 +456,7 @@ export default function ReportBuilderPage() {
               <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
                 <strong style={{ fontSize: 14 }}>{run.total} record{run.total === 1 ? "" : "s"}</strong>
                 <span className="muted" style={{ fontSize: 12.5 }}>
-                  {run.params.length ? run.params.map(([k, v]) => `${k}: ${v}`).join(" · ") : "Whole register"}
+                  {run.params.length ? run.params.map(([k, v]) => `${k}: ${show(v)}`).join(" · ") : "Whole register"}
                 </span>
                 {run.summary_over < run.total && (
                   <Badge tone="medium">Summary over the first {run.summary_over}</Badge>
@@ -478,7 +491,7 @@ export default function ReportBuilderPage() {
                       <tr key={row.id}>
                         {run.columns.map((c) => {
                           const v = row.cells[c.key];
-                          return <td key={c.key} style={{ fontSize: 13 }}>{v === null || v === undefined || v === "" ? <span className="muted">—</span> : String(v)}</td>;
+                          return <td key={c.key} style={{ fontSize: 13 }}>{v === null || v === undefined || v === "" ? <span className="muted">—</span> : show(v)}</td>;
                         })}
                       </tr>
                     ))}

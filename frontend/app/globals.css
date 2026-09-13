@@ -1139,7 +1139,7 @@ td .chips .chip { padding: 1px 7px; font-size: 12px; font-weight: 500; white-spa
 .drawer.full .drawer-head { padding: 14px 24px; align-items: center; }
 .drawer-back { flex-shrink: 0; }
 .drawer-columns { display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; }
-.drawer-columns.has-aside { grid-template-columns: minmax(0, 1fr) 460px; }
+.drawer-columns.has-aside { grid-template-columns: minmax(0, 1fr) var(--rail-w); }
 .drawer-main { overflow-y: auto; padding: 22px 28px 40px; min-width: 0; }
 .drawer-main-inner { max-width: 1180px; }
 .drawer-columns:not(.has-aside) .drawer-main-inner { margin: 0 auto; }
@@ -1195,3 +1195,411 @@ td .chips .chip { padding: 1px 7px; font-size: 12px; font-weight: 500; white-spa
 .toolbar-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .toolbar-filters .select, .toolbar-filters .input, .toolbar-filters button.input { padding: 7px 10px; font-size: 13px; min-height: 0; }
 .appetite-chip { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin-left: auto; padding-right: 6px; }
+
+/* =========================================================== Record page (dossier) */
+:root { --rail-w: 380px; --rec-gutter: 28px; }
+@media (max-width: 1439px) { :root { --rail-w: 340px; } }
+@media (max-width: 640px)  { :root { --rec-gutter: 16px; } }
+
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Badge modifiers (components/badges.tsx: asIs, hollow) */
+.badge.as-is { text-transform: none; }
+.badge.hollow { background: var(--surface); border-color: var(--border-strong); color: var(--muted); }
+.badge.hollow::before { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+
+/* The one filled button, link buttons, focus */
+.btn.rec-primary { background: var(--primary-deep); border-color: var(--primary-deep); box-shadow: var(--shadow-sm); }
+.btn.rec-primary:hover { filter: brightness(0.94); }
+.rec-link { background: none; border: 0; padding: 0; font: inherit; font-weight: 600; color: var(--primary-text);
+  cursor: pointer; text-decoration: none; }
+.rec-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.rec-link:disabled { color: var(--muted); cursor: not-allowed; text-decoration: none; }
+.drawer.rec :is(a, button, [tabindex]):focus-visible { outline: 2px solid var(--primary-deep); outline-offset: 2px; box-shadow: none; }
+.drawer.rec [tabindex="-1"]:focus { outline: none; }
+
+/* Header */
+.drawer.full.rec .rec-head { flex-shrink: 0; padding: 12px var(--rec-gutter) 14px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.rec-crumb { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 12.5px; line-height: 18px; color: var(--muted); }
+.rec-back { flex: none; white-space: nowrap; background: none; border: 0; padding: 0; font: inherit; font-weight: 560; color: var(--muted); cursor: pointer; }
+.rec-back:hover { color: var(--primary-text); }
+.rec-idline { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.rec-idline .sep { color: var(--border-strong); }
+.rec-kind { font-size: 11px; line-height: 16px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+.rec-ref { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text); background: var(--surface-3);
+  border: 0; border-radius: 5px; padding: 1px 6px; white-space: nowrap; cursor: copy; }
+.rec-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.rec-title { font-size: 22px; line-height: 28px; font-weight: 680; margin: 4px 0 0; text-wrap: balance; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rec-lead { margin: 4px 0 0; max-width: 86ch; font-size: 13.5px; line-height: 20px; color: var(--muted); text-wrap: pretty;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rec-lead.is-open { display: block; -webkit-line-clamp: unset; overflow: visible; }
+.rec-meta { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 12px 0 0; padding: 0; }
+.rec-meta > div { min-width: 0; }
+.rec-meta dt { font-size: 11.5px; line-height: 16px; font-weight: 600; color: var(--muted); }
+.rec-meta dd { margin: 2px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  font-size: 13.5px; line-height: 20px; font-weight: 560; color: var(--text); }
+.rec-meta dd .sub { font-size: 12.5px; font-weight: 450; color: var(--muted); }
+.rec-gap { color: var(--amber); font-weight: 600; }
+.rec-rule-cond { font-size: 12px; font-weight: 450; color: var(--muted); }
+
+/* Main column */
+.drawer.full.rec .drawer-main { padding: 18px var(--rec-gutter) 48px; }
+.drawer.full.rec .drawer-main-inner { max-width: 1040px; container: recmain / inline-size; }
+.rec-banner { display: flex; gap: 12px; align-items: flex-start; margin: 0 0 14px; padding: 10px 14px; font-size: 13px; line-height: 18px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--amber-bg); }
+.rec-headline-row { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; margin: 0 0 10px; }
+.rec-headline { margin: 0; max-width: 100ch; font-size: 14px; line-height: 20px; color: var(--text); text-wrap: pretty; }
+.rec-headline b { font-weight: 620; color: var(--text-strong); }
+.rec-key { margin: 8px 0 0; font-size: 11.5px; line-height: 16px; color: var(--muted); }
+
+/* Summary band: 3 or 6 tiles, 1px dividers, no holes */
+.rec-band { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
+  background: var(--border); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+@container recmain (max-width: 719px) {
+  .rec-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rec-band[data-count="3"] { grid-template-columns: 1fr; }
+}
+@container recmain (max-width: 479px) { .rec-band { grid-template-columns: 1fr; } }
+.rec-band > li { display: flex; min-width: 0; background: var(--surface); }
+.rec-tile { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 12px 14px; color: inherit; text-decoration: none; }
+a.rec-tile:hover { background: var(--surface-2); color: inherit; }
+.rec-tile-label { font-size: 11.5px; line-height: 16px; font-weight: 600; color: var(--muted); }
+.rec-tile-value { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 18px; line-height: 24px; font-weight: 650;
+  color: var(--text-strong); font-variant-numeric: tabular-nums; }
+.rec-tile-value .unit { font-size: 12.5px; font-weight: 500; color: var(--muted); }
+.rec-tile-value.is-hollow { color: var(--muted); font-weight: 600; }
+.rec-tone-critical { color: var(--red); } .rec-tone-high { color: var(--orange); }
+.rec-tone-medium { color: var(--amber); } .rec-tone-low { color: var(--green); }
+.rec-tile-because { font-size: 12.5px; line-height: 18px; color: var(--muted); text-wrap: pretty;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.rec-tile-because b { font-weight: 600; color: var(--text); }
+.rec-basis { margin-top: auto; padding-top: 2px; display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; line-height: 16px; font-weight: 500; }
+.rec-basis::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid currentColor; }
+.rec-basis.evidenced { color: var(--green); } .rec-basis.evidenced::before { background: currentColor; }
+.rec-basis.declared { color: var(--amber); } .rec-basis.declared::before { background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
+.rec-basis.derived { color: var(--primary-text); }
+.rec-basis.missing { color: var(--muted); } .rec-basis.missing::before { border-style: dashed; }
+.rec-cia { display: inline-flex; gap: 4px; }
+.rec-cia span { font-size: 13px; font-weight: 650; line-height: 20px; padding: 0 7px; border-radius: 5px; background: var(--surface-3); color: var(--text); }
+.rec-cia span.high { background: var(--orange-bg); color: var(--orange); }
+.rec-cia span.critical { background: var(--red-bg); color: var(--red); }
+
+/* AppetiteScale (aria-hidden) */
+.rec-scale { position: relative; height: 30px; margin-top: 2px; }
+.rec-scale-bar { position: absolute; left: 0; right: 0; top: 10px; height: 6px; border-radius: 3px; display: flex; overflow: hidden; }
+.rec-scale-bar .z-in { background: var(--green-bg); } .rec-scale-bar .z-el { background: var(--amber-bg); } .rec-scale-bar .z-br { background: var(--red-bg); }
+.rec-scale-tick { position: absolute; top: 18px; transform: translateX(-50%); font-size: 11px; line-height: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rec-scale-mk { position: absolute; top: 4px; width: 2px; height: 18px; transform: translateX(-1px); background: var(--text-strong); }
+.rec-scale-mk.dim { opacity: 0.35; }
+.rec-scale-mk.suggested { width: 0; background: none; border-left: 2px dashed var(--muted); }
+.rec-scale-mk.target { top: 9px; width: 8px; height: 8px; transform: translateX(-4px); border-radius: 50%; background: var(--surface); border: 2px solid var(--text-strong); }
+
+/* Open points */
+.rec-op { margin: 14px 0 18px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.rec-op-head { display: flex; align-items: baseline; gap: 8px; }
+.rec-op-head h2 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 650; }
+.rec-op-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rec-op ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.rec-op li { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; padding: 5px 0;
+  border-top: 1px solid var(--border); font-size: 13px; line-height: 18px; }
+.rec-op li:first-child { border-top: 0; }
+.rec-op .mk { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+.rec-op li .rec-link { font-size: 12.5px; white-space: nowrap; }
+.rec-op-notes { margin: 6px 0 0; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12.5px; line-height: 18px; color: var(--muted); }
+.rec-op.is-clear { background: var(--surface); color: var(--green); font-size: 13px; }
+@container recmain (max-width: 559px) {
+  .rec-op li { grid-template-columns: 14px minmax(0, 1fr); }
+  .rec-op li .rec-link { grid-column: 2; justify-self: start; }
+}
+
+/* Section nav (sticky inside the main scroller) */
+.rec-nav { position: sticky; top: 0; z-index: 2; display: flex; gap: 2px; overflow-x: auto; margin: 0 0 4px; padding: 6px 0;
+  background: var(--surface); border-bottom: 1px solid var(--border); scrollbar-width: thin; }
+.rec-nav a { flex: none; padding: 5px 10px; border-radius: 6px; font-size: 12.5px; font-weight: 560; color: var(--muted); white-space: nowrap; }
+.rec-nav a:hover { color: var(--text-strong); background: var(--surface-2); }
+.rec-nav a[aria-current="true"] { color: var(--primary-text); background: var(--primary-weak-2); }
+.rec-nav .n { margin-left: 4px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Sections: rules, not boxes */
+.rec-sec { padding: 22px 0 8px; border-top: 1px solid var(--border); scroll-margin-top: 48px; }
+.rec-nav + .rec-sec { border-top: 0; }
+.rec-sec-head { display: flex; align-items: center; gap: 10px; min-height: 28px; margin-bottom: 12px; flex-wrap: wrap; }
+.rec-sec-head h2 { margin: 0; display: flex; align-items: baseline; gap: 8px; font-size: 14.5px; line-height: 20px; font-weight: 660; }
+.rec-sec-head .n, .rec-sec-head .sub { font-size: 12px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rec-sec-head .acts { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.rec-sec.is-empty { padding: 12px 0; }
+.rec-sec.is-empty .rec-sec-head { margin: 0; }
+.rec-empty { font-size: 13px; color: var(--muted); }
+.rec-prose { margin: 0 0 14px; max-width: 76ch; font-size: 14px; line-height: 22px; text-wrap: pretty; white-space: pre-wrap; }
+.rec-quote { margin: 8px 0; padding: 2px 0 2px 10px; border-left: 2px solid var(--border-strong); font-size: 13px; color: var(--text); }
+.rec-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.rec-table-wrap table { min-width: 560px; }
+.rec-table-wrap td.num, .rec-table-wrap th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.rec-agree { font-size: 12.5px; font-weight: 600; }
+.rec-agree.ok { color: var(--green); } .rec-agree.differs { color: var(--amber); }
+
+/* Facts and the not-set sentence */
+.rec-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px 24px; margin: 0; }
+.rec-facts dt { font-size: 11.5px; line-height: 16px; font-weight: 600; color: var(--muted); }
+.rec-facts dd { margin: 2px 0 0; font-size: 13.5px; line-height: 20px; color: var(--text); overflow-wrap: anywhere; }
+.rec-facts .wide { grid-column: 1 / -1; }
+.rec-facts .wide dd { max-width: 86ch; white-space: pre-wrap; }
+.rec-notset { margin: 12px 0 0; font-size: 12.5px; line-height: 18px; color: var(--muted); }
+.rec-notset b { font-weight: 560; color: var(--text); }
+
+/* Linked records */
+.rec-rel { display: grid; grid-template-columns: 170px minmax(0, 1fr); margin: 0; }
+.rec-rel dt, .rec-rel dd { margin: 0; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.rec-rel dt { padding-right: 12px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.rec-rel dt .n { margin-left: 4px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.rec-rel dd { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+.rec-rel .meta { font-size: 12px; color: var(--muted); }
+.rec-rel .grp-act { margin-left: auto; }
+.rec-rel .grp-foot { flex-basis: 100%; font-size: 12px; color: var(--muted); }
+a.chip.rec-chip { display: inline-block; max-width: min(72ch, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+a.chip.rec-chip .ref { margin-right: 5px; font-family: var(--mono); font-size: 11.5px; color: var(--primary-deep); }
+.rec-none { margin: 10px 0 0; font-size: 12.5px; line-height: 18px; color: var(--muted); }
+@container recmain (max-width: 559px) {
+  .rec-rel { grid-template-columns: 1fr; }
+  .rec-rel dt { border-bottom: 0; padding-bottom: 0; }
+}
+
+/* Disclosure (forms on demand) */
+.rec-disclosure { margin-top: 8px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.rec-disclosure .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+
+/* Rail: Sign-off & trail */
+.drawer.full.rec .drawer-aside { padding: 18px 20px 40px; }
+.rec-rail-card { margin-top: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.rec-rail-card > header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.rec-rail-card > header h3 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 650; }
+.rec-rail-body { padding: 10px 14px 12px; }
+.rec-so-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 10px 0;
+  border-top: 1px solid var(--border); font-size: 12.5px; line-height: 18px; }
+.rec-so-row:first-child { border-top: 0; padding-top: 0; }
+.rec-so-row .k { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-strong); }
+.rec-so-row .d { grid-column: 1 / -1; color: var(--muted); }
+.rec-so-row .d b { font-weight: 560; color: var(--text); }
+.rec-so-row .acts { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.rec-filters { display: flex; gap: 4px; flex-wrap: wrap; }
+.rec-filters button { padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
+  font: inherit; font-size: 11.5px; line-height: 16px; color: var(--muted); cursor: pointer; }
+.rec-filters button[aria-pressed="true"] { background: var(--primary-weak); border-color: transparent; color: var(--primary-text); }
+.rec-trail { list-style: none; margin: 8px 0 0; padding: 0; }
+.rec-trail li { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 10px; padding: 6px 0; font-size: 12.5px; line-height: 18px; }
+.rec-trail li::before { content: ""; position: absolute; left: 5px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+.rec-trail li:first-child::before { top: 12px; }
+.rec-trail li:last-child::before { bottom: calc(100% - 12px); }
+.rec-trail .dot { position: relative; z-index: 1; width: 12px; height: 12px; margin-top: 3px; border-radius: 50%; background: var(--surface); border: 2px solid var(--border-strong); }
+.rec-trail time { display: block; font-size: 11.5px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rec-trail .cat { font-size: 11.5px; color: var(--muted); }
+.rec-trail .quote { margin-top: 2px; color: var(--text); }
+.rec-trail .flag { display: block; margin-top: 2px; font-size: 11.5px; color: var(--amber); }
+
+/* Stacked and phone */
+@media (max-width: 1100px) {
+  .drawer.full.rec .drawer-main { padding: 16px var(--rec-gutter) 24px; }
+  .drawer.full.rec .drawer-aside { padding: 16px var(--rec-gutter) 40px; }
+  .rec-crumb { flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  .rec-crumb { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "back close" "id id" "acts acts"; row-gap: 6px; }
+  .rec-back { grid-area: back; justify-self: start; }
+  .rec-close { grid-area: close; }
+  .rec-idline { grid-area: id; }
+  .rec-idline .sep { display: none; }
+  .rec-actions { grid-area: acts; margin-left: 0; justify-content: flex-start; }
+  .rec-meta { gap: 8px 20px; }
+  .rec-meta > div { flex: 1 1 40%; }
+}
+
+/* Print: working copy of the open record only */
+.rec-print-footer { display: none; margin-top: 16px; font-size: 11px; color: var(--muted); }
+@media print {
+  html.rec-printing body *:not(:has(.rec-print-root)):not(.rec-print-root):not(.rec-print-root *) { display: none !important; }
+  html.rec-printing, html.rec-printing body { height: auto !important; overflow: visible !important; background: #fff !important; }
+  html.rec-printing .main, html.rec-printing .content { margin: 0 !important; padding: 0 !important; max-width: none !important; }
+  html.rec-printing .drawer-overlay { position: static !important; background: none !important; animation: none !important; }
+  html.rec-printing .drawer { height: auto !important; max-width: none !important; box-shadow: none !important; animation: none !important; }
+  html.rec-printing .drawer-columns { display: block !important; overflow: visible !important; }
+  html.rec-printing .drawer-main, html.rec-printing .drawer-aside { overflow: visible !important; height: auto !important; border: 0 !important; background: none !important; padding: 0 var(--rec-gutter) 12px !important; }
+  html.rec-printing :is(.rec-actions, .rec-close, .rec-nav, .rec-filters, .rec-key, .btn, .rec-link) { display: none !important; }
+  html.rec-printing :is(.rec-title, .rec-lead, .rec-tile-because) { display: block !important; -webkit-line-clamp: unset !important; overflow: visible !important; }
+  html.rec-printing .rec-print-footer { display: block !important; }
+  html.rec-printing :is(.rec-band, .rec-op, .rec-rail-card, tr) { break-inside: avoid; }
+}
+
+/* Record page kit: supporting rules for components/record and the Phase 0 rail
+   (RecordHeader, SignOffCard, RecordTrail, AttestationPanel, CollabPanel,
+   CustomFieldsPanel, RelatedChips clustering). Existing tokens only. */
+.drawer :is(h1, h2)[tabindex="-1"]:focus, .modal[tabindex="-1"]:focus { outline: none; }
+/* Text-sized controls get a 28px hit area without changing the line box. */
+.rec-link, .rec-filters button, .rec-ref { position: relative; }
+.rec-link::after, .rec-ref::after { content: ""; position: absolute; inset: -5px -3px; }
+.rec-filters button::after { content: ""; position: absolute; inset: -4px 0; }
+.rec-close { flex: none; width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 8px;
+  background: transparent; color: var(--muted); font-size: 14px; cursor: pointer; }
+.rec-close:hover { background: var(--surface-2); color: var(--text); }
+/* Long unbroken text (URLs, e-mail addresses, pasted references) wraps instead of pushing
+   the page sideways — the lead once expanded, the headline, open points and rail lines. */
+.rec-lead, .rec-headline, .rec-op li, .rec-op-notes, .rec-so-row .d { overflow-wrap: anywhere; }
+.rec-lead-wrap { display: flex; align-items: flex-end; gap: 8px; }
+.rec-lead-wrap .rec-lead { min-width: 0; }
+.rec-lead-toggle { flex: none; font-size: 12.5px; line-height: 20px; }
+.rec-notset-v { font-weight: 450; }
+.rec-rules { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rec-rules-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+.rec-headline-row > .rec-key-toggle { flex: none; font-size: 12.5px; }
+/* AppetiteScale: tick labels sit below the marks (a mark runs 4–22px), one row. */
+.rec-scale { height: 34px; }
+.rec-scale-tick { top: 22px; }
+.rec-scale-tick.is-mark { color: var(--text); font-weight: 600; }
+.rec-op-clear { margin: 0; }
+.rc-none { margin: 0; }
+.rec-fact-solo { display: block; margin: 0 0 12px; }
+.rec-error { color: var(--red); }
+.rec-rail-body > p.rec-empty { margin: 0; }
+
+/* Sign-off rows (also used by RecordApproval compact and the classic attestation card) */
+.rec-so-row > :not(.k) { grid-column: 1 / -1; }
+.rec-so-row .d .rec-disclosure { margin-top: 6px; }
+.rec-wf-history { margin-top: 4px; }
+.rec-approval-card { margin-bottom: 16px; }
+.rec-att-card .card-head { gap: 8px; }
+.rec-att-blocked { align-self: center; font-size: 12.5px; color: var(--muted); }
+.rec-att-pending { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; color: var(--text); }
+.rec-att-pending li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rec-att-history { display: grid; gap: 8px; margin-top: 4px; }
+.rec-att-item { display: grid; gap: 2px; padding-top: 8px; border-top: 1px solid var(--border); }
+.rec-att-item:first-child { padding-top: 0; border-top: 0; }
+
+/* Custom fields (read card and on-demand editor) */
+.rec-cf-note { display: block; margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--muted); }
+p.rec-cf-note { margin: 0 0 10px; }
+.rec-cf-editor .row { margin-top: 4px; }
+
+/* Discussion & files */
+.rec-collab-group { padding: 0 0 10px; }
+.rec-collab-group + .rec-collab-group { padding-top: 10px; border-top: 1px solid var(--border); }
+.rec-collab-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.rec-collab-head .lbl { font-size: 12.5px; font-weight: 600; color: var(--text-strong); }
+.rec-collab-head .n { margin-left: 4px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rec-collab-head .rec-link { font-size: 12.5px; }
+.rec-collab-comments { display: grid; gap: 10px; }
+.rec-collab-comment { display: flex; gap: 10px; }
+.rec-collab-del { margin-left: 6px; font-size: 11.5px; font-weight: 500; color: var(--muted); }
+.rec-collab-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.rec-collab-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; font-size: 13px; }
+.rec-collab-list li > :first-child { overflow-wrap: anywhere; text-align: left; }
+.rec-collab-list li .muted { font-size: 11.5px; }
+.rec-collab-list li .btn { margin-left: auto; }
+.rec-collab-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.rec-collab-tag { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border: 1px solid; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.rec-collab-tag button { padding: 0 2px; border: 0; background: none; color: inherit; font-size: 13px; line-height: 1; cursor: pointer; }
+.rec-collab-add { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.rec-collab .rec-empty { margin: 0; }
+
+/* Trail extras (filtered-out rows stay in the DOM so print shows the whole trail) */
+.rec-trail li.is-out { display: none; }
+.rec-trail .sum { margin-top: 2px; overflow-wrap: anywhere; }
+.rec-print-footer { padding: 0 var(--rec-gutter); }
+@media print {
+  html.rec-printing .rec-trail li.is-out { display: grid !important; }
+  html.rec-printing .rec-trail-none { display: none !important; }
+}
+.rec-trail-foot { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+
+/* v1.1 shared kit B (record-page-spec "v1.1 decisions"): print section, shared Issues,
+   suggested-clauses row, labelled pickers, import rows in the trail. Existing tokens only. */
+
+/* Print section. Opt-in classes for any page, so no page embeds its own print <style>:
+   .record-print-full  — a region that clamps or scrolls on screen prints whole
+                         (inline max-height / overflow / line clamps included)
+   .record-print       — the same for every clamped or scrolling element inside it
+   .record-print-hide  — not printed (screen-only toggles, "Read full policy")
+   .record-print-only  — printed only (e.g. a note that the screen shows elsewhere)
+   .record-print-keep  — kept on one page where possible (a table row group, a card) */
+.record-print-only { display: none; }
+@media print {
+  .record-print-full,
+  .record-print [style*="max-height"],
+  .record-print [style*="overflow"] {
+    max-height: none !important; overflow: visible !important; -webkit-line-clamp: unset !important;
+  }
+  .record-print-full { height: auto !important; }
+  .record-print-hide { display: none !important; }
+  .record-print-only { display: block !important; }
+  .record-print-keep { break-inside: avoid; }
+  /* Every dossier table prints whole and fits the page (no inner scroller clips it). */
+  html.rec-printing .rec-table-wrap { overflow: visible !important; max-height: none !important; border: 0 !important; }
+  html.rec-printing .rec-table-wrap table { min-width: 0 !important; }
+  html.rec-printing .rec-suggest-line, html.rec-printing .rec-issues .rec-disclosure { display: none !important; }
+}
+
+/* RecordIssues (components/record/RecordIssues.tsx) */
+.rec-issue-form .label { margin-top: 0; }
+.rec-issue-form .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+.rec-issue-title { flex: 1 1 220px; min-width: 0; }
+.rec-issue-sev { width: 140px; max-width: 100%; }
+.rec-issue-owner { flex: 0 1 240px; min-width: 180px; max-width: 100%; }
+.rec-issue-err { margin: 8px 0 0; font-size: 12.5px; }
+.rec-issue-acts { margin-top: 10px; }
+.rec-issues-list.is-after-form { margin-top: 12px; }
+.rec-issues > .rec-issues-msg, .rec-issues-card .rec-issues-msg { margin: 0; }
+.rec-issues-card .card-head { gap: 8px; }
+.rec-issues-card .card-head h3 .n { margin-left: 4px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .rec-issue-owner, .rec-issue-sev { flex: 1 1 100%; width: auto; }
+}
+
+/* SuggestedClausesRow: one muted line, then the existing list in a disclosure. */
+.rec-suggest { flex-basis: 100%; }
+.rec-suggest-line { margin: 0; font-size: 12.5px; line-height: 18px; color: var(--muted); }
+.rec-rel dd .rec-suggest-line { font-size: 12px; }
+.rec-suggest-panel > .card { margin-bottom: 0 !important; box-shadow: none; }
+
+/* LabelledSearch: the label sits on the picker like a form label. */
+.rec-labelled > .label { margin-top: 0; }
+
+/* Trail: an import backfill reads as one sentence and names nobody. */
+.rec-trail b.rec-trail-import { color: var(--amber); }
+
+/* v1.1 interaction & security (engineer A): menu focus, pickers, chip remove buttons,
+   read-only rich text (RichTextView). Existing tokens only. */
+.menu-item:focus-visible { outline: 2px solid var(--primary-deep); outline-offset: -2px; background: var(--primary-weak-2); }
+.menu-label { display: block; }
+/* AsyncSelect: the clear button sits over the trigger's right edge (no longer nested in it). */
+.async-clear {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  min-width: 28px; height: 28px; padding: 0 6px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+}
+.async-clear:hover { color: var(--text); background: var(--surface-2); }
+/* Chip remove buttons (AsyncMultiSelect chips, filter chips) keep the old glyph look. */
+button.chip-x { border: 0; background: none; padding: 0 1px; margin: 0; color: inherit; font: inherit; font-size: 11px; line-height: 1; }
+:is(.async-clear, button.chip-x, .activity-toggle, .rt-btn):focus-visible { outline: 2px solid var(--primary-deep); outline-offset: 1px; }
+/* Stored rich text shown read-only: the editor's typography without the editing chrome. */
+.rt-view { overflow-wrap: anywhere; line-height: 1.6; }
+.rt-view > :first-child { margin-top: 0; }
+.rt-view > :last-child { margin-bottom: 0; }
+.rt-view p { margin: 0 0 10px; }
+.rt-view :is(h1, h2) { font-size: 18px; margin: 14px 0 6px; }
+.rt-view :is(h3, h4) { font-size: 15px; margin: 12px 0 5px; }
+.rt-view :is(ul, ol) { margin: 8px 0; padding-left: 24px; }
+.rt-view blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--border-strong); color: var(--muted); }
+.rt-view :is(pre, code) { font-family: var(--mono); font-size: 12.5px; }
+.rt-view pre { white-space: pre-wrap; background: var(--surface-2); padding: 8px 10px; border-radius: 6px; }
+.rt-view table { border-collapse: collapse; margin: 8px 0; }
+.rt-view :is(th, td) { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.rt-view a { color: var(--primary-text); text-decoration: underline; }
+/* v1.1 shared kit B (cont.): LabelledSearch renders a `.field` so pickers read its label;
+   keep it compact and styled like the other record-form labels. */
+.field.rec-labelled { margin-bottom: 0; }
+.field.rec-labelled > label.label { margin: 0 0 6px; font-size: 11.5px; color: var(--muted); }
+.rec-issues table td:first-child .ref { white-space: nowrap; }
+
+/* v1.1 asset record pages (information asset, IT asset): the labelled picker in the
+   Hosted-on link forms takes the width the old unlabelled wrapper had. */
+.row > .field.rec-labelled.rec-link-pick { flex: 1 1 220px; min-width: 0; }

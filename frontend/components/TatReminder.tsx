@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { api, type TatSummary } from "@/lib/api";
 import { Badge } from "@/components/badges";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 
 /* The sign-in reminder for breached turnaround times.
 
@@ -67,13 +68,20 @@ export default function TatReminder() {
     setOpen(false);
   }
 
+  // A layer of the shared escape stack: Esc dismisses the reminder and nothing under it
+  // (a deep-linked record opened behind it stays open). Focus moves in and comes back.
+  const shown = open && !!summary;
+  useEscapeLayer(shown, dismiss);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(shown, dialogRef);
+
   if (!open || !summary) return null;
 
   const breached = summary.records.filter((r) => r.days_overdue > 0);
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && dismiss()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label="Turnaround time breached">
+      <div ref={dialogRef} tabIndex={-1} className="modal" role="dialog" aria-modal="true" aria-label="Turnaround time breached" onKeyDown={(e) => trapTab(e, dialogRef.current)}>
         <div className="modal-head">
           <h2>Turnaround time breached</h2>
           <button className="x" onClick={dismiss} aria-label="Close">✕</button>

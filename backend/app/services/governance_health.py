@@ -9,7 +9,8 @@ gauge with no explanation.
 The components follow what risk and compliance functions are actually judged on:
 
 * **Within tolerance** — the share of risks whose effective score is at or under the
-  organisation's tolerance. The board question: are we inside the boundary we set?
+  tolerance that applies to them: their top-level category's where one is set, else the
+  organisation's. The board question: are we inside the boundary we set?
 * **Control assurance** — the share of controls that are effective or partially
   effective. Mapped-but-untested does not count; a promise is not assurance.
 * **Compliance assured** — the share of applicable clauses backed by a working
@@ -20,6 +21,13 @@ The components follow what risk and compliance functions are actually judged on:
 Weights favour the first two because they describe exposure today; the last two
 describe the discipline that keeps it that way. Everything here is pure: the endpoint
 gathers the counts, this module turns them into a number and its reasons.
+
+**An empty measure is not a green one.** A component with nothing behind it (no risks,
+no controls, no applicable clauses, no tracked deadlines) has no value at all: it is left
+out of the score and the remaining weights are re-normalised, and the page says what the
+score was actually computed on ("scored on 2 of 4 measures, 55 % of weight"). Treating
+"no risks" as "100 % within tolerance" is how a controls-only tenant used to collect two
+free full-marks components.
 """
 from __future__ import annotations
 
@@ -30,18 +38,30 @@ from dataclasses import dataclass
 class Component:
     key: str
     label: str
-    #: 0-100
-    value: float
+    #: 0-100, or None when there is nothing to measure (``population == 0``).
+    value: float | None
     weight: float
     #: One line the page shows under the component — the raw counts behind the %.
     detail: str
+    #: How many records the percentage is taken over. Zero means "no data": the
+    #: component is excluded from the score rather than counted as 0 % or 100 %.
+    population: int = 0
+    #: The rule behind the number, in plain words, for the "how is this calculated" note.
+    formula: str = ""
+
+    @property
+    def scored(self) -> bool:
+        return self.population > 0
 
 
-def pct(numerator: int, denominator: int, *, empty: float = 100.0) -> float:
-    """Percentage, treating an empty denominator as ``empty`` — no risks means nothing
-    is out of tolerance, but no controls means nothing is assured."""
+def pct(numerator: int, denominator: int) -> float | None:
+    """Percentage of ``denominator``; None when there is nothing to take a share of.
+
+    There is deliberately no "empty" default: an empty population is neither 0 % nor
+    100 %, it is unknown, and the caller decides what unknown means (here: excluded).
+    """
     if denominator <= 0:
-        return empty
+        return None
     return round(100.0 * numerator / denominator, 1)
 
 
@@ -61,28 +81,80 @@ def components(
             "tolerance", "Within tolerance",
             pct(risks_within_tolerance, risks_total),
             0.35, f"{risks_within_tolerance} of {risks_total} risks at or under tolerance",
+            population=max(risks_total, 0),
+            formula="Risks whose current score (residual if assessed, otherwise inherent) is at "
+                    "or under their tolerance — the top-level risk category's where one is set, "
+                    "otherwise the organisation's — as a share of all live risks.",
         ),
         Component(
             "assurance", "Control assurance",
-            pct(controls_assured, controls_total, empty=0.0),
-            0.30, f"{controls_assured} of {controls_total} controls effective or partially effective",
+            pct(controls_assured, controls_total),
+            0.30, f"{controls_assured} of {controls_total} operating controls effective or partially effective",
+            population=max(controls_total, 0),
+            formula="Controls rated effective or partially effective by their last test, as a "
+                    "share of controls that are implemented or operational. Mapped but untested "
+                    "counts as not assured; planned and retired controls are left out.",
         ),
         Component(
             "compliance", "Compliance assured",
-            pct(clauses_assured, clauses_applicable, empty=0.0),
+            pct(clauses_assured, clauses_applicable),
             0.20, f"{clauses_assured} of {clauses_applicable} applicable clauses backed by a working control",
+            population=max(clauses_applicable, 0),
+            formula="Applicable clauses of compliance frameworks backed by at least one working "
+                    "control, as a share of all applicable clauses. Maturity and guidance "
+                    "frameworks are not counted.",
         ),
         Component(
             "discipline", "Nothing overdue",
             pct(deadlines_total - deadlines_overdue, deadlines_total),
             0.15, f"{deadlines_overdue} of {deadlines_total} tracked deadlines past due",
+            population=max(deadlines_total, 0),
+            formula="Tracked deadlines (risk reviews, open risk-treatment actions — or the "
+                    "treatment deadline of a risk with no actions — tests of operating "
+                    "controls, policy reviews, issue and audit-finding due dates) that are not "
+                    "yet past due, as a share of all of them.",
         ),
     ]
 
 
+def scored_parts(parts: list[Component]) -> list[Component]:
+    """The components that have a population behind them."""
+    return [c for c in parts if c.scored and c.value is not None]
+
+
 def score(parts: list[Component]) -> int:
+    """Weighted mean of the scored components, weights re-normalised over them.
+
+    Returns 0 when nothing is scored; callers pair it with :func:`has_data` so that
+    case is shown as "no data", never as a critical 0.
+    """
+    live = scored_parts(parts)
+    total_weight = sum(c.weight for c in live)
+    if total_weight <= 0:
+        return 0
+    return int(round(sum(c.value * c.weight for c in live) / total_weight))  # type: ignore[operator]
+
+
+@dataclass(frozen=True)
+class Coverage:
+    """What the score was actually computed on."""
+
+    #: Components with data behind them.
+    scored: int
+    #: Components the score is defined over.
+    total: int
+    #: Share of the full weight those scored components carry, 0-100.
+    weight_pct: float
+
+
+def coverage(parts: list[Component]) -> Coverage:
     total_weight = sum(c.weight for c in parts) or 1.0
-    return int(round(sum(c.value * c.weight for c in parts) / total_weight))
+    live = scored_parts(parts)
+    return Coverage(
+        scored=len(live),
+        total=len(parts),
+        weight_pct=round(100.0 * sum(c.weight for c in live) / total_weight, 1),
+    )
 
 
 #: Band for an organisation with nothing to score yet — no risks, no controls, no
@@ -96,7 +168,7 @@ def has_data(parts: list[Component]) -> bool:
     An empty tenant is not healthy and it is not critical — there is nothing to
     judge. Scoring one anyway is how a freshly wiped system reported 70/100.
     """
-    return any(not c.detail.startswith("0 of 0") for c in parts)
+    return any(c.population > 0 for c in parts)
 
 
 def band(value: int, *, data: bool = True) -> str:

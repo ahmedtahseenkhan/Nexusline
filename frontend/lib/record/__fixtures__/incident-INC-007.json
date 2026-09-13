@@ -1,0 +1,245 @@
+{
+  "type": "incident",
+  "note": "INC-007: the shape of GET /incidents/{id} as the dev stack returns it (INC-001, captured 2026-09-13), filled in as a critical, SBP-reportable card-data exposure with 4 hours left on the initial notification, contained, no handler assigned, and a personal data breach whose breach record was not created (Data Protection not enabled).",
+  "input": {
+    "incident": {
+      "title": "Card data exposed through a misconfigured SFTP share",
+      "description": "A partner SFTP account could read the daily masked-PAN extract folder.",
+      "category": "Data leakage",
+      "category_id": "6026ead4-cc77-4410-ade8-0593ce09aec2",
+      "classification": "Confidential",
+      "classification_id": "k2",
+      "severity": "critical",
+      "status": "investigating",
+      "assignee": "",
+      "assignee_id": null,
+      "reported_by": "",
+      "reported_by_id": null,
+      "impact": "Masked PAN files for 1,240 customers were readable by an external partner account for 3 days.",
+      "root_cause": "",
+      "lessons_learned": "",
+      "cost": 850000,
+      "detected_at": "2026-09-12T01:00:00Z",
+      "occurred_at": "2026-09-10T17:00:00Z",
+      "contained_at": "2026-09-12T05:00:00Z",
+      "resolved_at": null,
+      "customers_affected": 1240,
+      "records_affected": 5310,
+      "near_miss": false,
+      "personal_data_breach": true,
+      "is_reportable": true,
+      "regulator": "SBP",
+      "regulator_id": "rg1",
+      "workflow_owner_id": null,
+      "id": "b615fe96-523d-4794-80ca-f6309c65eb83",
+      "reference": "INC-007",
+      "workflow_status": "draft",
+      "workflow_owner": "",
+      "assignee_ref": null,
+      "reported_by_ref": null,
+      "category_ref": {
+        "id": "c7",
+        "key": "incident_type",
+        "value": "data_leakage",
+        "label": "Data leakage"
+      },
+      "classification_ref": {
+        "id": "k2",
+        "key": "incident_classification",
+        "value": "confidential",
+        "label": "Confidential"
+      },
+      "regulator_ref": {
+        "id": "rg1",
+        "key": "regulator",
+        "value": "sbp",
+        "label": "SBP"
+      },
+      "workflow_owner_ref": null,
+      "stage_count": 5,
+      "completed_stages": 2,
+      "lifecycle_complete": false,
+      "current_stage": "Eradication",
+      "stages": [
+        {
+          "id": "f3511571-1ebe-4d6a-aee1-2c0b868985ca",
+          "incident_id": "b615fe96-523d-4794-80ca-f6309c65eb83",
+          "name": "Identification",
+          "order_index": 0,
+          "status": "done",
+          "notes": "",
+          "completed_at": "2026-09-12"
+        },
+        {
+          "id": "09a5bf61-1757-4e27-9567-70cd32c720d1",
+          "incident_id": "b615fe96-523d-4794-80ca-f6309c65eb83",
+          "name": "Containment",
+          "order_index": 1,
+          "status": "done",
+          "notes": "",
+          "completed_at": "2026-09-12"
+        },
+        {
+          "id": "38b1d4eb-3e59-4d6b-8cdf-4b3de87856f0",
+          "incident_id": "b615fe96-523d-4794-80ca-f6309c65eb83",
+          "name": "Eradication",
+          "order_index": 2,
+          "status": "pending",
+          "notes": "",
+          "completed_at": null
+        },
+        {
+          "id": "6b7c235c-091d-4bac-87b8-21b8098c8ff8",
+          "incident_id": "b615fe96-523d-4794-80ca-f6309c65eb83",
+          "name": "Recovery",
+          "order_index": 3,
+          "status": "pending",
+          "notes": "",
+          "completed_at": null
+        },
+        {
+          "id": "33ac814c-3cba-4b3f-af3e-9a9b3a4bc8e5",
+          "incident_id": "b615fe96-523d-4794-80ca-f6309c65eb83",
+          "name": "Lessons Learned",
+          "order_index": 4,
+          "status": "pending",
+          "notes": "",
+          "completed_at": null
+        }
+      ],
+      "regulatory_reports": [
+        {
+          "id": "rr1",
+          "incident_id": "b615fe96-523d-4794-80ca-f6309c65eb83",
+          "regulator": "SBP",
+          "regulator_id": "rg1",
+          "regulator_ref": null,
+          "report_type": "initial_notification",
+          "deadline": "2026-09-13T13:00:00Z",
+          "status": "pending",
+          "submitted_at": null,
+          "reference": "",
+          "summary": "",
+          "submitted_by": "",
+          "submitted_by_id": null,
+          "submitted_by_ref": null,
+          "is_overdue": false,
+          "created_at": "2026-09-12T01:10:00Z"
+        },
+        {
+          "id": "rr2",
+          "incident_id": "b615fe96-523d-4794-80ca-f6309c65eb83",
+          "regulator": "SBP",
+          "regulator_id": "rg1",
+          "regulator_ref": null,
+          "report_type": "final_report",
+          "deadline": "2026-10-12T01:00:00Z",
+          "status": "pending",
+          "submitted_at": null,
+          "reference": "",
+          "summary": "",
+          "submitted_by": "",
+          "submitted_by_id": null,
+          "submitted_by_ref": null,
+          "is_overdue": false,
+          "created_at": "2026-09-12T01:10:00Z"
+        }
+      ],
+      "controls": [],
+      "vendors": [],
+      "assets": [],
+      "risks": [],
+      "loss_events": [],
+      "data_breaches": [],
+      "notification_deadline": "2026-09-13T13:00:00Z",
+      "notified_at": null,
+      "regulator_reference": null,
+      "hours_to_deadline": 4,
+      "notified_on_time": null,
+      "mttd_hours": 32,
+      "mttc_hours": 4,
+      "mttr_hours": null,
+      "created_at": "2026-07-03T20:35:46.947782Z"
+    }
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "draft",
+      "approvalSteps": 0,
+      "lastStep": null,
+      "lastSubmitAt": null,
+      "attestation": null
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "severity",
+        "value": "Critical",
+        "because": "Data leakage · Confidential; 1,240 customers, 5,310 records affected.",
+        "basis": {
+          "kind": "declared",
+          "text": "Set by hand"
+        }
+      },
+      {
+        "key": "regclock",
+        "value": "Due in 4 h",
+        "because": "Initial report to SBP due 13 Sep 2026 13:00, counted from detection at 12 Sep 2026 01:00.",
+        "basis": {
+          "kind": "derived",
+          "text": "Calculated from detection time"
+        }
+      },
+      {
+        "key": "impact",
+        "value": "1,240 customers · 5,310 records",
+        "because": "Masked PAN files for 1,240 customers were readable by an external partner account for 3 days.",
+        "basis": {
+          "kind": "declared",
+          "text": "Recorded by hand"
+        }
+      },
+      {
+        "key": "loss",
+        "value": "Est. PKR 850,000",
+        "because": "Estimated PKR 850,000; no loss event recorded yet.",
+        "basis": {
+          "kind": "declared",
+          "text": "Estimate"
+        }
+      },
+      {
+        "key": "response",
+        "value": "Contained in 4 h",
+        "because": "Detected 1 d 8 h after it occurred; contained 4 h after detection; not resolved yet.",
+        "basis": {
+          "kind": "derived",
+          "text": "From the timeline"
+        }
+      },
+      {
+        "key": "stage",
+        "value": "Stage 3 of 5",
+        "because": "2 of 5 stages done; next: Eradication.",
+        "basis": {
+          "kind": "derived",
+          "text": "From the response lifecycle"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "incident.handler",
+        "level": "gap"
+      },
+      {
+        "id": "incident.breach_record_missing",
+        "level": "gap"
+      }
+    ],
+    "headline": "Critical incident, reportable to SBP; report due in 4 h; stage 3 of 5: Eradication."
+  }
+}

@@ -13,6 +13,9 @@ PERMISSION_CATALOG: dict[str, str] = {
     "risk:accept": "Approve risk acceptances",
     "control:read": "View controls",
     "control:write": "Create and edit controls",
+    # Recording and reviewing control tests is assurance work, held apart from editing
+    # the control: a tester need not be able to rewrite the control they test.
+    "control:test": "Record control tests and review other people's tests",
     "compliance:read": "View frameworks and requirements",
     "compliance:write": "Manage frameworks, requirements and control mappings",
     "incident:read": "View incidents",
@@ -53,6 +56,10 @@ PERMISSION_CATALOG: dict[str, str] = {
     # edit a risk.
     "sla:manage": "Set turnaround-time (TAT) targets and escalation",
     "sso:manage": "Configure single sign-on (SSO)",
+    # Organisation-wide locale and retention. Held apart from ``org:write`` (which risk
+    # managers hold to maintain business units): the retention window decides when
+    # archived records are purged for good, so it is an administrator's decision.
+    "settings:manage": "Change organisation settings: currency, timezone, date format, fiscal year, retention",
     "asset:read": "View assets",
     "asset:write": "Create and edit assets",
     "user:read": "View users",
@@ -123,6 +130,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "risk:delete",
             "control:read",
             "control:write",
+            "control:test",
             "asset:read",
             "asset:write",
             "incident:read",
@@ -193,6 +201,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "compliance:write",
             "control:read",
             "control:write",
+            "control:test",
             "policy:read",
             "policy:write",
             "privacy:read",

@@ -74,13 +74,16 @@ class ControlInput:
 
     ``healthy`` is False when the control cannot be relied on right now — a failed
     audit, an overdue test, or an open finding against it. ``health_note`` explains
-    which, so the rationale can say *why* a control earned nothing.
+    which, so the rationale can say *why* a control earned nothing. ``key`` identifies
+    the control to the caller (its id) in ``ResidualSuggestion.credited``; the label is
+    used when it is None.
     """
 
     label: str
     effectiveness: ControlEffectiveness | None
     healthy: bool = True
     health_note: str = ""
+    key: object = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,10 @@ class ResidualSuggestion:
     score: int
     reduction: int
     rationale: list[str] = field(default_factory=list)
+    #: The controls whose credit the suggestion takes (``ControlInput.key``, else the
+    #: label), in input order — empty when the suggestion equals inherent. Accepting the
+    #: suggestion is relying on each of these ratings.
+    credited: tuple = ()
 
     @property
     def differs_from(self) -> bool:  # pragma: no cover - convenience for callers
@@ -119,6 +126,7 @@ def suggest_residual(
         return _build(inherent_likelihood, inherent_impact, inherent_likelihood, inherent_impact, 0, rationale)
 
     earned = 0
+    credited: list = []
     for control in controls:
         weight = policy.weight_for(control.effectiveness)
         rating = control.effectiveness.value.replace("_", " ") if control.effectiveness else "not assessed"
@@ -130,6 +138,7 @@ def suggest_residual(
             rationale.append(f"{control.label}: no credit — rated {rating}.")
             continue
         earned += weight
+        credited.append(control.label if control.key is None else control.key)
         rationale.append(f"{control.label}: −{weight} ({rating}).")
 
     reduction = min(earned, policy.max_reduction)
@@ -146,7 +155,12 @@ def suggest_residual(
             f"Applied −{reduction} to {policy.applies_to}: "
             f"{inherent_likelihood}x{inherent_impact} → {likelihood}x{impact}."
         )
-    return _build(inherent_likelihood, inherent_impact, likelihood, impact, reduction, rationale)
+    return _build(
+        inherent_likelihood, inherent_impact, likelihood, impact, reduction, rationale,
+        # Credit counts only where it moved the score: a reduction spent against a
+        # likelihood already at 1 relies on nothing.
+        credited=tuple(credited) if (likelihood, impact) != (inherent_likelihood, inherent_impact) else (),
+    )
 
 
 def _apply(likelihood: int, impact: int, reduction: int, applies_to: str) -> tuple[int, int]:
@@ -173,11 +187,14 @@ def _build(
     impact: int,
     reduction: int,
     rationale: list[str],
+    *,
+    credited: tuple = (),
 ) -> ResidualSuggestion:
     inherent = inherent_likelihood * inherent_impact
     suggested = likelihood * impact
     if suggested < inherent:
         rationale.append(f"Suggested residual score {suggested} (inherent {inherent}).")
     return ResidualSuggestion(
-        likelihood=likelihood, impact=impact, score=suggested, reduction=reduction, rationale=rationale
+        likelihood=likelihood, impact=impact, score=suggested, reduction=reduction,
+        rationale=rationale, credited=credited,
     )

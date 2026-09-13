@@ -8,9 +8,12 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 interface EsgAssessment {
@@ -58,13 +61,12 @@ interface EsgSummary {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
 const PILLARS = opts(["environmental", "social", "governance"]);
 const ESG_STATUS = opts(["not_started", "in_progress", "achieved", "off_track"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const ENV_RISK = opts(["high", "medium", "low"]);
 
 // ------------------------------------------------------------------ tones
@@ -76,12 +78,12 @@ const ENV_RISK_TONE: Record<string, Tone> = { high: "critical", medium: "medium"
 type EsgForm = {
   title: string; description: string; pillar: string; category: string; metric: string;
   target_value: string; current_value: string; unit: string; status: string; owner: string;
-  period: string; sbp_green_banking_ref: string; workflow_status: string;
+  period: string; sbp_green_banking_ref: string;
 };
 const BLANK_ESG: EsgForm = {
   title: "", description: "", pillar: "environmental", category: "", metric: "",
   target_value: "", current_value: "", unit: "", status: "not_started", owner: "",
-  period: "", sbp_green_banking_ref: "", workflow_status: "draft",
+  period: "", sbp_green_banking_ref: "",
 };
 function fromEsg(a: EsgAssessment): EsgForm {
   return {
@@ -89,7 +91,6 @@ function fromEsg(a: EsgAssessment): EsgForm {
     category: a.category || "", metric: a.metric || "", target_value: a.target_value || "",
     current_value: a.current_value || "", unit: a.unit || "", status: a.status || "not_started",
     owner: a.owner || "", period: a.period || "", sbp_green_banking_ref: a.sbp_green_banking_ref || "",
-    workflow_status: a.workflow_status || "draft",
   };
 }
 
@@ -117,6 +118,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 /* ================================================================ page ===== */
 function EsgInner() {
   const [section, setSection] = useState<SectionId>("assessments");
+  const { formatDate } = useFormat();
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<EsgSummary | null>(null);
@@ -211,7 +213,7 @@ function EsgInner() {
     { key: "sector", header: "Sector", sortable: true, render: (r) => <span className="muted">{r.sector || "—"}</span> },
     { key: "risk_category", header: "Risk category", sortable: true, render: (r) => <Badge tone={ENV_RISK_TONE[r.risk_category] || "neutral"}>{cap(r.risk_category)}</Badge> },
     { key: "assessor", header: "Assessor", sortable: true, render: (r) => <span className="muted">{r.assessor || "—"}</span> },
-    { key: "rating_date", header: "Rating date", sortable: true, render: (r) => <span className="muted">{r.rating_date || "—"}</span> },
+    { key: "rating_date", header: "Rating date", sortable: true, render: (r) => <span className="muted">{formatDate(r.rating_date)}</span> },
     { key: "actions", header: "", render: (r) => <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditEnv(r)}>Edit</button><button className="btn secondary sm" onClick={() => removeEnv(r)}>Delete</button></div> },
   ];
 
@@ -263,9 +265,6 @@ function EsgInner() {
       </div>
       <Field label="SBP Green Banking reference" help="Clause / requirement in the SBP Green Banking Guidelines.">
         <TextInput value={ef.sbp_green_banking_ref} onChange={(v) => setE("sbp_green_banking_ref", v)} placeholder="GBG 2017 §4.2" />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this record.">
-        <Select value={ef.workflow_status} onChange={(v) => setE("workflow_status", v)} options={WORKFLOW} />
       </Field>
     </>
   );
@@ -381,7 +380,12 @@ function EsgInner() {
       )}
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="esg_assessment" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="esg_assessment" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="esg_assessment" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference || ""} ${detail.title}`.trim() : "…"}

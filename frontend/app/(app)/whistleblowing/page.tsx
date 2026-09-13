@@ -8,10 +8,13 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ local types
 interface WhistleUpdate {
@@ -59,11 +62,11 @@ interface WhistleSummary {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+
 const CATEGORY = opts([
   "fraud",
   "corruption",
@@ -111,7 +114,6 @@ type ReportForm = {
   tracking_code: string;
   confidentiality_note: string;
   outcome: string;
-  workflow_status: string;
 };
 const BLANK_REPORT: ReportForm = {
   title: "",
@@ -128,7 +130,6 @@ const BLANK_REPORT: ReportForm = {
   tracking_code: "",
   confidentiality_note: "",
   outcome: "",
-  workflow_status: "draft",
 };
 function fromReport(r: WhistleReport): ReportForm {
   return {
@@ -146,7 +147,6 @@ function fromReport(r: WhistleReport): ReportForm {
     tracking_code: r.tracking_code || "",
     confidentiality_note: r.confidentiality_note || "",
     outcome: r.outcome || "",
-    workflow_status: r.workflow_status || "draft",
   };
 }
 function reportPayload(f: ReportForm): Record<string, unknown> {
@@ -166,7 +166,6 @@ function reportPayload(f: ReportForm): Record<string, unknown> {
     tracking_code: f.tracking_code,
     confidentiality_note: f.confidentiality_note,
     outcome: f.outcome,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -180,6 +179,7 @@ const BLANK_UPDATE: UpdateDraft = { note: "", author: "", update_date: "", statu
 
 /* ================================================================ page ===== */
 function WhistleblowingInner() {
+  const { formatDate } = useFormat();
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<WhistleReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -338,9 +338,6 @@ function WhistleblowingInner() {
       <Field label="Outcome" help="Investigation conclusion and remediation.">
         <TextArea value={rf.outcome} onChange={(v) => setR("outcome", v)} rows={3} placeholder="Findings, disciplinary action, remediation." />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this case record.">
-        <Select value={rf.workflow_status} onChange={(v) => setR("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -406,7 +403,12 @@ function WhistleblowingInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="whistleblowing_report" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="whistleblowing_report" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="whistleblowing_report" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -470,7 +472,7 @@ function WhistleblowingInner() {
                         .sort((a, b) => (b.update_date || b.created_at).localeCompare(a.update_date || a.created_at))
                         .map((u) => (
                           <tr key={u.id}>
-                            <td className="muted">{u.update_date || "—"}</td>
+                            <td className="muted">{formatDate(u.update_date)}</td>
                             <td className="cell-title">{u.note || "—"}</td>
                             <td>{u.status_change ? <Badge tone="info">{cap(u.status_change)}</Badge> : <span className="muted">—</span>}</td>
                             <td className="muted">{u.author || "—"}</td>

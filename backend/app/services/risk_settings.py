@@ -9,9 +9,16 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.risk import ResidualPolicy, RiskMatrixLevel, RiskSetting
+from app.models.risk import ResidualPolicy, RiskAppetite, RiskMatrixLevel, RiskSetting
 from app.services.residual_engine import ResidualPolicySpec
-from app.services.risk_scoring import DEFAULT_MATRIX_SIZE, max_score_for
+from app.services.risk_scoring import (
+    DEFAULT_MATRIX_SIZE,
+    AppetiteBook,
+    SeverityScale,
+    max_score_for,
+    validate_bands,
+    validate_cells,
+)
 
 #: Generic scale wording used until a bank supplies its own. Deliberately plain: these
 #: are placeholders that prompt someone to write the real criteria, not a methodology.
@@ -46,6 +53,57 @@ async def get_matrix_size(db: AsyncSession, tenant_id) -> int:
 async def get_max_score(db: AsyncSession, tenant_id) -> int:
     """Highest score the tenant's matrix can produce — what severity bands scale to."""
     return max_score_for(await get_matrix_size(db, tenant_id))
+
+
+def scale_for(settings: RiskSetting) -> SeverityScale:
+    """The tenant's banding: matrix maximum, configured thresholds, cell overrides.
+
+    Stored configuration that no longer fits the matrix (bands above a shrunk maximum,
+    cells outside it) is ignored here rather than trusted; the matrix-config endpoint
+    clears it on resize.
+    """
+    size = settings.matrix_size or DEFAULT_MATRIX_SIZE
+    max_score = max_score_for(size)
+    try:
+        bands = validate_bands(settings.severity_bands or None, max_score)
+    except ValueError:
+        bands = None
+    try:
+        cells = validate_cells(settings.matrix_cells or {}, size)
+    except ValueError:
+        cells = {}
+    return SeverityScale(max_score=max_score, bands=bands, cells=cells)
+
+
+async def get_severity_scale(db: AsyncSession, tenant_id) -> SeverityScale:
+    """:func:`scale_for` the tenant's settings row (created on first read)."""
+    return scale_for(await get_or_create_settings(db, tenant_id))
+
+
+async def load_appetite_book(
+    db: AsyncSession, tenant_id, settings: RiskSetting | None = None
+) -> AppetiteBook:
+    """Per-category appetite (``RiskAppetite``) over the tenant default, plus the
+    risk-category tree needed to find each risk's level-1 category. Two small queries;
+    RLS scopes both to the current tenant."""
+    from app.models.lookup import Lookup
+
+    settings = settings or await get_or_create_settings(db, tenant_id)
+    rows = (await db.scalars(select(RiskAppetite))).all()
+    parents = {
+        lid: parent
+        for lid, parent in (
+            await db.execute(
+                select(Lookup.id, Lookup.parent_id).where(Lookup.key == "risk_category")
+            )
+        ).all()
+    }
+    return AppetiteBook(
+        appetite=settings.appetite_score,
+        tolerance=settings.tolerance_score,
+        by_category={r.category_id: (r.appetite_score, r.tolerance_score) for r in rows},
+        parents=parents,
+    )
 
 
 async def get_levels(db: AsyncSession, tenant_id) -> dict[str, dict[int, RiskMatrixLevel]]:

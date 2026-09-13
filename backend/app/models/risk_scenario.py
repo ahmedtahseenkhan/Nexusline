@@ -12,7 +12,22 @@ release.
 """
 from __future__ import annotations
 
-from sqlalchemy import Boolean, CheckConstraint, Integer, String, Text, UniqueConstraint
+import uuid
+from datetime import datetime
+
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -53,3 +68,56 @@ class RiskScenarioTemplate(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Bas
     #: scenario. Editable per tenant like every other column here.
     control_references: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+
+risk_proposal_assets = Table(
+    "risk_proposal_assets",
+    Base.metadata,
+    Column("proposal_id", Uuid, ForeignKey("risk_proposals.id", ondelete="CASCADE"), primary_key=True),
+    Column("asset_id", Uuid, ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class RiskProposal(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 3: a generated risk waiting for a person to accept, merge or reject it.
+
+    Asset × threat generation used to write straight into the register (the review saw
+    1,700 near-duplicates). Proposals now queue here, deduplicated by scenario + process
+    + business unit, and only an accepted one becomes a register risk.
+    """
+
+    __tablename__ = "risk_proposals"
+
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    scenario_reference: Mapped[str] = mapped_column(String(32), default="", nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    business_unit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("business_units.id", ondelete="SET NULL"), nullable=True
+    )
+    process_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("processes.id", ondelete="SET NULL"), nullable=True
+    )
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True
+    )
+    inherent_likelihood: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inherent_impact: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    control_references: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: scenario + process + business unit — two proposals with the same key are one risk.
+    dedupe_key: Mapped[str] = mapped_column(String(255), default="", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False, index=True)
+    merged_into_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("risk_proposals.id", ondelete="SET NULL"), nullable=True
+    )
+    promoted_risk_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    decided_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[str] = mapped_column(Text, default="", nullable=False)

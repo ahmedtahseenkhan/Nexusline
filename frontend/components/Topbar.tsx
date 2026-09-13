@@ -8,6 +8,7 @@ import { useMobileNav } from "@/lib/mobileNav";
 import { IconBell, IconLogout } from "./icons";
 
 const TITLES: Record<string, string> = {
+  "/my-work": "My Work",
   "/dashboard": "Dashboard",
   "/goals": "Strategy & Goals",
   "/risks": "Risk Register",
@@ -61,6 +62,8 @@ export default function Topbar({ user }: { user: Me | null }) {
   const key = Object.keys(TITLES).find((k) => pathname.startsWith(k));
   const title = key ? TITLES[key] : "NexusLine";
   const [unseen, setUnseen] = useState(0);
+  // Of the unseen, how many are addressed to me or one of my roles (the badge turns red).
+  const [unseenMine, setUnseenMine] = useState(0);
   const { toggle: toggleMobileNav } = useMobileNav();
 
   const [q, setQ] = useState("");
@@ -69,8 +72,21 @@ export default function Topbar({ user }: { user: Me | null }) {
   const searchRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    api.notifications().then((r) => setUnseen(r.unseen_count)).catch(() => {});
+    // Only the badge counts are needed here; they cover the user's whole feed, not the
+    // page. `fresh=false`: the server re-scans at most once a minute for the bell.
+    api
+      .notifications(1, 0, "&fresh=false")
+      .then((r) => {
+        setUnseen(r.unseen_count);
+        setUnseenMine(r.unseen_mine ?? 0);
+      })
+      .catch(() => {});
   }, [pathname]);
+
+  const bellLabel =
+    unseen === 0
+      ? "Notifications"
+      : `Notifications: ${unseen} new${unseenMine ? `, ${unseenMine} for you` : ""}`;
 
   // Debounced global search.
   useEffect(() => {
@@ -160,11 +176,14 @@ export default function Topbar({ user }: { user: Me | null }) {
             </div>
           )}
         </div>
-        <Link href="/notifications" className="btn secondary sm" aria-label="Notifications" title="Notifications" style={{ position: "relative" }}>
+        <Link href="/notifications" className="btn secondary sm" aria-label={bellLabel} title={bellLabel} style={{ position: "relative" }}>
           <IconBell width={16} height={16} />
           {unseen > 0 && (
-            <span style={{ position: "absolute", top: -6, right: -6, minWidth: 16, height: 16, padding: "0 4px", borderRadius: 999, background: "var(--red)", color: "#fff", fontSize: 10, fontWeight: 700, display: "grid", placeItems: "center" }}>
-              {unseen}
+            <span
+              aria-hidden
+              style={{ position: "absolute", top: -6, right: -6, minWidth: 16, height: 16, padding: "0 4px", borderRadius: 999, background: unseenMine > 0 ? "var(--red)" : "var(--muted)", color: "#fff", fontSize: 10, fontWeight: 700, display: "grid", placeItems: "center" }}
+            >
+              {unseen > 99 ? "99+" : unseen}
             </span>
           )}
         </Link>

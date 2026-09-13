@@ -43,6 +43,14 @@ async def lifespan(app: FastAPI):
         lookups = await reconcile_reference_data()
         if lookups:
             logger.info("Reconciled reference data: added %s lookup rows", lookups)
+        # Bring data written before the product-review rules into line with them
+        # (duplicate frameworks and tiles, test clocks on planned controls, residual
+        # above inherent), then add the unique indexes those rules rely on.
+        from app.db.data_repairs import repair_data
+
+        repaired = await repair_data()
+        if repaired.any():
+            logger.info("Data repairs: %s", repaired)
     except Exception:  # noqa: BLE001
         logger.exception("Startup DB initialization failed")
         raise

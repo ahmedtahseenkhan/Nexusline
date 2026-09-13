@@ -4,15 +4,23 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact } from "@/lib/records";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import WorkflowFields from "@/components/WorkflowFields";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import UserPicker from "@/components/UserPicker";
+import LookupSelect from "@/components/LookupSelect";
+import type { LookupRef, UserRef } from "@/lib/masterData";
+import { titleCase } from "@/lib/text";
 
 // ------------------------------------------------------------------ local types
 interface OutsourcingReview {
@@ -40,7 +48,10 @@ interface OutsourcingArrangement {
   is_cloud: boolean;
   cloud_model: string;
   data_offshored: boolean;
+  /** Legacy text (the picked country's name once `country_id` is set). */
   country: string;
+  country_id: string | null;
+  country_ref: LookupRef | null;
   sbp_approval_required: boolean;
   sbp_approval_status: string;
   sbp_approval_ref: string;
@@ -50,7 +61,11 @@ interface OutsourcingArrangement {
   exit_plan_tested: boolean;
   concentration_note: string;
   status: string;
+  /** Legacy text (the picked user's name once `owner_id` is set). */
   owner: string;
+  owner_id: string | null;
+  owner_ref: UserRef | null;
+  /** Read-only: moved by the approval lifecycle (WorkflowFields). */
   workflow_status: string;
   review_count: number;
   is_contract_expiring: boolean;
@@ -75,7 +90,7 @@ interface VendorOption {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
@@ -93,7 +108,6 @@ const MATERIALITY = opts(["material", "non_material"]);
 const CLOUD_MODEL = opts(["iaas", "paas", "saas", "not_applicable"]);
 const SBP_STATUS = opts(["not_required", "pending", "approved", "rejected"]);
 const STATUS = opts(["proposed", "active", "under_review", "terminated"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const REVIEW_STATUS = opts(["planned", "completed"]);
 
 // ------------------------------------------------------------------ tones
@@ -111,6 +125,9 @@ const REVIEW_STATUS_TONE: Record<string, Tone> = {
   planned: "neutral",
   completed: "low",
 };
+
+const ownerName = (a: OutsourcingArrangement) => a.owner_ref?.full_name || a.owner_ref?.email || a.owner || "";
+const countryName = (a: OutsourcingArrangement) => a.country_ref?.label || a.country || "";
 
 function cloudLabel(model: string): string {
   if (model === "iaas") return "IaaS";
@@ -131,7 +148,7 @@ type ArrForm = {
   is_cloud: boolean;
   cloud_model: string;
   data_offshored: boolean;
-  country: string;
+  country_id: string | null;
   sbp_approval_required: boolean;
   sbp_approval_status: string;
   sbp_approval_ref: string;
@@ -141,8 +158,7 @@ type ArrForm = {
   exit_plan_tested: boolean;
   concentration_note: string;
   status: string;
-  owner: string;
-  workflow_status: string;
+  owner_id: string | null;
 };
 const BLANK_ARR: ArrForm = {
   title: "",
@@ -155,7 +171,7 @@ const BLANK_ARR: ArrForm = {
   is_cloud: false,
   cloud_model: "not_applicable",
   data_offshored: false,
-  country: "",
+  country_id: null,
   sbp_approval_required: false,
   sbp_approval_status: "not_required",
   sbp_approval_ref: "",
@@ -165,8 +181,7 @@ const BLANK_ARR: ArrForm = {
   exit_plan_tested: false,
   concentration_note: "",
   status: "proposed",
-  owner: "",
-  workflow_status: "draft",
+  owner_id: null,
 };
 function fromArr(a: OutsourcingArrangement): ArrForm {
   return {
@@ -180,7 +195,7 @@ function fromArr(a: OutsourcingArrangement): ArrForm {
     is_cloud: !!a.is_cloud,
     cloud_model: a.cloud_model || "not_applicable",
     data_offshored: !!a.data_offshored,
-    country: a.country || "",
+    country_id: a.country_id ?? null,
     sbp_approval_required: !!a.sbp_approval_required,
     sbp_approval_status: a.sbp_approval_status || "not_required",
     sbp_approval_ref: a.sbp_approval_ref || "",
@@ -190,8 +205,7 @@ function fromArr(a: OutsourcingArrangement): ArrForm {
     exit_plan_tested: !!a.exit_plan_tested,
     concentration_note: a.concentration_note || "",
     status: a.status || "proposed",
-    owner: a.owner || "",
-    workflow_status: a.workflow_status || "draft",
+    owner_id: a.owner_id ?? null,
   };
 }
 function arrPayload(f: ArrForm): Record<string, unknown> {
@@ -206,7 +220,7 @@ function arrPayload(f: ArrForm): Record<string, unknown> {
     is_cloud: f.is_cloud,
     cloud_model: f.cloud_model,
     data_offshored: f.data_offshored,
-    country: f.country,
+    country_id: f.country_id,
     sbp_approval_required: f.sbp_approval_required,
     sbp_approval_status: f.sbp_approval_status,
     sbp_approval_ref: f.sbp_approval_ref,
@@ -216,8 +230,9 @@ function arrPayload(f: ArrForm): Record<string, unknown> {
     exit_plan_tested: f.exit_plan_tested,
     concentration_note: f.concentration_note,
     status: f.status,
-    owner: f.owner,
-    workflow_status: f.workflow_status,
+    // Picked, not typed: the server writes the person's / country's name into the
+    // legacy `owner` / `country` text, which older rows keep until someone picks.
+    owner_id: f.owner_id,
   };
 }
 
@@ -240,6 +255,7 @@ const BLANK_REVIEW: ReviewDraft = {
 };
 
 function OutsourcingInner() {
+  const { formatDate } = useFormat();
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<OutsourcingArrangement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -326,16 +342,16 @@ function OutsourcingInner() {
     }
   }
   async function removeArr(a: OutsourcingArrangement) {
-    if (!(await confirmDialog({ title: `Delete outsourcing arrangement ${a.reference || a.title}?`, danger: true }))) return;
-    setError(null);
+    if (!(await confirmDeleteWithImpact("outsourcing_arrangement", a.id, `${a.reference || ""} ${a.title}`.trim()))) return;
     try {
       await apiCall<void>("DELETE", `/outsourcing/${a.id}`);
       setShowArrForm(false);
       if (openId === a.id) setOpenId(null);
       reload();
-      toast("Deleted");
+      toast(`Deleted ${a.reference || "arrangement"}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete");
+      // A 403 is segregation of duties: the server's message says who may delete it.
+      toast(e instanceof Error && e.message ? e.message : "Failed to delete", "error");
     }
   }
 
@@ -401,14 +417,14 @@ function OutsourcingInner() {
           <Select value={af.status} onChange={(v) => setA("status", v)} options={STATUS} />
         </Field>
       </div>
-      <div className="field-row">
-        <Field label="Owner" help="Accountable business / risk owner.">
-          <TextInput value={af.owner} onChange={(v) => setA("owner", v)} placeholder="Owner" />
-        </Field>
-        <Field label="Workflow" help="Approval lifecycle for this arrangement record.">
-          <Select value={af.workflow_status} onChange={(v) => setA("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-      </div>
+      <Field label="Owner" help="Accountable business / risk owner.">
+        <UserPicker
+          value={af.owner_id}
+          onChange={(id) => setA("owner_id", id)}
+          selected={editingArr?.owner_ref ?? null}
+          legacyText={editingArr && !editingArr.owner_id ? editingArr.owner : null}
+        />
+      </Field>
     </>
   );
   const materialityTab = (
@@ -432,7 +448,13 @@ function OutsourcingInner() {
           <Toggle checked={af.data_offshored} onChange={(v) => setA("data_offshored", v)} label="Data offshored" />
         </Field>
         <Field label="Country" help="Country where data / processing is hosted.">
-          <TextInput value={af.country} onChange={(v) => setA("country", v)} placeholder="Pakistan" />
+          <LookupSelect
+            lookupKey="country"
+            value={af.country_id}
+            onChange={(id) => setA("country_id", id)}
+            placeholder="Choose a country…"
+            legacyText={editingArr && !editingArr.country_id ? editingArr.country : null}
+          />
         </Field>
       </div>
     </>
@@ -500,11 +522,12 @@ function OutsourcingInner() {
         a.is_contract_expiring ? (
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <Badge tone="high">Expiring</Badge>
-            <span className="muted">{a.contract_end}</span>
+            <span className="muted">{formatDate(a.contract_end)}</span>
           </div>
         ) : (
-          <span className="muted">{a.contract_end || "—"}</span>
+          <span className="muted">{formatDate(a.contract_end)}</span>
         ),
+      text: (a) => (a.contract_end ? formatDate(a.contract_end) : ""),
     },
     {
       key: "actions",
@@ -537,6 +560,7 @@ function OutsourcingInner() {
         <option value="">All statuses</option>
         {STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
       </select>
+      <ArchivedRecords entityType="outsourcing_arrangement" noun="arrangements" refreshKey={refreshKey} onRestored={() => { reload(); loadSummary(); }} />
     </>
   );
 
@@ -617,7 +641,8 @@ function OutsourcingInner() {
               <Badge tone={SBP_TONE[detail.sbp_approval_status] || "neutral"}>SBP: {cap(detail.sbp_approval_status)}</Badge>
               {detail.sbp_approval_required && <Badge tone="medium">Approval required</Badge>}
               {detail.is_cloud && <Badge tone="info">Cloud · {cloudLabel(detail.cloud_model)}</Badge>}
-              {detail.data_offshored && <Badge tone="high">Data offshored{detail.country ? " · " + detail.country : ""}</Badge>}
+              {detail.data_offshored && <Badge tone="high">Data offshored{countryName(detail) ? " · " + countryName(detail) : ""}</Badge>}
+              {!detail.data_offshored && countryName(detail) && <Badge tone="neutral">{countryName(detail)}</Badge>}
               <Badge tone={detail.exit_plan_tested ? "low" : "medium"}>Exit plan {detail.exit_plan_tested ? "tested" : "untested"}</Badge>
               {detail.is_contract_expiring && <Badge tone="high">Contract expiring ≤90d</Badge>}
             </div>
@@ -643,8 +668,16 @@ function OutsourcingInner() {
               </p>
               <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
                 {detail.sbp_approval_ref ? `NOC ref ${detail.sbp_approval_ref} · ` : ""}
-                Contract {detail.contract_start || "—"} → {detail.contract_end || "—"}
+                Contract {formatDate(detail.contract_start)} → {formatDate(detail.contract_end)}
                 {detail.vendor_id ? ` · linked vendor ${vendorName(detail.vendor_id)}` : ""}
+                {ownerName(detail) ? ` · owner ${ownerName(detail)}` : ""}
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-head"><h3>Approval</h3></div>
+              <div className="card-pad">
+                <WorkflowFields entityType="outsourcing_arrangement" entityId={detail.id} onChanged={() => { loadDetail(detail.id); reload(); }} />
               </div>
             </div>
 
@@ -706,7 +739,7 @@ function OutsourcingInner() {
                         .map((rv) => (
                           <tr key={rv.id}>
                             <td className="ref">{rv.reference || "—"}</td>
-                            <td className="muted">{rv.review_date || "—"}</td>
+                            <td className="muted">{formatDate(rv.review_date)}</td>
                             <td className="muted">{rv.reviewer || "—"}</td>
                             <td><Badge tone={REVIEW_STATUS_TONE[rv.status] || "neutral"}>{cap(rv.status)}</Badge></td>
                             <td>{rv.sla_met ? <Badge tone="low">Met</Badge> : <Badge tone="critical">Breached</Badge>}</td>

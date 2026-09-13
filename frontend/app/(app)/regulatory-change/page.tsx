@@ -11,16 +11,19 @@ import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelec
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import RelatedChips from "@/components/RelatedChips";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
@@ -31,7 +34,6 @@ const OBL_STATUS = ["open", "in_progress", "met", "not_met", "not_applicable"];
 const RETURN_STATUS = ["upcoming", "submitted", "overdue"];
 const FREQUENCY = ["none", "monthly", "quarterly", "semiannual", "annual"];
 const PRIORITY = ["low", "medium", "high", "critical"];
-const WORKFLOW = ["draft", "in_review", "approved", "retired"];
 
 const APPLICABILITY_OPTS = opts(APPLICABILITY);
 const REG_STATUS_OPTS = opts(REG_STATUS);
@@ -40,7 +42,6 @@ const OBL_STATUS_OPTS = opts(OBL_STATUS);
 const RETURN_STATUS_OPTS = opts(RETURN_STATUS);
 const FREQUENCY_OPTS = opts(FREQUENCY);
 const PRIORITY_OPTS = opts(PRIORITY);
-const WORKFLOW_OPTS = opts(WORKFLOW);
 
 // ------------------------------------------------------------------ tones
 const REG_STATUS_TONE: Record<string, Tone> = {
@@ -78,12 +79,6 @@ const PRIORITY_TONE: Record<string, Tone> = {
   medium: "medium",
   high: "high",
   critical: "critical",
-};
-const WORKFLOW_TONE: Record<string, Tone> = {
-  approved: "low",
-  in_review: "medium",
-  draft: "neutral",
-  retired: "neutral",
 };
 
 // ------------------------------------------------------------------ types
@@ -186,7 +181,6 @@ type ChangeForm = {
   owner: string;
   priority: string;
   department: string;
-  workflow_status: string;
 };
 const BLANK_CHANGE: ChangeForm = {
   title: "",
@@ -202,7 +196,6 @@ const BLANK_CHANGE: ChangeForm = {
   owner: "",
   priority: "medium",
   department: "",
-  workflow_status: "draft",
 };
 function fromChange(c: RegChange): ChangeForm {
   return {
@@ -219,7 +212,6 @@ function fromChange(c: RegChange): ChangeForm {
     owner: c.owner || "",
     priority: c.priority || "medium",
     department: c.department || "",
-    workflow_status: c.workflow_status || "draft",
   };
 }
 function changePayload(f: ChangeForm): Record<string, unknown> {
@@ -237,7 +229,6 @@ function changePayload(f: ChangeForm): Record<string, unknown> {
     owner: f.owner,
     priority: f.priority,
     department: f.department,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -321,7 +312,6 @@ type ReturnForm = {
   next_due_date: string;
   last_submitted_date: string;
   status: string;
-  workflow_status: string;
 };
 const BLANK_RETURN: ReturnForm = {
   name: "",
@@ -334,7 +324,6 @@ const BLANK_RETURN: ReturnForm = {
   next_due_date: "",
   last_submitted_date: "",
   status: "upcoming",
-  workflow_status: "draft",
 };
 function fromReturn(r: RegReturn): ReturnForm {
   return {
@@ -348,7 +337,6 @@ function fromReturn(r: RegReturn): ReturnForm {
     next_due_date: r.next_due_date || "",
     last_submitted_date: r.last_submitted_date || "",
     status: r.status || "upcoming",
-    workflow_status: r.workflow_status || "draft",
   };
 }
 function returnPayload(f: ReturnForm): Record<string, unknown> {
@@ -363,7 +351,6 @@ function returnPayload(f: ReturnForm): Record<string, unknown> {
     next_due_date: f.next_due_date || null,
     last_submitted_date: f.last_submitted_date || null,
     status: f.status,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -382,6 +369,7 @@ function StatusBadge({ value, tone }: { value: string | null; tone: Record<strin
 // ================================================================ page ===
 function RegulatoryChangeInner() {
   const [section, setSection] = useState<SectionId>("changes");
+  const { formatDate } = useFormat();
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -654,7 +642,7 @@ function RegulatoryChangeInner() {
           <Badge tone="critical">Overdue</Badge>
         ) : c.effective_date ? (
           <span className="muted">
-            {c.effective_date}
+            {formatDate(c.effective_date)}
             {c.days_to_effective != null && c.days_to_effective >= 0 ? ` · ${c.days_to_effective}d` : ""}
           </span>
         ) : (
@@ -680,7 +668,7 @@ function RegulatoryChangeInner() {
     { key: "owner", header: "Owner", sortable: true, render: (o) => <span className="muted">{o.owner || "—"}</span> },
     { key: "business_unit", header: "Business unit", sortable: true, render: (o) => <span className="muted">{o.business_unit || "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (o) => <StatusBadge value={o.status} tone={OBL_STATUS_TONE} /> },
-    { key: "due_date", header: "Due", sortable: true, render: (o) => <span className="muted">{o.due_date || "—"}</span> },
+    { key: "due_date", header: "Due", sortable: true, render: (o) => <span className="muted">{formatDate(o.due_date)}</span> },
     {
       key: "actions",
       header: "",
@@ -706,10 +694,10 @@ function RegulatoryChangeInner() {
       render: (r) => {
         const dueSoon = !r.is_overdue && r.days_to_due != null && r.days_to_due >= 0 && r.days_to_due <= 30 && r.status !== "submitted";
         return r.is_overdue ? (
-          <Badge tone="critical">Overdue{r.next_due_date ? ` · ${r.next_due_date}` : ""}</Badge>
+          <Badge tone="critical">Overdue{r.next_due_date ? ` · ${formatDate(r.next_due_date)}` : ""}</Badge>
         ) : r.next_due_date ? (
           <span className={dueSoon ? "" : "muted"}>
-            {r.next_due_date}
+            {formatDate(r.next_due_date)}
             {r.days_to_due != null && r.days_to_due >= 0 ? ` · ${r.days_to_due}d` : ""}
           </span>
         ) : (
@@ -787,9 +775,6 @@ function RegulatoryChangeInner() {
           <TextInput type="date" value={cf.effective_date} onChange={(v) => setC("effective_date", v)} />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this record.">
-        <Select value={cf.workflow_status} onChange={(v) => setC("workflow_status", v)} options={WORKFLOW_OPTS} />
-      </Field>
     </>
   );
 
@@ -882,6 +867,7 @@ function RegulatoryChangeInner() {
       <Field label="Description">
         <TextArea value={rf.description} onChange={(v) => setR("description", v)} rows={3} placeholder="What this return covers." />
       </Field>
+      <RecordApproval entityType="regulatory_return" entityId={editingReturn?.id ?? null} onChanged={reload} />
     </>
   );
   const returnSchedule = (
@@ -902,9 +888,6 @@ function RegulatoryChangeInner() {
           <TextInput type="date" value={rf.last_submitted_date} onChange={(v) => setR("last_submitted_date", v)} />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this record.">
-        <Select value={rf.workflow_status} onChange={(v) => setR("workflow_status", v)} options={WORKFLOW_OPTS} />
-      </Field>
     </>
   );
 
@@ -1052,7 +1035,12 @@ function RegulatoryChangeInner() {
 
       {/* ============================================= CHANGE DRAWER (obligations) */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="regulatory_change" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="regulatory_change" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="regulatory_change" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -1138,7 +1126,7 @@ function RegulatoryChangeInner() {
                               <td><StatusBadge value={o.obligation_type} tone={OBL_TYPE_TONE} /></td>
                               <td className="muted">{o.owner || "—"}</td>
                               <td><StatusBadge value={o.status} tone={OBL_STATUS_TONE} /></td>
-                              <td className="muted">{o.due_date || "—"}</td>
+                              <td className="muted">{formatDate(o.due_date)}</td>
                               <td>
                                 <div style={{ display: "flex", gap: 6 }}>
                                   <button className="btn secondary sm" onClick={() => openEditObl(o)}>Edit</button>

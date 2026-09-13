@@ -31,6 +31,23 @@ async def sync_permission_catalog(db: AsyncSession) -> dict[str, Permission]:
     return existing
 
 
+#: A permission split out of an existing one: when the new code first appears, every role
+#: (custom roles included) that holds the old code is granted the new one, so nobody
+#: silently loses an ability they had. Granted only on the start-up that introduces the
+#: code, so an administrator who later removes it from a role keeps that decision.
+IMPLIED_ON_INTRODUCTION: dict[str, str] = {
+    "control:test": "control:write",  # recording control tests (phase 2)
+}
+
+
+def implied_grants(new_codes: set[str], held: set[str]) -> set[str]:
+    """New permission codes a role should receive because it holds their source. Pure."""
+    return {
+        code for code, source in IMPLIED_ON_INTRODUCTION.items()
+        if code in new_codes and source in held and code not in held
+    }
+
+
 async def reconcile_permissions() -> int:
     """Bring every existing tenant's *system* roles up to date with the current catalog.
 
@@ -43,7 +60,9 @@ async def reconcile_permissions() -> int:
     """
     added = 0
     async with tenant_session(None) as db:
+        before = set((await db.scalars(select(Permission.code))).all())
         perms = await sync_permission_catalog(db)  # global table; adds new Permission rows
+        introduced = set(perms) - before if before else set()
         tenants = (await db.scalars(select(Tenant))).all()
         for tenant in tenants:
             # Roles are RLS-scoped, so switch the tenant GUC before touching them.
@@ -65,6 +84,20 @@ async def reconcile_permissions() -> int:
                 if missing:
                     role.permissions = list(role.permissions) + missing
                     added += len(missing)
+            if introduced:
+                every_role = (
+                    await db.scalars(
+                        select(Role)
+                        .where(Role.tenant_id == tenant.id)
+                        .options(selectinload(Role.permissions))
+                    )
+                ).all()
+                for role in every_role:
+                    have = {p.code for p in role.permissions}
+                    extra = implied_grants(introduced, have)
+                    if extra:
+                        role.permissions = list(role.permissions) + [perms[c] for c in sorted(extra)]
+                        added += len(extra)
         await db.flush()
     return added
 

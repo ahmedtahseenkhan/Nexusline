@@ -69,11 +69,18 @@ class EntitySla:
     label_of: object
 
 
-def _risk_severity(risk: Risk, bands) -> Severity:
-    from app.services.risk_scoring import effective_score, severity_for_score
+def _risk_severity(risk: Risk, scale) -> Severity:
+    """A risk's severity for its TAT window: the organisation's banding (matrix size,
+    configured thresholds, per-cell overrides), exactly as the heat map colours it."""
+    from app.services.risk_scoring import SeverityScale, effective_score, severity_for_score
 
+    if isinstance(scale, SeverityScale):
+        return scale.for_risk(
+            risk.inherent_likelihood, risk.inherent_impact,
+            risk.residual_likelihood, risk.residual_impact,
+        ) or Severity.low
     score = effective_score(risk.inherent_score, risk.residual_score)
-    return severity_for_score(score, bands) or Severity.low
+    return severity_for_score(score, scale) or Severity.low
 
 
 ENTITIES: dict[str, EntitySla] = {
@@ -220,11 +227,10 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
     or a longer policy), because a record that is no longer late should not keep
     reporting as historically late.
     """
-    from app.services.risk_scoring import max_score_for
-    from app.services.risk_settings import get_matrix_size
+    from app.services.risk_settings import get_or_create_settings, scale_for
 
     policies = await policy_map(db)
-    bands = max_score_for(await get_matrix_size(db, tenant_id))
+    bands = scale_for(await get_or_create_settings(db, tenant_id))
     today = date.today()
     flagged: list[TatRecord] = []
 

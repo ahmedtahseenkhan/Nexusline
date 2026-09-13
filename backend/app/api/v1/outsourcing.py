@@ -39,8 +39,36 @@ from app.schemas.outsourcing import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import ref_fields as rf
 
 router = APIRouter(tags=["outsourcing"])
+
+# Phase 2 picker fields beside the legacy text they replace (services/ref_fields): the
+# picked id wins and writes its display text into ``owner`` / ``country``; text sent on
+# its own (older clients, CSV import) is matched to a user / country value, and kept as
+# typed when nothing matches.
+OUTSOURCING_REFS = (
+    rf.user("owner_id", "owner"),
+    rf.RefField("country_id", "country", "lookup", "country"),
+)
+
+
+async def _arr_reads(db, rows) -> list[OutsourcingArrangementRead]:
+    items = [OutsourcingArrangementRead.model_validate(r) for r in rows]
+    await rf.fill_refs(db, list(zip(rows, items)), OUTSOURCING_REFS)
+    return items
+
+
+async def _arr_read(db, aid) -> OutsourcingArrangementRead:
+    return (await _arr_reads(db, [await _load_arrangement(db, aid)]))[0]
+
+
+async def _check_vendor(db, vendor_id) -> None:
+    if vendor_id is None:
+        return
+    v = await db.scalar(select(Vendor.id).where(Vendor.id == vendor_id, Vendor.deleted.is_(False)))
+    if v is None:
+        raise HTTPException(status_code=400, detail=f"Unknown or archived vendor id: {vendor_id}")
 
 _READ = Depends(require("outsourcing:read"))
 _WRITE = Depends(require("outsourcing:write"))
@@ -115,38 +143,48 @@ async def list_arrangements(
     else:
         stmt = stmt.order_by(OutsourcingArrangement.created_at.desc())
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    return Page(items=[OutsourcingArrangementRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    return Page(items=await _arr_reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post("/outsourcing", response_model=OutsourcingArrangementRead, status_code=201, dependencies=[_WRITE])
 async def create_arrangement(body: OutsourcingArrangementCreate, db: DbSession, user: CurrentUser) -> OutsourcingArrangementRead:
-    if body.vendor_id is not None:
-        v = await db.scalar(
-            select(Vendor.id).where(Vendor.id == body.vendor_id, Vendor.deleted.is_(False))
-        )
-        if v is None:
-            raise HTTPException(status_code=400, detail=f"Unknown or archived vendor id: {body.vendor_id}")
-    obj = OutsourcingArrangement(tenant_id=user.tenant_id, **body.model_dump())
+    await _check_vendor(db, body.vendor_id)
+    data = body.model_dump()
+    await rf.apply_refs(db, OutsourcingArrangement, data, OUTSOURCING_REFS)
+    obj = OutsourcingArrangement(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db, OutsourcingArrangement, "OUT")
     db.add(obj)
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="outsourcing_arrangement",
                            entity_id=obj.id, summary=f"Registered outsourcing arrangement {obj.reference}: {obj.title}")
-    return OutsourcingArrangementRead.model_validate(await _load_arrangement(db, obj.id))
+    return await _arr_read(db, obj.id)
 
 
 @router.get("/outsourcing/{aid}", response_model=OutsourcingArrangementRead, dependencies=[_READ])
 async def get_arrangement(aid: uuid.UUID, db: DbSession) -> OutsourcingArrangementRead:
-    return OutsourcingArrangementRead.model_validate(await _load_arrangement(db, aid))
+    return await _arr_read(db, aid)
 
 
 @router.patch("/outsourcing/{aid}", response_model=OutsourcingArrangementRead, dependencies=[_WRITE])
-async def update_arrangement(aid: uuid.UUID, body: OutsourcingArrangementUpdate, db: DbSession) -> OutsourcingArrangementRead:
+async def update_arrangement(
+    aid: uuid.UUID, body: OutsourcingArrangementUpdate, db: DbSession, user: CurrentUser
+) -> OutsourcingArrangementRead:
     obj = await _load_arrangement(db, aid)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if data.get("vendor_id") is not None and data["vendor_id"] != obj.vendor_id:
+        await _check_vendor(db, data["vendor_id"])
+    # Enum / NOT NULL columns: a null in a partial update means "unchanged".
+    for k in ("title", "category", "materiality", "cloud_model", "sbp_approval_status", "status",
+              "is_cloud", "data_offshored", "sbp_approval_required", "exit_plan_tested"):
+        if k in data and data[k] is None:
+            data.pop(k)
+    await rf.apply_refs(db, OutsourcingArrangement, data, OUTSOURCING_REFS, record=obj)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
-    return OutsourcingArrangementRead.model_validate(await _load_arrangement(db, aid))
+    await audit_log.record(db, actor=user, action="update", entity_type="outsourcing_arrangement",
+                           entity_id=obj.id, summary=f"Updated outsourcing arrangement {obj.reference}: {obj.title}")
+    return await _arr_read(db, aid)
 
 
 @router.delete("/outsourcing/{aid}", status_code=204, dependencies=[_WRITE])
@@ -163,29 +201,37 @@ async def delete_arrangement(aid: uuid.UUID, db: DbSession, user: CurrentUser) -
 # ======================================================== outsourcing reviews ===
 @router.post("/outsourcing/{aid}/reviews", response_model=OutsourcingArrangementRead, status_code=201, dependencies=[_WRITE])
 async def add_review(aid: uuid.UUID, body: OutsourcingReviewCreate, db: DbSession, user: CurrentUser) -> OutsourcingArrangementRead:
-    await _load_arrangement(db, aid)
+    arrangement = await _load_arrangement(db, aid)
     review = OutsourcingReview(tenant_id=user.tenant_id, arrangement_id=aid, **body.model_dump())
     review.reference = await _next_ref(db, OutsourcingReview, "OUR")
     db.add(review)
     await db.flush()
-    return OutsourcingArrangementRead.model_validate(await _load_arrangement(db, aid))
+    await audit_log.record(db, actor=user, action="add_review", entity_type="outsourcing_arrangement",
+                           entity_id=aid, summary=f"Added monitoring review {review.reference} to {arrangement.reference}")
+    return await _arr_read(db, aid)
 
 
 @router.patch("/outsourcing-reviews/{rid}", response_model=OutsourcingReviewRead, dependencies=[_WRITE])
-async def update_review(rid: uuid.UUID, body: OutsourcingReviewUpdate, db: DbSession) -> OutsourcingReviewRead:
+async def update_review(
+    rid: uuid.UUID, body: OutsourcingReviewUpdate, db: DbSession, user: CurrentUser
+) -> OutsourcingReviewRead:
     obj = await _get(db, OutsourcingReview, rid, "Outsourcing review")
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(obj, k, v)
     await db.flush()
+    await audit_log.record(db, actor=user, action="update_review", entity_type="outsourcing_arrangement",
+                           entity_id=obj.arrangement_id, summary=f"Updated monitoring review {obj.reference}")
     return OutsourcingReviewRead.model_validate(obj)
 
 
 @router.delete("/outsourcing-reviews/{rid}", status_code=204, dependencies=[_WRITE])
-async def delete_review(rid: uuid.UUID, db: DbSession) -> None:
+async def delete_review(rid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await db.scalar(select(OutsourcingReview).where(OutsourcingReview.id == rid))
     if obj is None:
         raise HTTPException(status_code=404, detail="Record not found")
     await db.delete(obj)
+    await audit_log.record(db, actor=user, action="delete_review", entity_type="outsourcing_arrangement",
+                           entity_id=obj.arrangement_id, summary=f"Removed monitoring review {obj.reference}")
 
 
 # ================================================================ summary ===

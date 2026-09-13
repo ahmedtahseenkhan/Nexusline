@@ -17,24 +17,25 @@ import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval, { WorkflowBadge } from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { getFormatSettings, useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
-const money = (n: number | null | undefined) =>
-  n == null ? "—" : Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 
 // ------------------------------------------------------------------ enum lists
 const RULING_STATUS = opts(["draft", "under_review", "approved", "superseded"]);
 const REVIEW_FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+
 const SHARIAH_MODE = opts([
   "murabaha",
   "ijarah",
@@ -110,7 +111,6 @@ type RulingForm = {
   basis: string;
   review_frequency: string;
   next_review_date: string;
-  workflow_status: string;
 };
 const BLANK_RULING: RulingForm = {
   title: "",
@@ -122,7 +122,6 @@ const BLANK_RULING: RulingForm = {
   basis: "",
   review_frequency: "annual",
   next_review_date: "",
-  workflow_status: "draft",
 };
 function fromRuling(r: ShariahRuling): RulingForm {
   return {
@@ -135,7 +134,6 @@ function fromRuling(r: ShariahRuling): RulingForm {
     basis: r.basis || "",
     review_frequency: r.review_frequency || "annual",
     next_review_date: r.next_review_date || "",
-    workflow_status: r.workflow_status || "draft",
   };
 }
 function rulingPayload(f: RulingForm): Record<string, unknown> {
@@ -149,7 +147,6 @@ function rulingPayload(f: RulingForm): Record<string, unknown> {
     basis: f.basis,
     review_frequency: f.review_frequency,
     next_review_date: f.next_review_date || null,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -162,7 +159,6 @@ type ProductForm = {
   approving_ruling_id: string;
   description: string;
   structure: string;
-  workflow_status: string;
 };
 const BLANK_PRODUCT: ProductForm = {
   name: "",
@@ -173,7 +169,6 @@ const BLANK_PRODUCT: ProductForm = {
   approving_ruling_id: "",
   description: "",
   structure: "",
-  workflow_status: "draft",
 };
 function fromProduct(p: IslamicProduct): ProductForm {
   return {
@@ -185,7 +180,6 @@ function fromProduct(p: IslamicProduct): ProductForm {
     approving_ruling_id: p.approving_ruling_id || "",
     description: p.description || "",
     structure: p.structure || "",
-    workflow_status: p.workflow_status || "draft",
   };
 }
 function productPayload(f: ProductForm): Record<string, unknown> {
@@ -198,7 +192,6 @@ function productPayload(f: ProductForm): Record<string, unknown> {
     approving_ruling_id: f.approving_ruling_id || null,
     description: f.description,
     structure: f.structure,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -214,7 +207,6 @@ type ReviewForm = {
   planned_date: string;
   rating: string;
   conclusion: string;
-  workflow_status: string;
 };
 const BLANK_REVIEW: ReviewForm = {
   title: "",
@@ -228,7 +220,6 @@ const BLANK_REVIEW: ReviewForm = {
   planned_date: "",
   rating: "",
   conclusion: "",
-  workflow_status: "draft",
 };
 function fromReview(r: ShariahReview): ReviewForm {
   return {
@@ -243,7 +234,6 @@ function fromReview(r: ShariahReview): ReviewForm {
     planned_date: r.planned_date || "",
     rating: r.rating || "",
     conclusion: r.conclusion || "",
-    workflow_status: r.workflow_status || "draft",
   };
 }
 function reviewPayload(f: ReviewForm): Record<string, unknown> {
@@ -259,7 +249,6 @@ function reviewPayload(f: ReviewForm): Record<string, unknown> {
     planned_date: f.planned_date || null,
     rating: f.rating || null,
     conclusion: f.conclusion,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -271,7 +260,6 @@ type CharityForm = {
   status: string;
   disbursement_date: string;
   notes: string;
-  workflow_status: string;
 };
 const BLANK_CHARITY: CharityForm = {
   description: "",
@@ -281,18 +269,16 @@ const BLANK_CHARITY: CharityForm = {
   status: "pending",
   disbursement_date: "",
   notes: "",
-  workflow_status: "draft",
 };
 function fromCharity(c: CharityDisbursement): CharityForm {
   return {
     description: c.description,
     amount: c.amount != null ? String(c.amount) : "",
-    currency: c.currency || "PKR",
+    currency: c.currency || getFormatSettings().currency,
     beneficiary: c.beneficiary || "",
     status: c.status || "pending",
     disbursement_date: c.disbursement_date || "",
     notes: c.notes || "",
-    workflow_status: c.workflow_status || "draft",
   };
 }
 function charityPayload(f: CharityForm): Record<string, unknown> {
@@ -304,7 +290,6 @@ function charityPayload(f: CharityForm): Record<string, unknown> {
     status: f.status,
     disbursement_date: f.disbursement_date || null,
     notes: f.notes,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -351,6 +336,7 @@ const searchProducts = (q: string) =>
 
 // ================================================================= page =====
 function ShariahInner() {
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const [section, setSection] = useState<SectionId>("fatwa");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -611,7 +597,7 @@ function ShariahInner() {
   // ------------------------------------------------------------- charity CRUD
   function openNewCharity() {
     setEditingCharity(null);
-    setCf(BLANK_CHARITY);
+    setCf({ ...BLANK_CHARITY, currency });
     setError(null);
     setShowCharityForm(true);
   }
@@ -659,7 +645,7 @@ function ShariahInner() {
     { key: "subject", header: "Subject", sortable: true, render: (r) => <span className="muted">{r.subject || "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={RULING_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
     { key: "approved_by", header: "Approved by", sortable: true, render: (r) => <span className="muted">{r.approved_by || "—"}</span> },
-    { key: "next_review_date", header: "Next review", sortable: true, render: (r) => (r.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{r.next_review_date || "—"}</span>) },
+    { key: "next_review_date", header: "Next review", sortable: true, render: (r) => (r.is_review_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(r.next_review_date)}</span>) },
     { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditRuling(r)}>Edit</button> <button className="btn secondary sm" onClick={() => removeRuling(r)}>Delete</button></div> },
   ];
   const productCols: Column<IslamicProduct>[] = [
@@ -668,7 +654,7 @@ function ShariahInner() {
     { key: "shariah_mode", header: "Mode", sortable: true, render: (p) => <Badge tone="info">{cap(p.shariah_mode)}</Badge> },
     { key: "status", header: "Status", sortable: true, render: (p) => <Badge tone={PRODUCT_STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge> },
     { key: "owner", header: "Owner", sortable: true, render: (p) => <span className="muted">{p.owner || "—"}</span> },
-    { key: "launch_date", header: "Launch date", sortable: true, render: (p) => <span className="muted">{p.launch_date || "—"}</span> },
+    { key: "launch_date", header: "Launch date", sortable: true, render: (p) => <span className="muted">{formatDate(p.launch_date)}</span> },
     { key: "actions", header: "", render: (p) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditProduct(p)}>Edit</button> <button className="btn secondary sm" onClick={() => removeProduct(p)}>Delete</button></div> },
   ];
   const reviewCols: Column<ShariahReview>[] = [
@@ -677,16 +663,17 @@ function ShariahInner() {
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={REVIEW_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
     { key: "reviewer", header: "Reviewer", sortable: true, render: (r) => <span className="muted">{r.reviewer || "—"}</span> },
     { key: "findings", header: "Findings", render: (r) => <span className="muted">{r.open_finding_count}/{r.finding_count} open</span> },
-    { key: "snc_income_total", header: "SNC income", render: (r) => <span className="muted">{money(r.snc_income_total)}</span> },
+    { key: "snc_income_total", header: "SNC income", render: (r) => <span className="muted">{formatMoney(r.snc_income_total)}</span> },
     { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => setOpenId(r.id)}>Manage</button> <button className="btn secondary sm" onClick={() => removeReview(r)}>Delete</button></div> },
   ];
   const charityCols: Column<CharityDisbursement>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
     { key: "description", header: "Description", sortable: true, render: (c) => <span className="cell-title">{c.description}</span> },
-    { key: "amount", header: "Amount", sortable: true, render: (c) => <span className="muted">{money(c.amount)} {c.currency}</span> },
+    { key: "amount", header: "Amount", sortable: true, render: (c) => <span className="muted">{formatMoney(c.amount, c.currency)}</span> },
     { key: "beneficiary", header: "Beneficiary", sortable: true, render: (c) => <span className="muted">{c.beneficiary || "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CHARITY_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
-    { key: "disbursement_date", header: "Disbursed", sortable: true, render: (c) => <span className="muted">{c.disbursement_date || "—"}</span> },
+    { key: "disbursement_date", header: "Disbursed", sortable: true, render: (c) => <span className="muted">{formatDate(c.disbursement_date)}</span> },
+    { key: "workflow_status", header: "Approval", render: (c) => <WorkflowBadge state={c.workflow_status} /> },
     { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditCharity(c)}>Edit</button> <button className="btn secondary sm" onClick={() => removeCharity(c)}>Delete</button></div> },
   ];
 
@@ -726,9 +713,7 @@ function ShariahInner() {
           <TextInput type="date" value={rf.next_review_date} onChange={(v) => setR("next_review_date", v)} />
         </Field>
       </div>
-      <Field label="Workflow" help="Approval lifecycle for this ruling record.">
-        <Select value={rf.workflow_status} onChange={(v) => setR("workflow_status", v)} options={WORKFLOW} />
-      </Field>
+      <RecordApproval entityType="shariah_ruling" entityId={editingRuling?.id ?? null} onChanged={reload} />
     </>
   );
 
@@ -772,9 +757,7 @@ function ShariahInner() {
       <Field label="Structure" help="How the contract is structured and executed.">
         <TextArea value={pf.structure} onChange={(v) => setP("structure", v)} rows={3} placeholder="Contract flow and steps." />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this product record.">
-        <Select value={pf.workflow_status} onChange={(v) => setP("workflow_status", v)} options={WORKFLOW} />
-      </Field>
+      <RecordApproval entityType="islamic_product" entityId={editingProduct?.id ?? null} onChanged={reload} />
     </>
   );
 
@@ -839,9 +822,6 @@ function ShariahInner() {
       <Field label="Conclusion">
         <RichText value={vf.conclusion} onChange={(v) => setV("conclusion", v)} placeholder="Summarise the review conclusion…" />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this review record.">
-        <Select value={vf.workflow_status} onChange={(v) => setV("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -856,7 +836,7 @@ function ShariahInner() {
           <TextInput type="number" value={cf.amount} onChange={(v) => setC("amount", v)} placeholder="0.00" />
         </Field>
         <Field label="Currency">
-          <TextInput value={cf.currency} onChange={(v) => setC("currency", v)} placeholder="PKR" />
+          <Select value={cf.currency} onChange={(v) => setC("currency", v)} options={currencyOptions} />
         </Field>
       </div>
       <div className="field-row">
@@ -872,9 +852,6 @@ function ShariahInner() {
       </Field>
       <Field label="Notes">
         <TextArea value={cf.notes} onChange={(v) => setC("notes", v)} rows={3} placeholder="Additional notes." />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this disbursement record.">
-        <Select value={cf.workflow_status} onChange={(v) => setC("workflow_status", v)} options={WORKFLOW} />
       </Field>
     </>
   );
@@ -975,7 +952,7 @@ function ShariahInner() {
           <div className="grid stat-grid">
             <div className="card stat">
               <div className="stat-top">
-                <span className="n">{disbursedTotal == null ? "…" : money(disbursedTotal)}</span>
+                <span className="n">{disbursedTotal == null ? "…" : formatMoney(disbursedTotal, undefined, { compact: "auto" })}</span>
               </div>
               <span className="l">Total disbursed</span>
             </div>
@@ -996,7 +973,12 @@ function ShariahInner() {
 
       {/* ============================================= REVIEW DRAWER (SNC findings) */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="shariah_review" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="shariah_review" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="shariah_review" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.title}` : "…"}
@@ -1026,7 +1008,7 @@ function ShariahInner() {
               </div>
               <div style={{ textAlign: "right" }}>
                 <div className="muted" style={{ fontSize: 12 }}>SNC income to purify</div>
-                <strong style={{ fontSize: 18 }}>{money(detail.snc_income_total)}</strong>
+                <strong style={{ fontSize: 18 }}>{formatMoney(detail.snc_income_total)}</strong>
               </div>
             </div>
 
@@ -1104,13 +1086,13 @@ function ShariahInner() {
                           <td className="ref">{fi.reference || "—"}</td>
                           <td className="cell-title">{fi.title}</td>
                           <td><SeverityBadge value={fi.severity} /></td>
-                          <td className="muted">{money(fi.snc_income_amount)}</td>
+                          <td className="muted">{formatMoney(fi.snc_income_amount)}</td>
                           <td className="muted">{fi.action_owner || "—"}</td>
                           <td>
                             {fi.is_overdue ? (
                               <Badge tone="high">Overdue</Badge>
                             ) : (
-                              <span className="muted">{fi.due_date || "—"}</span>
+                              <span className="muted">{formatDate(fi.due_date)}</span>
                             )}
                           </td>
                           <td>
