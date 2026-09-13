@@ -657,8 +657,9 @@ async def my_risk_reviews(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
 
 
 async def my_attestations(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
-    """Periodic reviews of records I own: policies and third parties by their own review
-    date, every other attested record type by its latest attestation's next due date."""
+    """Periodic reviews of records I own: policies, third parties and assets by their own
+    review date, every other attested record type by its latest attestation's next due
+    date."""
     from app.models.asset import Asset
     from app.models.attestation import Attestation
     from app.models.enums import VendorStatus
@@ -690,6 +691,20 @@ async def my_attestations(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     ).all():
         out.append(ctx.mk("attestation", due=due, id=vid, title=name, subtitle="Third-party review",
                           link=_link("/vendors", vid), entity_type="vendor", entity_id=vid))
+    # Assets by their own review date (record-page B4), for their approval owner (an
+    # asset's owner is a business unit, not a person).
+    for aid, name, aclass, due in (
+        await db.execute(
+            select(Asset.id, Asset.name, Asset.asset_class, Asset.next_review_date)
+            .where(Asset.workflow_owner_id == ctx.user_id, Asset.deleted.is_(False),
+                   Asset.next_review_date.is_not(None), Asset.next_review_date <= ctx.horizon)
+            .limit(ROW_CAP)
+        )
+    ).all():
+        it = getattr(aclass, "value", aclass) == "it_asset"
+        out.append(ctx.mk("attestation", due=due, id=aid, title=name,
+                          subtitle="IT asset review" if it else "Information asset review",
+                          link=link_to("asset", aid, asset_class=aclass), entity_type="asset", entity_id=aid))
 
     latest = (
         select(Attestation.entity_type, Attestation.entity_id, Attestation.next_due)

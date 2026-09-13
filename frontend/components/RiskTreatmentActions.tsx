@@ -1,11 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { forwardRef, useImperativeHandle, useRef, useState } from "react";
 import { api, type TreatmentAction } from "@/lib/api";
 import { toast, confirmDialog } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
 import UserPicker, { UserName } from "@/components/UserPicker";
 import { Badge } from "@/components/badges";
+import Disclosure from "@/components/record/Disclosure";
+import LabelledSearch, { rowAction } from "@/components/record/a11y";
 
 /* A risk's treatment plan as actions with an owner, a due date and progress.
 
@@ -13,7 +15,14 @@ import { Badge } from "@/components/badges";
    be chased. The risk's treatment deadline follows the actions (the latest open action's
    due date), and each open action past its due date raises its own overdue alert. Marking
    an action done stamps when it was completed; cancel an action to take it off the plan
-   while keeping it on the record. */
+   while keeping it on the record.
+
+   The add form opens on demand (a Disclosure: Esc and Cancel return focus to "Add
+   action"); a parent opens it through the `add()` handle — the risk record's More menu
+   and its "Add action" open points do. Every button is secondary: the record page keeps
+   its one filled button in the header. Each row's buttons and fields name the action they
+   act on ("Edit Enforce MFA", "Remove Enforce MFA"), and every picker has a real label
+   (record-page-spec v1.1 D3). Without `canWrite` the plan is read-only. */
 
 const STATUS_LABEL: Record<TreatmentAction["status"], string> = {
   open: "Open",
@@ -37,16 +46,35 @@ type Props = {
   progress?: { done: number; total: number; overdue: number; percent: number } | null;
   /** Reload the risk after any change (its treatment deadline may have moved). */
   onChange: () => void;
+  /** The viewer holds risk:write. Default true (the server still decides). */
+  canWrite?: boolean;
 };
 
-export default function RiskTreatmentActions({ riskId, actions, progress, onChange }: Props) {
+export type RiskTreatmentActionsHandle = {
+  /** Open the "Add action" form (focus moves to its first field). */
+  add(): void;
+};
+
+const RiskTreatmentActions = forwardRef<RiskTreatmentActionsHandle, Props>(function RiskTreatmentActions(
+  { riskId, actions, progress, onChange, canWrite = true },
+  ref,
+) {
   const { formatDate } = useFormat();
   const [adding, setAdding] = useState(false);
+  const addBtn = useRef<HTMLButtonElement>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [edit, setEdit] = useState<Draft>(EMPTY);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function setAddOpen(open: boolean) {
+    setAdding(open);
+    setError(null);
+    if (!open) setDraft(EMPTY);
+  }
+
+  useImperativeHandle(ref, () => ({ add: () => { if (canWrite) setAddOpen(true); } }), [canWrite]);
 
   async function run(fn: () => Promise<unknown>, done?: string) {
     setBusy(true);
@@ -64,7 +92,7 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
     }
   }
 
-  async function add() {
+  async function add(close: () => void) {
     if (!draft.title.trim()) {
       setError("Give the action a title.");
       return;
@@ -78,7 +106,7 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
     );
     if (ok) {
       setDraft(EMPTY);
-      setAdding(false);
+      close();
     }
   }
 
@@ -106,7 +134,7 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
-        <strong style={{ fontSize: 12.5 }}>Actions</strong>
+        <h3 style={{ margin: 0, fontSize: 13, lineHeight: "18px", fontWeight: 650, color: "var(--text-strong)" }}>Actions</h3>
         {progress && progress.total > 0 && (
           <>
             <div
@@ -122,13 +150,21 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
             </span>
           </>
         )}
-        {!adding && (
-          <button type="button" className="btn secondary sm" style={{ marginLeft: "auto" }} onClick={() => { setAdding(true); setError(null); }}>
+        {canWrite && (
+          <button
+            ref={addBtn}
+            type="button"
+            className="btn secondary sm"
+            style={{ marginLeft: "auto" }}
+            aria-expanded={adding}
+            aria-controls="risk-treatment-add"
+            onClick={() => setAddOpen(!adding)}
+          >
             Add action
           </button>
         )}
       </div>
-      {error && <div className="error" style={{ fontSize: 12.5, marginBottom: 8 }}>{error}</div>}
+      {error && !adding && <div className="error" style={{ fontSize: 12.5, marginBottom: 8 }}>{error}</div>}
 
       {actions.length > 0 ? (
         <div className="table-wrap">
@@ -138,22 +174,26 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
                 <th>Action</th>
                 <th style={{ width: 130 }}>Owner</th>
                 <th style={{ width: 110 }}>Due</th>
-                <th style={{ width: 120 }}>Status</th>
+                <th style={{ width: 150 }}>Status</th>
                 <th style={{ width: 70 }}>%</th>
-                <th style={{ width: 110 }} />
+                <th style={{ width: 110 }}><span className="sr-only">Row actions</span></th>
               </tr>
             </thead>
             <tbody>
               {actions.map((a) =>
                 editingId === a.id ? (
                   <tr key={a.id}>
-                    <td><input className="input" style={{ padding: "4px 8px", fontSize: 13 }} value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} /></td>
-                    <td><UserPicker value={edit.owner_id} onChange={(id) => setEdit({ ...edit, owner_id: id })} selected={a.owner_ref} placeholder="Owner…" /></td>
-                    <td><input className="input" type="date" style={{ padding: "4px 6px", fontSize: 12.5 }} value={edit.due_date} onChange={(e) => setEdit({ ...edit, due_date: e.target.value })} /></td>
+                    <td><input className="input" aria-label={`Title of ${a.title}`} style={{ padding: "4px 8px", fontSize: 13 }} value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} /></td>
+                    <td>
+                      <LabelledSearch label={`Owner of ${a.title}`} hideLabel>
+                        <UserPicker value={edit.owner_id} onChange={(id) => setEdit({ ...edit, owner_id: id })} selected={a.owner_ref} placeholder="Owner…" />
+                      </LabelledSearch>
+                    </td>
+                    <td><input className="input" type="date" aria-label={`Due date of ${a.title}`} style={{ padding: "4px 6px", fontSize: 12.5 }} value={edit.due_date} onChange={(e) => setEdit({ ...edit, due_date: e.target.value })} /></td>
                     <td colSpan={2} className="muted" style={{ fontSize: 12 }}>Status and % are set in the row.</td>
                     <td style={{ whiteSpace: "nowrap" }}>
-                      <button type="button" className="btn sm" disabled={busy} onClick={() => saveEdit(a)}>Save</button>{" "}
-                      <button type="button" className="btn secondary sm" onClick={() => setEditingId(null)}>Cancel</button>
+                      <button type="button" className="btn secondary sm" disabled={busy} {...rowAction("Save", a.title)} onClick={() => saveEdit(a)}>Save</button>{" "}
+                      <button type="button" className="btn secondary sm" {...rowAction("Cancel editing", a.title)} onClick={() => setEditingId(null)}>Cancel</button>
                     </td>
                   </tr>
                 ) : (
@@ -163,10 +203,10 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
                       {a.completed_at && <div className="muted" style={{ fontSize: 11.5 }}>Completed {formatDate(a.completed_at)}</div>}
                     </td>
                     <td className="muted"><UserName user={a.owner_ref} /></td>
-                    <td>{a.overdue ? <Badge tone="high">Overdue · {formatDate(a.due_date)}</Badge> : <span className="muted">{formatDate(a.due_date)}</span>}</td>
+                    <td>{a.overdue ? <Badge tone="high" asIs>Overdue · {formatDate(a.due_date)}</Badge> : a.due_date ? <span className="muted">{formatDate(a.due_date)}</span> : <span className="muted">No due date</span>}</td>
                     <td>
                       <select
-                        className="select" aria-label={`Status of ${a.title}`} value={a.status} disabled={busy}
+                        className="select" aria-label={`Status of ${a.title}`} value={a.status} disabled={busy || !canWrite}
                         onChange={(e) => run(() => api.updateTreatmentAction(riskId, a.id, { status: e.target.value as TreatmentAction["status"] }))}
                       >
                         {(Object.keys(STATUS_LABEL) as TreatmentAction["status"][]).map((k) => <option key={k} value={k}>{STATUS_LABEL[k]}</option>)}
@@ -179,7 +219,7 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
                         <input
                           key={`${a.id}-${a.percent_complete}`}
                           className="input" type="number" min={0} max={100} aria-label={`Percent complete of ${a.title}`}
-                          style={{ width: 60, padding: "4px 6px", fontSize: 12.5 }} defaultValue={a.percent_complete} disabled={busy}
+                          style={{ width: 60, padding: "4px 6px", fontSize: 12.5 }} defaultValue={a.percent_complete} disabled={busy || !canWrite}
                           onBlur={(e) => {
                             const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
                             if (v !== a.percent_complete) run(() => api.updateTreatmentAction(riskId, a.id, { percent_complete: v }));
@@ -188,11 +228,15 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
                       )}
                     </td>
                     <td style={{ whiteSpace: "nowrap" }}>
-                      <button type="button" className="btn secondary sm" onClick={() => {
-                        setEditingId(a.id);
-                        setEdit({ title: a.title, owner_id: a.owner_id, due_date: a.due_date ?? "", description: a.description });
-                      }}>Edit</button>{" "}
-                      <button type="button" className="btn secondary sm" disabled={busy} onClick={() => remove(a)}>Remove</button>
+                      {canWrite && (
+                        <>
+                          <button type="button" className="btn secondary sm" {...rowAction("Edit", a.title)} onClick={() => {
+                            setEditingId(a.id);
+                            setEdit({ title: a.title, owner_id: a.owner_id, due_date: a.due_date ?? "", description: a.description });
+                          }}>Edit</button>{" "}
+                          <button type="button" className="btn secondary sm" disabled={busy} {...rowAction("Remove", a.title)} onClick={() => remove(a)}>Remove</button>
+                        </>
+                      )}
                     </td>
                   </tr>
                 ),
@@ -204,26 +248,37 @@ export default function RiskTreatmentActions({ riskId, actions, progress, onChan
         !adding && <div className="muted" style={{ fontSize: 12.5 }}>No actions yet — break the plan into owned, dated actions so it can be chased.</div>
       )}
 
-      {adding && (
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr 0.9fr auto", gap: 8, alignItems: "end", marginTop: 8 }}>
-          <div>
-            <label className="label">Action</label>
-            <input className="input" value={draft.title} placeholder="e.g. Enforce MFA on internet banking" onChange={(e) => setDraft({ ...draft, title: e.target.value })} />
-          </div>
-          <div>
-            <label className="label">Owner</label>
-            <UserPicker value={draft.owner_id} onChange={(id) => setDraft({ ...draft, owner_id: id })} placeholder="Search people…" />
-          </div>
-          <div>
-            <label className="label">Due</label>
-            <input className="input" type="date" value={draft.due_date} onChange={(e) => setDraft({ ...draft, due_date: e.target.value })} />
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button type="button" className="btn sm" disabled={busy} onClick={add}>Add</button>
-            <button type="button" className="btn secondary sm" onClick={() => { setAdding(false); setDraft(EMPTY); setError(null); }}>Cancel</button>
-          </div>
-        </div>
-      )}
+      <Disclosure label="Add action" hideTrigger open={canWrite && adding} onOpenChange={setAddOpen} triggerRef={addBtn} id="risk-treatment-add">
+        {(close) => (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void add(close);
+            }}
+          >
+            <div>
+              <label className="label" htmlFor="risk-action-title">Action</label>
+              <input id="risk-action-title" className="input" value={draft.title} placeholder="e.g. Enforce MFA on internet banking" onChange={(e) => setDraft({ ...draft, title: e.target.value })} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8, alignItems: "end", marginTop: 8 }}>
+              <LabelledSearch label="Owner">
+                <UserPicker value={draft.owner_id} onChange={(id) => setDraft({ ...draft, owner_id: id })} placeholder="Search people…" />
+              </LabelledSearch>
+              <div>
+                <label className="label" htmlFor="risk-action-due">Due</label>
+                <input id="risk-action-due" className="input" type="date" value={draft.due_date} onChange={(e) => setDraft({ ...draft, due_date: e.target.value })} />
+              </div>
+            </div>
+            {error && <div className="error" style={{ fontSize: 12.5, marginTop: 8 }}>{error}</div>}
+            <div className="row" style={{ marginTop: 10 }}>
+              <button type="submit" className="btn secondary sm" disabled={busy}>{busy ? "Adding…" : "Add"}</button>
+              <button type="button" className="btn secondary sm" onClick={close}>Cancel</button>
+            </div>
+          </form>
+        )}
+      </Disclosure>
     </div>
   );
-}
+});
+
+export default RiskTreatmentActions;

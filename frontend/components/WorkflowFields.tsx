@@ -10,13 +10,31 @@
    POST /records/{entityType}/{id}/workflow/{action}. The server decides which buttons
    appear (permission, four-eyes, a live approval route) and enforces the same rules
    again when one is pressed. For a record not saved yet (`entityId` null) it shows
-   "Draft — save first" and nothing else. */
+   "Draft — save first" and nothing else.
 
-import { useCallback, useEffect, useState } from "react";
+   Options (record-page-spec §3.5, §3.3.10):
+   - `variant="compact"`: the one-row layout of the dossier Sign-off card (and of
+     RecordApproval in a drawer aside): "Approval [badge]", the status line, the
+     approval-owner line (Set / Change in a Disclosure), the remaining actions as
+     secondary buttons (Reject… opens its reason form in a Disclosure), the blocked
+     reason and a collapsed "History (n)" with "See in trail".
+   - `omitActions`: actions not to render here (SignOffCard omits submit and approve,
+     which the header's primary button owns).
+   Inside a RecordDrawer with a matching `governance` it reads that shared state and
+   reloads it after a change; anywhere else it fetches its own, as before. Transitions go
+   through `runWorkflowAction`, so confirms and toasts match the header button. */
+
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Badge } from "@/components/badges";
 import UserPicker from "@/components/UserPicker";
-import { confirmDialog, toast } from "@/lib/feedback";
-import { formatDateTime } from "@/lib/format";
+import Disclosure from "@/components/record/Disclosure";
+import { WorkflowBadge } from "@/components/record/WorkflowBadge";
+import { useRecordGovernance, govModelFromParts } from "@/components/record/RecordGovernance";
+import { useEscapeLayer } from "@/lib/escapeLayer";
+import { toast } from "@/lib/feedback";
+import { formatDate, formatDateTime } from "@/lib/format";
+import { approvalLine } from "@/lib/record/text";
+import { runWorkflowAction, workflowErrorMessage } from "@/lib/workflowActions";
 import {
   records,
   WORKFLOW_ACTION_DONE,
@@ -34,6 +52,12 @@ type Props = {
   entityId: string | null;
   /** Called with the new state after a transition (or owner change), so the page can reload. */
   onChanged?: (state: WorkflowStateKey) => void;
+  /** "full" (default) or the one-row "compact" layout. */
+  variant?: "full" | "compact";
+  /** Actions not to render here (the header's primary owns them). */
+  omitActions?: WorkflowActionKey[];
+  /** Compact only: the row's key label (default "Approval"); null shows the badge alone. */
+  keyLabel?: string | null;
 };
 
 const STATE_TONE: Record<WorkflowStateKey, "neutral" | "info" | "low" | "medium"> = {
@@ -45,82 +69,114 @@ const STATE_TONE: Record<WorkflowStateKey, "neutral" | "info" | "low" | "medium"
 
 const HISTORY_PREVIEW = 4;
 
-const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
+/** Accessible names that say which row the button belongs to. */
+const ACTION_ARIA: Record<WorkflowActionKey, string> = {
+  submit: "Submit the record for review",
+  approve: "Approve the record",
+  reject: "Reject approval…",
+  revise: "Revise: reopen the record for revision",
+  retire: "Retire the record",
+};
 
-export default function WorkflowFields({ entityType, entityId, onChanged }: Props) {
-  const [data, setData] = useState<RecordWorkflow | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+const dateFmt = { date: (v: string | null | undefined) => formatDate(v), dateTime: (v: string | null | undefined) => formatDateTime(v), money: () => "" };
+
+export default function WorkflowFields({ entityType, entityId, onChanged, variant = "full", omitActions, keyLabel = "Approval" }: Props) {
+  const gov = useRecordGovernance(entityType, entityId);
+  const shared = !!gov && gov.lifecycle && !!entityId;
+
+  const [own, setOwn] = useState<RecordWorkflow | null>(null);
+  const [ownError, setOwnError] = useState<string | null>(null);
   const [busy, setBusy] = useState<WorkflowActionKey | "owner" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
   const [showAll, setShowAll] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // "History (n)" is a disclosure: while open, Esc folds it (focus back on its toggle)
+  // and leaves the record open.
+  const historyBtn = useRef<HTMLButtonElement>(null);
+  useEscapeLayer(historyOpen, () => {
+    setHistoryOpen(false);
+    historyBtn.current?.focus({ preventScroll: true });
+  });
+  const [ownerOpen, setOwnerOpen] = useState(false);
+  const uid = useId();
+  const rejectBtn = useRef<HTMLButtonElement>(null);
+  const ownerBtn = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
-    if (!entityId) return;
+    if (!entityId || shared) return;
     try {
-      setData(await records.workflow(entityType, entityId));
-      setLoadError(null);
+      setOwn(await records.workflow(entityType, entityId));
+      setOwnError(null);
     } catch (e) {
-      setLoadError(errMsg(e, "Could not load the approval status"));
+      setOwnError(workflowErrorMessage(e, "Could not load the approval status"));
     }
-  }, [entityType, entityId]);
+  }, [entityType, entityId, shared]);
 
   useEffect(() => {
-    setData(null);
+    setOwn(null);
     setRejecting(false);
     setReason("");
     setError(null);
     setShowAll(false);
+    setHistoryOpen(false);
+    setOwnerOpen(false);
     load();
   }, [load]);
 
+  const data = shared ? gov?.workflow ?? null : own;
+  const loadError = shared ? gov?.errors.workflow ?? null : ownError;
+  const compact = variant === "compact";
+
   if (!entityId) {
-    return (
-      <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+    const msg = (
+      <>
         <Badge tone="neutral">Draft</Badge>
         <span className="muted">Draft — save first, then submit it for review.</span>
-      </div>
+      </>
+    );
+    return compact ? (
+      <div className="rec-so-row rec-wf"><div className="k">{msg}</div></div>
+    ) : (
+      <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>{msg}</div>
     );
   }
-  if (loadError) return <div className="muted" style={{ fontSize: 12.5 }}>{loadError}</div>;
-  if (!data) return <div className="muted" style={{ fontSize: 12.5 }}>Loading approval status…</div>;
+  if (!data && loadError) {
+    return compact ? (
+      <div className="rec-so-row rec-wf"><div className="k">{keyLabel}</div><div className="d">{loadError}</div></div>
+    ) : (
+      <div className="muted" style={{ fontSize: 12.5 }}>{loadError}</div>
+    );
+  }
+  if (!data) {
+    return compact ? (
+      <div className="rec-so-row rec-wf"><div className="k">{keyLabel}</div><div className="d">Loading approval status…</div></div>
+    ) : (
+      <div className="muted" style={{ fontSize: 12.5 }}>Loading approval status…</div>
+    );
+  }
 
   const id = entityId;
+  const wf = data;
+
+  async function afterChange(state: WorkflowStateKey) {
+    if (shared && gov) await gov.reload();
+    else await load();
+    onChanged?.(state);
+  }
 
   async function run(action: WorkflowActionKey, why?: string) {
-    if (action === "retire") {
-      const ok = await confirmDialog({
-        title: "Retire this record?",
-        message: "A retired record stays on file but is no longer in force. Retiring is final — a replacement is a new record.",
-        confirmLabel: "Retire",
-        danger: true,
-      });
-      if (!ok) return;
-    }
-    if (action === "revise") {
-      const ok = await confirmDialog({
-        title: "Reopen for revision?",
-        message: "The record returns to draft. Once edited it must be submitted and approved again.",
-        confirmLabel: "Revise",
-      });
-      if (!ok) return;
-    }
     setBusy(action);
     setError(null);
     try {
-      const res = await records.transition(entityType, id, action, why);
-      toast(
-        res.routed
-          ? "Submitted — the approval route's first stage is in the Approvals inbox"
-          : WORKFLOW_ACTION_DONE[action] || "Done",
-      );
+      const res = await runWorkflowAction(entityType, id, action, why);
+      if (!res) return;
       setRejecting(false);
       setReason("");
-      await load();
-      onChanged?.(res.state);
+      await afterChange(res.state);
     } catch (e) {
-      const msg = errMsg(e, "Could not change the approval status");
+      const msg = workflowErrorMessage(e);
       setError(msg);
       toast(msg, "error");
     } finally {
@@ -132,11 +188,14 @@ export default function WorkflowFields({ entityType, entityId, onChanged }: Prop
     setBusy("owner");
     setError(null);
     try {
-      setData(await records.setOwner(entityType, id, ownerId));
+      const next = await records.setOwner(entityType, id, ownerId);
       toast(ownerId ? "Approval owner set" : "Approval owner cleared");
-      if (data) onChanged?.(data.state);
+      setOwnerOpen(false);
+      if (shared && gov) await gov.reload();
+      else setOwn(next);
+      onChanged?.(next.state);
     } catch (e) {
-      const msg = errMsg(e, "Could not change the approval owner");
+      const msg = workflowErrorMessage(e, "Could not change the approval owner");
       setError(msg);
       toast(msg, "error");
     } finally {
@@ -144,14 +203,211 @@ export default function WorkflowFields({ entityType, entityId, onChanged }: Prop
     }
   }
 
-  const history = showAll ? data.history : data.history.slice(0, HISTORY_PREVIEW);
-  const ownerName = data.owner ? data.owner.full_name || data.owner.email : data.owner_text;
+  const omit = new Set(omitActions ?? []);
+  const actions = wf.allowed_actions.filter((a) => !omit.has(a));
+  const history = showAll ? wf.history : wf.history.slice(0, HISTORY_PREVIEW);
+  const ownerName = wf.owner ? wf.owner.full_name || wf.owner.email : wf.owner_text;
+
+  const historyList = (
+    <>
+      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+        {history.map((h, i) => (
+          <li key={`${h.at}-${i}`} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+            <b>{WORKFLOW_ACTION_DONE[h.action] || (h.action === "import" ? "Imported" : h.action)}</b>
+            <span className="muted">
+              {" · "}{h.actor_email || "system"}{" · "}{formatDateTime(h.at)}
+              {h.via ? ` · via ${h.via}` : ""}
+            </span>
+            {h.reason && <div style={{ marginTop: 2 }}>&ldquo;{h.reason}&rdquo;</div>}
+          </li>
+        ))}
+      </ul>
+      {wf.history.length > HISTORY_PREVIEW && (
+        <button
+          type="button"
+          className={compact ? "rec-link" : "btn secondary sm"}
+          style={{ marginTop: 6 }}
+          onClick={() => setShowAll((v) => !v)}
+        >
+          {showAll ? "Show less" : `Show all ${wf.history.length}`}
+        </button>
+      )}
+    </>
+  );
+
+  if (compact) {
+    const line = approvalLine(govModelFromParts(wf, null, false), dateFmt, { routing: wf.routing });
+    const rejectPanel = `${uid}-reject`;
+    const ownerPanel = `${uid}-owner`;
+    const seeInTrail = () => {
+      gov?.setTrailFilter("approval");
+      requestAnimationFrame(() => document.getElementById("rec-trail-card")?.focus());
+    };
+    return (
+      <div className="rec-so-row rec-wf">
+        <div className="k">
+          {keyLabel}
+          <WorkflowBadge state={wf.state} asIs hollowDraft />
+        </div>
+        <div className="d">
+          <span className={line.warn ? "rec-gap" : undefined}>{line.text}</span>
+          {line.note && <span> {line.note}</span>}
+        </div>
+        <div className="d">
+          {ownerName ? (
+            <>
+              Approval owner: <b>{ownerName}</b>
+            </>
+          ) : (
+            "Approval owner not set"
+          )}
+          {wf.can_set_owner && (
+            <>
+              {" "}
+              <button
+                ref={ownerBtn}
+                type="button"
+                className="rec-link"
+                aria-expanded={ownerOpen}
+                aria-controls={ownerPanel}
+                aria-label={ownerName ? "Change the approval owner" : "Set the approval owner"}
+                onClick={() => setOwnerOpen((v) => !v)}
+                disabled={busy !== null}
+              >
+                {ownerName ? "Change" : "Set"}
+              </button>
+            </>
+          )}
+        </div>
+        {wf.can_set_owner && (
+          <div className="d">
+            <Disclosure
+              label="Approval owner"
+              hideTrigger
+              open={ownerOpen}
+              onOpenChange={setOwnerOpen}
+              id={ownerPanel}
+              triggerRef={ownerBtn}
+            >
+              {(close) => (
+                <div style={{ display: "grid", gap: 8 }}>
+                  <UserPicker
+                    value={wf.owner?.id ?? null}
+                    selected={wf.owner}
+                    legacyText={wf.owner_text || null}
+                    onChange={(ownerId) => changeOwner(ownerId)}
+                    disabled={busy !== null}
+                    placeholder="Who takes this through approval…"
+                  />
+                  <div className="row">
+                    {(wf.owner || wf.owner_text) && (
+                      <button type="button" className="btn secondary sm" onClick={() => changeOwner(null)} disabled={busy !== null}>
+                        Clear
+                      </button>
+                    )}
+                    <button type="button" className="btn secondary sm" onClick={close} disabled={busy !== null}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </Disclosure>
+          </div>
+        )}
+        {actions.length > 0 && (
+          <div className="acts">
+            {actions.map((action) =>
+              action === "reject" ? (
+                <button
+                  key={action}
+                  ref={rejectBtn}
+                  type="button"
+                  className="btn secondary sm"
+                  aria-label={ACTION_ARIA.reject}
+                  aria-expanded={rejecting}
+                  aria-controls={rejectPanel}
+                  onClick={() => setRejecting((v) => !v)}
+                  disabled={busy !== null}
+                >
+                  Reject…
+                </button>
+              ) : (
+                <button
+                  key={action}
+                  type="button"
+                  className="btn secondary sm"
+                  aria-label={ACTION_ARIA[action]}
+                  onClick={() => run(action)}
+                  disabled={busy !== null}
+                >
+                  {busy === action ? "Working…" : WORKFLOW_ACTION_LABEL[action]}
+                </button>
+              ),
+            )}
+          </div>
+        )}
+        {actions.includes("reject") && (
+          <div className="d">
+            <Disclosure label="Reject approval" hideTrigger open={rejecting} onOpenChange={setRejecting} id={rejectPanel} triggerRef={rejectBtn}>
+              {(close) => (
+                <div style={{ display: "grid", gap: 6 }}>
+                  <label className="label" htmlFor={`wf-reject-${id}`} style={{ margin: 0 }}>Why is it going back to draft?</label>
+                  <textarea
+                    id={`wf-reject-${id}`}
+                    className="input"
+                    rows={2}
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    placeholder="The reason is recorded in the history and the activity log"
+                  />
+                  <div className="row">
+                    <button type="button" className="btn secondary sm" onClick={() => run("reject", reason)} disabled={busy !== null || !reason.trim()}>
+                      {busy === "reject" ? "Rejecting…" : "Reject"}
+                    </button>
+                    <button type="button" className="btn secondary sm" onClick={close} disabled={busy !== null}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </Disclosure>
+          </div>
+        )}
+        {wf.blocked_reason && <div className="d">{wf.blocked_reason}</div>}
+        {error && <div className="d rec-error" role="alert">{error}</div>}
+        {wf.history.length > 0 && (
+          <div className="d">
+            <button
+              ref={historyBtn}
+              type="button"
+              className="rec-link"
+              aria-expanded={historyOpen}
+              aria-controls={`${uid}-history`}
+              onClick={() => setHistoryOpen((v) => !v)}
+            >
+              History ({wf.history.length})
+            </button>
+          </div>
+        )}
+        {historyOpen && (
+          <div className="d rec-wf-history" id={`${uid}-history`}>
+            {historyList}
+            {shared && (
+              <div style={{ marginTop: 6 }}>
+                <button type="button" className="rec-link" onClick={seeInTrail}>See in trail</button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "grid", gap: 12 }}>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <Badge tone={STATE_TONE[data.state] ?? "neutral"}>{WORKFLOW_STATE_LABEL[data.state] ?? data.state}</Badge>
-        {data.routing && (
+        <Badge tone={STATE_TONE[wf.state] ?? "neutral"}>{WORKFLOW_STATE_LABEL[wf.state] ?? wf.state}</Badge>
+        {wf.routing && (
           <span className="muted" style={{ fontSize: 12.5 }}>
             Going through its approval route — each stage is decided in the Approvals inbox.
           </span>
@@ -160,11 +416,11 @@ export default function WorkflowFields({ entityType, entityId, onChanged }: Prop
 
       <div>
         <label className="label">Approval owner</label>
-        {data.can_set_owner ? (
+        {wf.can_set_owner ? (
           <UserPicker
-            value={data.owner?.id ?? null}
-            selected={data.owner}
-            legacyText={data.owner_text || null}
+            value={wf.owner?.id ?? null}
+            selected={wf.owner}
+            legacyText={wf.owner_text || null}
             onChange={(ownerId) => changeOwner(ownerId)}
             disabled={busy !== null}
             placeholder="Who takes this through approval…"
@@ -174,10 +430,10 @@ export default function WorkflowFields({ entityType, entityId, onChanged }: Prop
         )}
       </div>
 
-      {(data.allowed_actions.length > 0 || data.blocked_reason) && (
+      {(actions.length > 0 || wf.blocked_reason) && (
         <div style={{ display: "grid", gap: 8 }}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {data.allowed_actions.map((action) =>
+            {actions.map((action) =>
               action === "reject" ? (
                 <button
                   key={action}
@@ -202,8 +458,8 @@ export default function WorkflowFields({ entityType, entityId, onChanged }: Prop
               ),
             )}
           </div>
-          {data.blocked_reason && (
-            <div className="muted" style={{ fontSize: 12.5 }}>{data.blocked_reason}</div>
+          {wf.blocked_reason && (
+            <div className="muted" style={{ fontSize: 12.5 }}>{wf.blocked_reason}</div>
           )}
           {rejecting && (
             <div style={{ display: "grid", gap: 6 }}>
@@ -238,26 +494,10 @@ export default function WorkflowFields({ entityType, entityId, onChanged }: Prop
 
       <div>
         <div className="label" style={{ marginBottom: 4 }}>History</div>
-        {data.history.length === 0 ? (
+        {wf.history.length === 0 ? (
           <div className="muted" style={{ fontSize: 12.5 }}>No approval steps yet.</div>
         ) : (
-          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
-            {history.map((h, i) => (
-              <li key={`${h.at}-${i}`} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
-                <b>{WORKFLOW_ACTION_DONE[h.action] || h.action}</b>
-                <span className="muted">
-                  {" · "}{h.actor_email || "system"}{" · "}{formatDateTime(h.at)}
-                  {h.via ? ` · via ${h.via}` : ""}
-                </span>
-                {h.reason && <div style={{ marginTop: 2 }}>&ldquo;{h.reason}&rdquo;</div>}
-              </li>
-            ))}
-          </ul>
-        )}
-        {data.history.length > HISTORY_PREVIEW && (
-          <button type="button" className="btn secondary sm" style={{ marginTop: 6 }} onClick={() => setShowAll((v) => !v)}>
-            {showAll ? "Show less" : `Show all ${data.history.length}`}
-          </button>
+          historyList
         )}
       </div>
     </div>

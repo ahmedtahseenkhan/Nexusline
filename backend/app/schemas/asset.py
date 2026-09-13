@@ -15,6 +15,7 @@ from app.models.enums import (
     Criticality,
     DiscoverySource,
     ReviewFrequency,
+    Severity,
     WorkflowStatus,
 )
 
@@ -22,6 +23,36 @@ from app.models.enums import (
 class LinkRef(BaseModel):
     id: uuid.UUID
     label: str
+
+
+class RiskExposureRef(LinkRef):
+    """A risk on the asset, with its exposure (spec B8): scores, their bands on the
+    tenant's matrix (cell overrides included) and the appetite band of the effective
+    score (residual when assessed, else inherent) — the same rules as ``RiskRead`` and
+    the dashboard. The bands and the appetite status are null where the tenant's scale
+    was not loaded (the asset list)."""
+
+    reference: str = ""
+    inherent_score: int | None = None
+    inherent_severity: Severity | None = None
+    residual_score: int | None = None
+    residual_severity: Severity | None = None
+    appetite_status: str | None = None
+
+
+class ExceptionLinkRef(LinkRef):
+    """A linked exception with its state and expiry (B3); an approved exception past its
+    expiry reads ``expired`` (``schemas.common.exception_status``)."""
+
+    status: str | None = None
+    expires_at: date | None = None
+
+
+class InformationAssetRef(LinkRef):
+    """The information asset in a dependency, with the business value an IT asset that
+    carries it inherits (B8)."""
+
+    business_value: Criticality | None = None
 
 
 class ClassificationRef(BaseModel):
@@ -150,7 +181,7 @@ class AssetDependencyRead(BaseModel):
     id: uuid.UUID
     relationship_type: AssetDependencyType
     notes: str
-    information_asset: LinkRef | None = None
+    information_asset: InformationAssetRef | None = None
     it_asset: LinkRef | None = None
 
 
@@ -348,9 +379,9 @@ class AssetRead(BaseModel):
     legals: list[LinkRef] = []
     requirements: list[LinkRef] = []
     incidents: list[LinkRef] = []
-    exceptions: list[LinkRef] = []
+    exceptions: list[ExceptionLinkRef] = []
     related_assets: list[LinkRef] = []
-    risks: list[LinkRef] = []
+    risks: list[RiskExposureRef] = []
     # Reverse links (read-only).
     vendors: list[GraphRef] = []
     access_reviews: list[GraphRef] = []

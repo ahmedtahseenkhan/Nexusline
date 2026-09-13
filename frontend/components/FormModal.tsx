@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { confirmDialog } from "@/lib/feedback";
+import { trapTab, useEscapeLayer } from "@/lib/escapeLayer";
 
 export type FormTab = { id: string; label: string; content: ReactNode; required?: boolean };
 
@@ -15,6 +16,8 @@ type Props = {
   saveLabel?: string;
   wide?: boolean;
   footerLeft?: ReactNode;
+  /** Tab to open on (default the first) — record pages open Edit on the tab a fix names. */
+  initialTab?: string;
 };
 
 /** eramba-style tabbed record dialog: header, tab strip, scrollable body, Close/Save footer.
@@ -23,7 +26,12 @@ type Props = {
  *  `required` inputs, switches to the tab that contains the first one, highlights the
  *  fields, focuses the first, and shows a plain-language message — all without the
  *  page needing to wire anything. The server's (now readable) validation is the
- *  backstop for anything not caught here. */
+ *  backstop for anything not caught here.
+ *
+ *  Keyboard: the dialog is labelled by its title and takes focus on open (unless a
+ *  field autofocused); Tab stays inside it; focus returns to the opener on close. Esc
+ *  goes through the escape stack (lib/escapeLayer): a picker, menu or confirm opened
+ *  inside or on top of the form closes first, and Esc while saving does nothing. */
 export default function FormModal({
   title,
   tabs,
@@ -34,11 +42,30 @@ export default function FormModal({
   saveLabel = "Save",
   wide,
   footerLeft,
+  initialTab,
 }: Props) {
-  const [active, setActive] = useState(tabs[0]?.id);
+  const [active, setActive] = useState(
+    initialTab && tabs.some((t) => t.id === initialTab) ? initialTab : tabs[0]?.id,
+  );
   const [clientError, setClientError] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
   const dirtyRef = useRef(false);
+  const titleId = `fm-title-${useId()}`;
+
+  // Focus: move into the dialog on open (unless a field already took it with autoFocus)
+  // and give it back to whatever opened it on close — "Attest…", Edit, a row, …
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    const raf = requestAnimationFrame(() => {
+      const root = modalRef.current;
+      if (root && !root.contains(document.activeElement)) root.focus({ preventScroll: true });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      if (opener && opener !== document.body && opener.isConnected) opener.focus({ preventScroll: true });
+    };
+  }, []);
 
   /** Close, but guard unsaved edits: any change in the form marks it dirty, and closing
    *  a dirty form prompts before discarding — so a stray Escape/overlay-click can't wipe
@@ -50,17 +77,18 @@ export default function FormModal({
     }
   }, [onClose]);
 
+  // Esc: the top layer of the escape stack while the form is open (pickers, menus and the
+  // discard-changes confirm opened from it sit above it). Ignored while saving, like Close.
+  useEscapeLayer(true, () => {
+    if (!saving) void requestClose();
+  });
+
   useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") requestClose();
-    }
-    window.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
     return () => {
-      window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
-  }, [requestClose]);
+  }, []);
 
   function labelFor(el: Element): string {
     const lbl = el.closest(".field")?.querySelector("label")?.textContent || "";
@@ -105,10 +133,18 @@ export default function FormModal({
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && requestClose()}>
-      <div className={`modal${wide ? " wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
+      <div
+        ref={modalRef}
+        tabIndex={-1}
+        className={`modal${wide ? " wide" : ""}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onKeyDown={(e) => trapTab(e, modalRef.current)}
+      >
         <div className="modal-head">
-          <h2>{title}</h2>
-          <button className="x" onClick={requestClose} aria-label="Close">✕</button>
+          <h2 id={titleId}>{title}</h2>
+          <button className="x" onClick={requestClose} aria-label={`Close ${title}`} type="button">✕</button>
         </div>
 
         {tabs.length > 1 && (
@@ -119,9 +155,10 @@ export default function FormModal({
                 className={`modal-tab${active === t.id ? " active" : ""}`}
                 onClick={() => setActive(t.id)}
                 type="button"
+                aria-current={active === t.id ? "true" : undefined}
               >
                 {t.label}
-                {t.required && <span className="req-dot">•</span>}
+                {t.required && <span className="req-dot" aria-hidden="true">•</span>}
               </button>
             ))}
           </div>

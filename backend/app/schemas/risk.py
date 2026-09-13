@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from app.models.base import WorkflowState
-from app.schemas.common import GraphRef, LookupRef, UserRef
+from app.schemas.common import ExceptionRef, GraphRef, LookupRef, UserRef
 from app.models.enums import (
     AcceptanceStatus,
     ReviewFrequency,
@@ -16,7 +16,7 @@ from app.models.enums import (
     TreatmentStrategy,
 )
 from app.schemas.asset import AssetRef
-from app.schemas.control import ControlRef
+from app.schemas.control import ControlAssuranceRef
 from app.schemas.threat import NamedRef
 from app.services.risk_scoring import (
     DEFAULT_MAX_SCORE,
@@ -378,7 +378,9 @@ class RiskRead(BaseModel):
     business_units: list[NamedRef] = []
     processes: list[NamedRef] = []
     assets: list[AssetRef] = []
-    controls: list[ControlRef] = []
+    # Each control's rating, its basis and its test record (B2): filled on the
+    # single-record read and write responses; null on the list.
+    controls: list[ControlAssuranceRef] = []
     threats: list[NamedRef] = []
     vulnerabilities: list[NamedRef] = []
     policies: list[RiskLinkRef] = []
@@ -387,7 +389,9 @@ class RiskRead(BaseModel):
 
     # Reverse links — records elsewhere that point at this risk (read-only).
     requirements: list[GraphRef] = []
-    exceptions: list[GraphRef] = []
+    # Exceptions carry their status and expiry (B3): an exception is not a risk
+    # acceptance, and the page says which one it is and when it lapses.
+    exceptions: list[ExceptionRef] = []
     vendors: list[GraphRef] = []
     projects: list[GraphRef] = []
     goals: list[GraphRef] = []
@@ -666,14 +670,37 @@ class SuggestedResidual(BaseModel):
     inherent_score: int
     current_residual_score: int | None
     matches_current: bool
+    #: The appetite band the *suggested* score would fall in for this risk's category —
+    #: within_appetite | elevated | breach — judged exactly as ``RiskRead.appetite_status``
+    #: judges the recorded score (B12). None when there is nothing to judge.
+    appetite_status: str | None = None
+    #: The linked controls whose credit the suggestion takes, in link order — empty when
+    #: the suggestion equals inherent. Accepting the suggestion relies on exactly these
+    #: ratings (B6), so a page lists them from here instead of re-deriving the weights.
+    credited_control_ids: list[uuid.UUID] = []
+    #: Whether accepting the suggestion as it stands needs ``ResidualAcceptance.note``:
+    #: a credited control is rated by hand or by override, or has no reviewed test on
+    #: file. The same rule ``POST /accept-residual`` enforces with a 422 (B6).
+    note_required: bool = False
+
+
+#: Refusal when a suggestion leans on a control rating no reviewed test supports and the
+#: owner has not said why they accept it anyway (B6).
+UNTESTED_CREDIT_NOTE_NEEDED = "Accepting credit from an untested control rating needs a note"
 
 
 class ResidualAcceptance(BaseModel):
-    """Accept the suggestion as-is, or record a different judgement with a reason."""
+    """Accept the suggestion as-is, or record a different judgement with a reason.
+
+    ``note`` is the owner's word on accepting the suggestion. It is required (422) when
+    any control that earns credit is rated by hand or by override, or has no reviewed
+    test on file; it is appended to the stored rationale as "; owner's note: …".
+    """
 
     likelihood: int | None = _OptionalScale
     impact: int | None = _OptionalScale
     override_reason: str = ""
+    note: str = ""
 
 
 class RiskAggregateRow(BaseModel):

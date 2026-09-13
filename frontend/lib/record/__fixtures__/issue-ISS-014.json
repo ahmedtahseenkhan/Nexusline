@@ -1,0 +1,286 @@
+{
+  "type": "issue",
+  "note": "ISS-014: the shape of GET /issues/{id} as the dev stack returns it (ISS-002, captured 2026-09-13), filled in as a regulator-related audit finding: 13 days overdue, moved twice with a third move awaiting the viewer's decision, 1 of 3 CAPA actions done, root cause recorded, not validated. `source` is the page's resolution of source_id.",
+  "input": {
+    "issue": {
+      "title": "Wire release lacks segregation of duties",
+      "description": "Makers in the payments back office can also release outgoing wires above PKR 5 million.",
+      "source_type": "internal_audit",
+      "source_reference": "AUD-004 finding 3",
+      "source_id": "7a21c0d4-5e55-4c0b-a7f4-9a4a1b2c3d4e",
+      "category": "",
+      "category_id": null,
+      "severity": "high",
+      "status": "in_progress",
+      "owner": "",
+      "owner_id": "u3",
+      "business_unit": "",
+      "business_unit_id": null,
+      "identified_date": "2026-06-02",
+      "due_date": "2026-08-31",
+      "root_cause": "Release rights granted to the maker role during the 2025 migration were never revoked.",
+      "root_cause_category_id": "rc1",
+      "management_response": "Payments operations will remove release rights from makers and add a dual-authorisation step.",
+      "repeat_finding": false,
+      "regulator_related": true,
+      "workflow_owner_id": null,
+      "id": "f37086d2-7823-4849-8cf4-00769bf3b1bf",
+      "reference": "ISS-014",
+      "workflow_status": "in_review",
+      "workflow_owner": "",
+      "owner_ref": {
+        "id": "u3",
+        "full_name": "Sana Iqbal",
+        "email": "sana.iqbal@bank.pk"
+      },
+      "business_unit_ref": null,
+      "category_ref": null,
+      "workflow_owner_ref": null,
+      "root_cause_category_ref": {
+        "id": "rc1",
+        "key": "root_cause_category",
+        "value": "access_management",
+        "label": "Access management"
+      },
+      "closed_date": null,
+      "validated_by_id": null,
+      "validated_by_ref": null,
+      "validated_at": null,
+      "validation_result": null,
+      "validation_note": "",
+      "risks": [
+        {
+          "id": "5deaf5aa-734c-4517-9d55-1243ae638d8c",
+          "reference": "R-002",
+          "title": "Ransomware encrypts production systems",
+          "name": ""
+        }
+      ],
+      "controls": [
+        {
+          "id": "7a21c0d4-5e55-4c0b-a7f4-9a4a1b2c3d4e",
+          "reference": "CTL-021",
+          "title": "",
+          "name": "Dual authorisation of wire release"
+        }
+      ],
+      "requirements": [],
+      "assets": [],
+      "vendors": [],
+      "due_date_changes": [
+        {
+          "id": "dc1",
+          "issue_id": "f37086d2-7823-4849-8cf4-00769bf3b1bf",
+          "old_due_date": "2026-06-30",
+          "new_due_date": "2026-07-31",
+          "reason": "Core banking change freeze over Eid",
+          "status": "approved",
+          "requested_by_id": "u3",
+          "requested_by_ref": {
+            "id": "u3",
+            "full_name": "Sana Iqbal",
+            "email": "sana.iqbal@bank.pk"
+          },
+          "approved_by_id": "u1",
+          "approved_by_ref": {
+            "id": "u1",
+            "full_name": "Omar Farooq",
+            "email": "omar.farooq@bank.pk"
+          },
+          "approved_at": "2026-06-26T10:00:00Z",
+          "created_at": "2026-06-25T09:00:00Z"
+        },
+        {
+          "id": "dc2",
+          "issue_id": "f37086d2-7823-4849-8cf4-00769bf3b1bf",
+          "old_due_date": "2026-07-31",
+          "new_due_date": "2026-08-31",
+          "reason": "Vendor patch delayed to the August release",
+          "status": "approved",
+          "requested_by_id": "u3",
+          "requested_by_ref": {
+            "id": "u3",
+            "full_name": "Sana Iqbal",
+            "email": "sana.iqbal@bank.pk"
+          },
+          "approved_by_id": "u1",
+          "approved_by_ref": {
+            "id": "u1",
+            "full_name": "Omar Farooq",
+            "email": "omar.farooq@bank.pk"
+          },
+          "approved_at": "2026-07-21T10:00:00Z",
+          "created_at": "2026-07-20T09:00:00Z"
+        },
+        {
+          "id": "dc3",
+          "issue_id": "f37086d2-7823-4849-8cf4-00769bf3b1bf",
+          "old_due_date": "2026-08-31",
+          "new_due_date": "2026-10-15",
+          "reason": "Awaiting UAT sign-off from payments operations",
+          "status": "pending",
+          "requested_by_id": "u3",
+          "requested_by_ref": {
+            "id": "u3",
+            "full_name": "Sana Iqbal",
+            "email": "sana.iqbal@bank.pk"
+          },
+          "approved_by_id": null,
+          "approved_by_ref": null,
+          "approved_at": null,
+          "created_at": "2026-09-10T09:00:00Z"
+        }
+      ],
+      "due_date_moves": 2,
+      "action_count": 3,
+      "open_action_count": 2,
+      "is_overdue": true,
+      "age_days": 103,
+      "created_at": "2026-07-12T22:45:15.393866Z",
+      "actions": [
+        {
+          "id": "a1",
+          "issue_id": "f37086d2-7823-4849-8cf4-00769bf3b1bf",
+          "title": "Remove release rights from the maker role",
+          "description": "",
+          "action_type": "corrective",
+          "owner": "",
+          "owner_id": "u3",
+          "owner_ref": null,
+          "due_date": "2026-07-15",
+          "status": "done",
+          "completed_date": "2026-07-14",
+          "evidence_note": "",
+          "is_overdue": false
+        },
+        {
+          "id": "a2",
+          "issue_id": "f37086d2-7823-4849-8cf4-00769bf3b1bf",
+          "title": "Add dual authorisation to wire release",
+          "description": "",
+          "action_type": "corrective",
+          "owner": "",
+          "owner_id": "u4",
+          "owner_ref": null,
+          "due_date": "2026-08-25",
+          "status": "open",
+          "completed_date": null,
+          "evidence_note": "",
+          "is_overdue": true
+        },
+        {
+          "id": "a3",
+          "issue_id": "f37086d2-7823-4849-8cf4-00769bf3b1bf",
+          "title": "Quarterly access recertification of payments roles",
+          "description": "",
+          "action_type": "preventive",
+          "owner": "",
+          "owner_id": "u4",
+          "owner_ref": null,
+          "due_date": "2026-09-30",
+          "status": "in_progress",
+          "completed_date": null,
+          "evidence_note": "",
+          "is_overdue": false
+        }
+      ],
+      "updates": []
+    },
+    "source": {
+      "kind": "control",
+      "label": "CTL-021 Dual authorisation of wire release"
+    },
+    "meId": "u1",
+    "canApprove": true,
+    "primaryLabel": null
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "in_review",
+      "approvalSteps": 1,
+      "lastStep": {
+        "action": "submit",
+        "at": "2026-09-01T08:00:00Z",
+        "actor": "sana.iqbal@bank.pk",
+        "reason": ""
+      },
+      "lastSubmitAt": "2026-09-01T08:00:00Z",
+      "attestation": null
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "due",
+        "value": "Overdue 13 days",
+        "because": "Due 31 Aug 2026; moved 2 times, last reason “Vendor patch delayed to the August release”.",
+        "basis": {
+          "kind": "declared",
+          "text": "Date moved 2×"
+        }
+      },
+      {
+        "key": "age",
+        "value": "103 days",
+        "because": "Identified 02 Jun 2026.",
+        "basis": {
+          "kind": "derived",
+          "text": "Calculated"
+        }
+      },
+      {
+        "key": "remediation",
+        "value": "1 of 3",
+        "because": "2 open, 1 overdue; next due 25 Aug 2026.",
+        "basis": {
+          "kind": "derived",
+          "text": "From the action plan"
+        }
+      },
+      {
+        "key": "source",
+        "value": "CTL-021 Dual authorisation of wire release",
+        "because": "Raised from internal audit (AUD-004 finding 3); linked to 1 risk and 1 control.",
+        "basis": {
+          "kind": "derived",
+          "text": "From the source link"
+        }
+      },
+      {
+        "key": "rootcause",
+        "value": "Access management",
+        "because": "Release rights granted to the maker role during the 2025 migration were never revoked.",
+        "basis": {
+          "kind": "declared",
+          "text": "Recorded by hand"
+        }
+      },
+      {
+        "key": "closure",
+        "value": "Not validated",
+        "because": "To close: finish every action (2 open), attach closure evidence, and have someone independent validate the fix.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "issue.overdue",
+        "level": "gap"
+      },
+      {
+        "id": "issue.due_change_to_decide",
+        "level": "gap"
+      },
+      {
+        "id": "issue.moved_twice",
+        "level": "note"
+      }
+    ],
+    "headline": "High issue, 13 days overdue; 1 of 3 actions done; not validated."
+  }
+}

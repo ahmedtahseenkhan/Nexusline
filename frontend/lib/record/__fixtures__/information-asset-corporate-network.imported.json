@@ -1,0 +1,288 @@
+{
+  "_source": "Captured 2026-09-13 from the dev stack (older API build, before B1/B3/B4/B8): GET /api/v1/assets/72a69d43-130c-4f5a-89b1-681eaf7da072, GET /api/v1/asset-classification-types, GET /api/v1/attestations/asset/{id} and GET /api/v1/records/asset/{id}/workflow, stored verbatim; ctx.gov is toGovModel() of the last two. Expected output is record-page-spec \u00a74.3 'Expected for Corporate Network' (the degrade path: risk labels only).",
+  "type": "infoAsset",
+  "input": {
+    "asset": {
+      "id": "72a69d43-130c-4f5a-89b1-681eaf7da072",
+      "name": "Corporate Network",
+      "description": "Corporate Network \u2014 core asset in the security program.",
+      "asset_class": "information_asset",
+      "media_type": {
+        "id": "268efbf9-ed48-4574-99b4-ebe07a803159",
+        "label": "Network"
+      },
+      "label": {
+        "id": "9bafa0f1-7ae0-4736-b481-8d26bd6283ce",
+        "label": "Internal"
+      },
+      "owner": {
+        "id": "d364ed33-baae-40a3-aaad-da9d55ee035a",
+        "label": "IT"
+      },
+      "guardian": {
+        "id": "d364ed33-baae-40a3-aaad-da9d55ee035a",
+        "label": "IT"
+      },
+      "user": null,
+      "confidentiality": "medium",
+      "integrity": "medium",
+      "availability": "high",
+      "criticality": "medium",
+      "classification": "high",
+      "potential_liabilities": "",
+      "business_value": "medium",
+      "information_owner": "",
+      "data_categories": "",
+      "records_volume": "",
+      "self_assessed": false,
+      "assessed_by": "",
+      "assessed_date": null,
+      "replacement_cost": 0.0,
+      "currency": "PKR",
+      "rto_hours": null,
+      "rpo_hours": null,
+      "environment": "production",
+      "location": "",
+      "hostname": "",
+      "ip_address": "",
+      "serial_number": "",
+      "manufacturer": "",
+      "model_number": "",
+      "os_version": "",
+      "discovery_source": "manual",
+      "external_id": "",
+      "auto_discovered": false,
+      "last_seen": null,
+      "cost_band": "low",
+      "intrinsic_criticality": "high",
+      "derived_criticality": "low",
+      "effective_criticality": "medium",
+      "review_frequency": "annual",
+      "next_review_date": "2027-07-03",
+      "last_review_date": null,
+      "expired_reviews": 0,
+      "review_status": "current",
+      "workflow_status": "approved",
+      "classifications": [
+        {
+          "id": "3341e876-bdd4-4565-bef8-67d085f9041d",
+          "name": "Mission-critical",
+          "value": 4.0,
+          "type_name": "Availability"
+        }
+      ],
+      "tags": [],
+      "dependencies": [],
+      "processes": [],
+      "legals": [],
+      "requirements": [],
+      "incidents": [],
+      "exceptions": [],
+      "related_assets": [],
+      "risks": [
+        {
+          "id": "5deaf5aa-734c-4517-9d55-1243ae638d8c",
+          "label": "R-002"
+        }
+      ],
+      "vendors": [
+        {
+          "id": "86790476-5725-48be-8ab0-43d75309da69",
+          "reference": "",
+          "title": "",
+          "name": "Amazon Web Services"
+        }
+      ],
+      "access_reviews": [],
+      "controls": [
+        {
+          "id": "7e23bf27-1359-4f31-9768-a70f4d96c4c3",
+          "reference": "A.5.15",
+          "title": "",
+          "name": "Access Control Policy"
+        }
+      ],
+      "threats": [],
+      "vulnerabilities": [],
+      "reviews": [],
+      "risk_count": 1,
+      "review_count": 0,
+      "created_at": "2026-07-03T20:35:46.947782Z"
+    },
+    "classTypes": [
+      {
+        "id": "0d4a0c13-2d8e-4192-8ca5-3d152cab8b72",
+        "name": "Availability",
+        "description": "Availability rating scale",
+        "classifications": [
+          {
+            "name": "Standard",
+            "criteria": "Can be unavailable for several days (recovery time over 72 hours)",
+            "value": 1.0,
+            "id": "acf85c7c-2c2c-4470-ba6e-553626079703",
+            "type_id": "0d4a0c13-2d8e-4192-8ca5-3d152cab8b72"
+          },
+          {
+            "name": "Important",
+            "criteria": "Needed within a working day (recovery time up to 24 hours)",
+            "value": 2.0,
+            "id": "772b0f07-7f1e-40bd-b684-5f70ed00c491",
+            "type_id": "0d4a0c13-2d8e-4192-8ca5-3d152cab8b72"
+          },
+          {
+            "name": "Business-critical",
+            "criteria": "Needed within hours (recovery time up to 4 hours)",
+            "value": 3.0,
+            "id": "bd527c02-43b3-4d20-a3fa-3876cb3f731d",
+            "type_id": "0d4a0c13-2d8e-4192-8ca5-3d152cab8b72"
+          },
+          {
+            "name": "Mission-critical",
+            "criteria": "Must stay up; any outage is immediately material (under 1 hour)",
+            "value": 4.0,
+            "id": "3341e876-bdd4-4565-bef8-67d085f9041d",
+            "type_id": "0d4a0c13-2d8e-4192-8ca5-3d152cab8b72"
+          }
+        ]
+      },
+      {
+        "id": "093edb3d-273a-4b8a-9177-9d3da295ba20",
+        "name": "Confidentiality",
+        "description": "Confidentiality rating scale",
+        "classifications": [
+          {
+            "name": "Public",
+            "criteria": "Publicly shareable, no harm if disclosed",
+            "value": 1.0,
+            "id": "7cd790cc-2e43-4ff8-b46e-98bc46b49a28",
+            "type_id": "093edb3d-273a-4b8a-9177-9d3da295ba20"
+          },
+          {
+            "name": "Internal",
+            "criteria": "Internal use only",
+            "value": 2.0,
+            "id": "1fd4a6ab-6d4f-4399-84bb-c8d7900b9b7b",
+            "type_id": "093edb3d-273a-4b8a-9177-9d3da295ba20"
+          },
+          {
+            "name": "Confidential",
+            "criteria": "Limited distribution, business impact if disclosed",
+            "value": 3.0,
+            "id": "bbbff2d9-9b6f-44bd-8f5c-8204bc797e1b",
+            "type_id": "093edb3d-273a-4b8a-9177-9d3da295ba20"
+          },
+          {
+            "name": "Restricted",
+            "criteria": "Strictly need-to-know, severe impact if disclosed",
+            "value": 4.0,
+            "id": "3f2b692c-fd4f-4cf3-9171-7f3b2e05daa3",
+            "type_id": "093edb3d-273a-4b8a-9177-9d3da295ba20"
+          }
+        ]
+      },
+      {
+        "id": "c00af8e6-0f03-4d15-9054-1cce3c810fe4",
+        "name": "Integrity",
+        "description": "Integrity rating scale",
+        "classifications": [
+          {
+            "name": "Low",
+            "criteria": "Errors or unauthorised changes would have little business effect",
+            "value": 1.0,
+            "id": "6b44b009-ab5a-4311-80cb-9ba8d0a06b1b",
+            "type_id": "c00af8e6-0f03-4d15-9054-1cce3c810fe4"
+          },
+          {
+            "name": "Moderate",
+            "criteria": "Errors would cause rework or minor customer impact",
+            "value": 2.0,
+            "id": "467374d8-b3e1-4dca-b129-56a0af90afcb",
+            "type_id": "c00af8e6-0f03-4d15-9054-1cce3c810fe4"
+          },
+          {
+            "name": "High",
+            "criteria": "Errors would cause financial loss, misreporting or customer harm",
+            "value": 3.0,
+            "id": "970cd423-8a3d-4d78-94eb-94da7dff02a3",
+            "type_id": "c00af8e6-0f03-4d15-9054-1cce3c810fe4"
+          },
+          {
+            "name": "Critical",
+            "criteria": "Errors would cause material loss, regulatory breach or fraud",
+            "value": 4.0,
+            "id": "484ba4ce-228d-4bf1-b61f-276415d932fb",
+            "type_id": "c00af8e6-0f03-4d15-9054-1cce3c810fe4"
+          }
+        ]
+      },
+      {
+        "id": "4d7b861a-78de-4dc6-8952-81f9f6c303b2",
+        "name": "RVW-AST-ctype",
+        "description": "",
+        "classifications": []
+      },
+      {
+        "id": "06a589cb-a467-4d4b-9592-ba6c854a09c4",
+        "name": "RVW-AST-ctype",
+        "description": "",
+        "classifications": []
+      }
+    ]
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "approved",
+      "approvalSteps": 0,
+      "lastStep": {
+        "action": "import",
+        "at": "2026-09-13T01:00:00Z",
+        "actor": "system@nexusline",
+        "reason": ""
+      },
+      "lastSubmitAt": null,
+      "attestation": {
+        "status": "never",
+        "nativeReview": false,
+        "nextDue": null,
+        "canAttest": null,
+        "blockedReason": null
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "points": [
+      {
+        "id": "asset.approved_without_step",
+        "level": "gap",
+        "text": "Imported as approved, no approver recorded."
+      },
+      {
+        "id": "asset.no_business_owner",
+        "level": "gap"
+      },
+      {
+        "id": "asset.cia_conflict.availability",
+        "level": "gap"
+      },
+      {
+        "id": "asset.self_assessment",
+        "level": "gap"
+      },
+      {
+        "id": "asset.data_categories",
+        "level": "gap"
+      },
+      {
+        "id": "asset.not_hosted",
+        "level": "note"
+      },
+      {
+        "id": "asset.never_attested",
+        "level": "note"
+      }
+    ]
+  },
+  "note": "Corporate Network after the B10b repair wrote its workflow_import row (round-2 integration, decision D5): the open point uses the header's and Sign-off's wording, never the 'no approval step' sentence."
+}

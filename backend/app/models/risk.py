@@ -297,6 +297,8 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     )
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
         "ExceptionRecord", secondary="exception_risks", lazy="selectin", viewonly=True,
+        # An archived exception is not on the register: never show it as a live link.
+        secondaryjoin="and_(exception_risks.c.exception_id == ExceptionRecord.id, ExceptionRecord.deleted == False)",
     )
     vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
         "Vendor", secondary="vendor_risks", lazy="selectin", viewonly=True,
@@ -336,22 +338,17 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     @property
     def control_health(self) -> str:
         """Live rollup of the mitigating controls' health — the risk-treatment loop.
-        A control audit that fails (or an open audit finding, or an overdue audit) makes
-        this ``issues`` on the very next read, so the risk register reacts automatically.
+        A control whose latest reviewed test failed (or with an open audit finding, or a
+        test overdue) makes this ``issues`` on the very next read, so the risk register
+        reacts automatically. A test awaiting review changes nothing until it is decided.
 
         ``none`` = unmitigated · ``ok`` = controls exist and are healthy · ``issues``.
         """
-        from app.models.enums import AuditFindingStatus, TestResult
-
         if not self.controls:
             return "none"
-        _open = lambda f: f.status not in (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)  # noqa: E731
-        for c in self.controls:
-            if c.last_audit_result == TestResult.failed or c.is_audit_overdue:
-                return "issues"
-            if any(_open(f) for f in c.audit_findings):
-                return "issues"
-        return "ok"
+        # The residual engine's reliance rule (``control_assurance.reliance_note``): the
+        # latest reviewed test failed, the test is overdue, or an audit finding is open.
+        return "issues" if any(c.reliance_note for c in self.controls) else "ok"
 
 
 class RiskAcceptance(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):

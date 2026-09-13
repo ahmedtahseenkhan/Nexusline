@@ -107,7 +107,11 @@ _INCIDENT_TYPES = [
 
 DEFAULT_LOOKUPS: dict[str, list[SeedValue]] = {
     "risk_category": _RISK_L1 + _RISK_L2,
-    "control_classification": _flat("Preventive", "Detective", "Corrective", "Directive"),
+    # No shipped values: Preventive / Detective / Corrective / Directive are a control's
+    # *nature* (its own field), and the start-up repair (``data_repairs`` B10a) retires
+    # them from this list. Seeding them would hand every new tenant four classifications
+    # the next restart takes away. A bank adds its own (Technical, Administrative, …).
+    "control_classification": [],
     "incident_type": _INCIDENT_TYPES,
     "incident_classification": _flat("Public", "Internal", "Confidential", "Restricted"),
     "issue_category": _flat("People", "Process", "Technology", "External"),

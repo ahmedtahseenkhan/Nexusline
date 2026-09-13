@@ -1,0 +1,261 @@
+{
+  "_source": "The contract-expired capture with a second, older expired contract added (AWS Support Agreement 2020-2022, ended 09 Jan 2022), so two contracts are on file and none is in force. Pins the plural wording: '2 on file, latest expired 09 Jan 2026'.",
+  "type": "vendor",
+  "input": {
+    "vendor": {
+      "name": "Amazon Web Services",
+      "description": "",
+      "category": "Cloud Infrastructure",
+      "category_id": "2a1d4146-39d6-428a-ac8e-662f2e051920",
+      "type_id": "513e23fa-e8d7-4b1d-9b69-659a2cb566c2",
+      "contact_name": "AWS Security Team",
+      "contact_email": "security@aws.example",
+      "contact_phone": "+1-206-555-0100",
+      "website": "https://aws.amazon.com",
+      "location": "Seattle, US",
+      "country_id": null,
+      "criticality": "critical",
+      "status": "active",
+      "workflow_owner_id": null,
+      "risk_rating": "medium",
+      "shares_data": true,
+      "assessment_status": "completed",
+      "last_assessed_at": "2026-07-03",
+      "onboarded_at": "2023-01-10",
+      "offboarded_at": null,
+      "review_frequency": "annual",
+      "next_review_date": "2027-07-03",
+      "legal_name": "",
+      "registration_number": "",
+      "relationship_owner_id": null,
+      "data_classification_id": null,
+      "annual_spend": null,
+      "spend_currency": "",
+      "id": "86790476-5725-48be-8ab0-43d75309da69",
+      "workflow_status": "approved",
+      "workflow_owner": "",
+      "category_ref": {
+        "id": "2a1d4146-39d6-428a-ac8e-662f2e051920",
+        "key": "vendor_category",
+        "value": "cloud_infrastructure",
+        "label": "Cloud Infrastructure"
+      },
+      "country_ref": null,
+      "workflow_owner_ref": null,
+      "type": {
+        "name": "Cloud Provider",
+        "description": "Infrastructure / SaaS provider",
+        "id": "513e23fa-e8d7-4b1d-9b69-659a2cb566c2"
+      },
+      "contracts": [
+        {
+          "name": "AWS Support Agreement 2020-2022",
+          "description": "Cloud infrastructure + enterprise support.",
+          "value": 90000.0,
+          "currency": "",
+          "start_date": "2020-01-10",
+          "end_date": "2022-01-09",
+          "id": "c0",
+          "is_expired": true,
+          "created_at": "2026-07-03T20:35:46.947782Z"
+        },
+        {
+          "name": "AWS Enterprise Agreement",
+          "description": "Cloud infrastructure + enterprise support.",
+          "value": 240000.0,
+          "currency": "",
+          "start_date": "2023-01-10",
+          "end_date": "2026-01-09",
+          "id": "bd29292b-52f7-4368-b4fd-fe9e34cfd32f",
+          "is_expired": true,
+          "created_at": "2026-07-03T20:35:46.947782Z"
+        }
+      ],
+      "risks": [
+        {
+          "id": "5deaf5aa-734c-4517-9d55-1243ae638d8c",
+          "reference": "R-002",
+          "title": "Ransomware encrypts production systems",
+          "name": ""
+        }
+      ],
+      "assets": [
+        {
+          "id": "e5ae4ce4-34f7-42a9-960f-2cea8939f9e3",
+          "reference": "",
+          "title": "",
+          "name": "Customer Database"
+        },
+        {
+          "id": "72a69d43-130c-4f5a-89b1-681eaf7da072",
+          "reference": "",
+          "title": "",
+          "name": "Corporate Network"
+        }
+      ],
+      "incidents": [],
+      "assessments": [
+        {
+          "id": "7185b34c-8f49-49c1-b02d-35fd15c36981",
+          "reference": "",
+          "title": "AWS annual security review",
+          "name": ""
+        }
+      ],
+      "outsourcing_arrangements": [],
+      "requirements": [],
+      "controls": [],
+      "contract_count": 2,
+      "active_contract_value": 0.0,
+      "active_contract_totals": {},
+      "created_at": "2026-07-03T20:35:46.947782Z",
+      "relationship_owner_ref": null,
+      "data_classification_ref": null,
+      "data_residency_countries": [],
+      "processes": [],
+      "subcontractors": [],
+      "subcontractor_of": [],
+      "certifications": [],
+      "inherent_tier": null,
+      "tier_override_reason": "",
+      "tiering": {
+        "tier": null,
+        "proposed_criticality": null,
+        "overridden": false,
+        "override_reason": "",
+        "assessment": null,
+        "submitted_at": null,
+        "total_score": null,
+        "max_score": null,
+        "score_pct": null,
+        "band_tier": null,
+        "worst_case_answers": null,
+        "floor_applied": false,
+        "explanation": "",
+        "stale": false,
+        "problem": "",
+        "questionnaire_id": "88f161b6-e2e3-43bb-b1ef-aca871b1f3f6"
+      },
+      "outsourcing": []
+    }
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "approved",
+      "approvalSteps": 1,
+      "lastStep": {
+        "action": "approve",
+        "at": "2026-07-03T20:40:00Z",
+        "actor": "admin@acme.com",
+        "reason": ""
+      },
+      "lastSubmitAt": "2026-07-03T20:36:00Z",
+      "attestation": {
+        "status": "never",
+        "nativeReview": true,
+        "nextDue": "2027-07-03",
+        "canAttest": true,
+        "blockedReason": null
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "tier",
+        "value": "Not tiered",
+        "because": "Answer the 8-question tiering questionnaire to set it.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "criticality",
+        "value": "Critical",
+        "because": "Set by hand; no tiering on file.",
+        "basis": {
+          "kind": "declared",
+          "text": "Set by hand"
+        }
+      },
+      {
+        "key": "rating",
+        "value": "Medium",
+        "because": "From the completed assessment, last 03 Jul 2026.",
+        "basis": {
+          "kind": "evidenced",
+          "text": "From assessment AWS annual security review"
+        }
+      },
+      {
+        "key": "data",
+        "value": "Handles our data",
+        "because": "Handles our data, but no data classification or residency is recorded.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "contracts",
+        "value": "None in force",
+        "because": "No contract in force: 2 on file, latest expired on 09 Jan 2026.",
+        "basis": {
+          "kind": "derived",
+          "text": "From contract records"
+        }
+      },
+      {
+        "key": "certs",
+        "value": "None",
+        "because": "No certification on file.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "vendor.owner",
+        "level": "gap",
+        "text": "No relationship owner.",
+        "action": {
+          "kind": "edit",
+          "target": "diligence"
+        }
+      },
+      {
+        "id": "vendor.data_unclassified",
+        "level": "gap",
+        "text": "Handles our data but the data classification is not recorded.",
+        "action": {
+          "kind": "edit",
+          "target": "diligence"
+        }
+      },
+      {
+        "id": "vendor.contract_expired_active",
+        "level": "gap",
+        "text": "Active third party with no contract in force.",
+        "action": {
+          "kind": "section",
+          "target": "contracts"
+        }
+      },
+      {
+        "id": "vendor.not_tiered",
+        "level": "note",
+        "text": "Not tiered",
+        "action": {
+          "kind": "section",
+          "target": "tiering"
+        }
+      }
+    ],
+    "headline": "Critical third party; not tiered; no contract in force; no valid certification."
+  }
+}

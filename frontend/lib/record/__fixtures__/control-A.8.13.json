@@ -1,0 +1,207 @@
+{
+  "type": "control",
+  "note": "Captured 2026-09-13 from the dev stack: GET /controls/9314ece7-… (implemented, rated effective by hand, no test, relied on by R-002; spec §5 row 4). B7 framework added from GET /requirements. Governance before B10b (approved, no approval step on file), seen by a viewer without control:write: B1 can_attest false with the server's permission refusal, so the attestation note offers no action.",
+  "input": {
+    "control": {
+      "name": "Backup & Recovery",
+      "reference": "A.8.13",
+      "description": "",
+      "objective": "Ensure data can be restored after a disruptive event.",
+      "owner_id": null,
+      "operator_id": null,
+      "owner": "Infrastructure",
+      "nature": null,
+      "automation": null,
+      "is_key": false,
+      "operating_frequency": null,
+      "iso27002_attributes": {},
+      "test_procedure": "",
+      "evidence_expected": "",
+      "control_type": "production",
+      "classification_id": "4076baac-9d8e-4d5e-afe6-41ebf6ce1efd",
+      "classification": "Technical",
+      "documentation_url": "",
+      "status": "implemented",
+      "effectiveness": "effective",
+      "workflow_owner_id": null,
+      "opex": 15000,
+      "capex": 30000,
+      "resource_utilization": 20,
+      "audit_frequency": "annual",
+      "audit_metric": "Sample of access grants reviewed against policy.",
+      "audit_success_criteria": "100% of sampled grants comply with least-privilege.",
+      "maintenance_frequency": "quarterly",
+      "id": "9314ece7-eb5f-4dac-b2c0-f977a251c6c1",
+      "owner_ref": null,
+      "operator_ref": null,
+      "classification_ref": {
+        "id": "4076baac-9d8e-4d5e-afe6-41ebf6ce1efd",
+        "key": "control_classification",
+        "value": "technical",
+        "label": "Technical"
+      },
+      "workflow_status": "approved",
+      "workflow_owner": "",
+      "workflow_owner_ref": null,
+      "next_audit_date": "2027-07-03",
+      "last_audit_date": null,
+      "next_maintenance_date": "2026-10-03",
+      "last_maintenance_date": null,
+      "audit_count": 0,
+      "last_audit_result": null,
+      "is_audit_overdue": false,
+      "maintenance_count": 0,
+      "last_maintenance_result": null,
+      "is_maintenance_overdue": false,
+      "design_effectiveness": "not_assessed",
+      "operating_effectiveness": "not_assessed",
+      "effectiveness_override_reason": "",
+      "effectiveness_basis": "manual",
+      "open_issues": [],
+      "pending_review_count": 0,
+      "business_units": [],
+      "processes": [],
+      "policies": [],
+      "requirements": [
+        {
+          "id": "715e2715-f20e-4b72-921b-2c9b1044596e",
+          "reference": "A.8.13",
+          "title": "Information backup",
+          "name": "",
+          "framework": "ISO/IEC 27001:2022",
+          "framework_id": "2e7a373a-db9b-41be-8b69-dedb5ee70d87"
+        }
+      ],
+      "risks": [
+        {
+          "id": "5deaf5aa-734c-4517-9d55-1243ae638d8c",
+          "reference": "R-002",
+          "title": "Ransomware encrypts production systems",
+          "name": ""
+        }
+      ],
+      "incidents": [],
+      "exceptions": [],
+      "projects": [
+        {
+          "id": "7df87ca2-eba3-41b0-b740-204f357e87d8",
+          "reference": "PRJ-001",
+          "title": "Immutable backup rollout",
+          "name": ""
+        }
+      ],
+      "audit_findings": [],
+      "assets": [],
+      "vendors": []
+    },
+    "tests": [],
+    "maints": [],
+    "suggestionCount": 0
+  },
+  "ctx": {
+    "now": "2026-09-12T09:00:00Z",
+    "gov": {
+      "workflowState": "approved",
+      "approvalSteps": 0,
+      "lastStep": null,
+      "lastSubmitAt": null,
+      "attestation": {
+        "status": "never",
+        "nativeReview": false,
+        "nextDue": null,
+        "canAttest": false,
+        "blockedReason": "You don't have permission to attest control records."
+      }
+    },
+    "canWrite": false
+  },
+  "expect": {
+    "headline": "Effective, set by hand; never tested; relied on by 1 risk.",
+    "tiles": [
+      {
+        "key": "effectiveness",
+        "value": "Effective",
+        "because": "Rated by hand before ratings came from tests; no reviewed test on file.",
+        "basis": {
+          "kind": "declared",
+          "text": "Set by hand"
+        }
+      },
+      {
+        "key": "testing",
+        "value": "Never tested",
+        "because": "0 tests on file; next due 03 Jul 2027 (annual cycle).",
+        "basis": {
+          "kind": "missing",
+          "text": "No test on file"
+        }
+      },
+      {
+        "key": "maintenance",
+        "value": "None recorded",
+        "because": "Next due 03 Oct 2026 (quarterly cycle); 0 records on file.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "reliedon",
+        "value": "1 risk · 1 requirement",
+        "because": "Implements ISO/IEC 27001:2022 A.8.13. Mitigates R-002.",
+        "basis": {
+          "kind": "derived",
+          "text": "From links"
+        }
+      },
+      {
+        "key": "issues",
+        "value": "None",
+        "because": "No open issue caps its operating rating.",
+        "basis": {
+          "kind": "derived",
+          "text": "From issues and exceptions"
+        }
+      },
+      {
+        "key": "evidence",
+        "value": "None",
+        "because": "0 evidence items across 0 tests. Evidence expected: not defined.",
+        "basis": {
+          "kind": "missing",
+          "text": "Nothing attached to tests"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "control.operator",
+        "level": "gap"
+      },
+      {
+        "id": "control.untested_in_operation",
+        "level": "gap"
+      },
+      {
+        "id": "control.hand_rating_relied_on",
+        "level": "gap"
+      },
+      {
+        "id": "control.no_procedure",
+        "level": "gap"
+      },
+      {
+        "id": "control.approved_without_step",
+        "level": "gap"
+      },
+      {
+        "id": "control.owner_text",
+        "level": "note"
+      },
+      {
+        "id": "control.never_attested",
+        "level": "note"
+      }
+    ]
+  }
+}

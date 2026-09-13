@@ -1,0 +1,235 @@
+{
+  "_source": "POL-001 as the dev stack returns it on 2026-09-13 (GET /api/v1/policies/dec3fc2a-… and …/acknowledgement-status): published 03 Jul 2026 while Record approval is still Draft with no approval step, no policy text or document link, owner the free text \"CISO\" with no person picked, no approving authority, 0 of 3 acknowledged. Pins: the unapproved publication and the empty document as gaps, the publication tile's basis 'Not approved', the acknowledgement tile's basis 'No acknowledgement yet' at 0%, and the text-only owner note.",
+  "type": "policy",
+  "input": {
+    "policy": {
+      "title": "Information Security Policy",
+      "summary": "",
+      "body": "",
+      "url": "",
+      "category_id": "c1872562-03cd-4c90-9d9e-e6d9dcec84e8",
+      "category": "Security",
+      "document_type": "policy",
+      "version": "2.1",
+      "status": "published",
+      "workflow_owner_id": null,
+      "owner_id": null,
+      "owner": "CISO",
+      "label_id": null,
+      "use_attachments": false,
+      "review_frequency": "annual",
+      "approving_authority_id": null,
+      "effective_date": null,
+      "supersedes_id": null,
+      "id": "dec3fc2a-365f-44ea-b273-4467ab0a52fd",
+      "reference": "POL-001",
+      "owner_ref": null,
+      "category_ref": {
+        "id": "c1872562-03cd-4c90-9d9e-e6d9dcec84e8",
+        "key": "policy_category",
+        "value": "security",
+        "label": "Security"
+      },
+      "workflow_status": "draft",
+      "workflow_owner": "",
+      "workflow_owner_ref": null,
+      "next_review_date": "2027-07-03",
+      "last_review_date": null,
+      "published_at": "2026-07-03",
+      "expired_reviews": 0,
+      "is_review_overdue": false,
+      "acknowledgment_count": 0,
+      "related": [],
+      "controls": [],
+      "requirements": [],
+      "risks": [],
+      "reviews": [],
+      "exceptions": [],
+      "projects": [],
+      "goals": [],
+      "processing_activities": [],
+      "approving_authority_ref": null,
+      "supersedes_ref": null,
+      "superseded_by": [],
+      "business_units": [],
+      "roles": [],
+      "created_at": "2026-07-03T20:35:46.947782Z"
+    },
+    "ack": {
+      "policy_id": "dec3fc2a-365f-44ea-b273-4467ab0a52fd",
+      "scope": "everyone",
+      "roles": [],
+      "note": "The policy names no role, so every active user is asked to acknowledge it.",
+      "total": 3,
+      "acknowledged": 0,
+      "pending": 3,
+      "outside_scope": 0,
+      "users": [
+        {
+          "user_id": "1b9dcc72-6c63-47fa-8347-7f317666468f",
+          "full_name": "Lim",
+          "email": "rvw2-lim@acme.com",
+          "roles": [
+            "Viewer"
+          ],
+          "acknowledged": false,
+          "acknowledged_at": null
+        },
+        {
+          "user_id": "2d51cc55-dc6e-4461-bf9f-8643c3e8c133",
+          "full_name": "Lim2",
+          "email": "rvw2-lim2@acme.com",
+          "roles": [],
+          "acknowledged": false,
+          "acknowledged_at": null
+        },
+        {
+          "user_id": "8e9676e6-3fdd-4991-a40d-e510d27d3b15",
+          "full_name": "Platform Admin",
+          "email": "admin@acme.com",
+          "roles": [
+            "Admin"
+          ],
+          "acknowledged": false,
+          "acknowledged_at": null
+        }
+      ]
+    },
+    "reviews": [],
+    "primaryLabel": "Submit for review"
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "draft",
+      "approvalSteps": 0,
+      "lastStep": null,
+      "lastSubmitAt": null,
+      "attestation": {
+        "status": "never",
+        "nativeReview": true,
+        "nextDue": "2027-07-03",
+        "canAttest": true,
+        "blockedReason": null
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "publication",
+        "value": "Published",
+        "tone": "medium",
+        "because": "Published 03 Jul 2026; effective on publication.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not approved"
+        }
+      },
+      {
+        "key": "version",
+        "value": "v2.1",
+        "because": "First version on file.",
+        "basis": {
+          "kind": "derived",
+          "text": "From version links"
+        }
+      },
+      {
+        "key": "ack",
+        "value": "0 of 3",
+        "tone": "medium",
+        "because": "3 still to acknowledge; in scope: everyone.",
+        "basis": {
+          "kind": "missing",
+          "text": "No acknowledgement yet"
+        }
+      },
+      {
+        "key": "review",
+        "value": "Due 03 Jul 2027",
+        "because": "Annual cycle; never reviewed; no scheduled review open.",
+        "basis": {
+          "kind": "derived",
+          "text": "From the review schedule"
+        }
+      },
+      {
+        "key": "coverage",
+        "value": "0 controls · 0 requirements",
+        "because": "No control implements it.",
+        "basis": {
+          "kind": "derived",
+          "text": "From links"
+        }
+      },
+      {
+        "key": "exceptions",
+        "value": "None",
+        "because": "No exception is granted against this policy.",
+        "basis": {
+          "kind": "derived",
+          "text": "From links"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "policy.published_unapproved",
+        "level": "gap",
+        "text": "Published, but its content has not been approved (record approval: Draft).",
+        "action": {
+          "kind": "focus",
+          "target": "rec-signoff"
+        }
+      },
+      {
+        "id": "policy.published_no_text",
+        "level": "gap",
+        "text": "Published with no policy text or document link: staff are acknowledging nothing.",
+        "action": {
+          "kind": "edit",
+          "target": "content"
+        }
+      },
+      {
+        "id": "policy.authority",
+        "level": "gap",
+        "text": "No approving authority named.",
+        "action": {
+          "kind": "edit",
+          "target": "governance"
+        }
+      },
+      {
+        "id": "policy.ack_pending",
+        "level": "note",
+        "text": "3 people still to acknowledge",
+        "action": {
+          "kind": "section",
+          "target": "acknowledgement"
+        }
+      },
+      {
+        "id": "policy.owner_text",
+        "level": "note",
+        "text": "Owner is a text label (“CISO”), not a person",
+        "action": {
+          "kind": "edit",
+          "target": "general"
+        }
+      },
+      {
+        "id": "policy.no_controls",
+        "level": "note",
+        "text": "No control implements it",
+        "action": {
+          "kind": "edit",
+          "target": "links"
+        }
+      }
+    ],
+    "headline": "Published v2.1 on 03 Jul 2026 without approval; 0 of 3 acknowledged; review due 03 Jul 2027."
+  }
+}

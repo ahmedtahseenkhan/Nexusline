@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useEscapeLayer } from "@/lib/escapeLayer";
 import { timezoneOffset, useFormat } from "@/lib/format";
 import { fromZonedInput, toZonedInput } from "@/lib/zonedInput";
 import { confirmDeleteWithImpact } from "@/lib/records";
@@ -19,15 +20,28 @@ import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
-import RichText from "@/components/RichText";
+import RichText, { RichTextView } from "@/components/RichText";
 import UserPicker, { UserName } from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
-import WorkflowFields from "@/components/WorkflowFields";
 import ArchivedRecords from "@/components/ArchivedRecords";
+import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import {
+  Fact, FactGrid, FactList, LabelledSearch, OpenPoints, PrimaryAction, RecordSection, RelatedGroups, SectionNav, SummaryBand,
+  approvalHintFor, approvalMetaItem, relatedCount, rowAction, rowLabel, useRecordCtx, useRecordGovernanceData, useRecordSections,
+  withBaseMoreItems, type MetaItem, type RelatedGroup,
+} from "@/components/record";
+import { useHasPermission } from "@/lib/tenantSettings";
 import { Field, TextInput, TextArea, Select, NumberInput, Toggle, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
+import { sentenceCase, textOnlyPerson } from "@/lib/record/text";
+import { htmlToText } from "@/lib/sanitize";
+import {
+  INCIDENT_CLEAR_TEXT, incidentDurationNote, incidentGenerateHint, incidentHeadline, incidentOpenPoints, incidentRegulatorName,
+  incidentTiles, type IncidentInput,
+} from "@/lib/record/incident";
+import type { PointAction } from "@/lib/record/types";
 
 // ----------------------------------------------------------------- types (inline)
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -186,6 +200,7 @@ const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neut
   resolved: "low",
   closed: "neutral",
 };
+const SEV_TONE: Record<string, "low" | "medium" | "high" | "critical"> = { low: "low", medium: "medium", high: "high", critical: "critical" };
 const STAGE_TONE: Record<string, "low" | "medium" | "neutral"> = {
   done: "low",
   in_progress: "medium",
@@ -194,7 +209,7 @@ const STAGE_TONE: Record<string, "low" | "medium" | "neutral"> = {
 
 const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.title || x.name || x.reference || x.id });
 const personName = (u: UserRef | null, legacy: string) => u?.full_name || u?.email || legacy || "";
-const regulatorName = (i: IncidentFull) => i.regulator_ref?.label || i.regulator || "";
+const regulatorName = (i: IncidentFull) => incidentRegulatorName(i);
 
 /** "45 m", "5 h 12 m", "2 d 4 h" — a duration given in hours (sign ignored). */
 function duration(hours: number | null | undefined): string {
@@ -230,22 +245,21 @@ function NotificationBadge({ i }: { i: IncidentFull }) {
   if (!i.notification_deadline) return <span className="muted">—</span>;
   if (i.notified_at) {
     return i.notified_on_time
-      ? <Badge tone="low">Notified on time</Badge>
-      : <Badge tone="critical">Notified late · {duration(i.hours_to_deadline)}</Badge>;
+      ? <Badge tone="low" asIs>Notified on time</Badge>
+      : <Badge tone="critical" asIs>Notified late{i.hours_to_deadline != null ? ` · ${duration(i.hours_to_deadline)}` : ""}</Badge>;
   }
   const left = (new Date(i.notification_deadline).getTime() - now) / 3_600_000;
-  if (left < 0) return <Badge tone="critical">Overdue by {duration(left)}</Badge>;
-  return <Badge tone={left < 6 ? "high" : "medium"}>Due in {duration(left)}</Badge>;
+  if (left < 0) return <Badge tone="critical" asIs>Overdue by {duration(left)}</Badge>;
+  return <Badge tone={left < 6 ? "high" : "medium"} asIs>Due in {duration(left)}</Badge>;
 }
 
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <div className="muted" style={{ fontSize: 12 }}>{label}</div>
-      <div style={{ marginTop: 2, fontSize: 13 }}>{children}</div>
-    </div>
-  );
-}
+// ----------------------------------------------------------------- record copy
+/* The incident's judgement wording (tiles, open points, headline, the regulator clock)
+   lives in lib/record/incident.ts, pinned by lib/record/__fixtures__/incident-*.json. Stored
+   rich text (root cause, lessons learned) renders through RichTextView (lib/sanitize). */
+
+/** Labels of the built-in fields a custom field could duplicate (admins get a note). */
+const INCIDENT_BUILT_IN_LABELS = ["Handler", "Owner", "Severity", "Status", "Type", "Category", "Classification", "Impact", "Root cause"];
 
 // ----------------------------------------------------------------- form state
 type FormState = {
@@ -395,14 +409,30 @@ function IncidentsInner() {
   }, []);
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
 
+  // ---- the record page (dossier, record-page-spec §4.7) ----
+  const gov = useRecordGovernanceData("incident", detail?.id ?? null, { statusRulesModel: "incident" });
+  const canWrite = useHasPermission("incident:write");
+  const nowMs = useNow(); // the notification countdown in the band and open points stays live
+  const ctx = useRecordCtx(gov, canWrite, new Date(nowMs));
+  const sections = useRecordSections();
+  const cf = useCustomFieldFacts("incident", detail?.id, { builtInLabels: INCIDENT_BUILT_IN_LABELS });
+  /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
+  const [editTab, setEditTab] = useState<string | undefined>(undefined);
+  /** After any change: the governance (primary, sign-off, rules), the record, the list. */
+  const refresh = () => {
+    void gov.reload();
+    if (openId) loadDetail(openId);
+    reload();
+  };
+
   // server typeahead sources for the form link pickers
   const searchControls = (q: string) => apiCall<PagedList<{ id: string; name: string; reference: string }>>("GET", `/controls?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.reference })));
   const searchVendors = (q: string) => apiCall<PagedList<{ id: string; name: string; category: string }>>("GET", `/vendors?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.category })));
   const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
   const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string; classification: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.classification })));
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
-  function openEdit(i: IncidentFull) { setEditing(i); setF(fromIncident(i, tz)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(i: IncidentFull, tab?: string) { setEditing(i); setF(fromIncident(i, tz)); setError(null); setEditTab(tab); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
@@ -410,7 +440,7 @@ function IncidentsInner() {
       const payload = toPayload(f, tz);
       if (editing) await apiCall<IncidentFull>("PATCH", `/incidents/${editing.id}`, payload);
       else await apiCall<IncidentFull>("POST", "/incidents", payload);
-      setShowForm(false); reload(); if (openId) loadDetail(openId);
+      setShowForm(false); refresh();
       toast(editing ? "Changes saved" : "Incident logged");
       if (f.personal_data_breach && !editing?.personal_data_breach) toast("Personal data breach: a breach record was opened in Data Protection");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save incident"); }
@@ -432,20 +462,18 @@ function IncidentsInner() {
 
   async function advance(stageId: string, status: string) {
     if (!detail) return;
-    setError(null);
     try {
       await apiCall<IncidentFull>("PATCH", `/incidents/${detail.id}/stages/${stageId}`, { status });
-      loadDetail(detail.id); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to update stage"); }
+      refresh();
+    } catch (e) { toast(errMsg(e, "Failed to update stage"), "error"); }
   }
 
   async function regAction(fn: Promise<unknown>) {
     if (!detail) return;
-    setError(null);
     try {
       await fn;
-      loadDetail(detail.id); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Action failed"); }
+      refresh();
+    } catch (e) { toast(errMsg(e, "Action failed"), "error"); }
   }
   function generateRegReports() {
     if (!detail) return;
@@ -482,13 +510,9 @@ function IncidentsInner() {
     setError(null);
     try {
       await apiCall<IncidentFull>("POST", `/incidents/${detail.id}/loss-event`, {});
-      loadDetail(detail.id); reload(); toast("Loss event created");
+      refresh(); toast("Loss event created");
     } catch (e) { toast(errMsg(e, "Failed to create the loss event"), "error"); }
   }
-
-  const linkCount = (i: IncidentFull) =>
-    i.controls.length + i.vendors.length + i.assets.length + i.risks.length;
-
 
   /* Inline relation chips linking to each record's own page. */
   const labelOf = (x: { id: string; label?: string; name?: string; title?: string; reference?: string }) =>
@@ -539,7 +563,7 @@ function IncidentsInner() {
     },
     { key: "workflow_status", header: "Workflow", hidden: true, render: (i) => <span className="muted">{cap(i.workflow_status)}</span>, text: (i) => cap(i.workflow_status) },
     { key: "created_at", header: "Logged", hidden: true, render: (i) => <span className="muted">{formatDate(i.created_at)}</span>, text: (i) => (i.created_at ? formatDate(i.created_at) : "") },
-    { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button></div> },
+    { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" {...rowAction("Edit", rowLabel(i.reference, i.title))} onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" {...rowAction("Delete", rowLabel(i.reference, i.title))} onClick={() => remove(i)}>Delete</button></div> },
   ];
 
   /** Delete every selected incident after one confirmation, then drop the selection. */
@@ -576,7 +600,7 @@ function IncidentsInner() {
   const generalTab = (
     <>
       <Field label="Title" required help="A short, descriptive name for the incident.">
-        <TextInput value={f.title} onChange={(v) => set("title", v)} placeholder="Suspicious login from unknown IP" required />
+        <TextInput value={f.title} onChange={(v) => set("title", v)} placeholder="e.g. Suspicious login from unknown IP" required />
       </Field>
       <Field label="Description">
         <TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="What happened, who detected it, and the initial scope." />
@@ -722,10 +746,10 @@ function IncidentsInner() {
       </Field>
       <div className="field-row">
         <Field label="Customers affected">
-          <NumberInput value={f.customers_affected} onChange={(v) => set("customers_affected", v)} min={0} step={1} placeholder="0" />
+          <NumberInput value={f.customers_affected} onChange={(v) => set("customers_affected", v)} min={0} step={1} placeholder="Not recorded" />
         </Field>
         <Field label="Records affected" help="Data records exposed, altered or lost.">
-          <NumberInput value={f.records_affected} onChange={(v) => set("records_affected", v)} min={0} step={1} placeholder="0" />
+          <NumberInput value={f.records_affected} onChange={(v) => set("records_affected", v)} min={0} step={1} placeholder="Not recorded" />
         </Field>
       </div>
       <div className="field-row">
@@ -746,7 +770,7 @@ function IncidentsInner() {
       </div>
       {!f.near_miss && (
         <Field label={`Estimated Cost (${currency})`} help="Financial impact in the organisation's reporting currency. Becomes the gross loss when you create a loss event.">
-          <NumberInput value={f.cost} onChange={(v) => set("cost", v)} min={0} step={100} placeholder="0" />
+          <NumberInput value={f.cost} onChange={(v) => set("cost", v)} min={0} step={100} placeholder="Not recorded" />
         </Field>
       )}
       <Field label="Root Cause">
@@ -775,14 +799,55 @@ function IncidentsInner() {
     </>
   );
 
+  // ------------------------------------------------------------- dossier
+  const incidentInput: IncidentInput | null = detail ? { incident: detail } : null;
+  /** Open-point fixes only move: scroll, focus or open Edit on a tab. */
+  function handlePoint(a: PointAction) {
+    if (!detail) return;
+    if (a.kind === "section") sections.scrollTo(a.target);
+    else if (a.kind === "edit") openEdit(detail, a.target);
+    else if (a.kind === "focus") document.getElementById(a.target)?.focus();
+    else if (a.kind === "attest") gov.openAttest();
+  }
+  const handler = detail ? personName(detail.assignee_ref, detail.assignee) : "";
+  // Header meta (record-page-spec §4.7, v1.1 D1): Incident status, Record approval, then
+  // Severity, Handler, Occurred, Detected.
+  const statusMeta: MetaItem | undefined = detail ? {
+    key: "status", label: "Incident status",
+    value: <Badge tone={STATUS_TONE[detail.status] || "neutral"} asIs>{sentenceCase(detail.status)}</Badge>,
+    hint: "Where the incident is in its response. Separate from record approval.",
+  } : undefined;
+  const incidentMeta: MetaItem[] = detail ? [
+    {
+      key: "severity", label: "Severity",
+      value: detail.severity ? <Badge tone={SEV_TONE[detail.severity] ?? "neutral"} asIs>{sentenceCase(detail.severity)}</Badge> : null,
+    },
+    {
+      key: "handler", label: "Handler", value: handler || null, hint: "Responsible for the response.",
+      // Free text with no person picked ("Network Team") is a label nobody can be notified at.
+      gap: !handler ? { text: "Not assigned", fix: canWrite ? { label: "Assign", onClick: () => openEdit(detail, "general") } : undefined }
+        : textOnlyPerson(detail.assignee_id, detail.assignee) ? { text: "Text only", fix: canWrite ? { label: "Pick a person", onClick: () => openEdit(detail, "general") } : undefined }
+        : undefined,
+    },
+    { key: "occurred", label: "Occurred", value: detail.occurred_at ? formatDateTime(detail.occurred_at) : null },
+    { key: "detected", label: "Detected", value: detail.detected_at ? formatDateTime(detail.detected_at) : null, hint: "Starts the regulator's notification clock." },
+  ] : [];
+  const linkGroups: RelatedGroup[] = detail ? [
+    { key: "risks", label: "Risks", items: detail.risks, href: "/risks" },
+    { key: "controls", label: "Controls", items: detail.controls, href: "/controls" },
+    { key: "assets", label: "Assets", items: detail.assets, href: "/information-assets" },
+    { key: "vendors", label: "Third parties", items: detail.vendors, href: "/vendors" },
+  ] : [];
+
   return (
     <>
-      <div className="page-head row-between">
-        <div>
+      <div className="page-head row-between" style={{ flexWrap: "wrap" }}>
+        {/* The actions wrap under the title on a phone instead of widening the page. */}
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
           <h1>Security Operations</h1>
           <p>Log, triage and resolve security incidents through their response lifecycle.</p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <ImportExport resource="incidents" label="Incidents" onDone={reload} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> Add incident
@@ -872,180 +937,296 @@ function IncidentsInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="incident" entityId={detail.id} /> : null}
+        variant="dossier"
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
-        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
-        subtitle={detail ? `${cap(detail.status)} · ${personName(detail.assignee_ref, detail.assignee) || "no owner"}` : ""}
-        width={760}
-        actions={detail && (
-          <>
-            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
-            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
-          </>
+        governance={gov}
+        identity={detail ? {
+          kind: "Incident",
+          backLabel: "Incidents",
+          reference: detail.reference || null,
+          name: detail.title,
+          lead: detail.description || null,
+          badges: (detail.near_miss || detail.personal_data_breach || detail.is_reportable) ? (
+            <>
+              {detail.near_miss && <Badge tone="info" asIs>Near miss</Badge>}
+              {detail.personal_data_breach && <Badge tone="high" asIs>Personal data breach</Badge>}
+              {detail.is_reportable && <Badge tone="high" asIs>Reportable{regulatorName(detail) ? ` · ${regulatorName(detail)}` : ""}</Badge>}
+            </>
+          ) : null,
+          status: statusMeta,
+          approval: approvalMetaItem(gov, ctx.fmt, approvalHintFor("Incident status")),
+          meta: incidentMeta,
+          statusRules: { model: "incident", entityId: detail.id },
+        } : undefined}
+        primaryAction={(
+          <PrimaryAction
+            candidates={[{ kind: "workflow", action: "approve" }, { kind: "workflow", action: "submit" }, { kind: "attest" }]}
+            onChanged={refresh}
+          />
         )}
+        onEdit={detail && canWrite ? () => openEdit(detail) : undefined}
+        moreItems={detail ? withBaseMoreItems(
+          canWrite ? [
+            { label: `Generate ${regulatorName(detail) || "SBP"} reports`, onClick: generateRegReports, hint: incidentGenerateHint(detail) },
+            {
+              label: "Create loss event", onClick: createLossEvent, disabled: detail.near_miss,
+              hint: detail.near_miss ? "A near miss has no loss to record" : "Adds it to the operational loss database",
+            },
+          ] : [],
+          { onDelete: canWrite ? () => remove(detail) : undefined },
+        ) : []}
+        aside={detail ? (
+          <RecordPanels model="incident" entityId={detail.id} layout="dossier" signOff={{ onChanged: refresh }} trail={{ reference: detail.reference }} />
+        ) : null}
       >
-        {detail && (
+        {detail && incidentInput && (
           <>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
-              <Severity value={detail.severity} />
-              <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>
-              {detail.near_miss && <Badge tone="info">Near miss</Badge>}
-              {detail.personal_data_breach && <Badge tone="high">Personal data breach</Badge>}
-              {detail.is_reportable && <Badge tone="high">Reportable{regulatorName(detail) ? ` · ${regulatorName(detail)}` : ""}</Badge>}
-              {linkCount(detail) > 0 && <Badge tone="neutral" plain>{linkCount(detail)} links</Badge>}
-            </div>
+            <SummaryBand tiles={incidentTiles(incidentInput, ctx)} headline={incidentHeadline(incidentInput, ctx)} />
+            <OpenPoints
+              points={incidentOpenPoints(incidentInput, ctx)}
+              canAct={canWrite}
+              onAction={handlePoint}
+              clearText={INCIDENT_CLEAR_TEXT}
+            />
+            <SectionNav />
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <Fact label="Type">{detail.category_ref?.label || detail.category || <span className="muted">—</span>}</Fact>
-              <Fact label="Classification">{detail.classification_ref?.label || detail.classification || <span className="muted">—</span>}</Fact>
-              <Fact label="Owner / handler"><UserName user={detail.assignee_ref} fallback={detail.assignee} /></Fact>
-              <Fact label="Reported by"><UserName user={detail.reported_by_ref} fallback={detail.reported_by} /></Fact>
-              <Fact label="Occurred">{formatDateTime(detail.occurred_at)}</Fact>
-              <Fact label="Detected">{formatDateTime(detail.detected_at)}</Fact>
-              <Fact label="Contained">{formatDateTime(detail.contained_at)}</Fact>
-              <Fact label="Resolved">{formatDateTime(detail.resolved_at)}</Fact>
-              <Fact label="Customers affected">{detail.customers_affected != null ? detail.customers_affected.toLocaleString() : <span className="muted">—</span>}</Fact>
-              <Fact label="Records affected">{detail.records_affected != null ? detail.records_affected.toLocaleString() : <span className="muted">—</span>}</Fact>
-              <Fact label="Estimated cost">{detail.near_miss ? <span className="muted">Near miss — no loss</span> : detail.cost != null ? formatMoney(detail.cost) : <span className="muted">—</span>}</Fact>
-              {detail.personal_data_breach && (
-                <Fact label="Data breach record">
-                  {detail.data_breaches.length ? detail.data_breaches.map((b) => (
-                    <Link key={b.id} className="chip" href={`/data-protection?section=breach&id=${b.id}`}>{b.reference || b.title}</Link>
-                  )) : <span className="muted">Not created (Data Protection is not enabled)</span>}
-                </Fact>
+            <RecordSection
+              id="timeline"
+              title="Timeline"
+              sub={`Times in ${tzLabel}`}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "timeline")}>Edit times</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "occurred", label: "Occurred", value: detail.occurred_at ? formatDateTime(detail.occurred_at) : null, tab: "timeline" },
+                  { key: "detected", label: "Detected", value: detail.detected_at ? formatDateTime(detail.detected_at) : null, tab: "timeline" },
+                  // A stage the incident hasn't reached reads as a fact, not a field to fill in.
+                  {
+                    key: "contained", label: "Contained", tab: "timeline",
+                    value: detail.contained_at ? formatDateTime(detail.contained_at)
+                      : !["contained", "resolved", "closed"].includes(detail.status) ? <span className="muted">Not contained yet</span>
+                      : null,
+                  },
+                  {
+                    key: "resolved", label: "Resolved", tab: "timeline",
+                    value: detail.resolved_at ? formatDateTime(detail.resolved_at)
+                      : !["resolved", "closed"].includes(detail.status) ? <span className="muted">Not resolved yet</span>
+                      : null,
+                  },
+                  {
+                    key: "reported_by", label: "Reported by", tab: "general",
+                    value: detail.reported_by_ref || detail.reported_by ? <UserName user={detail.reported_by_ref} fallback={detail.reported_by} /> : null,
+                  },
+                  // Calculated from the times above, never typed: a missing input reads "Needs
+                  // Occurred" (not a "Fill in" field), and two date-only entries read "Same day"
+                  // rather than an implausible "0 m".
+                  ...(["mttd", "mttc", "mttr"] as const).map((k) => {
+                    const note = incidentDurationNote(detail, k, ctx.fmt);
+                    const hours = k === "mttd" ? detail.mttd_hours : k === "mttc" ? detail.mttc_hours : detail.mttr_hours;
+                    return {
+                      key: k,
+                      label: k === "mttd" ? "Time to detect (MTTD)" : k === "mttc" ? "Time to contain (MTTC)" : "Time to resolve (MTTR)",
+                      value: note ? <span className="muted">{note}</span> : duration(hours),
+                      hint: k === "mttd" ? "Calculated: occurred to detected" : k === "mttc" ? "Calculated: detected to contained" : "Calculated: detected to resolved",
+                    };
+                  }),
+                ]}
+                onFillIn={canWrite ? (tab) => openEdit(detail, tab) : undefined}
+              />
+            </RecordSection>
+
+            <RecordSection
+              id="impact"
+              title="Impact & loss"
+              count={detail.loss_events.length || null}
+              actions={canWrite ? (
+                <button
+                  type="button"
+                  className="btn secondary sm"
+                  onClick={createLossEvent}
+                  disabled={detail.near_miss}
+                  title={detail.near_miss ? "A near miss has no loss to record" : undefined}
+                >
+                  Create loss event
+                </button>
+              ) : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "customers", label: "Customers affected", value: detail.customers_affected != null ? detail.customers_affected.toLocaleString() : null, tab: "analysis" },
+                  { key: "records", label: "Records affected", value: detail.records_affected != null ? detail.records_affected.toLocaleString() : null, tab: "analysis" },
+                  {
+                    key: "cost", label: "Estimated cost", tab: "analysis",
+                    value: detail.near_miss ? "Near miss — no loss" : detail.cost != null ? formatMoney(detail.cost) : null,
+                  },
+                  { key: "impact", label: "Impact", value: detail.impact?.trim() || null, wide: true, tab: "analysis" },
+                ]}
+                onFillIn={canWrite ? (tab) => openEdit(detail, tab) : undefined}
+              />
+              <h3 style={{ margin: "18px 0 8px", fontSize: 13, fontWeight: 650 }}>Loss events</h3>
+              {detail.loss_events.length > 0 ? (
+                <div className="rec-table-wrap">
+                  <table className="compact">
+                    <thead><tr><th>Ref</th><th>Title</th><th>Occurred</th><th className="num">Gross</th><th className="num">Net</th><th>Status</th></tr></thead>
+                    <tbody>
+                      {detail.loss_events.map((l) => (
+                        <tr key={l.id}>
+                          <td><Link className="ref" href="/operational-risk">{l.reference}</Link></td>
+                          <td className="cell-title">{l.title}</td>
+                          <td className="muted">{l.occurrence_date ? formatDate(l.occurrence_date) : "Not set"}</td>
+                          <td className="muted num">{formatMoney(l.gross_loss, l.currency)}</td>
+                          <td className="muted num">{formatMoney(l.net_loss, l.currency)}</td>
+                          <td><Badge tone={l.status === "closed" || l.status === "recovered" ? "low" : "medium"} asIs>{sentenceCase(l.status)}</Badge></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="rec-empty" style={{ margin: 0 }}>
+                  {detail.near_miss ? "A near miss has no loss to record." : "No loss events yet. Create one to record what this incident cost, pre-filled from the incident."}
+                </p>
               )}
-            </div>
+            </RecordSection>
 
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Response times</h3><span className="sub">from the timeline</span></div>
-              <div className="card-pad" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
-                <Fact label="MTTD — occurred to detected">{duration(detail.mttd_hours)}</Fact>
-                <Fact label="MTTC — detected to contained">{duration(detail.mttc_hours)}</Fact>
-                <Fact label="MTTR — detected to resolved">{duration(detail.mttr_hours)}</Fact>
-              </div>
-            </div>
-
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Approval</h3></div>
-              <div className="card-pad">
-                <WorkflowFields entityType="incident" entityId={detail.id} onChanged={() => { loadDetail(detail.id); reload(); }} />
-              </div>
-            </div>
-
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head">
-                <h3>Response lifecycle</h3>
-                <span className="sub">{detail.completed_stages}/{detail.stage_count} stages done</span>
-              </div>
-              <div className="card-pad">
-                {detail.stages.map((s) => (
-                  <div key={s.id} className="activity-item" style={{ alignItems: "center" }}>
-                    <span style={{ width: 24, textAlign: "center", color: "var(--faint)" }}>{s.order_index + 1}</span>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13 }}>{s.name}</div>
-                      {s.completed_at && <div className="when">completed {formatDate(s.completed_at)}</div>}
-                    </div>
-                    <Badge tone={STAGE_TONE[s.status] || "neutral"}>{s.status.replace(/_/g, " ")}</Badge>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      {s.status === "pending" && <button className="btn secondary sm" onClick={() => advance(s.id, "in_progress")}>Start</button>}
-                      {s.status !== "done" && <button className="btn sm" onClick={() => advance(s.id, "done")}>Done</button>}
-                      {s.status === "done" && <button className="btn secondary sm" onClick={() => advance(s.id, "in_progress")}>Reopen</button>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head">
-                <h3>Regulatory reporting</h3>
-                <span className="sub">
-                  {detail.is_reportable ? `Reportable to ${regulatorName(detail) || "regulator"}` : "Not flagged reportable"}
-                </span>
-              </div>
-              <div className="card-pad">
-                {detail.notification_deadline && (
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 12 }}>
-                    <Fact label="Regulator">{regulatorName(detail) || <span className="muted">—</span>}</Fact>
-                    <Fact label="Notification deadline">{formatDateTime(detail.notification_deadline)}</Fact>
-                    <Fact label="Countdown"><NotificationBadge i={detail} /></Fact>
-                    <Fact label="Notified at">{detail.notified_at ? formatDateTime(detail.notified_at) : <span className="muted">Not yet</span>}</Fact>
-                    <Fact label="Regulator reference">{detail.regulator_reference || <span className="muted">—</span>}</Fact>
-                  </div>
-                )}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10 }}>
-                  <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 460 }}>
-                    Marking the incident reportable creates the {regulatorName(detail) || "SBP"} initial notification and final report,
-                    with deadlines counted from the detection time. Generate recreates any that were removed.
-                  </p>
-                  <button className="btn secondary sm" onClick={generateRegReports}>Generate {regulatorName(detail) || "SBP"} reports</button>
+            <RecordSection
+              id="regulatory"
+              title="Regulatory reporting"
+              count={detail.regulatory_reports.length || null}
+              sub={detail.is_reportable ? `Reportable to ${regulatorName(detail) || "the regulator"}` : "Not reportable"}
+              actions={canWrite ? (
+                <button type="button" className="btn secondary sm" title={incidentGenerateHint(detail)} onClick={generateRegReports}>Generate {regulatorName(detail) || "SBP"} reports</button>
+              ) : undefined}
+              empty={!detail.is_reportable && !detail.notification_deadline && detail.regulatory_reports.length === 0 ? "No regulator reports." : undefined}
+            >
+              {detail.notification_deadline && (
+                <FactGrid>
+                  <Fact label="Regulator">{regulatorName(detail) || <span className="muted">Not set</span>}</Fact>
+                  <Fact label="Notification deadline">{formatDateTime(detail.notification_deadline)}</Fact>
+                  <Fact label="Countdown"><NotificationBadge i={detail} /></Fact>
+                  <Fact label="Notified at">{detail.notified_at ? formatDateTime(detail.notified_at) : <span className="muted">Not yet</span>}</Fact>
+                  <Fact label="Regulator reference">{detail.regulator_reference || <span className="muted">Not recorded</span>}</Fact>
+                </FactGrid>
+              )}
+              <p className="muted" style={{ fontSize: 12.5, margin: "12px 0", maxWidth: "86ch" }}>
+                Marking the incident reportable creates the {regulatorName(detail) || "SBP"} initial notification and final report,
+                with deadlines counted from the detection time. Generate recreates any that were removed.
+              </p>
+              {detail.regulatory_reports.length > 0 ? (
+                <div className="rec-table-wrap">
+                  <table className="compact">
+                    <thead><tr><th>Regulator</th><th>Report</th><th>Deadline</th><th>Status</th><th>Submitted</th><th>Reference</th><th aria-label="Actions" /></tr></thead>
+                    <tbody>
+                      {detail.regulatory_reports.map((r) => (
+                        <RegReportRow
+                          key={r.id}
+                          r={r}
+                          formatDate={formatDateTime}
+                          canWrite={canWrite}
+                          submitting={submitting?.id === r.id ? submitting : null}
+                          onStartSubmit={() => setSubmitting({ id: r.id, reference: r.reference || "", submitted_by_id: r.submitted_by_id })}
+                          onChangeSubmit={(patch) => setSubmitting((p) => (p ? { ...p, ...patch } : p))}
+                          onCancelSubmit={() => setSubmitting(null)}
+                          onConfirmSubmit={markReportSubmitted}
+                          onRemove={() => deleteRegReport(r)}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                {detail.regulatory_reports.length > 0 ? (
-                  <div className="table-wrap">
-                    <table>
-                      <thead><tr><th>Regulator</th><th>Report</th><th>Deadline</th><th>Status</th><th>Submitted</th><th>Reference</th><th></th></tr></thead>
-                      <tbody>
-                        {detail.regulatory_reports.map((r) => (
-                          <RegReportRow
-                            key={r.id}
-                            r={r}
-                            formatDate={formatDateTime}
-                            submitting={submitting?.id === r.id ? submitting : null}
-                            onStartSubmit={() => setSubmitting({ id: r.id, reference: r.reference || "", submitted_by_id: r.submitted_by_id })}
-                            onChangeSubmit={(patch) => setSubmitting((p) => (p ? { ...p, ...patch } : p))}
-                            onCancelSubmit={() => setSubmitting(null)}
-                            onConfirmSubmit={markReportSubmitted}
-                            onRemove={() => deleteRegReport(r)}
-                          />
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <span className="muted" style={{ fontSize: 12.5 }}>No regulatory reports yet.</span>
-                )}
-              </div>
-            </div>
+              ) : (
+                <p className="rec-empty" style={{ margin: 0 }}>No regulatory reports yet.</p>
+              )}
+            </RecordSection>
 
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head">
-                <h3>Loss events</h3>
-                <span className="sub">{detail.loss_events.length ? `${detail.loss_events.length} in the loss database` : "operational loss database"}</span>
+            <RecordSection
+              id="lifecycle"
+              title="Response lifecycle"
+              count={detail.stage_count || null}
+              sub={detail.stage_count ? `${detail.completed_stages} of ${detail.stage_count} stages done` : undefined}
+              empty={detail.stages.length === 0 ? "No response stages." : undefined}
+            >
+              <div className="rec-table-wrap">
+                <table className="compact">
+                  <thead><tr><th style={{ width: 36 }} className="num">#</th><th>Stage</th><th>Status</th><th>Completed</th><th aria-label="Actions" /></tr></thead>
+                  <tbody>
+                    {detail.stages.map((s) => (
+                      <tr key={s.id}>
+                        <td className="muted num">{s.order_index + 1}</td>
+                        <td className="cell-title">{s.name}</td>
+                        <td><Badge tone={STAGE_TONE[s.status] || "neutral"} asIs>{sentenceCase(s.status)}</Badge></td>
+                        <td className="muted" style={{ whiteSpace: "nowrap" }}>{s.completed_at ? formatDate(s.completed_at) : "Not yet"}</td>
+                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                          {canWrite && (
+                            <span style={{ display: "inline-flex", gap: 6 }}>
+                              {s.status === "pending" && <button type="button" className="btn secondary sm" {...rowAction("Start", s.name)} onClick={() => advance(s.id, "in_progress")}>Start</button>}
+                              {s.status !== "done" && <button type="button" className="btn secondary sm" {...rowAction("Done", s.name)} onClick={() => advance(s.id, "done")}>Done</button>}
+                              {s.status === "done" && <button type="button" className="btn secondary sm" {...rowAction("Reopen", s.name)} onClick={() => advance(s.id, "in_progress")}>Reopen</button>}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-              <div className="card-pad">
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10 }}>
-                  <p className="muted" style={{ fontSize: 12.5, margin: 0, maxWidth: 460 }}>
-                    {detail.near_miss
-                      ? "A near miss has no loss to record."
-                      : "Record what this incident cost in the operational loss database, pre-filled from the incident."}
-                  </p>
-                  <button className="btn secondary sm" onClick={createLossEvent} disabled={detail.near_miss}>Create loss event</button>
-                </div>
-                {detail.loss_events.length > 0 ? (
-                  <div className="table-wrap">
-                    <table>
-                      <thead><tr><th>Ref</th><th>Title</th><th>Occurred</th><th style={{ textAlign: "right" }}>Gross</th><th style={{ textAlign: "right" }}>Net</th><th>Status</th></tr></thead>
-                      <tbody>
-                        {detail.loss_events.map((l) => (
-                          <tr key={l.id}>
-                            <td><Link className="ref" href="/operational-risk">{l.reference}</Link></td>
-                            <td className="cell-title">{l.title}</td>
-                            <td className="muted">{formatDate(l.occurrence_date)}</td>
-                            <td className="muted" style={{ textAlign: "right" }}>{formatMoney(l.gross_loss, l.currency)}</td>
-                            <td className="muted" style={{ textAlign: "right" }}>{formatMoney(l.net_loss, l.currency)}</td>
-                            <td><Badge tone={l.status === "closed" || l.status === "recovered" ? "low" : "medium"}>{cap(l.status)}</Badge></td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <span className="muted" style={{ fontSize: 12.5 }}>No loss events yet.</span>
-                )}
-              </div>
-            </div>
+            </RecordSection>
 
+            <RecordSection
+              id="analysis"
+              title="Root cause & lessons"
+              actions={canWrite ? <button type="button" className="btn secondary sm" aria-label="Edit root cause and lessons" onClick={() => openEdit(detail, "analysis")}>Edit</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "root_cause", label: "Root cause", value: htmlToText(detail.root_cause) ? <RichTextView html={detail.root_cause} style={{ overflowWrap: "anywhere" }} /> : null, wide: true, tab: "analysis" },
+                  { key: "lessons", label: "Lessons learned", value: htmlToText(detail.lessons_learned) ? <RichTextView html={detail.lessons_learned} style={{ overflowWrap: "anywhere" }} /> : null, wide: true, tab: "analysis" },
+                ]}
+                onFillIn={canWrite ? (tab) => openEdit(detail, tab) : undefined}
+                allUnsetText="Not recorded yet"
+              />
+            </RecordSection>
+
+            <RecordSection
+              id="details"
+              title="Details"
+              actions={canWrite ? <button type="button" className="btn secondary sm" aria-label="Edit details" onClick={() => openEdit(detail)}>Edit</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "type", label: "Type", value: detail.category_ref?.label || detail.category || null, tab: "general" },
+                  { key: "classification", label: "Classification", value: detail.classification_ref?.label || detail.classification || null, tab: "general" },
+                  ...(detail.personal_data_breach ? [{
+                    key: "breach", label: "Data breach record",
+                    value: detail.data_breaches.length ? (
+                      <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 6 }}>
+                        {detail.data_breaches.map((b) => (
+                          <Link key={b.id} className="chip chip-link rec-chip" href={`/data-protection?section=breach&id=${b.id}`} title={[b.reference, b.title].filter(Boolean).join(" ")}>
+                            {b.reference && <span className="ref">{b.reference}</span>}{b.title || b.name || ""}
+                          </Link>
+                        ))}
+                      </span>
+                    ) : "Not created (Data Protection is not enabled)",
+                  }] : []),
+                  { key: "created", label: "Created", value: detail.created_at ? formatDate(detail.created_at) : null },
+                  ...cf.facts,
+                ]}
+                onFillIn={canWrite ? (tab) => (tab === "custom" ? cf.setEditing(true) : openEdit(detail, tab)) : undefined}
+              />
+              {cf.editor}
+              {cf.editLink(canWrite)}
+            </RecordSection>
+
+            <RecordSection
+              id="linked"
+              title="Linked records"
+              count={relatedCount(linkGroups)}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "links")}>Link records</button> : undefined}
+            >
+              {/* The head holds "Link records"; the empty line needs no second one (v1.1 D3). */}
+              <RelatedGroups groups={linkGroups} />
+            </RecordSection>
           </>
         )}
       </RecordDrawer>
@@ -1060,6 +1241,7 @@ function IncidentsInner() {
             { id: "analysis", label: "Impact & analysis", content: analysisTab },
             { id: "links", label: "Links & Relations", content: linksTab },
           ]}
+          initialTab={editTab}
           onClose={() => setShowForm(false)}
           onSave={save}
           saving={saving}
@@ -1082,6 +1264,7 @@ function IncidentsInner() {
 function RegReportRow({
   r,
   formatDate,
+  canWrite,
   submitting,
   onStartSubmit,
   onChangeSubmit,
@@ -1091,6 +1274,7 @@ function RegReportRow({
 }: {
   r: RegReport;
   formatDate: (v: string | null) => string; // formatDateTime: deadlines are timestamps
+  canWrite: boolean;
   submitting: { reference: string; submitted_by_id: string | null } | null;
   onStartSubmit: () => void;
   onChangeSubmit: (patch: { reference?: string; submitted_by_id?: string | null }) => void;
@@ -1098,16 +1282,40 @@ function RegReportRow({
   onConfirmSubmit: () => void;
   onRemove: () => void;
 }) {
+  // The "mark submitted" form opens on demand: Esc (through the shared escape stack) or
+  // Cancel closes it, and focus goes back to the button that opened it. Focus is only
+  // put back when closing lost it (it sat in the removed form): when the form closed
+  // because another row's form opened, that form's field already has it. After a
+  // successful submit the start button goes away, so focus lands on the row's Remove.
+  const startRef = useRef<HTMLButtonElement>(null);
+  const removeRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  const closedBy = useRef<"cancel" | "confirm" | null>(null);
+  const cancel = () => { closedBy.current = "cancel"; onCancelSubmit(); };
+  const confirm = () => { closedBy.current = "confirm"; onConfirmSubmit(); };
+  useEscapeLayer(!!submitting, cancel);
+  const label = `${sentenceCase(r.report_type).toLowerCase()} for ${r.regulator_ref?.label || r.regulator || "the regulator"}`;
+  useEffect(() => {
+    if (submitting) { wasOpen.current = true; return; }
+    if (!wasOpen.current) return;
+    wasOpen.current = false;
+    const by = closedBy.current;
+    closedBy.current = null;
+    const active = document.activeElement;
+    const lost = !active || active === document.body || !active.isConnected;
+    if (!lost) return;
+    (by === "confirm" ? removeRef.current : startRef.current ?? removeRef.current)?.focus();
+  }, [submitting]);
   return (
     <>
       <tr>
         <td className="muted">{r.regulator_ref?.label || r.regulator}</td>
-        <td className="cell-title">{cap(r.report_type)}</td>
+        <td className="cell-title">{sentenceCase(r.report_type)}</td>
         <td className="muted">
-          {formatDate(r.deadline)}
-          {r.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="critical">overdue</Badge></span>}
+          {r.deadline ? formatDate(r.deadline) : "No deadline"}
+          {r.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="critical" asIs>Overdue</Badge></span>}
         </td>
-        <td><Badge tone={r.status === "pending" ? "medium" : "low"}>{cap(r.status)}</Badge></td>
+        <td><Badge tone={r.status === "pending" ? "medium" : "low"} asIs>{sentenceCase(r.status)}</Badge></td>
         <td className="muted">
           {r.submitted_at ? (
             <>
@@ -1116,14 +1324,16 @@ function RegReportRow({
                 <div style={{ fontSize: 12 }}>by <UserName user={r.submitted_by_ref} fallback={r.submitted_by} /></div>
               )}
             </>
-          ) : "—"}
+          ) : "Not yet"}
         </td>
-        <td className="muted">{r.reference || "—"}</td>
+        <td className="muted">{r.reference || "Not recorded"}</td>
         <td>
-          <div style={{ display: "flex", gap: 6 }}>
-            {r.status === "pending" && !submitting && <button className="btn sm" onClick={onStartSubmit}>Mark submitted</button>}
-            <button className="btn secondary sm" onClick={onRemove}>Remove</button>
-          </div>
+          {canWrite && (
+            <div style={{ display: "flex", gap: 6 }}>
+              {r.status === "pending" && !submitting && <button ref={startRef} type="button" className="btn secondary sm" {...rowAction("Mark submitted", label)} onClick={onStartSubmit}>Mark submitted</button>}
+              <button ref={removeRef} type="button" className="btn secondary sm" {...rowAction("Remove", label)} onClick={onRemove}>Remove</button>
+            </div>
+          )}
         </td>
       </tr>
       {submitting && (
@@ -1131,12 +1341,13 @@ function RegReportRow({
           <td colSpan={7}>
             <form
               style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
-              onSubmit={(ev) => { ev.preventDefault(); onConfirmSubmit(); }}
+              onSubmit={(ev) => { ev.preventDefault(); confirm(); }}
             >
               <div style={{ flex: "1 1 180px" }}>
                 <label className="label" htmlFor={`rr-ref-${r.id}`}>Regulator acknowledgement reference</label>
                 <input
                   id={`rr-ref-${r.id}`}
+                  autoFocus
                   className="input"
                   value={submitting.reference}
                   onChange={(ev) => onChangeSubmit({ reference: ev.target.value })}
@@ -1144,16 +1355,17 @@ function RegReportRow({
                 />
               </div>
               <div style={{ flex: "1 1 200px" }}>
-                <label className="label">Submitted by</label>
-                <UserPicker
-                  value={submitting.submitted_by_id}
-                  selected={r.submitted_by_ref}
-                  onChange={(id) => onChangeSubmit({ submitted_by_id: id })}
-                  placeholder="Who submitted it…"
-                />
+                <LabelledSearch label="Submitted by">
+                  <UserPicker
+                    value={submitting.submitted_by_id}
+                    selected={r.submitted_by_ref}
+                    onChange={(id) => onChangeSubmit({ submitted_by_id: id })}
+                    placeholder="Who submitted it…"
+                  />
+                </LabelledSearch>
               </div>
-              <button className="btn sm" type="submit">Mark submitted</button>
-              <button className="btn secondary sm" type="button" onClick={onCancelSubmit}>Cancel</button>
+              <button className="btn secondary sm" type="submit" {...rowAction("Mark submitted", label)}>Mark submitted</button>
+              <button className="btn secondary sm" type="button" {...rowAction("Cancel", label)} onClick={cancel}>Cancel</button>
             </form>
           </td>
         </tr>

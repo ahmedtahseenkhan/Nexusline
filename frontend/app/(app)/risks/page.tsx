@@ -7,38 +7,100 @@ import { type Page as PagedList } from "@/lib/list";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
+import { useHasPermission } from "@/lib/tenantSettings";
 import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
 import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
 import { cachedBusinessUnits, lookupValues, pickProcesses, type LookupRef, type LookupValue, type UserRef } from "@/lib/masterData";
+import { plural, sentenceCase } from "@/lib/record/text";
+import type { PointAction } from "@/lib/record/types";
+import {
+  appetiteFact,
+  categoryText,
+  composeRiskTitle as composeTitle,
+  controlBasisWord,
+  controlsNote,
+  creditedControlLines,
+  exceptionMeta,
+  hasAssurance,
+  inherentBasis,
+  isPast,
+  isUnscored,
+  isUntested,
+  noteRequired,
+  personName,
+  quantificationText,
+  residualBasisText,
+  reviewCycleText,
+  reviewReasons,
+  riskHeadline,
+  riskLead,
+  riskOpenPoints,
+  riskTiles,
+  rollupParts,
+  sevTone,
+  suggestedBasis,
+  type RiskControlRef,
+  type RiskExceptionRef,
+  type RiskInput,
+  type RiskSuggestion,
+} from "@/lib/record/risk";
 import UserPicker, { UserName } from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import BusinessUnitSelect from "@/components/BusinessUnitSelect";
 import ProcessSelect from "@/components/ProcessSelect";
-import WorkflowFields from "@/components/WorkflowFields";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import CustomFieldsEditor from "@/components/CustomFieldsEditor";
+import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
-import RecordIssues from "@/components/RecordIssues";
-import RelatedChips from "@/components/RelatedChips";
-import RiskAcceptancePanel from "@/components/RiskAcceptancePanel";
-import RiskTreatmentActions from "@/components/RiskTreatmentActions";
-import ResidualSuggestion from "@/components/ResidualSuggestion";
-import WorkflowStrip from "@/components/WorkflowStrip";
+import RiskAcceptancePanel, { type RiskAcceptancePanelHandle } from "@/components/RiskAcceptancePanel";
+import RiskTreatmentActions, { type RiskTreatmentActionsHandle } from "@/components/RiskTreatmentActions";
 import RiskMethodology from "@/components/RiskMethodology";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import AsyncSelect from "@/components/AsyncSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import GenerateRisks, { type GenerateRisksHandle } from "@/components/GenerateRisks";
-import Menu from "@/components/Menu";
+import Menu, { type MenuItem } from "@/components/Menu";
 import ImportExport, { type ImportExportHandle } from "@/components/ImportExport";
 import OrphanCleanup, { type OrphanCleanupHandle } from "@/components/OrphanCleanup";
-import RichText from "@/components/RichText";
+import RichText, { RichTextView } from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import {
+  Disclosure,
+  FactList,
+  OpenPoints,
+  PrimaryAction,
+  RecordIssuesSection,
+  RecordSection,
+  RelatedGroups,
+  SectionNav,
+  SummaryBand,
+  UNTESTED_CREDIT_NOTE_NEEDED,
+  approvalHintFor,
+  approvalMetaItem,
+  isNoteRequired,
+  pickPrimary,
+  relatedCount,
+  repeatsLead,
+  rowAction,
+  rowLabel,
+  useRecordCtx,
+  useRecordGovernanceData,
+  useRecordSections,
+  useResidualSuggestion,
+  withBaseMoreItems,
+  type FactItem,
+  type MetaItem,
+  type PrimaryCandidate,
+  type RecordIdentity,
+  type RecordIssuesHandle,
+  type RelatedGroup,
+  type ResidualSuggestionApi,
+} from "@/components/record";
 import { titleCase } from "@/lib/text";
 import { useFilterParams, type FilterSpec, type FilterValues } from "@/lib/useFilterParams";
 import { useRouter } from "next/navigation";
@@ -70,6 +132,11 @@ type RiskRow = {
   inherent_severity: string | null;
   residual_severity: string | null;
   residual_override_reason?: string;
+  /** The suggestion as it stood when the residual was last accepted or overridden. */
+  suggested_residual_likelihood?: number | null;
+  suggested_residual_impact?: number | null;
+  /** When the owner signed the residual off through accept-residual. */
+  residual_accepted_at?: string | null;
 
   // Phase 2: the risk statement, classification, target and assessment trail.
   cause?: string;
@@ -134,7 +201,8 @@ type RiskRow = {
   business_units: Ref[];
   processes: Ref[];
   assets: Ref[];
-  controls: Ref[];
+  /** B2: each control's rating, basis and test record on the single-record read. */
+  controls: RiskControlRef[];
   threats: Ref[];
   vulnerabilities: Ref[];
   policies: Ref[];
@@ -146,12 +214,15 @@ type RiskRow = {
 
   // reverse graph links (read-only, from GET /risks/{id})
   requirements?: Ref[];
-  exceptions?: Ref[];
+  /** B3: each exception's status and expiry. */
+  exceptions?: RiskExceptionRef[];
   vendors?: Ref[];
   projects?: Ref[];
   goals?: Ref[];
   processing_activities?: Ref[];
   audit_findings?: Ref[];
+  kris?: Ref[];
+  loss_events?: Ref[];
   issues?: Ref[];
 };
 
@@ -194,18 +265,6 @@ const SOURCE: Option[] = [
 ];
 const sourceLabel = (v: string | null | undefined) => SOURCE.find((o) => o.value === v)?.label ?? (v ? cap(v) : "");
 const velocityLabel = (v: string | null | undefined) => VELOCITY.find((o) => o.value === v)?.label ?? (v ? cap(v) : "");
-/** Mirrors risk_integrity.compose_title: "<Event>, caused by <cause>, resulting in <consequence>". */
-function composeTitle(cause: string, event: string, consequence: string): string {
-  const clean = (t: string) => t.split(/\s+/).filter(Boolean).join(" ").replace(/[ .;,]+$/, "");
-  const lower = (t: string) => (/^[A-Z]{2}/.test(t) ? t : t.charAt(0).toLowerCase() + t.slice(1));
-  const ev = clean(event);
-  if (!ev) return "";
-  const parts = [ev.charAt(0).toUpperCase() + ev.slice(1)];
-  if (clean(cause)) parts.push(`caused by ${lower(clean(cause))}`);
-  if (clean(consequence)) parts.push(`resulting in ${lower(clean(consequence))}`);
-  const title = parts.join(", ");
-  return title.length > 255 ? title.slice(0, 254) + "…" : title;
-}
 /** How impact-dimension scores combine (RiskSetting.impact_mode). */
 function combineImpact(scores: number[], mode: string | undefined): number | null {
   if (!scores.length) return null;
@@ -226,9 +285,6 @@ const STATUS_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neut
   draft: "neutral",
 };
 
-/** The picked category as the list shows it: "Parent › Child", else the legacy text. */
-const categoryText = (r: Pick<RiskRow, "category" | "category_ref">) =>
-  r.category_ref ? r.category_ref.path || r.category_ref.label : r.category || "";
 
 const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
 
@@ -261,9 +317,7 @@ function controlHealth(v: string | null | undefined): React.ReactNode {
   return <span className="muted">—</span>;
 }
 
-/** One reason per line on the risk; shown as the badge's tooltip and in the drawer. */
-const reviewReasons = (r: { review_reason?: string }) =>
-  (r.review_reason || "").split("\n").filter((x) => x.trim());
+
 
 const REVIEW_FILTER: Option[] = [
   { value: "true", label: "Needs review" },
@@ -520,6 +574,8 @@ function RisksPage() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  /** The form tab Edit opens on (an open point or a "Fill in" link names it). */
+  const [editTab, setEditTab] = useState<string | undefined>(undefined);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
   // Impact dimensions (Settings → Lookups → Impact dimension), the grid's rows.
   const [dimensions, setDimensions] = useState<LookupValue[]>([]);
@@ -701,13 +757,15 @@ function RisksPage() {
   }, []);
 
   function openNew() {
+    setEditTab(undefined);
     setEditing(null);
     setF(BLANK);
     setCfValues({});
     setError(null);
     setShowForm(true);
   }
-  function openEdit(r: RiskRow) {
+  function openEdit(r: RiskRow, tab?: string) {
+    setEditTab(tab);
     setEditing(r);
     setF(fromRisk(r));
     setCfValues({});
@@ -735,6 +793,83 @@ function RisksPage() {
     if (!detail?.children_count) { setRollup(null); return; }
     apiCall<RiskRollupView>("GET", `/risks/${detail.id}/rollup`).then(setRollup).catch(() => setRollup(null));
   }, [detail?.id, detail?.children_count]);
+
+  // --------------------------------------------------------------- record page (dossier)
+  /* The open record's governance (approval, attestation, status rules), the viewer's
+     permissions and the record's side data. Every change made on the record page calls
+     `refresh()` — or `refreshRecord()` where the component that made the change already
+     reloaded the governance (a workflow step, an attestation) — so the header, the open
+     points and the Sign-off card agree without a manual reload (record-page-spec §3.3.14). */
+  const gov = useRecordGovernanceData("risk", detail?.id ?? null, { statusRulesModel: "risk" });
+  const canWrite = useHasPermission("risk:write");
+  const canDelete = useHasPermission("risk:delete");
+  const canRaiseIssue = useHasPermission("issue:write");
+  const canAcceptRisk = useHasPermission("risk:accept");
+  const ctx = useRecordCtx(gov, canWrite);
+  const sectionsApi = useRecordSections();
+  const cf = useCustomFieldFacts("risk", detail?.id, { builtInLabels: ["Owner"] });
+  // The suggested residual (B6 note_required and credited controls, B12 appetite band)
+  // and the two ways to record a residual from it: the shared kit hook (decision D7).
+  const suggestion = useResidualSuggestion(detail?.id ?? null);
+  const acceptanceRef = useRef<RiskAcceptancePanelHandle>(null);
+  const treatmentRef = useRef<RiskTreatmentActionsHandle>(null);
+  // The shared Issues section (decision D6): More › "Raise issue…" opens its form.
+  const issuesRef = useRef<RecordIssuesHandle>(null);
+  const acceptBtn = useRef<HTMLButtonElement>(null);
+  const overrideBtn = useRef<HTMLButtonElement>(null);
+  const [acceptOpen, setAcceptOpen] = useState(false);
+  const [overrideOpen, setOverrideOpen] = useState(false);
+
+  // Another record (a parent or child chip): close the last one's forms and start its
+  // columns at the top.
+  const shownId = useRef<string | null>(null);
+  useEffect(() => {
+    setAcceptOpen(false);
+    setOverrideOpen(false);
+    const prev = shownId.current;
+    shownId.current = detail?.id ?? null;
+    if (prev && detail?.id && prev !== detail.id) {
+      document
+        .querySelectorAll<HTMLElement>(".drawer.rec .drawer-main, .drawer.rec .drawer-aside, .drawer.rec .drawer-columns")
+        .forEach((el) => { el.scrollTop = 0; });
+    }
+  }, [detail?.id]);
+
+  // Custom fields are edited in place under Details; a save can change rule verdicts.
+  const govReload = gov.reload;
+  const cfWasEditing = useRef(false);
+  useEffect(() => {
+    if (cfWasEditing.current && !cf.editing) void govReload();
+    cfWasEditing.current = cf.editing;
+  }, [cf.editing, govReload]);
+
+  /** After a change the governance already reflects (a workflow step, an attestation). */
+  const refreshRecord = () => {
+    if (detail) loadDetail(detail.id);
+    reload();
+    suggestion.reload();
+  };
+  /** After any other change on the record. */
+  const refresh = () => {
+    void gov.reload();
+    refreshRecord();
+  };
+
+  /** Forms the open points and the More menu can open (they never change state themselves). */
+  const openers: Record<string, () => void> = {
+    "add-action": () => { sectionsApi.scrollTo("treatment"); treatmentRef.current?.add(); },
+    "request-acceptance": () => { sectionsApi.scrollTo("assessment"); acceptanceRef.current?.openRequest(); },
+    "raise-issue": () => issuesRef.current?.raise(),
+  };
+  function handlePoint(a: PointAction) {
+    if (!detail) return;
+    if (a.kind === "section") sectionsApi.scrollTo(a.target);
+    else if (a.kind === "edit") openEdit(detail, a.target);
+    else if (a.kind === "focus") document.getElementById(a.target)?.focus();
+    else if (a.kind === "href") router.push(a.target);
+    else if (a.kind === "attest") gov.openAttest();
+    else openers[a.target]?.();
+  }
 
   async function save() {
     setError(null);
@@ -771,7 +906,15 @@ function RisksPage() {
       }
       setShowForm(false);
       reload();
-      if (recordId) loadDetail(recordId);  // refresh the open view drawer
+      if (recordId && detail?.id === recordId) {
+        // The open record: its scores, links and custom fields may all have moved.
+        loadDetail(recordId);
+        void gov.reload();
+        void cf.reload();
+        suggestion.reload();
+      } else if (recordId) {
+        loadDetail(recordId);
+      }
       toast(editing ? "Changes saved" : "Risk created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save risk");
@@ -798,6 +941,7 @@ function RisksPage() {
       await apiCall("POST", `/risks/${r.id}/mark-reviewed`);
       reload();
       loadDetail(r.id);
+      void gov.reload();
       toast("Marked reviewed");
     } catch (e) {
       toast(e instanceof Error ? e.message : "Could not mark the risk reviewed", "error");
@@ -817,27 +961,6 @@ function RisksPage() {
   }
 
   const personText = (u: UserRef | null | undefined, fallback?: string) => (u ? u.full_name || u.email : fallback || "");
-  const linkCount = (r: RiskRow) =>
-    r.assets.length + r.controls.length + r.threats.length + r.vulnerabilities.length + r.policies.length + r.incidents.length;
-
-  // read-only helpers for the view drawer
-  const chips = (items: Ref[]) =>
-    items.length ? (
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {items.map((x) => (
-          <span key={x.id} className="chip">{x.reference || x.title || x.name || x.id}</span>
-        ))}
-      </div>
-    ) : (
-      <span className="muted">—</span>
-    );
-  const field = (label: string, value: React.ReactNode) => (
-    <div style={{ minWidth: 140 }}>
-      <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
-      <div style={{ marginTop: 3 }}>{value ?? <span className="muted">—</span>}</div>
-    </div>
-  );
-
   // computed previews
   const inhScore = f.inherent_likelihood === "" || f.inherent_impact === "" ? null : Number(f.inherent_likelihood) * Number(f.inherent_impact);
   const resScore = f.residual_likelihood === "" || f.residual_impact === "" ? null : Number(f.residual_likelihood) * Number(f.residual_impact);
@@ -922,13 +1045,13 @@ function RisksPage() {
           describe the same risk the same way. The title is composed from it when blank. */}
       <div className="field-row">
         <Field label="Cause" help="What could make it happen.">
-          <TextArea value={f.cause} onChange={(v) => set("cause", v)} rows={2} placeholder="Phishing emails harvest staff credentials" />
+          <TextArea value={f.cause} onChange={(v) => set("cause", v)} rows={2} placeholder="e.g. Phishing emails harvest staff credentials" />
         </Field>
         <Field label="Event" help="What could happen — the risk itself.">
-          <TextArea value={f.event} onChange={(v) => set("event", v)} rows={2} placeholder="Unauthorised access to customer accounts" />
+          <TextArea value={f.event} onChange={(v) => set("event", v)} rows={2} placeholder="e.g. Unauthorised access to customer accounts" />
         </Field>
         <Field label="Consequence" help="What it would lead to.">
-          <TextArea value={f.consequence} onChange={(v) => set("consequence", v)} rows={2} placeholder="Customer losses and an SBP enforcement action" />
+          <TextArea value={f.consequence} onChange={(v) => set("consequence", v)} rows={2} placeholder="e.g. Customer losses and an SBP enforcement action" />
         </Field>
       </div>
       <Field
@@ -936,7 +1059,7 @@ function RisksPage() {
         required={!f.event.trim()}
         help={f.title.trim() || !composedTitle ? "A short name for the risk." : `Leave blank to use: “${composedTitle}”`}
       >
-        <TextInput value={f.title} onChange={(v) => set("title", v)} placeholder={composedTitle || "Phishing leads to credential theft"} />
+        <TextInput value={f.title} onChange={(v) => set("title", v)} placeholder={composedTitle || "e.g. Phishing leads to credential theft"} />
       </Field>
       <Field label="Description">
         <TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="Threat / vulnerability context and what could go wrong." />
@@ -1230,14 +1353,13 @@ function RisksPage() {
 
       <Field label="Quantitative (FAIR)" help={`Annual Loss Expectancy = loss events / year × ${currency} per event. Optional.`}>
         <div className="field-row">
-          <div className="field" style={{ margin: 0 }}>
-            <label>Loss events / year (ALF)</label>
-            <NumberInput value={f.annual_loss_frequency} onChange={(v) => set("annual_loss_frequency", v)} min={0} step={0.1} placeholder="0.5" />
-          </div>
-          <div className="field" style={{ margin: 0 }}>
-            <label>{currency} per event (SLE)</label>
-            <NumberInput value={f.single_loss_expectancy} onChange={(v) => set("single_loss_expectancy", v)} min={0} step={1000} placeholder="200000" />
-          </div>
+          {/* Field names each spinbutton after its own label (a bare <label> left them unnamed). */}
+          <Field label="Loss events / year (ALF)">
+            <NumberInput value={f.annual_loss_frequency} onChange={(v) => set("annual_loss_frequency", v)} min={0} step={0.1} placeholder="e.g. 0.5" />
+          </Field>
+          <Field label={`${currency} per event (SLE)`}>
+            <NumberInput value={f.single_loss_expectancy} onChange={(v) => set("single_loss_expectancy", v)} min={0} step={1000} placeholder="e.g. 200000" />
+          </Field>
           <div className="field" style={{ margin: 0 }}>
             <label>Exposure (ALE)</label>
             <div style={{ paddingTop: 4 }}>
@@ -1273,7 +1395,7 @@ function RisksPage() {
           )}
         </Field>
         <Field label={`Treatment Cost (${currency})`}>
-          <NumberInput value={f.treatment_cost} onChange={(v) => set("treatment_cost", v)} min={0} step={1000} placeholder="50000" />
+          <NumberInput value={f.treatment_cost} onChange={(v) => set("treatment_cost", v)} min={0} step={1000} placeholder="e.g. 50000" />
         </Field>
       </div>
       <Field label="Treatment Plan" help="The plan's summary. Owned, dated actions are added from the risk's detail view.">
@@ -1410,7 +1532,7 @@ function RisksPage() {
     { key: "next_review_date", header: "Review", sortable: true, render: (r) => (isOverdue(r.next_review_date) ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(r.next_review_date)}</span>), text: (r) => (r.next_review_date ? formatDate(r.next_review_date) : "") },
     { key: "created_at", header: "Created", hidden: true, render: (r) => <span className="muted">{formatDate(r.created_at)}</span>, text: (r) => (r.created_at ? formatDate(r.created_at) : "") },
     { key: "updated_at", header: "Updated", hidden: true, render: (r) => <span className="muted">{formatDate(r.updated_at)}</span>, text: (r) => (r.updated_at ? formatDate(r.updated_at) : "") },
-    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => remove(r)}>Delete</button></div> },
+    { key: "actions", header: "", render: (r) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" {...rowAction("Delete", rowLabel(r.reference, r.title))} onClick={() => remove(r)}>Delete</button></div> },
   ];
 
   /** Delete every selected risk after one confirmation, then drop the selection. */
@@ -1453,14 +1575,599 @@ function RisksPage() {
       .then((a) => setScopeAsset({ id: a.id, name: a.name })).catch(() => {});
   };
 
+  // --------------------------------------------------------------- the open record's view
+  const riskInput: RiskInput | null = detail
+    ? { risk: detail, suggestion: suggestion.data, matrixSize, impactMode: settings?.impact_mode === "average" ? "average" : "max" }
+    : null;
+  /* The one filled button: approve, then submit, then "Mark reviewed" when the risk is
+     flagged, then attest — the first the server (or the page) allows now. */
+  const primaryCandidates: PrimaryCandidate[] = detail
+    ? [
+        { kind: "workflow", action: "approve" },
+        { kind: "workflow", action: "submit" },
+        { kind: "custom", label: "Mark reviewed", when: !!detail.needs_review && canWrite, onClick: () => markReviewed(detail) },
+        { kind: "attest" },
+      ]
+    : [];
+  const primary = pickPrimary(primaryCandidates, gov);
+  const acceptancePending = (detail?.acceptances ?? []).some((a) => a.status === "pending");
+  const moreItems: MenuItem[] | undefined = detail
+    ? withBaseMoreItems(
+        [
+          ...(canWrite
+            ? ([
+                { label: "Record a different residual…", onClick: () => { sectionsApi.scrollTo("assessment"); setAcceptOpen(false); setOverrideOpen(true); } },
+                ...(acceptancePending ? [] : [{ label: "Request acceptance…", onClick: openers["request-acceptance"] }]),
+                { label: "Add treatment action", onClick: openers["add-action"] },
+              ] as MenuItem[])
+            : []),
+          ...(detail.children_count ? [{ label: "List the risks directly below", onClick: () => showBelow(detail.id) }] : []),
+          ...(canRaiseIssue ? [{ label: "Raise issue…", onClick: openers["raise-issue"] }] : []),
+        ],
+        { onDelete: canDelete ? () => remove(detail) : undefined },
+      )
+    : undefined;
+
+  /* Header meta (§4.1, decision D1): slot 1 the risk status, slot 2 "Record approval",
+     then Owner, Category, Treatment and Next review. */
+  const identity: RecordIdentity | undefined = detail
+    ? {
+        kind: "Risk",
+        backLabel: "Risk Register",
+        reference: detail.reference,
+        name: detail.title,
+        lead: riskLead(detail),
+        badges: detail.level ? <LevelBadge level={detail.level} /> : null,
+        statusRules: { model: "risk", entityId: detail.id },
+        status: {
+          key: "status",
+          label: "Risk status",
+          value: <Badge tone={STATUS_TONE[detail.status] || "neutral"} asIs>{sentenceCase(detail.status)}</Badge>,
+          hint: "Where the risk is in assessment and treatment. Separate from record approval.",
+        },
+        approval: approvalMetaItem(gov, ctx.fmt, approvalHintFor("Risk status")),
+        meta: [
+          {
+            key: "owner",
+            label: "Owner",
+            value: detail.owner_ref ? personName(detail.owner_ref) : undefined,
+            hint: "Accountable for the assessment and its treatment.",
+            gap: detail.owner_id
+              ? undefined
+              : { text: "Not assigned", fix: canWrite ? { label: "Assign", onClick: () => openEdit(detail, "general") } : undefined },
+          },
+          { key: "category", label: "Category", value: categoryText(detail) || undefined },
+          {
+            key: "treatment",
+            label: "Treatment",
+            value: detail.treatment_strategy ? sentenceCase(detail.treatment_strategy) : undefined,
+            sub: detail.treatment_progress?.total ? `${detail.treatment_progress.done}/${detail.treatment_progress.total} actions` : undefined,
+          },
+          {
+            key: "review",
+            label: "Next review",
+            hint: "Attesting the risk records the review and moves this date.",
+            value: detail.next_review_date ? (
+              isPast(detail.next_review_date, ctx.now)
+                ? <Badge tone="high" asIs>Overdue since {formatDate(detail.next_review_date)}</Badge>
+                : formatDate(detail.next_review_date)
+            ) : (
+              <span className="muted">Not scheduled</span>
+            ),
+            sub: detail.next_review_date && detail.review_frequency !== "none" ? sentenceCase(detail.review_frequency) : undefined,
+          },
+        ] satisfies MetaItem[],
+      }
+    : undefined;
+
+  /** "3 below in all · worst residual R-014 (12) · …"; each reference opens that risk. */
+  const rollupFooter = (x: RiskRollupView) =>
+    rollupParts(x).map((part, i) => (
+      <span key={i}>
+        {i > 0 ? " · " : ""}
+        {typeof part === "string" ? part : (
+          <>
+            {part.pre}
+            <button type="button" className="rec-link" title={part.ref.title} aria-label={`${part.pre.trim()} ${rowLabel(part.ref.reference, part.ref.title)}`} onClick={() => setRecordId(part.ref.id)}>
+              {part.ref.reference}
+            </button>
+            {part.post}
+          </>
+        )}
+      </span>
+    ));
+
+  /** The record's main column: banner, band, open points, then the sections of §4.1. */
+  function renderRecord(r: RiskRow, input: RiskInput) {
+    const tiles = riskTiles(input, ctx);
+    const primaryIsSubmit = primary?.kind === "workflow" && primary.action === "submit";
+    const points = riskOpenPoints(input, ctx).map((p) =>
+      p.id === "risk.not_submitted" && !primaryIsSubmit ? { ...p, action: undefined } : p,
+    );
+    const s = input.suggestion;
+    const unscored = isUnscored(r);
+    const reasons = reviewReasons(r);
+    const hasActions = (r.treatment_actions?.length ?? 0) > 0;
+    const why = (r.assessment_rationale ?? "").trim();
+    const assessor = personName(r.last_assessed_by_ref);
+    const lead = riskLead(r);
+    const assured = hasAssurance(r.controls);
+    const rowHead: React.CSSProperties = { fontWeight: 600, color: "var(--text-strong)", whiteSpace: "nowrap" };
+    const band = (sev: string | null | undefined, missing: string) =>
+      sev ? <Badge tone={sevTone(sev)} asIs>{sentenceCase(sev)}</Badge> : <Badge hollow asIs>{missing}</Badge>;
+    const cellBand = (l: number, i: number) => matrix?.cells?.find((c) => c.likelihood === l && c.impact === i)?.band ?? null;
+
+    // The Suggested row: hidden once the recorded residual matches it.
+    const blankScores = <><td className="num" /><td className="num" /><td className="num" /><td /></>;
+    let suggestedRow: React.ReactNode = null;
+    if (unscored) {
+      suggestedRow = <tr><td style={rowHead}>Suggested</td>{blankScores}<td className="muted">No suggestion until the inherent risk is scored</td></tr>;
+    } else if (r.controls.length === 0) {
+      suggestedRow = <tr><td style={rowHead}>Suggested</td>{blankScores}<td className="muted">No suggestion: no linked controls</td></tr>;
+    } else if (suggestion.error) {
+      suggestedRow = <tr><td style={rowHead}>Suggested</td>{blankScores}<td className="muted">Could not work out the suggestion: {suggestion.error}</td></tr>;
+    } else if (!s) {
+      suggestedRow = <tr><td style={rowHead}>Suggested</td>{blankScores}<td className="muted">Working out the suggestion…</td></tr>;
+    } else if (!s.matches_current) {
+      const sBand = cellBand(s.likelihood, s.impact);
+      const basis = suggestedBasis(input);
+      suggestedRow = (
+        <tr>
+          <td style={rowHead}>Suggested</td>
+          <td className="num">{s.likelihood}</td>
+          <td className="num">{s.impact}</td>
+          <td className="num">{s.score}</td>
+          <td>{sBand ? band(sBand, "") : null}</td>
+          <td>
+            <span className="muted">{basis.reasoning}</span>
+            {basis.credit && <div className="muted" style={{ marginTop: 2 }}>{basis.credit}</div>}
+            {canWrite && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                <button
+                  ref={acceptBtn}
+                  type="button"
+                  className="btn secondary sm"
+                  style={{ whiteSpace: "nowrap" }}
+                  aria-expanded={acceptOpen}
+                  aria-controls="risk-accept-suggestion"
+                  onClick={() => { setOverrideOpen(false); setAcceptOpen((v) => !v); }}
+                >
+                  Accept suggestion…
+                </button>
+                <button
+                  ref={overrideBtn}
+                  type="button"
+                  className="btn secondary sm"
+                  style={{ whiteSpace: "nowrap" }}
+                  aria-expanded={overrideOpen}
+                  aria-controls="risk-override-residual"
+                  onClick={() => { setAcceptOpen(false); setOverrideOpen((v) => !v); }}
+                >
+                  Record a different residual…
+                </button>
+              </div>
+            )}
+          </td>
+        </tr>
+      );
+    }
+
+    const linkedGroups: RelatedGroup[] = [
+      { key: "assets", label: "Assets", items: r.assets, href: "/information-assets" },
+      { key: "threats", label: "Threats", items: r.threats, href: "/threat-library" },
+      { key: "vulnerabilities", label: "Vulnerabilities", items: r.vulnerabilities, href: "/threat-library" },
+      // The operational-risk page cannot open a KRI or loss event by id yet (follow-up F12).
+      { key: "kris", label: "KRIs", items: r.kris, href: () => "/operational-risk" },
+      { key: "loss_events", label: "Loss events", items: r.loss_events, href: () => "/operational-risk" },
+      // B3: each exception's state and expiry; nothing extra on an older API.
+      { key: "exceptions", label: "Exceptions", items: r.exceptions, href: "/exceptions", meta: (x: RiskExceptionRef) => exceptionMeta(x, ctx.fmt) },
+      { key: "policies", label: "Policies", items: r.policies, href: "/policies" },
+      { key: "requirements", label: "Compliance requirements", items: r.requirements, href: "/compliance" },
+      { key: "incidents", label: "Incidents", items: r.incidents, href: "/incidents" },
+      { key: "business_units", label: "Business units", items: r.business_units, href: "/business-units" },
+      { key: "processes", label: "Processes", items: r.processes, href: "/processes" },
+      { key: "vendors", label: "Third parties", items: r.vendors, href: "/vendors" },
+      { key: "projects", label: "Projects", items: r.projects, href: "/projects" },
+      { key: "goals", label: "Goals", items: r.goals, href: "/goals" },
+      { key: "processing_activities", label: "Processing activities", items: r.processing_activities, href: "/privacy" },
+      { key: "audit_findings", label: "Audit findings", items: r.audit_findings, href: "/internal-audit" },
+      ...(r.children_count && rollup
+        ? [{
+            key: "below",
+            label: "Risks below",
+            items: rollup.children,
+            href: (x: { id: string }) => {
+              const q = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
+              q.set("id", x.id);
+              return `/risks?${q.toString()}`;
+            },
+            meta: (x: RollupNode) => (x.severity ? <Badge tone={sevTone(x.severity)} asIs>{sentenceCase(x.severity)}</Badge> : null),
+            action: <button type="button" className="rec-link" onClick={() => showBelow(r.id)}>List the risks directly below</button>,
+            footer: rollupFooter(rollup),
+          } satisfies RelatedGroup<RollupNode>]
+        : []),
+    ];
+
+    const detailFacts: FactItem[] = [
+      { key: "category", label: "Category", value: categoryText(r) || null, tab: "general" },
+      { key: "type", label: "Type", value: r.risk_type ? sentenceCase(r.risk_type) : null, tab: "general" },
+      { key: "velocity", label: "Velocity", value: velocityLabel(r.velocity) || null, tab: "general" },
+      { key: "source", label: "Source", value: sourceLabel(r.source) || null, tab: "general" },
+      {
+        key: "identified",
+        label: "Identified",
+        tab: "general",
+        value: r.identified_date || r.identified_by_ref
+          ? [r.identified_date ? formatDate(r.identified_date) : "", personName(r.identified_by_ref)].filter(Boolean).join(" · ")
+          : null,
+      },
+      {
+        key: "hierarchy",
+        label: "Hierarchy",
+        tab: "general",
+        value: r.level ? (
+          <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <LevelBadge level={r.level} />
+            {r.parent ? (
+              <>
+                under
+                <button type="button" className="chip" title={r.parent.title} aria-label={`Parent risk ${rowLabel(r.parent.reference, r.parent.title)}`} onClick={() => setRecordId(r.parent!.id)}>
+                  {r.parent.reference}
+                </button>
+                <span className="muted">{r.parent.title}</span>
+              </>
+            ) : r.parent_id ? (
+              <span className="muted">parent archived</span>
+            ) : null}
+          </span>
+        ) : null,
+      },
+      {
+        key: "statement",
+        label: "Risk statement",
+        wide: true,
+        tab: "general",
+        value: r.cause || r.event || r.consequence ? (
+          <span style={{ display: "grid", gridTemplateColumns: "110px minmax(0, 1fr)", gap: "4px 12px", whiteSpace: "normal" }}>
+            {([["Cause", r.cause], ["Event", r.event], ["Consequence", r.consequence]] as const).map(([label, text]) => (
+              <span key={label} style={{ display: "contents" }}>
+                <span className="muted" style={{ fontSize: 12, fontWeight: 600 }}>{label}</span>
+                <span>{text || <span className="muted">Not set</span>}</span>
+              </span>
+            ))}
+          </span>
+        ) : null,
+      },
+      { key: "review", label: "Review cycle", tab: "review", value: reviewCycleText(r, ctx.fmt) },
+      {
+        key: "created",
+        label: "Created",
+        value: r.created_at ? `${formatDate(r.created_at)}${r.updated_at ? ` · updated ${formatDate(r.updated_at)}` : ""}` : null,
+      },
+      ...cf.facts,
+    ];
+
+    const note = controlsNote(r);
+    // D2: the treatment plan is shown unless it only repeats the lead (the description).
+    const plan = (r.treatment_description ?? "").trim() && !repeatsLead(r.treatment_description, lead) ? r.treatment_description : "";
+
+    return (
+      <>
+        {r.needs_review && (
+          <div role="status" className="rec-banner">
+            <Badge tone="high" asIs>Needs review</Badge>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {reasons.length ? reasons.map((line, i) => <div key={i}>{line}</div>) : <span className="muted">Something this risk depended on changed.</span>}
+            </div>
+            {canWrite && primary?.kind !== "custom" && (
+              <button type="button" className="btn secondary sm" onClick={() => markReviewed(r)}>Mark reviewed</button>
+            )}
+          </div>
+        )}
+
+        <SummaryBand tiles={tiles} headline={riskHeadline(input, ctx)} />
+        <OpenPoints
+          points={points}
+          canAct={canWrite}
+          onAction={handlePoint}
+          clearText="No open points: owner, assessment, approval and attestation are on file."
+        />
+        <SectionNav />
+
+        {/* 1. Assessment */}
+        <RecordSection
+          id="assessment"
+          title="Assessment"
+          actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(r, "assessment")}>Edit scores</button> : undefined}
+        >
+          <div className="rec-table-wrap">
+            <table className="compact">
+              <thead>
+                <tr>
+                  <th><span className="sr-only">Assessment</span></th>
+                  <th className="num">Likelihood</th>
+                  <th className="num">Impact</th>
+                  <th className="num">Score</th>
+                  <th>Band</th>
+                  {/* The table scrolls sideways on a phone: keep the basis readable rather than an 11-line column. */}
+                  <th style={{ minWidth: 260 }}>Basis</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style={rowHead}>Inherent</td>
+                  {unscored ? (
+                    <><td className="num" /><td className="num" /><td className="num" /></>
+                  ) : (
+                    <><td className="num">{r.inherent_likelihood}</td><td className="num">{r.inherent_impact}</td><td className="num">{r.inherent_score}</td></>
+                  )}
+                  <td>{unscored ? band(null, "Not scored") : band(r.inherent_severity, "Not banded")}</td>
+                  <td className="muted">{inherentBasis(r, ctx.fmt, true).text}</td>
+                </tr>
+                <tr>
+                  <td style={rowHead}>Residual</td>
+                  <td className="num">{r.residual_likelihood ?? ""}</td>
+                  <td className="num">{r.residual_impact ?? ""}</td>
+                  <td className="num">{r.residual_score ?? ""}</td>
+                  <td>{r.residual_score != null ? band(r.residual_severity, "Not banded") : band(null, "Not recorded")}</td>
+                  <td className="muted">{residualBasisText(r, ctx.fmt)}</td>
+                </tr>
+                {suggestedRow}
+                <tr>
+                  <td style={rowHead}>Target</td>
+                  <td className="num">{r.target_likelihood ?? ""}</td>
+                  <td className="num">{r.target_impact ?? ""}</td>
+                  <td className="num">{r.target_score ?? ""}</td>
+                  <td>{r.target_score != null ? band(r.target_severity, "Not banded") : band(null, "Not set")}</td>
+                  <td className="muted">{r.target_score != null ? "" : "Not set"}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          {canWrite && s && (
+            <Disclosure label="Accept suggestion" hideTrigger open={acceptOpen} onOpenChange={setAcceptOpen} triggerRef={acceptBtn} id="risk-accept-suggestion">
+              {(close) => <AcceptSuggestionForm input={{ ...input, suggestion: s }} residual={suggestion} close={close} onRecorded={refresh} />}
+            </Disclosure>
+          )}
+          {canWrite && (
+            <Disclosure label="Record a different residual" hideTrigger open={overrideOpen} onOpenChange={setOverrideOpen} triggerRef={overrideBtn} id="risk-override-residual">
+              {(close) => (
+                <OverrideResidualForm
+                  suggestion={s}
+                  residual={suggestion}
+                  start={{
+                    likelihood: r.residual_likelihood ?? s?.likelihood ?? r.inherent_likelihood,
+                    impact: r.residual_impact ?? s?.impact ?? r.inherent_impact,
+                  }}
+                  likelihoodOptions={LIKELIHOOD}
+                  impactOptions={IMPACT}
+                  close={close}
+                  onRecorded={refresh}
+                />
+              )}
+            </Disclosure>
+          )}
+
+          <SubHead>Impact by dimension</SubHead>
+          {(r.impact_dimensions?.length ?? 0) > 0 ? (
+            <div className="rec-table-wrap">
+              <table className="compact">
+                <thead><tr><th>Dimension</th>{DIM_BASES.map((b) => <th key={b} style={{ width: 150 }}>{sentenceCase(b)}</th>)}</tr></thead>
+                <tbody>
+                  {Array.from(new Map((r.impact_dimensions ?? []).map((d) => [d.dimension_id, d.dimension_ref?.label ?? "Dimension"])).entries()).map(([id, label]) => (
+                    <tr key={id}>
+                      <td>{label}</td>
+                      {DIM_BASES.map((b) => {
+                        const hit = r.impact_dimensions?.find((d) => d.dimension_id === id && d.basis === b);
+                        return <td key={b}>{hit ? rungLabel("impact", hit.score) : <span className="muted">Not scored</span>}</td>;
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="rec-empty" style={{ margin: 0 }}>No impact dimensions scored</p>
+          )}
+
+          <div style={{ marginTop: 18 }}>
+            <FactList
+              items={[
+                {
+                  key: "appetite",
+                  label: "Appetite · tolerance",
+                  value: appetiteFact(r),
+                  hint: "The thresholds that apply: the risk's top-level category's own, else the organisation's (Risk methodology).",
+                },
+                { key: "quantification", label: "Quantification", tab: "assessment", value: quantificationText(r, ctx.fmt) },
+                {
+                  key: "rationale",
+                  label: "Rationale",
+                  wide: true,
+                  tab: "assessment",
+                  value: (
+                    <>
+                      {why ? why : <span className="muted">Not recorded</span>}
+                      {r.last_assessed_at && (
+                        <span className="muted">
+                          {" · "}{why ? "assessed" : "scored"} {formatDateTime(r.last_assessed_at)}{assessor ? ` by ${assessor}` : ""}
+                        </span>
+                      )}
+                    </>
+                  ),
+                },
+              ]}
+              onFillIn={canWrite ? (tab) => openEdit(r, tab ?? "assessment") : undefined}
+            />
+          </div>
+
+          <RiskAcceptancePanel
+            ref={acceptanceRef}
+            bare
+            riskId={r.id}
+            riskReference={r.reference}
+            acceptances={r.acceptances ?? []}
+            relatedExceptions={r.exceptions}
+            onChange={refresh}
+            canRequest={canWrite}
+            canDecide={canAcceptRisk}
+          />
+        </RecordSection>
+
+        {/* 2. Treatment */}
+        <RecordSection
+          id="treatment"
+          title="Treatment"
+          actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(r, "assessment")}>Edit plan</button> : undefined}
+        >
+          <FactList
+            items={[
+              { key: "strategy", label: "Strategy", value: r.treatment_strategy ? sentenceCase(r.treatment_strategy) : null, tab: "assessment" },
+              {
+                key: "towner", label: "Owner", tab: "assessment",
+                // Free text with no person picked is a label, not someone accountable.
+                value: r.treatment_owner_ref ? personName(r.treatment_owner_ref)
+                  : r.treatment_owner?.trim() ? <>{r.treatment_owner.trim()} <span className="rec-gap">(text only · pick a person in Edit)</span></>
+                  : null,
+              },
+              { key: "deadline", label: hasActions ? "Deadline (from actions)" : "Deadline", value: r.treatment_deadline ? formatDate(r.treatment_deadline) : null, tab: "assessment" },
+              { key: "cost", label: "Cost", value: r.treatment_cost != null ? formatMoney(r.treatment_cost) : null, tab: "assessment" },
+            ]}
+            onFillIn={canWrite ? (tab) => openEdit(r, tab ?? "assessment") : undefined}
+          />
+          {plan && (
+            /* Stored rich text: sanitised by RichTextView (lib/sanitize), never raw. */
+            <RichTextView html={plan} style={{ margin: "12px 0 0", maxWidth: "76ch", fontSize: 13.5, lineHeight: 1.55 }} />
+          )}
+          <RiskTreatmentActions
+            ref={treatmentRef}
+            riskId={r.id}
+            actions={r.treatment_actions ?? []}
+            progress={r.treatment_progress}
+            canWrite={canWrite}
+            onChange={refresh}
+          />
+        </RecordSection>
+
+        {/* 3. Controls — each one's rating, its basis and its test record (B2). */}
+        <RecordSection
+          id="controls"
+          title="Controls"
+          count={r.controls.length}
+          actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(r, "links")}>Link controls</button> : undefined}
+          empty={r.controls.length ? undefined : "No controls linked — nothing can reduce the residual."}
+        >
+          <div className="rec-table-wrap">
+            <table className="compact">
+              <thead>
+                <tr>
+                  <th style={{ width: 110 }}>Ref</th>
+                  <th style={{ minWidth: 180 }}>Name</th>
+                  {assured && (
+                    <>
+                      <th>Effectiveness</th>
+                      <th style={{ whiteSpace: "nowrap" }}>Basis</th>
+                      <th className="num">Reviewed tests</th>
+                      <th>Last reviewed test</th>
+                      <th>Next test</th>
+                    </>
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {r.controls.map((c) => (
+                  <tr key={c.id}>
+                    <td>
+                      <Link
+                        href={`/controls?id=${c.id}`}
+                        aria-label={rowLabel(c.reference || "Control", c.name || c.title)}
+                        style={{ fontFamily: "var(--mono)", fontSize: 12.5, fontWeight: 600 }}
+                      >
+                        {c.reference || "Open"}
+                      </Link>
+                    </td>
+                    <td>{c.name || c.title}</td>
+                    {assured && (
+                      <>
+                        <td>{effectivenessBadge(c.effectiveness)}</td>
+                        <td className={isUntested(c) ? undefined : "muted"} style={{ whiteSpace: "nowrap", ...(isUntested(c) ? { fontWeight: 600 } : {}) }}>{controlBasisWord(c)}</td>
+                        <td className="num">
+                          {c.audit_count ?? 0}
+                          {(c.pending_review_count ?? 0) > 0 && <div className="muted">+{c.pending_review_count} awaiting review</div>}
+                        </td>
+                        <td>
+                          {c.last_audit_result ? (
+                            <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                              <Badge tone={TEST_TONE[c.last_audit_result] ?? "neutral"} asIs>{sentenceCase(c.last_audit_result)}</Badge>
+                              {c.last_audit_date && <span className="muted">{formatDate(c.last_audit_date)}</span>}
+                            </span>
+                          ) : <span className="muted">None on file</span>}
+                        </td>
+                        <td>
+                          {c.is_audit_overdue
+                            ? <Badge tone="high" asIs>{c.next_audit_date ? `Overdue since ${formatDate(c.next_audit_date)}` : "Overdue"}</Badge>
+                            : c.next_audit_date ? <span className="muted">{formatDate(c.next_audit_date)}</span> : <span className="muted">Not scheduled</span>}
+                          {(c.open_finding_count ?? 0) > 0 && <div className="muted">{plural(c.open_finding_count ?? 0, "open audit finding")}</div>}
+                          {(c.open_issue_count ?? 0) > 0 && <div className="muted">{plural(c.open_issue_count ?? 0, "open issue")}</div>}
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {note && <p className="rec-none">{note}</p>}
+        </RecordSection>
+
+        {/* 4. Details */}
+        <RecordSection
+          id="details"
+          title="Details"
+          actions={canWrite ? <button type="button" className="btn secondary sm" aria-label="Edit details" onClick={() => openEdit(r)}>Edit</button> : undefined}
+        >
+          <FactList
+            items={detailFacts}
+            onFillIn={canWrite ? (tab) => (tab === "custom" ? cf.setEditing(true) : openEdit(r, tab ?? "general")) : undefined}
+          />
+          {cf.editor}
+          {cf.editLink(canWrite)}
+        </RecordSection>
+
+        {/* 5. Linked records */}
+        <RecordSection
+          id="linked"
+          title="Linked records"
+          count={relatedCount(linkedGroups)}
+          actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(r, "links")}>Link records</button> : undefined}
+        >
+          {/* No onLink: the head's "Link records" is the one control (decision D3). */}
+          <RelatedGroups groups={linkedGroups} />
+        </RecordSection>
+
+        {/* 6. Issues — the shared section (decision D6): list, count and Raise issue. */}
+        <RecordIssuesSection
+          ref={issuesRef}
+          entityId={r.id}
+          entityKind="risk"
+          entityRef={r.reference}
+          sourceType="risk_assessment"
+          noun="risk"
+          onRaised={refresh}
+        />
+      </>
+    );
+  }
+
   return (
     <>
-      <div className="page-head row-between">
-        <div>
+      <div className="page-head row-between" style={{ flexWrap: "wrap" }}>
+        {/* The actions wrap under the title on a phone instead of widening the page. */}
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
           <h1>Risk Register</h1>
           <p>Qualitative ({matrixSize}×{matrixSize}) and quantitative (FAIR) risks, with controls, threats and review cycles.</p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <div className="seg" role="tablist" aria-label="Register view">
             <button className={!treeView ? "on" : ""} onClick={() => setUrlFilter("view", "")} role="tab" aria-selected={!treeView}>List</button>
             <button className={treeView ? "on" : ""} onClick={() => setUrlFilter("view", "tree")} role="tab" aria-selected={treeView}>Hierarchy</button>
@@ -1657,244 +2364,37 @@ function RisksPage() {
         </div>
       </RecordDrawer>
 
-      {/* Read-only detail view (?id=) — click a row to see everything; Edit is separate. */}
+      {/* The risk record (?id=): the dossier record page — identity header, summary band,
+          open points and sections, with Sign-off & trail in the rail (record-page-spec §4.1).
+          Row click, global search and ⌘K open it; Edit is a separate action from there. */}
       <RecordDrawer
-        aside={detail ? <RecordPanels model="risk" entityId={detail.id} /> : null}
+        variant="dossier"
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
-        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
-        subtitle={detail ? cap(detail.status) + (categoryText(detail) ? ` · ${categoryText(detail)}` : "") : ""}
-        width={680}
-        actions={detail && (
-          <>
-            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
-            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
-          </>
-        )}
-      >
-        {detail && (
-          <>
-            {detail.needs_review && (
-              <div role="status" style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "10px 14px", borderRadius: 8, marginBottom: 16, background: "var(--amber-bg)", border: "1px solid var(--border)" }}>
-                <Badge tone="high">Needs review</Badge>
-                <div style={{ flex: 1, fontSize: 13, lineHeight: 1.5 }}>
-                  {reviewReasons(detail).length
-                    ? reviewReasons(detail).map((line, i) => <div key={i}>{line}</div>)
-                    : <span className="muted">Something this risk depended on changed.</span>}
-                </div>
-                <button className="btn secondary sm" onClick={() => markReviewed(detail)}>Mark reviewed</button>
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-end", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Inherent</div><div style={{ marginTop: 4 }}><Severity value={detail.inherent_severity} /> <span className="muted">({detail.inherent_score ?? "—"})</span></div></div>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Residual</div><div style={{ marginTop: 4 }}><Severity value={detail.residual_severity} /> <span className="muted">({detail.residual_score ?? "—"})</span></div></div>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Target</div><div style={{ marginTop: 4 }}>{detail.target_score ? <><Severity value={detail.target_severity ?? null} /> <span className="muted">({detail.target_score})</span></> : <span className="muted">Not set</span>}</div></div>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Appetite</div><div style={{ marginTop: 4 }}>{(() => { const a = appetite(detail, settings); return a ? <span title={a.title}><Badge tone={a.tone}>{a.label}</Badge></span> : <span className="muted">—</span>; })()}</div>{detail.tolerance_score != null && <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>{detail.appetite_category_id ? "Category" : "Organisation"}: {detail.appetite_score} · {detail.tolerance_score}</div>}</div>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Control health</div><div style={{ marginTop: 4 }}>{controlHealth(detail.control_health)}</div></div>
-              <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Exposure (ALE)</div><div style={{ marginTop: 4 }}>{money(detail.annual_loss_expectancy)}</div></div>
-            </div>
-
-            {/* Phase 3: where the risk sits — its parent, and everything below it. */}
-            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                <strong style={{ fontSize: 13 }}>Hierarchy</strong>
-                <LevelBadge level={detail.level} />
-                {detail.parent ? (
-                  <span style={{ fontSize: 13 }}>
-                    under{" "}
-                    <button type="button" className="chip" title={detail.parent.title} onClick={() => setRecordId(detail.parent!.id)}>
-                      {detail.parent.reference}
-                    </button>{" "}
-                    <span className="muted">{detail.parent.title}</span>
-                  </span>
-                ) : (
-                  <span className="muted" style={{ fontSize: 13 }}>{detail.parent_id ? "Its parent was archived" : "No parent"}</span>
-                )}
-              </div>
-              {rollup && rollup.total > 0 && (
-                <div style={{ marginTop: 10 }}>
-                  <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-                    Directly below ({rollup.children.length})
-                  </div>
-                  <div className="chips">
-                    {rollup.children.map((c) => (
-                      <button key={c.id} type="button" className="chip" title={c.title} onClick={() => setRecordId(c.id)}>
-                        {c.reference} <Severity value={c.severity} />
-                      </button>
-                    ))}
-                  </div>
-                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center", marginTop: 10, fontSize: 12.5 }}>
-                    <span>{rollup.total} below in all</span>
-                    {rollup.worst_exposure && (
-                      <span>
-                        worst exposure{" "}
-                        <button type="button" className="linklike" onClick={() => setRecordId(rollup.worst_exposure!.id)}>{rollup.worst_exposure.reference}</button>{" "}
-                        <Severity value={rollup.worst_exposure.severity} /> <span className="muted">({rollup.worst_exposure.exposure ?? "—"})</span>
-                      </span>
-                    )}
-                    {rollup.worst_residual && (
-                      <span>
-                        worst residual{" "}
-                        <button type="button" className="linklike" onClick={() => setRecordId(rollup.worst_residual!.id)}>{rollup.worst_residual.reference}</button>{" "}
-                        <span className="muted">({rollup.worst_residual.residual_score})</span>
-                      </span>
-                    )}
-                    <span className="muted">
-                      {(["critical", "high", "medium", "low"] as const).map((b) => `${rollup.by_severity[b] ?? 0} ${b}`).join(" · ")}
-                    </span>
-                    {rollup.breaches > 0 && <Badge tone="critical">{rollup.breaches} above tolerance</Badge>}
-                    <button type="button" className="linklike" onClick={() => showBelow(detail.id)}>List the risks directly below</button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <strong style={{ fontSize: 13, display: "block", marginBottom: 10 }}>Approval</strong>
-              <WorkflowFields entityType="risk" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
-            </div>
-
-            <WorkflowStrip
-              entityType="risk"
+        governance={gov}
+        identity={identity}
+        primaryAction={detail ? <PrimaryAction candidates={primaryCandidates} onChanged={refreshRecord} /> : null}
+        onEdit={detail && canWrite ? () => openEdit(detail) : undefined}
+        moreItems={moreItems}
+        aside={
+          detail ? (
+            <RecordPanels
+              model="risk"
               entityId={detail.id}
-              entityLabel={`${detail.reference} — ${detail.title}`}
-              link="/risks"
-              ownerEmail={detail.owner_ref?.email ?? ""}
-              hideStart
-              onChange={() => { reload(); loadDetail(detail.id); }}
+              layout="dossier"
+              signOff={{
+                route: { label: `${detail.reference} — ${detail.title}`, link: "/risks", ownerEmail: detail.owner_ref?.email ?? "" },
+                onChanged: refreshRecord,
+              }}
+              trail={{
+                reference: detail.reference,
+                related: (detail.acceptances ?? []).map((a) => ({ entityType: "risk_acceptance", entityId: a.id, label: "Acceptance" })),
+              }}
             />
-
-            <ResidualSuggestion
-              riskId={detail.id}
-              onAccepted={() => { reload(); loadDetail(detail.id); }}
-            />
-
-            <RiskAcceptancePanel
-              riskId={detail.id}
-              riskReference={detail.reference}
-              acceptances={detail.acceptances ?? []}
-              onChange={() => { reload(); loadDetail(detail.id); }}
-            />
-
-            {(detail.cause || detail.event || detail.consequence) && (
-              <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16, display: "grid", gap: 8 }}>
-                <strong style={{ fontSize: 13 }}>Risk statement</strong>
-                {([["Cause", detail.cause], ["Event", detail.event], ["Consequence", detail.consequence]] as const).map(([label, text]) =>
-                  text ? (
-                    <div key={label} style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, fontSize: 13.5, lineHeight: 1.5 }}>
-                      <span className="muted" style={{ fontWeight: 600, fontSize: 12 }}>{label}</span>
-                      <span>{text}</span>
-                    </div>
-                  ) : null,
-                )}
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
-              {field("Owner", <UserName user={detail.owner_ref} />)}
-              {field("Category", categoryText(detail) || "—")}
-              {field("Status", <Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge>)}
-              {field("Type", detail.risk_type ? cap(detail.risk_type) : "—")}
-              {field("Velocity", velocityLabel(detail.velocity) || "—")}
-              {field("Source", sourceLabel(detail.source) || "—")}
-              {field("Identified", detail.identified_date || detail.identified_by_ref
-                ? <>{detail.identified_date ? formatDate(detail.identified_date) : ""}{detail.identified_by_ref ? <> {detail.identified_date ? "· " : ""}<UserName user={detail.identified_by_ref} /></> : null}</>
-                : "—")}
-            </div>
-
-            {(detail.assessment_rationale || detail.last_assessed_at) && (
-              <div style={{ marginBottom: 16 }}>
-                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                  Assessment rationale
-                  {detail.last_assessed_at && <> · assessed {formatDateTime(detail.last_assessed_at)}{detail.last_assessed_by_ref ? <> by <UserName user={detail.last_assessed_by_ref} /></> : null}</>}
-                </div>
-                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.assessment_rationale || <span className="muted">No rationale recorded (provisional draft scores).</span>}</div>
-              </div>
-            )}
-
-            {(detail.impact_dimensions?.length ?? 0) > 0 && (
-              <div style={{ marginBottom: 16 }}>
-                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Impact by dimension</div>
-                <div className="table-wrap">
-                  <table style={{ fontSize: 13 }}>
-                    <thead><tr><th>Dimension</th>{DIM_BASES.map((b) => <th key={b} style={{ width: 110, textTransform: "capitalize" }}>{b}</th>)}</tr></thead>
-                    <tbody>
-                      {Array.from(new Map((detail.impact_dimensions ?? []).map((d) => [d.dimension_id, d.dimension_ref?.label ?? "Dimension"])).entries()).map(([id, label]) => (
-                        <tr key={id}>
-                          <td>{label}</td>
-                          {DIM_BASES.map((b) => {
-                            const hit = detail.impact_dimensions?.find((d) => d.dimension_id === id && d.basis === b);
-                            return <td key={b}>{hit ? rungLabel("impact", hit.score) : <span className="muted">—</span>}</td>;
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {detail.description && (
-              <div style={{ marginBottom: 16 }}>
-                <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
-                <div style={{ fontSize: 14, lineHeight: 1.5 }}>{detail.description}</div>
-              </div>
-            )}
-
-            <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <strong style={{ fontSize: 13 }}>Treatment</strong>
-              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
-                {field("Strategy", detail.treatment_strategy ? cap(detail.treatment_strategy) : "—")}
-                {field("Owner", <UserName user={detail.treatment_owner_ref} fallback={detail.treatment_owner} />)}
-                {field(detail.treatment_actions?.length ? "Deadline (from actions)" : "Deadline", formatDate(detail.treatment_deadline))}
-                {field("Cost", money(detail.treatment_cost))}
-              </div>
-              {detail.treatment_description && (
-                <div style={{ fontSize: 13.5, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: detail.treatment_description }} />
-              )}
-              <RiskTreatmentActions
-                riskId={detail.id}
-                actions={detail.treatment_actions ?? []}
-                progress={detail.treatment_progress}
-                onChange={() => { reload(); loadDetail(detail.id); }}
-              />
-            </div>
-
-            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 18 }}>
-              {field("Review frequency", cap(detail.review_frequency))}
-              {field("Last review", formatDate(detail.last_review_date))}
-              {field("Next review", isOverdue(detail.next_review_date) ? <Badge tone="high">Overdue · {formatDate(detail.next_review_date)}</Badge> : formatDate(detail.next_review_date))}
-              {field("Expired reviews", String(detail.expired_reviews))}
-            </div>
-
-            <strong style={{ fontSize: 13 }}>Related records</strong>
-            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
-              <RelatedChips label="Business units" items={detail.business_units} href="/business-units" />
-              <RelatedChips label="Processes" items={detail.processes} href="/processes" />
-              <RelatedChips label="Assets" items={detail.assets} href="/information-assets" />
-              <RelatedChips label="Controls" items={detail.controls} href="/controls" />
-              <RelatedChips label="Threats" items={detail.threats} href="/threat-library" />
-              <RelatedChips label="Vulnerabilities" items={detail.vulnerabilities} href="/threat-library" />
-              <RelatedChips label="Policies" items={detail.policies} href="/policies" />
-              <RelatedChips label="Incidents" items={detail.incidents} href="/incidents" />
-              <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
-              <RelatedChips label="Exceptions" items={detail.exceptions} href="/exceptions" />
-              <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
-              <RelatedChips label="Projects" items={detail.projects} href="/projects" />
-              <RelatedChips label="Goals" items={detail.goals} href="/goals" />
-              <RelatedChips label="Processing activities" items={detail.processing_activities} href="/privacy" />
-              <RelatedChips label="Audit findings" items={detail.audit_findings} href="/internal-audit" />
-              <RelatedChips label="Issues" items={detail.issues} href="/issues" />
-            </div>
-
-            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-              <RecordIssues entityId={detail.id} entityRef={detail.reference} sourceType="risk_assessment" />
-            </div>
-
-            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-            </div>
-          </>
-        )}
+          ) : null
+        }
+      >
+        {detail && riskInput ? renderRecord(detail, riskInput) : null}
       </RecordDrawer>
 
       {showForm && (
@@ -1921,7 +2421,8 @@ function RisksPage() {
                 }]
               : []),
           ]}
-          onClose={() => { setShowForm(false); setRecordId(null); }}
+          initialTab={editTab}
+          onClose={() => setShowForm(false)}
           onSave={save}
           saving={saving}
           error={error}
@@ -1929,6 +2430,217 @@ function RisksPage() {
         />
       )}
     </>
+  );
+}
+
+// --------------------------------------------------------------- record page: local parts
+/* The few pieces only the risk record uses. The suggestion itself comes from the kit's
+   `useResidualSuggestion` (decision D7) and the Issues section from `RecordIssuesSection`
+   (D6); every sentence of judgement comes from lib/record/risk.ts. */
+
+const EFFECTIVENESS_TONE: Record<string, "low" | "medium" | "high"> = {
+  effective: "low",
+  partially_effective: "medium",
+  ineffective: "high",
+};
+/** A control's combined rating as a band badge; "Not assessed" (or none) is hollow. */
+function effectivenessBadge(v: string | null | undefined) {
+  if (!v || !EFFECTIVENESS_TONE[v]) return <Badge hollow asIs>{v ? sentenceCase(v) : "Not rated"}</Badge>;
+  return <Badge tone={EFFECTIVENESS_TONE[v]} asIs>{sentenceCase(v)}</Badge>;
+}
+const TEST_TONE: Record<string, "low" | "medium" | "high" | "neutral"> = {
+  passed: "low",
+  passed_with_exceptions: "medium",
+  failed: "high",
+  not_assessed: "neutral",
+};
+
+/** A sub-heading inside a record section ("Impact by dimension"). */
+function SubHead({ children }: { children: React.ReactNode }) {
+  return (
+    <h3 style={{ margin: "18px 0 8px", fontSize: 13, lineHeight: "18px", fontWeight: 650, color: "var(--text-strong)" }}>
+      {children}
+    </h3>
+  );
+}
+
+/** "Accept suggestion…": records the suggested residual; the engine's reasoning becomes
+ *  the rationale on the record (POST /risks/{id}/accept-residual with no scores). B6: when
+ *  a credited control is rated by hand or by override, or has no reviewed test, the
+ *  server refuses without the owner's note, so the form asks for it — up front when the
+ *  suggestion says so (`note_required`, or the B2 fields), else once the server refuses. */
+function AcceptSuggestionForm({
+  input, residual, close, onRecorded,
+}: {
+  input: RiskInput & { suggestion: RiskSuggestion };
+  residual: ResidualSuggestionApi;
+  close: () => void;
+  onRecorded: () => void;
+}) {
+  const s = input.suggestion;
+  const [note, setNote] = useState("");
+  const [refused, setRefused] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
+  const required = noteRequired(input) === true || refused;
+  const credited = creditedControlLines(input);
+
+  async function accept(e: React.FormEvent) {
+    e.preventDefault();
+    if (required && !note.trim()) {
+      setError("Say why you accept credit from an untested rating. The note is kept with the residual's rationale.");
+      noteRef.current?.focus();
+      return;
+    }
+    setError(null);
+    try {
+      await residual.accept(note);
+      toast(`Residual ${s.likelihood}×${s.impact} recorded`);
+      close();
+      onRecorded();
+    } catch (err) {
+      if (isNoteRequired(err)) {
+        setRefused(true);
+        setError(`${UNTESTED_CREDIT_NOTE_NEEDED}. Say why you rely on it.`);
+        requestAnimationFrame(() => noteRef.current?.focus());
+      } else {
+        setError(err instanceof Error ? err.message : "Could not record the residual");
+      }
+    }
+  }
+
+  return (
+    <form onSubmit={accept}>
+      <p style={{ margin: 0, fontSize: 13, lineHeight: "18px" }}>
+        Record <b>{s.likelihood}×{s.impact} = {s.score}</b> as the residual. This reasoning becomes its recorded rationale:
+      </p>
+      <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: "18px" }}>
+        {s.rationale.map((line, i) => <li key={i}>{line}</li>)}
+      </ul>
+      {credited.length > 0 && (
+        <>
+          <p style={{ margin: "10px 0 0", fontSize: 12.5, fontWeight: 600 }}>Accepting relies on these ratings</p>
+          <ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: "18px" }}>
+            {credited.map((c) => (
+              <li key={c.id}>
+                {c.text}
+                {c.untested && <b> (untested)</b>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <div style={{ marginTop: 10 }}>
+        <label className="label" htmlFor="risk-accept-note">
+          {required ? "Why accept credit from an untested rating? (required)" : "Note (optional)"}
+        </label>
+        <textarea
+          ref={noteRef}
+          id="risk-accept-note"
+          className="input"
+          rows={2}
+          style={{ minHeight: 60 }}
+          value={note}
+          aria-required={required || undefined}
+          aria-invalid={(required && !!error && !note.trim()) || undefined}
+          aria-describedby="risk-accept-note-help"
+          onChange={(e) => setNote(e.target.value)}
+          placeholder={required ? "For example: the restore was demonstrated at the March DR drill; the test record is being written up" : ""}
+        />
+        <div id="risk-accept-note-help" className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+          Kept with the residual&rsquo;s rationale as the owner&rsquo;s note, and on the activity trail.
+        </div>
+      </div>
+      <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>
+        Until you accept it, the suggestion is only a proposal: nothing is recorded on the risk.
+      </p>
+      {error && <p className="rec-error" role="alert" style={{ margin: "8px 0 0", fontSize: 12.5 }}>{error}</p>}
+      <div className="row" style={{ marginTop: 10 }}>
+        <button type="submit" className="btn secondary sm" disabled={residual.busy}>{residual.busy ? "Saving…" : "Accept suggestion"}</button>
+        <button type="button" className="btn secondary sm" onClick={close} disabled={residual.busy}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
+/** "Record a different residual…": the owner's own judgement, which needs a written
+ *  reason whenever it differs from the suggestion (the server enforces it too). */
+function OverrideResidualForm({
+  suggestion: s, residual, start, likelihoodOptions, impactOptions, close, onRecorded,
+}: {
+  suggestion: RiskSuggestion | null;
+  residual: ResidualSuggestionApi;
+  start: { likelihood: number; impact: number };
+  likelihoodOptions: Option[];
+  impactOptions: Option[];
+  close: () => void;
+  onRecorded: () => void;
+}) {
+  const [likelihood, setLikelihood] = useState(String(start.likelihood));
+  const [impact, setImpact] = useState(String(start.impact));
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const differs = !s || Number(likelihood) !== s.likelihood || Number(impact) !== s.impact;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (differs && !reason.trim()) {
+      setError("Write down why your assessment differs from the suggestion — that sentence is what an auditor reads.");
+      return;
+    }
+    setError(null);
+    try {
+      await residual.override(Number(likelihood), Number(impact), reason);
+      toast(`Residual ${likelihood}×${impact} recorded`);
+      close();
+      onRecorded();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not record the residual");
+    }
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <div className="row">
+        <div style={{ width: 220, maxWidth: "100%" }}>
+          <label className="label" htmlFor="risk-override-l">Residual likelihood</label>
+          <select id="risk-override-l" className="select" value={likelihood} onChange={(e) => setLikelihood(e.target.value)}>
+            {likelihoodOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div style={{ width: 220, maxWidth: "100%" }}>
+          <label className="label" htmlFor="risk-override-i">Residual impact</label>
+          <select id="risk-override-i" className="select" value={impact} onChange={(e) => setImpact(e.target.value)}>
+            {impactOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label className="label" htmlFor="risk-override-reason">
+          Why does your assessment differ from the suggestion?{differs ? " (required)" : ""}
+        </label>
+        <textarea
+          id="risk-override-reason"
+          className="input"
+          rows={2}
+          style={{ minHeight: 60 }}
+          value={reason}
+          aria-required={differs || undefined}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="For example: the backup restore test failed in August, so its credit is not relied on"
+        />
+      </div>
+      {s && (
+        <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>
+          The linked controls suggest {s.likelihood}×{s.impact} = {s.score}.
+        </p>
+      )}
+      {error && <p className="rec-error" role="alert" style={{ margin: "8px 0 0", fontSize: 12.5 }}>{error}</p>}
+      <div className="row" style={{ marginTop: 10 }}>
+        <button type="submit" className="btn secondary sm" disabled={residual.busy}>{residual.busy ? "Saving…" : "Record residual"}</button>
+        <button type="button" className="btn secondary sm" onClick={close} disabled={residual.busy}>Cancel</button>
+      </div>
+    </form>
   );
 }
 

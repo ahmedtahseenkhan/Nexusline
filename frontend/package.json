@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "check:record-copy": "node --experimental-strip-types --no-warnings --import ./scripts/record-copy/resolve-ts.mjs scripts/record-copy/check.ts",
+    "check:sanitize": "node --experimental-strip-types --no-warnings --import ./scripts/sanitize-check/resolve-ts.mjs scripts/sanitize-check/check.ts"
   },
   "dependencies": {
     "next": "14.2.5",

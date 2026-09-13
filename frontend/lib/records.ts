@@ -179,7 +179,12 @@ export async function confirmDeleteWithImpact(
   opts: ConfirmDeleteOpts = {},
 ): Promise<boolean> {
   const type = opts.typeLabel || entityTypeWords(entityType);
+  // The impact check is a round trip. If the record the delete was asked from is closed
+  // (or another opened) meanwhile, don't pop a delete confirm over whatever is showing now.
+  const openRecord = () => (typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("id"));
+  const askedFrom = openRecord();
   const report = await records.impact(entityType, id).catch(() => null);
+  if (openRecord() !== askedFrom) return false;
   const archiveNote = opts.permanent
     ? "This can't be undone."
     : "It is archived, not erased: it can be restored from the register's Archived list until the retention period ends.";

@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.audit import AuditLog
-from app.models.compliance import Requirement, requirement_controls
+from app.models.compliance import Framework, Requirement, requirement_controls
 from app.models.control import (
     Control,
     ControlAudit,
@@ -108,9 +108,36 @@ async def _open_issues_by_control(db, control_ids) -> dict:
     return out
 
 
+async def _frameworks_by_requirement(db, requirement_ids) -> dict:
+    """``{requirement id: (framework id, framework name)}`` — one query for a page (B7)."""
+    ids = list(dict.fromkeys(requirement_ids))
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Requirement.id, Framework.id, Framework.name)
+            .join(Framework, Framework.id == Requirement.framework_id)
+            .where(Requirement.id.in_(ids))
+        )
+    ).all()
+    return {rid: (fid, name or "") for rid, fid, name in rows}
+
+
+def fill_frameworks(items, frameworks: dict) -> None:
+    """Name the framework of every clause on each read (B7). Pure."""
+    for item in items:
+        for req in item.requirements:
+            found = frameworks.get(req.id)
+            if found is not None:
+                req.framework_id, req.framework = found
+
+
 async def _reads(db, controls) -> list[ControlRead]:
     items = [ControlRead.model_validate(c) for c in controls]
     await ref_fields.fill_refs(db, list(zip(controls, items)), CONTROL_REFS)
+    fill_frameworks(
+        items, await _frameworks_by_requirement(db, [r.id for item in items for r in item.requirements])
+    )
     open_issues = await _open_issues_by_control(db, [c.id for c in controls])
     for control, item in zip(controls, items):
         tests = list(control.audits or [])
@@ -124,6 +151,7 @@ async def _reads(db, controls) -> list[ControlRead]:
         )
         item.design_effectiveness = derived.design
         item.operating_effectiveness = derived.operating
+        item.operating_capped = derived.capped
         item.effectiveness_basis = derived.basis
         item.pending_review_count = sum(1 for t in tests if t.review_status == REVIEW_PENDING)
         item.open_issues = open_issues.get(control.id, [])

@@ -140,12 +140,16 @@ def test_default_statements():
 
 
 def test_native_review_types_carry_their_own_schedule():
+    from app.models.asset import Asset
     from app.models.policy import Policy
     from app.models.risk import Risk
     from app.models.vendor import Vendor
 
-    by_type = {"risk": Risk, "policy": Policy, "vendor": Vendor}
-    assert set(by_type) == NATIVE_REVIEW_ENTITY_TYPES
+    by_type = {"risk": Risk, "policy": Policy, "vendor": Vendor, "asset": Asset}
+    # One review clock per record: the attestation is the record's review for these
+    # (spec B4 added the asset), and each has its own overdue sweep on that date.
+    assert set(by_type) == att.REVIEW_CLOCK_ENTITY_TYPES
+    assert att.REVIEW_CLOCK_ENTITY_TYPES == NATIVE_REVIEW_ENTITY_TYPES
     for et, model in by_type.items():
         record = model()
         assert att._native(et, record), et

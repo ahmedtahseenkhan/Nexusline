@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiCall } from "@/lib/api";
@@ -17,7 +17,6 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
-import RelatedChips from "@/components/RelatedChips";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, Toggle, NumberInput, type Option } from "@/components/fields";
@@ -26,9 +25,22 @@ import { IconPlus } from "@/components/icons";
 import { InlineLookupCreate } from "@/components/LookupManager";
 import LookupSelect from "@/components/LookupSelect";
 import UserPicker from "@/components/UserPicker";
-import WorkflowFields from "@/components/WorkflowFields";
 import ArchivedRecords from "@/components/ArchivedRecords";
+import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import {
+  FactList, OpenPoints, PrimaryAction, RecordIssuesSection, RecordSection, RelatedGroups, SectionNav, SummaryBand,
+  approvalHintFor, approvalMetaItem, relatedCount, rowAction, useRecordCtx, useRecordGovernanceData, useRecordSections,
+  withBaseMoreItems, type MetaItem, type RecordIssuesHandle, type RelatedGroup,
+} from "@/components/record";
+import { useHasPermission } from "@/lib/tenantSettings";
 import { titleCase } from "@/lib/text";
+import { sentenceCase, uniqueLabels } from "@/lib/record/text";
+import { safeLinkUrl } from "@/lib/sanitize";
+import {
+  VENDOR_CLEAR_TEXT, vendorContractsSub, vendorDataTone, vendorHeadline, vendorOpenPoints, vendorOverrideNote, vendorOverrideText,
+  vendorReviewOverdue, vendorSevTone, vendorTiles, type VendorInput,
+} from "@/lib/record/vendor";
+import type { PointAction } from "@/lib/record/types";
 
 /* ---------------------------------------------------------------- inline types */
 type RefItem = { id: string; reference?: string; title?: string; name?: string };
@@ -113,21 +125,21 @@ const categoryName = (v: Vendor) => v.category_ref?.label || v.category || "";
 const refToOpt = (x: RefItem): AsyncOption => ({ value: x.id, label: x.title || x.name || x.reference || x.id });
 const personName = (u: UserRef | null | undefined) => (u ? u.full_name || u.email : "");
 
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <div className="muted" style={{ fontSize: 12 }}>{label}</div>
-      <div style={{ marginTop: 2, fontSize: 13 }}>{children}</div>
-    </div>
-  );
+function ExpiryBadge({ c, formatDate }: { c: Certification; formatDate: (d: string | null) => string }) {
+  if (c.expiry_state === "expired") return <Badge tone="critical" asIs>Expired {formatDate(c.expires_on)}</Badge>;
+  if (c.expiry_state === "expiring") return <Badge tone="medium" asIs>Expires in {c.days_to_expiry} day{c.days_to_expiry === 1 ? "" : "s"}</Badge>;
+  if (c.expiry_state === "valid") return <Badge tone="low" asIs>Valid to {formatDate(c.expires_on)}</Badge>;
+  return <Badge tone="neutral" asIs>No expiry recorded</Badge>;
 }
 
-function ExpiryBadge({ c, formatDate }: { c: Certification; formatDate: (d: string | null) => string }) {
-  if (c.expiry_state === "expired") return <Badge tone="critical">Expired {formatDate(c.expires_on)}</Badge>;
-  if (c.expiry_state === "expiring") return <Badge tone="medium">Expires in {c.days_to_expiry} day{c.days_to_expiry === 1 ? "" : "s"}</Badge>;
-  if (c.expiry_state === "valid") return <Badge tone="low">Valid to {formatDate(c.expires_on)}</Badge>;
-  return <Badge tone="neutral">No expiry recorded</Badge>;
-}
+/* ---------------------------------------------------------------- record copy */
+/* The third party's judgement wording (tiles, open points, headline, the review and
+   override rules the header shares) lives in lib/record/vendor.ts, pinned by
+   lib/record/__fixtures__/vendor-*.json. */
+const sevTone = vendorSevTone;
+
+/** Labels of the built-in fields a custom field could duplicate (admins get a note). */
+const VENDOR_BUILT_IN_LABELS = ["Relationship owner", "Owner", "Criticality", "Status", "Category", "Type", "Country", "Risk rating", "Data classification"];
 
 /* -------------------------------------------------------------------- form state */
 type FormState = {
@@ -225,8 +237,29 @@ function VendorsInner() {
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const filters = useFilterParams(VENDOR_FILTERS);
   const fetchVendors = useCallback((qs: string) => apiCall<PagedList<Vendor>>("GET", `/vendors?${qs}`), []);
-  const loadDetail = useCallback((id: string) => { apiCall<Vendor>("GET", `/vendors/${id}`).then(setDetail).catch(() => setDetail(null)); }, []);
+  const loadDetail = useCallback((id: string) => {
+    apiCall<Vendor>("GET", `/vendors/${id}`).then(setDetail).catch(() => setDetail(null));
+  }, []);
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
+
+  // ---- the record page (dossier, record-page-spec §4.8) ----
+  const gov = useRecordGovernanceData("vendor", detail?.id ?? null, { statusRulesModel: "vendor" });
+  const canWrite = useHasPermission("vendor:write");
+  const canRaiseIssue = useHasPermission("issue:write");
+  const ctx = useRecordCtx(gov, canWrite);
+  const sections = useRecordSections();
+  const cf = useCustomFieldFacts("vendor", detail?.id, { builtInLabels: VENDOR_BUILT_IN_LABELS });
+  /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
+  const [editTab, setEditTab] = useState<string | undefined>(undefined);
+  /** The Issues section (the shared kit: list + Raise issue form); More › "Raise issue…"
+   *  opens its form. */
+  const issuesRef = useRef<RecordIssuesHandle>(null);
+  /** After any change: the governance (primary, sign-off, rules), the record, the list. */
+  const refresh = () => {
+    void gov.reload();
+    if (openId) loadDetail(openId);
+    reload();
+  };
   useEffect(() => { apiCall<VendorType[]>("GET", "/vendor-types").then(setTypes).catch(() => {}); }, []);
 
   const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
@@ -238,8 +271,8 @@ function VendorsInner() {
   // A vendor can't be its own sub-contractor, so it is left out of the choices.
   const searchSubcontractors = (q: string) => apiCall<PagedList<{ id: string; name: string; legal_name?: string }>>("GET", `/vendors?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.filter((x) => x.id !== editing?.id).map((x) => ({ value: x.id, label: x.name, sub: x.legal_name && x.legal_name !== x.name ? x.legal_name : undefined })));
 
-  function openNew() { setEditing(null); setF(BLANK); setContract(BLANK_CONTRACT); setCert(BLANK_CERT); setError(null); setShowForm(true); }
-  function openEdit(v: Vendor) { setEditing(v); setF(fromVendor(v)); setContract(BLANK_CONTRACT); setCert(BLANK_CERT); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); setContract(BLANK_CONTRACT); setCert(BLANK_CERT); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(v: Vendor, tab?: string) { setEditing(v); setF(fromVendor(v)); setContract(BLANK_CONTRACT); setCert(BLANK_CERT); setError(null); setEditTab(tab); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
@@ -247,7 +280,7 @@ function VendorsInner() {
       const payload = toPayload(f, !!editing);
       if (editing) await apiCall<Vendor>("PATCH", `/vendors/${editing.id}`, payload);
       else await apiCall<Vendor>("POST", "/vendors", payload);
-      setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "Vendor created");
+      setShowForm(false); refresh(); toast(editing ? "Changes saved" : "Vendor created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save vendor"); }
     finally { setSaving(false); }
   }
@@ -313,7 +346,7 @@ function VendorsInner() {
     setTierBusy(true);
     try {
       const updated = await apiCall<Vendor>("POST", `/vendors/${v.id}/tiering`);
-      setDetail(updated); reload(); toast(`Inherent tier: ${cap(updated.inherent_tier || "—")}`);
+      setDetail(updated); refresh(); toast(`Inherent tier: ${updated.inherent_tier ? sentenceCase(updated.inherent_tier) : "not set"}`);
     } catch (e) { toast(errMsg(e, "Could not compute the tier"), "error"); }
     finally { setTierBusy(false); }
   }
@@ -344,13 +377,13 @@ function VendorsInner() {
     { key: "assessment_status", header: "Assessment", sortable: true, render: (v) => <Badge tone={ASSESS_TONE[v.assessment_status] || "neutral"}>{cap(v.assessment_status)}</Badge> },
     { key: "contracts", header: "Contracts", render: (v) => <span className="muted">{v.contract_count > 0 ? `${v.contract_count} · ${totals(v)}` : "—"}</span> },
     { key: "links", header: "Links", align: "center", render: (v) => <span className="muted">{linkCount(v) || "—"}</span> },
-    { key: "actions", header: "", render: (v) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(v)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(v)}>Delete</button></div> },
+    { key: "actions", header: "", render: (v) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" {...rowAction("Edit", v.name)} onClick={() => openEdit(v)}>Edit</button> <button className="btn secondary sm" {...rowAction("Delete", v.name)} onClick={() => remove(v)}>Delete</button></div> },
   ];
 
   /* -------------------------------- form tabs -------------------------------- */
   const generalTab = (
     <>
-      <Field label="Name" required help="The name the bank knows the third party by, e.g. 1LINK, Systems Ltd, Microsoft Azure."><TextInput value={f.name} onChange={(v) => set("name", v)} placeholder="1LINK" required /></Field>
+      <Field label="Name" required help="The name the bank knows the third party by, e.g. 1LINK, Systems Ltd, Microsoft Azure."><TextInput value={f.name} onChange={(v) => set("name", v)} placeholder="e.g. 1LINK" required /></Field>
       <Field label="Description"><TextArea value={f.description} onChange={(v) => set("description", v)} rows={3} placeholder="What this third party provides and how the bank uses it." /></Field>
       <div className="field-row">
         <Field label="Category">
@@ -372,17 +405,17 @@ function VendorsInner() {
       </div>
       <div className="field-row">
         <Field label="Contact Name"><TextInput value={f.contact_name} onChange={(v) => set("contact_name", v)} placeholder="Relationship manager" /></Field>
-        <Field label="Contact Email"><TextInput value={f.contact_email} onChange={(v) => set("contact_email", v)} type="email" placeholder="accounts@vendor.com.pk" /></Field>
+        <Field label="Contact Email"><TextInput value={f.contact_email} onChange={(v) => set("contact_email", v)} type="email" placeholder="e.g. accounts@vendor.com.pk" /></Field>
       </div>
       <div className="field-row">
-        <Field label="Contact Phone"><TextInput value={f.contact_phone} onChange={(v) => set("contact_phone", v)} placeholder="+92 21 3456 7890" /></Field>
-        <Field label="Website"><TextInput value={f.website} onChange={(v) => set("website", v)} placeholder="https://www.vendor.com.pk" /></Field>
+        <Field label="Contact Phone"><TextInput value={f.contact_phone} onChange={(v) => set("contact_phone", v)} placeholder="e.g. +92 21 3456 7890" /></Field>
+        <Field label="Website"><TextInput value={f.website} onChange={(v) => set("website", v)} placeholder="e.g. https://www.vendor.com.pk" /></Field>
       </div>
       <div className="field-row">
         <Field label="Country" help="Where the third party is based — drives offshoring and concentration reporting.">
           <LookupSelect lookupKey="country" value={f.country_id} onChange={(id) => set("country_id", id)} placeholder="Choose a country…" />
         </Field>
-        <Field label="Location" help="City or address."><TextInput value={f.location} onChange={(v) => set("location", v)} placeholder="Karachi, PK" /></Field>
+        <Field label="Location" help="City or address."><TextInput value={f.location} onChange={(v) => set("location", v)} placeholder="e.g. Karachi, PK" /></Field>
       </div>
       <div className="field-row">
         <Field
@@ -406,8 +439,8 @@ function VendorsInner() {
   const diligenceTab = (
     <>
       <div className="field-row">
-        <Field label="Legal name" help="Registered name, if it differs from the trading name."><TextInput value={f.legal_name} onChange={(v) => set("legal_name", v)} placeholder="1LINK (Private) Limited" /></Field>
-        <Field label="Registration number" help="SECP incorporation / company registration number."><TextInput value={f.registration_number} onChange={(v) => set("registration_number", v)} placeholder="0045678" /></Field>
+        <Field label="Legal name" help="Registered name, if it differs from the trading name."><TextInput value={f.legal_name} onChange={(v) => set("legal_name", v)} placeholder="e.g. 1LINK (Private) Limited" /></Field>
+        <Field label="Registration number" help="SECP incorporation / company registration number."><TextInput value={f.registration_number} onChange={(v) => set("registration_number", v)} placeholder="e.g. 0045678" /></Field>
       </div>
       <div className="field-row">
         <Field label="Relationship owner" help="The bank's accountable owner of this relationship.">
@@ -427,7 +460,7 @@ function VendorsInner() {
         <AsyncMultiSelect search={searchSubcontractors} value={f.subcontractor_ids} onChange={(v) => set("subcontractor_ids", v)} placeholder="Search the vendor register…" />
       </Field>
       <div className="field-row">
-        <Field label="Annual spend"><NumberInput value={f.annual_spend} onChange={(v) => set("annual_spend", v)} min={0} placeholder="12500000" /></Field>
+        <Field label="Annual spend"><NumberInput value={f.annual_spend} onChange={(v) => set("annual_spend", v)} min={0} placeholder="e.g. 12500000" /></Field>
         <Field label="Spend currency">
           <Select value={f.spend_currency} onChange={(v) => set("spend_currency", v)} options={currencyOptions} placeholder={`Organisation default (${currency})`} />
         </Field>
@@ -467,7 +500,7 @@ function VendorsInner() {
                     <td className="muted">{formatDate(c.start_date)}</td>
                     <td className="muted">{formatDate(c.end_date)}</td>
                     <td>{c.is_expired ? <Badge tone="high">Expired</Badge> : <Badge tone="low">Active</Badge>}</td>
-                    <td><button className="btn secondary sm" type="button" disabled={contractBusy} onClick={() => removeContract(c.id)}>Remove</button></td>
+                    <td><button className="btn secondary sm" type="button" disabled={contractBusy} {...rowAction("Remove", c.name)} onClick={() => removeContract(c.id)}>Remove</button></td>
                   </tr>
                 ))}
                 {editing.contracts.length === 0 && <tr><td colSpan={6}><span className="muted">No contracts yet.</span></td></tr>}
@@ -475,10 +508,10 @@ function VendorsInner() {
             </table>
           </div>
           <div className="card card-pad">
-            <Field label="Add Contract" help="Record a contract, SLA or order with this vendor."><TextInput value={contract.name} onChange={(v) => setC("name", v)} placeholder="Master Services Agreement" /></Field>
+            <Field label="Add Contract" help="Record a contract, SLA or order with this vendor."><TextInput value={contract.name} onChange={(v) => setC("name", v)} placeholder="e.g. Master Services Agreement" /></Field>
             <Field label="Description"><TextArea value={contract.description} onChange={(v) => setC("description", v)} rows={2} /></Field>
             <div className="field-row">
-              <Field label="Value"><NumberInput value={contract.value} onChange={(v) => setC("value", v)} min={0} placeholder="5000000" /></Field>
+              <Field label="Value"><NumberInput value={contract.value} onChange={(v) => setC("value", v)} min={0} placeholder="e.g. 5000000" /></Field>
               <Field label="Currency"><Select value={contract.currency} onChange={(v) => setC("currency", v)} options={currencyOptions} placeholder={`Organisation default (${currency})`} /></Field>
             </div>
             <div className="field-row">
@@ -500,7 +533,13 @@ function VendorsInner() {
             <table>
               <thead><tr><th>Certification</th><th>Issuer</th><th>Number</th><th>Issued</th><th>Expiry</th><th></th></tr></thead>
               <tbody>
-                {(editing.certifications ?? []).map((c) => (
+                {(editing.certifications ?? []).map((c, ci, all) => {
+                  // The row's name (decision D3): type, then scope or number; still unique.
+                  const cl = uniqueLabels(all.map((x) => {
+                    const extra = (x.scope || "").trim() || (x.certificate_number || "").trim();
+                    return extra ? `${x.cert_type_label} (${extra})` : x.cert_type_label;
+                  }))[ci];
+                  return (
                   <tr key={c.id}>
                     <td className="cell-title">{c.cert_type_label}{c.scope && <div className="muted" style={{ fontSize: 12 }}>{c.scope}</div>}</td>
                     <td className="muted">{c.issuer || "—"}</td>
@@ -508,11 +547,12 @@ function VendorsInner() {
                     <td className="muted">{formatDate(c.issued_on)}</td>
                     <td><ExpiryBadge c={c} formatDate={formatDate} /></td>
                     <td style={{ whiteSpace: "nowrap" }}>
-                      <button className="btn secondary sm" type="button" disabled={certBusy} onClick={() => editCert(c)}>Edit</button>{" "}
-                      <button className="btn secondary sm" type="button" disabled={certBusy} onClick={() => removeCert(c)}>Remove</button>
+                      <button className="btn secondary sm" type="button" disabled={certBusy} {...rowAction("Edit", cl)} onClick={() => editCert(c)}>Edit</button>{" "}
+                      <button className="btn secondary sm" type="button" disabled={certBusy} {...rowAction("Remove", cl)} onClick={() => removeCert(c)}>Remove</button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
                 {(editing.certifications ?? []).length === 0 && <tr><td colSpan={6}><span className="muted">No certifications recorded.</span></td></tr>}
               </tbody>
             </table>
@@ -521,10 +561,10 @@ function VendorsInner() {
             <strong style={{ fontSize: 13 }}>{cert.id ? "Edit certification" : "Add certification"}</strong>
             <div className="field-row" style={{ marginTop: 8 }}>
               <Field label="Type" required><Select value={cert.cert_type} onChange={(v) => setCt("cert_type", v)} options={CERT_TYPES} /></Field>
-              <Field label="Issuer" help="Certification body or audit firm."><TextInput value={cert.issuer} onChange={(v) => setCt("issuer", v)} placeholder="BSI, A. F. Ferguson & Co." /></Field>
-              <Field label="Certificate number"><TextInput value={cert.certificate_number} onChange={(v) => setCt("certificate_number", v)} placeholder="IS 123456" /></Field>
+              <Field label="Issuer" help="Certification body or audit firm."><TextInput value={cert.issuer} onChange={(v) => setCt("issuer", v)} placeholder="e.g. BSI, A. F. Ferguson & Co." /></Field>
+              <Field label="Certificate number"><TextInput value={cert.certificate_number} onChange={(v) => setCt("certificate_number", v)} placeholder="e.g. IS 123456" /></Field>
             </div>
-            <Field label="Scope" help="What the certificate or report covers."><TextArea value={cert.scope} onChange={(v) => setCt("scope", v)} rows={2} placeholder="Switching and ATM network operations, Karachi and Lahore data centres." /></Field>
+            <Field label="Scope" help="What the certificate or report covers."><TextArea value={cert.scope} onChange={(v) => setCt("scope", v)} rows={2} placeholder="e.g. Switching and ATM network operations, Karachi and Lahore data centres." /></Field>
             <div className="field-row">
               <Field label="Issued on"><TextInput value={cert.issued_on} onChange={(v) => setCt("issued_on", v)} type="date" /></Field>
               <Field label="Expires on" help="An alert is raised 60 days before this date, and again once it has passed."><TextInput value={cert.expires_on} onChange={(v) => setCt("expires_on", v)} type="date" /></Field>
@@ -548,14 +588,73 @@ function VendorsInner() {
   );
 
   const tiering = detail?.tiering;
+
+  // ---- dossier: the open third party's header, open points and sections ----
+  const vendorInput: VendorInput | null = detail ? { vendor: detail } : null;
+  function openIssueForm() {
+    issuesRef.current?.raise();
+  }
+  /** Open-point fixes only move: scroll, focus, open Edit on a tab or open a form. */
+  function handlePoint(a: PointAction) {
+    if (!detail) return;
+    if (a.kind === "section") sections.scrollTo(a.target);
+    else if (a.kind === "edit") openEdit(detail, a.target);
+    else if (a.kind === "focus") document.getElementById(a.target)?.focus();
+    else if (a.kind === "attest") gov.openAttest();
+    else if (a.kind === "open" && a.target === "raise-issue") openIssueForm();
+  }
+  const reviewOverdue = !!detail && vendorReviewOverdue(detail, ctx.now);
+  const ownerText = detail ? personName(detail.relationship_owner_ref) : "";
+  const overrideNote = detail ? vendorOverrideNote(detail) : null;
+  // Header meta (record-page-spec §4.8, v1.1 D1): Third-party status, Record approval,
+  // then Relationship owner, Criticality, Assessment, Next review.
+  const statusMeta: MetaItem | undefined = detail ? {
+    key: "status", label: "Third-party status",
+    value: <Badge tone={STATUS_TONE[detail.status] || "neutral"} asIs>{sentenceCase(detail.status)}</Badge>,
+    hint: "Where the relationship is: prospective, active, suspended or offboarded. Separate from record approval.",
+  } : undefined;
+  const vendorMeta: MetaItem[] = detail ? [
+    {
+      key: "owner", label: "Relationship owner", value: ownerText || null, hint: "The bank's accountable owner of this relationship.",
+      gap: ownerText ? undefined : { text: "Not assigned", fix: canWrite ? { label: "Assign", onClick: () => openEdit(detail, "diligence") } : undefined },
+    },
+    {
+      key: "criticality", label: "Criticality",
+      value: <Badge tone={sevTone(detail.criticality)} asIs>{sentenceCase(detail.criticality)}</Badge>,
+      sub: overrideNote ? <span style={{ color: "var(--amber)" }}>{overrideNote}</span> : undefined,
+      hint: "How critical the third party is to operations. The inherent tier proposes it.",
+    },
+    {
+      key: "assessment", label: "Assessment", value: sentenceCase(detail.assessment_status),
+      sub: detail.last_assessed_at ? `last ${formatDate(detail.last_assessed_at)}` : undefined,
+    },
+    {
+      key: "review", label: "Next review",
+      value: reviewOverdue && detail.next_review_date
+        ? <Badge tone="high" asIs>Overdue since {formatDate(detail.next_review_date)}</Badge>
+        : detail.next_review_date ? formatDate(detail.next_review_date) : <span className="muted">Not scheduled</span>,
+      sub: detail.review_frequency && detail.review_frequency !== "none" ? sentenceCase(detail.review_frequency) : undefined,
+      hint: "Attesting the third party records the review and moves this date.",
+    },
+  ] : [];
+  const linkGroups: RelatedGroup[] = detail ? [
+    { key: "risks", label: "Risks", items: detail.risks, href: "/risks" },
+    { key: "assets", label: "Assets", items: detail.assets, href: "/information-assets" },
+    { key: "requirements", label: "Compliance requirements", items: detail.requirements, href: "/compliance" },
+    { key: "controls", label: "Mitigating controls", items: detail.controls, href: "/controls" },
+    { key: "incidents", label: "Incidents", items: detail.incidents, href: "/incidents" },
+    { key: "assessments", label: "Assessments", items: detail.assessments, href: "/assessments" },
+    { key: "outsourcing", label: "Outsourcing arrangements", items: detail.outsourcing_arrangements, href: "/outsourcing" },
+  ] : [];
   return (
     <>
-      <div className="page-head row-between">
-        <div>
+      <div className="page-head row-between" style={{ flexWrap: "wrap" }}>
+        {/* The actions wrap under the title on a phone instead of widening the page. */}
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
           <h1>Third-Party Risk</h1>
           <p>Vendor registry with due diligence, inherent risk tier, certifications, contracts and linked risks/assets.</p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <ImportExport resource="vendors" label="Vendors" onDone={reload} />
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add vendor</button>
         </div>
@@ -593,176 +692,295 @@ function VendorsInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="vendor" entityId={detail.id} /> : null}
+        variant="dossier"
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
-        title={detail?.name || "…"}
-        subtitle={detail ? `${detail.type?.name || categoryName(detail) || "Vendor"}${[detail.location, detail.country_ref?.label].filter(Boolean).length ? " · " + [detail.location, detail.country_ref?.label].filter(Boolean).join(", ") : ""}` : ""}
-        actions={detail && (<><button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button><button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button></>)}
+        governance={gov}
+        identity={detail ? {
+          kind: "Third party",
+          backLabel: "Third Parties",
+          reference: null,
+          name: detail.name,
+          lead: detail.description?.trim() || [detail.legal_name, detail.country_ref?.label].filter(Boolean).join(" · ") || null,
+          badges: (detail.type?.name || categoryName(detail) || detail.shares_data) ? (
+            <>
+              {(detail.type?.name || categoryName(detail)) && (
+                <>
+                  <span className="sep" aria-hidden="true">/</span>
+                  <span>{detail.type?.name || categoryName(detail)}</span>
+                </>
+              )}
+              {/* A risk-bearing fact: amber while its classification or residency is missing, never the success green. */}
+              {detail.shares_data && <Badge tone={vendorDataTone(detail)} asIs>Handles our data</Badge>}
+            </>
+          ) : null,
+          status: statusMeta,
+          approval: approvalMetaItem(gov, ctx.fmt, approvalHintFor("Third-party status")),
+          meta: vendorMeta,
+          statusRules: { model: "vendor", entityId: detail.id },
+        } : undefined}
+        primaryAction={(
+          <PrimaryAction
+            candidates={[{ kind: "workflow", action: "approve" }, { kind: "workflow", action: "submit" }, { kind: "attest" }]}
+            onChanged={refresh}
+          />
+        )}
+        onEdit={detail && canWrite ? () => openEdit(detail) : undefined}
+        moreItems={detail ? withBaseMoreItems(
+          [
+            { label: "Start tiering questionnaire", onClick: () => startTiering(detail), disabled: tierBusy, hint: "Opens a new tiering assessment" },
+            ...(canWrite && detail.tiering?.assessment ? [{ label: "Recompute tier", onClick: () => recomputeTier(detail), disabled: tierBusy }] : []),
+            ...(canRaiseIssue ? [{ label: "Raise issue…", onClick: openIssueForm }] : []),
+          ],
+          { onDelete: canWrite ? () => remove(detail) : undefined },
+        ) : []}
+        aside={detail ? (
+          <RecordPanels model="vendor" entityId={detail.id} layout="dossier" signOff={{ onChanged: refresh }} trail={{ reference: detail.name }} />
+        ) : null}
       >
-        {detail && (
+        {detail && vendorInput && (
           <>
-            <div style={{ display: "flex", gap: 20, flexWrap: "wrap", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <div><div className="muted" style={{ fontSize: 12 }}>Inherent tier</div><div style={{ marginTop: 4 }}><Severity value={detail.inherent_tier || null} /></div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Criticality</div><div style={{ marginTop: 4 }}><Severity value={detail.criticality} />{tiering?.overridden && <span className="muted" style={{ fontSize: 11, marginLeft: 4 }}>override</span>}</div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Status</div><div style={{ marginTop: 4 }}><Badge tone={STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge></div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Risk rating</div><div style={{ marginTop: 4 }}><Severity value={detail.risk_rating} /></div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Assessment</div><div style={{ marginTop: 4 }}><Badge tone={ASSESS_TONE[detail.assessment_status] || "neutral"}>{cap(detail.assessment_status)}</Badge></div></div>
-              {detail.contract_count > 0 && <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Contracts</div><div style={{ marginTop: 4 }}><strong>{detail.contract_count}</strong> · {totals(detail)}</div></div>}
-            </div>
-            {detail.shares_data && <div style={{ marginBottom: 14 }}><Badge tone="info">Handles our data</Badge></div>}
+            <SummaryBand tiles={vendorTiles(vendorInput, ctx)} headline={vendorHeadline(vendorInput, ctx)} />
+            <OpenPoints
+              points={vendorOpenPoints(vendorInput, ctx)}
+              canAct={canWrite}
+              onAction={handlePoint}
+              clearText={VENDOR_CLEAR_TEXT}
+            />
+            <SectionNav />
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <Fact label="Category">{categoryName(detail) || <span className="muted">—</span>}</Fact>
-              <Fact label="Type">{detail.type?.name || <span className="muted">—</span>}</Fact>
-              <Fact label="Country">{detail.country_ref?.label || <span className="muted">—</span>}</Fact>
-              <Fact label="Location">{detail.location || <span className="muted">—</span>}</Fact>
-              <Fact label="Contact">{[detail.contact_name, detail.contact_email, detail.contact_phone].filter(Boolean).join(" · ") || <span className="muted">—</span>}</Fact>
-              <Fact label="Last assessed">{formatDate(detail.last_assessed_at)}</Fact>
-              <Fact label="Next review">{formatDate(detail.next_review_date)}</Fact>
-              <Fact label="Onboarded">{formatDate(detail.onboarded_at)}</Fact>
-              {detail.offboarded_at && <Fact label="Offboarded">{formatDate(detail.offboarded_at)}</Fact>}
-            </div>
-
-            <div className="card" style={{ marginBottom: 16 }}>
-              <div className="card-head"><h3>Due diligence</h3></div>
-              <div className="card-pad" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
-                <Fact label="Legal name">{detail.legal_name || <span className="muted">—</span>}</Fact>
-                <Fact label="Registration no.">{detail.registration_number || <span className="muted">—</span>}</Fact>
-                <Fact label="Relationship owner">{personName(detail.relationship_owner_ref) || <span className="muted">—</span>}</Fact>
-                <Fact label="Data classification">{detail.data_classification_ref?.label || <span className="muted">—</span>}</Fact>
-                <Fact label="Data residency">{(detail.data_residency_countries ?? []).map((c) => c.label).join(", ") || <span className="muted">—</span>}</Fact>
-                <Fact label="Annual spend">{detail.annual_spend != null ? money(detail.annual_spend, detail.spend_currency) : <span className="muted">—</span>}</Fact>
-              </div>
-              <div className="card-pad" style={{ display: "grid", gap: 12, paddingTop: 0 }}>
-                <RelatedChips label="Processes supported" items={detail.processes} href="/processes" />
-                <RelatedChips label="Sub-contractors (fourth parties)" items={detail.subcontractors} href="/vendors" />
-                <RelatedChips label="Is a sub-contractor of" items={detail.subcontractor_of} href="/vendors" />
-              </div>
-            </div>
-
-            <div className="card" style={{ marginBottom: 16 }}>
-              <div className="card-head">
-                <h3>Inherent risk tier</h3>
-                <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
-                  <button className="btn secondary sm" disabled={tierBusy} onClick={() => startTiering(detail)}>Start tiering questionnaire</button>
-                  {tiering?.assessment && <button className="btn secondary sm" disabled={tierBusy} onClick={() => recomputeTier(detail)}>Recompute tier</button>}
-                </div>
-              </div>
-              <div className="card-pad" style={{ fontSize: 13 }}>
-                {!detail.inherent_tier && !tiering?.assessment && (
-                  <p className="muted" style={{ margin: 0 }}>Not tiered yet. Start the eight-question “Inherent risk tiering” questionnaire, answer every question and submit it — the tier is written here and proposes the criticality.</p>
-                )}
-                {(detail.inherent_tier || tiering?.assessment) && (
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
-                      <span>Tier <Severity value={detail.inherent_tier || null} /></span>
-                      {tiering?.proposed_criticality && <span>Proposes criticality <Severity value={tiering.proposed_criticality} /></span>}
-                      {tiering?.assessment && <span className="muted">From <Link href={`/assessments?id=${tiering.assessment.id}`}>{tiering.assessment.title || "assessment"}</Link>{tiering.submitted_at ? `, submitted ${formatDate(tiering.submitted_at)}` : ""}</span>}
-                    </div>
-                    {tiering?.explanation && <div className="muted">Score {tiering.explanation}. Bands: 70% and above critical, 45% high, 20% medium, below that low; one worst-case answer makes it at least medium, three at least high.</div>}
-                    {tiering?.stale && (
-                      <div style={{ color: "var(--amber, #b45309)" }}>
-                        {tiering.problem || "The latest completed tiering assessment gives a different tier from the one stored."} {!tiering.problem && "Recompute to update it."}
-                      </div>
-                    )}
-                    {tiering?.overridden && (
-                      <div><Badge tone="medium">Criticality overridden</Badge> <span className="muted">Set to {detail.criticality} instead of the proposed {tiering.proposed_criticality}: {detail.tier_override_reason || "—"}</span></div>
+            <RecordSection
+              id="tiering"
+              title="Tiering & assessment"
+              actions={(
+                <>
+                  <button type="button" className="btn secondary sm" disabled={tierBusy} onClick={() => startTiering(detail)}>Start tiering questionnaire</button>
+                  {canWrite && tiering?.assessment && (
+                    <button type="button" className="btn secondary sm" disabled={tierBusy} onClick={() => recomputeTier(detail)}>Recompute tier</button>
+                  )}
+                </>
+              )}
+            >
+              {!detail.inherent_tier && !tiering?.assessment ? (
+                <p className="rec-empty" style={{ margin: 0, maxWidth: "86ch" }}>
+                  Not tiered yet. Start the eight-question “Inherent risk tiering” questionnaire, answer every question and submit it — the tier is written here and proposes the criticality.
+                </p>
+              ) : (
+                <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
+                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+                    <span>Tier {detail.inherent_tier ? <Badge tone={sevTone(detail.inherent_tier)} asIs>{sentenceCase(detail.inherent_tier)}</Badge> : <Badge hollow asIs>Not tiered</Badge>}</span>
+                    {tiering?.proposed_criticality && <span>Proposes criticality <Badge tone={sevTone(tiering.proposed_criticality)} asIs>{sentenceCase(tiering.proposed_criticality)}</Badge></span>}
+                    {tiering?.assessment && (
+                      <span className="muted">
+                        From <Link href={`/assessments?id=${tiering.assessment.id}`}>{tiering.assessment.title || "assessment"}</Link>
+                        {tiering.submitted_at ? `, submitted ${formatDate(tiering.submitted_at)}` : ""}
+                      </span>
                     )}
                   </div>
-                )}
-              </div>
-            </div>
-
-            {(detail.certifications ?? []).length > 0 && (
-              <>
-                <strong style={{ fontSize: 13 }}>Certifications</strong>
-                <div className="table-wrap" style={{ marginTop: 8, marginBottom: 16 }}>
-                  <table>
-                    <thead><tr><th>Certification</th><th>Issuer</th><th>Number</th><th>Expiry</th></tr></thead>
-                    <tbody>
-                      {(detail.certifications ?? []).map((c) => (
-                        <tr key={c.id}>
-                          <td className="cell-title">{c.cert_type_label}{c.scope && <div className="muted" style={{ fontSize: 12 }}>{c.scope}</div>}</td>
-                          <td className="muted">{c.issuer || "—"}</td>
-                          <td className="muted">{c.certificate_number || "—"}</td>
-                          <td><ExpiryBadge c={c} formatDate={formatDate} /></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  {tiering?.explanation && (
+                    <div className="muted">
+                      Score {tiering.explanation}. Bands: 70% and above critical, 45% high, 20% medium, below that low; one worst-case answer makes it at least medium, three at least high.
+                    </div>
+                  )}
+                  {tiering?.stale && (
+                    <div style={{ color: "var(--amber)" }}>
+                      {tiering.problem || "The latest completed tiering assessment gives a different tier from the one stored."} {!tiering.problem && "Recompute to update it."}
+                    </div>
+                  )}
+                  {tiering?.overridden && (
+                    <div>
+                      <Badge tone="medium" asIs>Criticality overridden</Badge>{" "}
+                      <span className="muted">{vendorOverrideText(detail)}</span>
+                    </div>
+                  )}
                 </div>
-              </>
-            )}
+              )}
+            </RecordSection>
+
+            <RecordSection
+              id="diligence"
+              title="Due diligence"
+              actions={canWrite ? <button type="button" className="btn secondary sm" aria-label="Edit due diligence" onClick={() => openEdit(detail, "diligence")}>Edit</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "legal", label: "Legal name", value: detail.legal_name?.trim() || null, tab: "diligence" },
+                  { key: "reg", label: "Registration number", value: detail.registration_number?.trim() || null, tab: "diligence" },
+                  { key: "rating", label: "Risk rating", value: detail.risk_rating ? <Badge tone={sevTone(detail.risk_rating)} asIs>{sentenceCase(detail.risk_rating)}</Badge> : null, tab: "risk" },
+                  {
+                    key: "assessment", label: "Assessment", tab: "risk",
+                    value: `${sentenceCase(detail.assessment_status)}${detail.last_assessed_at ? ` · last ${formatDate(detail.last_assessed_at)}` : ""}`,
+                  },
+                  { key: "classification", label: "Data classification", value: detail.data_classification_ref?.label || null, tab: "diligence" },
+                  { key: "residency", label: "Data residency", value: (detail.data_residency_countries ?? []).map((c) => c.label).join(", ") || null, tab: "diligence" },
+                  { key: "spend", label: "Annual spend", value: detail.annual_spend != null ? money(detail.annual_spend, detail.spend_currency) : null, tab: "diligence" },
+                  {
+                    key: "contact", label: "Contact", tab: "general",
+                    // Name, email and phone each stay whole (a phone number never breaks mid-number).
+                    value: detail.contact_name?.trim() || detail.contact_email?.trim() || detail.contact_phone?.trim() ? (
+                      <span className="rec-contact">
+                        {[
+                          detail.contact_name?.trim() ? <span key="n" style={{ whiteSpace: "nowrap" }}>{detail.contact_name.trim()}</span> : null,
+                          detail.contact_email?.trim() ? <a key="e" href={`mailto:${detail.contact_email.trim()}`} style={{ whiteSpace: "nowrap" }}>{detail.contact_email.trim()}</a> : null,
+                          detail.contact_phone?.trim() ? <a key="p" href={`tel:${detail.contact_phone.trim().replace(/[^\d+]/g, "")}`} style={{ whiteSpace: "nowrap" }}>{detail.contact_phone.trim()}</a> : null,
+                        ].filter(Boolean).flatMap((el, i) => (i ? [<span key={`s${i}`} className="muted" aria-hidden="true"> · </span>, el] : [el]))}
+                      </span>
+                    ) : null,
+                  },
+                  {
+                    key: "website", label: "Website", tab: "general",
+                    // Stored URLs render as links only when they are web addresses (never javascript:).
+                    value: detail.website?.trim()
+                      ? (safeLinkUrl(detail.website)
+                          ? <a href={safeLinkUrl(detail.website) ?? undefined} target="_blank" rel="noopener noreferrer">{detail.website.trim()}</a>
+                          : detail.website.trim())
+                      : null,
+                  },
+                ]}
+                onFillIn={canWrite ? (tab) => openEdit(detail, tab) : undefined}
+              />
+              <div style={{ marginTop: 14 }}>
+                <RelatedGroups
+                  groups={[
+                    { key: "processes", label: "Processes supported", items: detail.processes, href: "/processes" },
+                    { key: "subcontractors", label: "Sub-contractors (fourth parties)", items: detail.subcontractors, href: "/vendors" },
+                    { key: "main", label: "Main contractors", items: detail.subcontractor_of, href: "/vendors" },
+                  ]}
+                  noun="processes or sub-contractors"
+                  onLink={canWrite ? () => openEdit(detail, "diligence") : undefined}
+                />
+              </div>
+            </RecordSection>
+
+            <RecordSection
+              id="contracts"
+              title="Contracts"
+              count={detail.contracts.length}
+              sub={vendorContractsSub(detail, ctx.fmt) ?? undefined}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "contracts")}>Add contract</button> : undefined}
+              empty={detail.contracts.length === 0 ? "No service contract on file." : undefined}
+            >
+              <div className="rec-table-wrap">
+                <table className="compact">
+                  <thead><tr><th>Contract</th><th className="num">Value</th><th>Start</th><th>End</th><th>State</th></tr></thead>
+                  <tbody>
+                    {detail.contracts.map((c) => (
+                      <tr key={c.id}>
+                        <td className="cell-title">{c.name}</td>
+                        <td className="muted num">{c.value != null ? money(c.value, c.currency) : "Not set"}</td>
+                        <td className="muted">{c.start_date ? formatDate(c.start_date) : "Not set"}</td>
+                        <td className="muted">{c.end_date ? formatDate(c.end_date) : "Open-ended"}</td>
+                        <td>{c.is_expired ? <Badge tone="high" asIs>Expired</Badge> : <Badge tone="low" asIs>Active</Badge>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </RecordSection>
+
+            <RecordSection
+              id="certifications"
+              title="Certifications"
+              count={(detail.certifications ?? []).length}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "certifications")}>Add certification</button> : undefined}
+              empty={(detail.certifications ?? []).length === 0 ? "No certification on file." : undefined}
+            >
+              <div className="rec-table-wrap">
+                <table className="compact">
+                  <thead><tr><th>Certification</th><th>Issuer</th><th>Number</th><th>Expiry</th></tr></thead>
+                  <tbody>
+                    {(detail.certifications ?? []).map((c) => (
+                      <tr key={c.id}>
+                        <td className="cell-title">{c.cert_type_label}{c.scope && <div className="muted" style={{ fontSize: 12 }}>{c.scope}</div>}</td>
+                        <td className="muted">{c.issuer || "Not set"}</td>
+                        <td className="muted">{c.certificate_number || "Not set"}</td>
+                        <td><ExpiryBadge c={c} formatDate={formatDate} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </RecordSection>
 
             {(detail.outsourcing ?? []).length > 0 && (
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div className="card-head"><h3>Outsourcing (SBP)</h3><span className="sub">Edited under Outsourcing</span></div>
-                <div className="card-pad" style={{ display: "grid", gap: 12 }}>
+              <RecordSection id="outsourcing" title="Outsourcing (SBP)" count={(detail.outsourcing ?? []).length} sub="Edited under Outsourcing">
+                <div style={{ display: "grid", gap: 12 }}>
                   {(detail.outsourcing ?? []).map((o) => (
                     <div key={o.id} style={{ display: "grid", gap: 6 }}>
-                      <div><Link href={`/outsourcing?id=${o.id}`} className="cell-title">{o.reference ? `${o.reference} — ` : ""}{o.title}</Link> <span className="muted" style={{ fontSize: 12 }}>{cap(o.status)}{o.contract_end ? ` · contract to ${formatDate(o.contract_end)}` : ""}</span></div>
+                      <div>
+                        <Link href={`/outsourcing?id=${o.id}`} className="cell-title">{o.reference ? `${o.reference} — ` : ""}{o.title}</Link>{" "}
+                        <span className="muted" style={{ fontSize: 12 }}>{sentenceCase(o.status)}{o.contract_end ? ` · contract to ${formatDate(o.contract_end)}` : ""}</span>
+                      </div>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        <Badge tone={o.materiality === "material" ? "high" : "neutral"}>{cap(o.materiality)}</Badge>
-                        {o.is_cloud && <Badge tone="info">Cloud</Badge>}
-                        {o.data_offshored ? <Badge tone="high">Data offshored{o.country ? ` · ${o.country}` : ""}</Badge> : o.country ? <Badge tone="neutral">{o.country}</Badge> : null}
-                        <Badge tone={o.sbp_approval_status === "approved" ? "low" : o.sbp_approval_status === "pending" ? "medium" : o.sbp_approval_status === "rejected" ? "critical" : "neutral"}>SBP: {cap(o.sbp_approval_status)}</Badge>
-                        <Badge tone={o.exit_plan_tested ? "low" : "medium"}>Exit plan {o.exit_plan ? (o.exit_plan_tested ? "tested" : "untested") : "missing"}</Badge>
+                        <Badge tone={o.materiality === "material" ? "high" : "neutral"} asIs>{sentenceCase(o.materiality)}</Badge>
+                        {o.is_cloud && <Badge tone="info" asIs>Cloud</Badge>}
+                        {o.data_offshored
+                          ? <Badge tone="high" asIs>Data offshored{o.country ? ` · ${o.country}` : ""}</Badge>
+                          : o.country ? <Badge tone="neutral" asIs>{o.country}</Badge> : null}
+                        <Badge
+                          tone={o.sbp_approval_status === "approved" ? "low" : o.sbp_approval_status === "pending" ? "medium" : o.sbp_approval_status === "rejected" ? "critical" : "neutral"}
+                          asIs
+                        >
+                          SBP: {sentenceCase(o.sbp_approval_status).toLowerCase()}
+                        </Badge>
+                        <Badge tone={o.exit_plan_tested ? "low" : "medium"} asIs>Exit plan {o.exit_plan ? (o.exit_plan_tested ? "tested" : "untested") : "missing"}</Badge>
                       </div>
                       {o.exit_plan && <p className="muted" style={{ margin: 0, fontSize: 12, whiteSpace: "pre-wrap" }}>{o.exit_plan}</p>}
                     </div>
                   ))}
                 </div>
-              </div>
+              </RecordSection>
             )}
 
-            <div className="card" style={{ marginBottom: 16 }}>
-              <div className="card-head"><h3>Approval</h3></div>
-              <div className="card-pad">
-                <WorkflowFields entityType="vendor" entityId={detail.id} onChanged={() => { loadDetail(detail.id); reload(); }} />
-              </div>
-            </div>
+            <RecordSection
+              id="details"
+              title="Details"
+              actions={canWrite ? <button type="button" className="btn secondary sm" aria-label="Edit details" onClick={() => openEdit(detail)}>Edit</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "category", label: "Category", value: categoryName(detail) || null, tab: "general" },
+                  { key: "type", label: "Type", value: detail.type?.name || null, tab: "general" },
+                  { key: "country", label: "Country", value: detail.country_ref?.label || null, tab: "general" },
+                  { key: "location", label: "Location", value: detail.location?.trim() || null, tab: "general" },
+                  { key: "onboarded", label: "Onboarded", value: detail.onboarded_at ? formatDate(detail.onboarded_at) : null, tab: "risk" },
+                  ...(detail.offboarded_at || detail.status === "offboarded"
+                    ? [{ key: "offboarded", label: "Offboarded", value: detail.offboarded_at ? formatDate(detail.offboarded_at) : null, tab: "risk" }]
+                    : []),
+                  { key: "created", label: "Created", value: detail.created_at ? formatDate(detail.created_at) : null },
+                  ...cf.facts,
+                ]}
+                onFillIn={canWrite ? (tab) => (tab === "custom" ? cf.setEditing(true) : openEdit(detail, tab)) : undefined}
+              />
+              {cf.editor}
+              {cf.editLink(canWrite)}
+            </RecordSection>
 
-            {detail.contracts.length > 0 && (
-              <>
-                <strong style={{ fontSize: 13 }}>Service contracts</strong>
-                <div className="table-wrap" style={{ marginTop: 8, marginBottom: 16 }}>
-                  <table>
-                    <thead><tr><th>Contract</th><th>Value</th><th>Start</th><th>End</th><th>State</th></tr></thead>
-                    <tbody>
-                      {detail.contracts.map((c) => (
-                        <tr key={c.id}>
-                          <td className="cell-title">{c.name}</td>
-                          <td className="muted">{c.value != null ? money(c.value, c.currency) : "—"}</td>
-                          <td className="muted">{formatDate(c.start_date)}</td>
-                          <td className="muted">{formatDate(c.end_date)}</td>
-                          <td>{c.is_expired ? <Badge tone="high">Expired</Badge> : <Badge tone="low">Active</Badge>}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
+            <RecordSection
+              id="linked"
+              title="Linked records"
+              count={relatedCount(linkGroups)}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "links")}>Link records</button> : undefined}
+            >
+              {/* The head holds "Link records"; the empty line needs no second one (v1.1 D3). */}
+              <RelatedGroups groups={linkGroups} />
+            </RecordSection>
 
-            <strong style={{ fontSize: 13 }}>Related records</strong>
-            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 16 }}>
-              <RelatedChips label="Risks" items={detail.risks} href="/risks" />
-              <RelatedChips label="Assets" items={detail.assets} href="/information-assets" />
-              <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
-              <RelatedChips label="Mitigating controls" items={detail.controls} href="/controls" />
-              <RelatedChips label="Incidents" items={detail.incidents} href="/incidents" />
-              <RelatedChips label="Assessments" items={detail.assessments} href="/assessments" />
-              <RelatedChips label="Outsourcing arrangements" items={detail.outsourcing_arrangements} href="/outsourcing" />
-            </div>
-
+            <RecordIssuesSection
+              ref={issuesRef}
+              entityId={detail.id}
+              entityKind="vendor"
+              entityRef={detail.name}
+              noun="third party"
+              onRaised={refresh}
+            />
           </>
         )}
       </RecordDrawer>
 
       {showForm && (
         <FormModal
-          title={editing ? `Edit vendor — ${editing.name}` : "Add item (Vendors)"}
+          title={editing ? `Edit third party — ${editing.name}` : "Add third party"}
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "diligence", label: "Due diligence", content: diligenceTab },
@@ -771,7 +989,13 @@ function VendorsInner() {
             { id: "certifications", label: "Certifications", content: certsTab },
             { id: "links", label: "Links & Relations", content: linksTab },
           ]}
-          onClose={() => setShowForm(false)}
+          initialTab={editTab}
+          onClose={() => {
+            setShowForm(false);
+            // Contracts and certificates are saved from the form as they are added; the
+            // open record picks them up even when the form closes without Save.
+            if (editing && openId === editing.id) loadDetail(editing.id);
+          }}
           onSave={save}
           saving={saving}
           error={error}

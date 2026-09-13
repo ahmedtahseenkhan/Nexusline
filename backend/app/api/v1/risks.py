@@ -17,8 +17,9 @@ from sqlalchemy.orm import aliased
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.asset import Asset
-from app.models.control import Control
+from app.models.control import Control, ControlAudit
 from app.models.incident import Incident
+from app.models.issue import Issue, IssueStatus2, issue_controls
 from app.models.policy import Policy
 from app.models.enums import (
     AcceptanceStatus,
@@ -36,6 +37,7 @@ from app.models.risk import (
 from app.services.risk_query import UNPLACED, build_risk_query  # noqa: F401 - re-exported for callers
 from app.models.threat import Threat, Vulnerability
 from app.schemas.common import GraphRef, Page
+from app.schemas.control import ControlAssuranceRef
 from app.schemas.risk import (
     OrphanedRisk,
     OrphanedRiskPage,
@@ -58,10 +60,12 @@ from app.schemas.risk import (
     TreatmentActionRead,
     TreatmentActionUpdate,
     TreatmentProgress,
+    UNTESTED_CREDIT_NOTE_NEEDED,
 )
 from app.db.data_repairs import RESIDUAL_REVIEW_REASON
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import control_assurance
 from app.services import delete_guard
 from app.services import master_data
 from app.services import dual_control
@@ -267,31 +271,157 @@ def _enforce_residual(
 
 def _control_inputs(risk: Risk) -> list[ControlInput]:
     """Describe each linked control to the residual engine, including whether it can be
-    relied on today — a failed audit, an overdue test or an open finding means it cannot.
+    relied on today — its latest reviewed test failed, its test is overdue or an audit
+    finding is open. The rule is ``control_assurance.reliance_note``, the same one the
+    risk page's assurance fields (B2) and the health rollups read.
     """
-    from app.models.enums import AuditFindingStatus, TestResult
-
     out: list[ControlInput] = []
     for control in risk.controls:
-        note = ""
-        if control.last_audit_result == TestResult.failed:
-            note = "its last audit failed"
-        elif control.is_audit_overdue:
-            note = "its audit is overdue"
-        elif any(
-            f.status not in (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)
-            for f in control.audit_findings
-        ):
-            note = "it has an open audit finding"
+        note = control_assurance.reliance_note(control, getattr(control, "audits", None) or ())
         out.append(
             ControlInput(
                 label=control.reference or control.name,
                 effectiveness=control.effectiveness,
                 healthy=not note,
                 health_note=note,
+                key=control.id,
             )
         )
     return out
+
+
+# ------------------------------------------------------- control assurance (B2, B6)
+# What a risk page needs to judge how far each mitigating control's rating can be
+# trusted — and what accepting residual credit leans on. Only tests that decide a rating
+# count (conclusive, and reviewed or recorded before reviews existed): a test awaiting
+# review is the tester's claim, not assurance (``services.control_assurance``).
+
+#: Bases of a rating no reviewed test stands behind.
+HAND_RATED_BASES: tuple[str, ...] = (control_assurance.BASIS_MANUAL, control_assurance.BASIS_OVERRIDE)
+_OPEN_ISSUE_EXCLUDED = tuple(IssueStatus2(s) for s in control_assurance.CLOSED_ISSUE_STATES)
+
+
+def control_assurance_ref(
+    control,
+    tests=(),
+    open_issue_count: int | None = 0,
+    today: date | None = None,
+    *,
+    assurance: bool = True,
+) -> ControlAssuranceRef:
+    """A linked control with its rating, the rating's basis and its test record (B2).
+
+    ``tests`` are the control's test rows in any review state; only those that decide a
+    rating are counted, and the last result and date are the newest of those
+    (``control_assurance.latest_counting_test`` — what the residual engine reads too).
+    ``pending_review_count`` says how many more await a reviewer; ``open_finding_count``
+    is the open audit findings the engine also withholds credit for. The next test date
+    is the control's clock, which a planned or retired control does not carry.
+
+    ``assurance=False`` (a viewer without ``control:read``) gives identity only;
+    ``open_issue_count=None`` (a viewer without ``issue:read``) leaves the issue count
+    out. The page reads a missing field as "not shown here". Pure.
+    """
+    if not assurance:
+        return ControlAssuranceRef(id=control.id, name=control.name, reference=control.reference or "")
+    tests = list(tests)
+    counting = [t for t in tests if control_assurance.counts_towards_rating(t)]
+    latest = control_assurance.latest_counting_test(tests)
+    clock = control_assurance.carries_test_clock(control.status)
+    return ControlAssuranceRef(
+        id=control.id,
+        name=control.name,
+        reference=control.reference or "",
+        effectiveness=control.effectiveness,
+        effectiveness_basis=control_assurance.effectiveness_basis(
+            tests, control.effectiveness_override_reason or "", control.effectiveness
+        ),
+        audit_count=len(counting),
+        last_audit_result=latest.result if latest is not None else None,
+        last_audit_date=control_assurance.performed_on(latest) if latest is not None else None,
+        next_audit_date=control.next_audit_date if clock else None,
+        is_audit_overdue=control_assurance.is_cycle_overdue(control.status, control.next_audit_date, today),
+        pending_review_count=control_assurance.pending_review_count(tests),
+        open_finding_count=control_assurance.open_finding_count(control),
+        open_issue_count=open_issue_count,
+    )
+
+
+def rests_on_untested_rating(ref: ControlAssuranceRef) -> bool:
+    """A rating set by hand or by override, or with no reviewed test on file (B6)."""
+    return ref.effectiveness_basis in HAND_RATED_BASES or not ref.audit_count
+
+
+async def _assurance_inputs(db, control_ids, *, issues: bool = True) -> tuple[dict, dict]:
+    """``({control id: [test rows]}, {control id: open issue count})`` for these
+    controls — one query for the tests and one for the issues, whatever their number."""
+    ids = list(dict.fromkeys(control_ids))
+    if not ids:
+        return {}, {}
+    tests: dict = {}
+    for row in (
+        await db.execute(
+            select(
+                ControlAudit.control_id, ControlAudit.result, ControlAudit.review_status,
+                ControlAudit.test_type, ControlAudit.conducted_date, ControlAudit.created_at,
+            ).where(ControlAudit.control_id.in_(ids))
+        )
+    ).all():
+        tests.setdefault(row.control_id, []).append(row)
+    if not issues:
+        return tests, {}
+    open_issues = {
+        control_id: int(n)
+        for control_id, n in (
+            await db.execute(
+                select(issue_controls.c.control_id, func.count())
+                .join(Issue, Issue.id == issue_controls.c.issue_id)
+                .where(
+                    issue_controls.c.control_id.in_(ids),
+                    Issue.deleted.is_(False),
+                    Issue.status.notin_(_OPEN_ISSUE_EXCLUDED),
+                )
+                .group_by(issue_controls.c.control_id)
+            )
+        ).all()
+    }
+    return tests, open_issues
+
+
+def _holds(user, code: str) -> bool:
+    return code in set(getattr(user, "permission_codes", None) or [])
+
+
+async def _assured_controls(db, controls, user=None) -> list[ControlAssuranceRef]:
+    """The risk's controls with their assurance (B2), in the order given.
+
+    Test results and dates are control-testing records: only a viewer who holds
+    ``control:read`` gets them, and the open-issue count only with ``issue:read`` too —
+    as an asset reader without ``risk:read`` gets no risk scores (B8). ``user=None`` is
+    an internal caller and gets everything."""
+    controls = list(controls)
+    can_controls = user is None or _holds(user, "control:read")
+    can_issues = can_controls and (user is None or _holds(user, "issue:read"))
+    if not can_controls:
+        return [control_assurance_ref(c, assurance=False) for c in controls]
+    tests, issues = await _assurance_inputs(db, [c.id for c in controls], issues=can_issues)
+    today = date.today()
+    return [
+        control_assurance_ref(c, tests.get(c.id, ()), issues.get(c.id, 0) if can_issues else None, today)
+        for c in controls
+    ]
+
+
+async def _untested_credit(db, risk: Risk, suggestion) -> list[ControlAssuranceRef]:
+    """The controls a suggestion takes credit from whose rating no reviewed test
+    supports (B6). Empty when the suggestion takes no credit."""
+    credited = set(getattr(suggestion, "credited", ()) or ())
+    controls = [c for c in (getattr(risk, "controls", None) or []) if c.id in credited]
+    if not controls:
+        return []
+    tests, _ = await _assurance_inputs(db, [c.id for c in controls], issues=False)
+    refs = [control_assurance_ref(c, tests.get(c.id, ())) for c in controls]
+    return [r for r in refs if rests_on_untested_rating(r)]
 
 
 # --------------------------------------------------------------------------- CRUD
@@ -1199,6 +1329,10 @@ async def get_suggested_residual(
         _control_inputs(risk),
         policy_spec(policy),
     )
+    # The band the suggested score would fall in, judged as the recorded score is (B12).
+    book = await load_appetite_book(db, user.tenant_id)
+    # What accepting it relies on, and whether that needs the owner's note (B6).
+    untested = await _untested_credit(db, risk, suggestion)
     return SuggestedResidual(
         likelihood=suggestion.likelihood,
         impact=suggestion.impact,
@@ -1211,6 +1345,9 @@ async def get_suggested_residual(
             risk.residual_likelihood == suggestion.likelihood
             and risk.residual_impact == suggestion.impact
         ),
+        appetite_status=book.status(suggestion.score, getattr(risk, "category_id", None)),
+        credited_control_ids=list(suggestion.credited),
+        note_required=bool(untested),
     )
 
 
@@ -1228,6 +1365,11 @@ async def accept_residual(
     Sending no scores accepts the suggestion as it stands. Sending different scores is
     an override and **requires a reason** — that sentence is what an auditor reads when
     they ask why the recorded residual is lower than the control evidence supports.
+
+    Accepting a suggestion that takes credit from a control rated by hand or by
+    override, or with no reviewed test on file, **requires a note** (422 otherwise): the
+    owner says why they rely on that rating. A note is appended to the stored rationale
+    ("; owner's note: …") and recorded in the activity trail.
     """
     risk = await _load_risk(db, risk_id)
     policy = await get_or_create_residual_policy(db, user.tenant_id)
@@ -1253,6 +1395,13 @@ async def accept_residual(
                 f"{suggestion.likelihood}x{suggestion.impact} needs a written reason"
             ),
         )
+    # An override is the owner's own judgement and carries its own reason; accepting the
+    # suggestion is relying on the credited controls' ratings, so an untested one needs
+    # the owner's word on why (B6).
+    note = (body.note or "").strip()
+    untested = [] if is_override else await _untested_credit(db, risk, suggestion)
+    if untested and not note:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=UNTESTED_CREDIT_NOTE_NEEDED)
 
     # The suggestion never exceeds inherent, but an override can: that needs the reason
     # above *and* the right to accept risk.
@@ -1278,6 +1427,8 @@ async def accept_residual(
         else f"Accepted the suggested residual {likelihood}x{impact}: "
         + "; ".join(str(line) for line in suggestion.rationale)
     )
+    if note:
+        rationale += f"; owner's note: {note}"
     decision, advance = _residual_assessment(
         risk, {"residual_likelihood": likelihood, "residual_impact": impact}, rationale
     )
@@ -1310,6 +1461,8 @@ async def accept_residual(
             "residual_impact": impact,
             "suggested": f"{suggestion.likelihood}x{suggestion.impact}",
             "override_reason": risk.residual_override_reason,
+            **({"note": note} if note else {}),
+            **({"untested_credit": [c.reference or c.name for c in untested]} if untested else {}),
             **({"review_reason": "residual corrected; review flag cleared"} if cleared else {}),
         },
     )
@@ -1491,6 +1644,8 @@ async def _read(db, risk_id: uuid.UUID, user: CurrentUser) -> RiskRead:
     read = RiskRead.model_validate(risk, context=context)
     await ref_fields.fill_refs(db, [(risk, read)], RISK_REFS)
     await _fill_hierarchy(db, [(risk, read)])
+    # Each control's rating, basis and test record (B2): two queries for all of them.
+    read.controls = await _assured_controls(db, risk.controls, user)
     actions = (await _actions_by_risk(db, [risk.id]))[risk.id]
     read.treatment_actions = await _action_reads(db, actions)
     read.treatment_progress = TreatmentProgress(

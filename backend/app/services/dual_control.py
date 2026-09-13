@@ -260,9 +260,45 @@ async def enforce_maker_checker(
     if maker_id is not None and checker_id is not None and maker_id == checker_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=message or (
-                f"Segregation of duties: the maker of this {subject} cannot approve it — "
-                "an independent checker must decide."
-            ),
+            detail=maker_checker_message(subject, message),
         )
     return rule
+
+
+def maker_checker_message(subject: str = "request", message: str | None = None) -> str:
+    """The refusal a maker hears when they try to be their own checker."""
+    return message or (
+        f"Segregation of duties: the maker of this {subject} cannot approve it — "
+        "an independent checker must decide."
+    )
+
+
+async def record_maker_checker_refusal(
+    db: AsyncSession,
+    *,
+    module: str,
+    action: str,
+    entity_type: str,
+    entity_id: uuid.UUID,
+    checker_id: uuid.UUID | None,
+    amount: float | None = None,
+    subject: str = "request",
+    message: str | None = None,
+    record: Any = None,
+) -> str | None:
+    """:func:`enforce_record_maker_checker` as a question instead of a gate.
+
+    Returns the exact text the enforcing call would raise as its 403 detail, or ``None``
+    when this checker may decide. Never raises (beyond a database error), so a read
+    endpoint can tell the user *before* they try — the attestation panel's ``can_attest``
+    / ``blocked_reason`` — while the write path keeps enforcing with the raising call.
+    Same resolution as the gate: the rule from :func:`dual_control_required`, the maker
+    from :func:`maker_of` (only looked up when the rule applies).
+    """
+    required, _rule = await dual_control_required(db, module, action, amount)
+    if not required or checker_id is None:
+        return None
+    maker_id = await maker_of(db, entity_type, entity_id, record=record)
+    if maker_id is not None and maker_id == checker_id:
+        return maker_checker_message(subject, message)
+    return None

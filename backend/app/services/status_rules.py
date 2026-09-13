@@ -44,6 +44,10 @@ MODEL_MAP: dict[str, type] = {
 
 OPERATORS = ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "overdue", "is_true", "is_false", "not_empty"]
 
+#: Operators that ignore the rule's ``value``: a verdict reports an empty value for them,
+#: so a stale value left on the rule never shows up in the condition it explains.
+VALUELESS_OPERATORS: frozenset[str] = frozenset({"overdue", "is_true", "is_false", "not_empty"})
+
 _SKIP = {"id", "tenant_id", "created_at", "updated_at"}
 
 
@@ -141,7 +145,21 @@ def match_values(record, field: str, op: str, rv: str) -> bool:
     return False
 
 
+def verdict(rule) -> dict:
+    """What a matching rule tells the reader: its label and colour, plus the condition
+    that fired it — ``field``, ``operator`` and ``value`` exactly as the rule stores them
+    ("inherent_score", "gte", "15"), so the page can say "inherent score ≥ 15"."""
+    return {
+        "label": rule.label,
+        "color": rule.color,
+        "field": rule.field,
+        "operator": rule.operator,
+        "value": "" if rule.operator in VALUELESS_OPERATORS else (rule.value or ""),
+    }
+
+
 def evaluate(record, rules) -> list[dict]:
-    """Return [{label, color}] for the rules that match this record, by priority."""
+    """Return [{label, color, field, operator, value}] for the rules that match this
+    record, by priority."""
     hits = [r for r in sorted(rules, key=lambda r: r.priority) if r.enabled and matches(r, record)]
-    return [{"label": r.label, "color": r.color} for r in hits]
+    return [verdict(r) for r in hits]

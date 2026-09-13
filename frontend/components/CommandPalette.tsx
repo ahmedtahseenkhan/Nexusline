@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, type SearchHit } from "@/lib/api";
 import { routeDisabled, useModules } from "@/lib/modules";
 import { visibleNav, type NavAccess } from "@/lib/nav";
 import { useNavUser } from "@/lib/navPrefs";
 import { useTenantSettings } from "@/lib/tenantSettings";
+import { trapTab, useEscapeLayer } from "@/lib/escapeLayer";
 
 type NavRow = { kind: "nav"; href: string; label: string; section: string };
 type RecordRow = { kind: "record"; hit: SearchHit };
@@ -30,6 +31,12 @@ export default function CommandPalette() {
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  // Combobox semantics: the input keeps focus and names the highlighted row through
+  // aria-activedescendant, so a screen reader hears each row as ArrowUp / ArrowDown move.
+  const uid = useId();
+  const listId = `cmdk-list-${uid}`;
+  const rowId = (i: number) => `cmdk-row-${uid}-${i}`;
+  const boxRef = useRef<HTMLDivElement>(null);
 
   // Flat list of navigable modules this user may open in this installation — includes
   // group-level single links (Dashboard, Shariah) and every submenu item.
@@ -64,8 +71,18 @@ export default function CommandPalette() {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, openPalette]);
 
+  // Focus moves into the palette on open and back to where it was on close (Esc, a
+  // click outside, or a choice that leaves the page as it was), when that element is
+  // still in the document.
   useEffect(() => {
-    if (open) inputRef.current?.focus();
+    if (!open) return;
+    const opener = document.activeElement as HTMLElement | null;
+    inputRef.current?.focus();
+    return () => {
+      if (opener && opener !== document.body && opener.isConnected && typeof opener.focus === "function") {
+        opener.focus({ preventScroll: true });
+      }
+    };
   }, [open]);
 
   // Debounced record search.
@@ -101,6 +118,9 @@ export default function CommandPalette() {
   }, [rows.length]);
 
   const close = useCallback(() => setOpen(false), []);
+  // Esc closes the palette and nothing under it (an open record stays open), wherever
+  // focus is inside it; the input's own Esc handling below consumes it first.
+  useEscapeLayer(open, close);
 
   const choose = useCallback(
     (row: Row) => {
@@ -138,7 +158,15 @@ export default function CommandPalette() {
 
   return (
     <div className="cmdk-overlay" onMouseDown={close}>
-      <div className="cmdk" role="dialog" aria-label="Command palette" onMouseDown={(e) => e.stopPropagation()}>
+      <div
+        ref={boxRef}
+        className="cmdk"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => trapTab(e, boxRef.current)}
+      >
         <input
           ref={inputRef}
           className="cmdk-input"
@@ -150,16 +178,25 @@ export default function CommandPalette() {
           onKeyDown={onInputKey}
           placeholder="Jump to a module or search records…"
           aria-label="Command palette search"
+          role="combobox"
+          aria-expanded={rows.length > 0}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={rows[active] ? rowId(active) : undefined}
         />
-        <div className="cmdk-list" ref={listRef}>
+        <div className="cmdk-list" ref={listRef} role="listbox" id={listId} aria-label="Results" tabIndex={-1}>
           {rows.length === 0 ? (
-            <div className="cmdk-empty">{term.length < 2 ? "Type to search records…" : `No matches for “${q}”.`}</div>
+            <div className="cmdk-empty" role="presentation">{term.length < 2 ? "Type to search records…" : `No matches for “${q}”.`}</div>
           ) : (
             <>
-              {filteredNav.length > 0 && <div className="cmdk-group">Navigate</div>}
+              {filteredNav.length > 0 && <div className="cmdk-group" role="presentation">Navigate</div>}
               {filteredNav.map((r, i) => (
                 <button
                   key={`nav-${r.href}`}
+                  id={rowId(i)}
+                  role="option"
+                  aria-selected={active === i}
+                  tabIndex={-1}
                   data-idx={i}
                   className={`cmdk-row${active === i ? " active" : ""}`}
                   onMouseMove={() => setActive(i)}
@@ -169,12 +206,16 @@ export default function CommandPalette() {
                   <span className="cmdk-row-sub">{r.section}</span>
                 </button>
               ))}
-              {hits.length > 0 && <div className="cmdk-group">Records</div>}
+              {hits.length > 0 && <div className="cmdk-group" role="presentation">Records</div>}
               {hits.map((hit, j) => {
                 const idx = firstRecordIdx + j;
                 return (
                   <button
                     key={`rec-${hit.type}-${hit.reference}-${j}`}
+                    id={rowId(idx)}
+                    role="option"
+                    aria-selected={active === idx}
+                    tabIndex={-1}
                     data-idx={idx}
                     className={`cmdk-row${active === idx ? " active" : ""}`}
                     onMouseMove={() => setActive(idx)}

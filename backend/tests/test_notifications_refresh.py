@@ -165,6 +165,6 @@ def test_a_grouped_alert_count_change_updates_title_and_body():
 
 # ----------------------------------------------------- one review clock per record ---
 def test_native_review_types_are_the_ones_with_their_own_sweep():
-    assert ns.NATIVE_REVIEW_ENTITY_TYPES == {"risk", "policy", "vendor"}
-    for fam in ("risk-review", "policy-review", "vendor-review"):
+    assert ns.NATIVE_REVIEW_ENTITY_TYPES == {"risk", "policy", "vendor", "asset"}
+    for fam in ("risk-review", "policy-review", "vendor-review", "asset-review", "itasset-review"):
         assert fam in ns.GROUPABLE_FAMILIES

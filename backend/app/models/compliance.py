@@ -155,6 +155,8 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
     )
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
         "ExceptionRecord", secondary="exception_requirements", lazy="selectin", viewonly=True,
+        # An archived exception is not on the register: never show it as a live link.
+        secondaryjoin="and_(exception_requirements.c.exception_id == ExceptionRecord.id, ExceptionRecord.deleted == False)",
     )
     audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
         "AuditFinding", secondary="audit_finding_requirements", lazy="selectin", viewonly=True,
@@ -174,7 +176,8 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
         if not self.controls:
             return "none"
         for c in self.controls:
-            if c.last_audit_result == TestResult.failed or c.is_audit_overdue:
+            # The latest *reviewed* test, as ratings and the residual engine read it.
+            if c.last_reviewed_result == TestResult.failed or c.is_audit_overdue:
                 return "issues"
         return "ok"
 

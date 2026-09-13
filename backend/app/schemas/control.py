@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.common import GraphRef, LookupRef, UserRef
+from app.schemas.common import ExceptionRef, GraphRef, LookupRef, UserRef
 
 from app.models.base import WorkflowState
 from app.models.enums import (
@@ -104,6 +104,35 @@ class ControlLinkRef(BaseModel):
     reference: str = ""
     title: str = ""
     name: str = ""
+
+
+class RequirementLinkRef(ControlLinkRef):
+    """A clause the control implements, with the framework it belongs to (spec B7), so a
+    page can say where the clause comes from without guessing from its reference.
+
+    ``Requirement.framework`` is a lazy relationship: reading it off the ORM row inside
+    an async session would try to load it and fail. The validator below takes the
+    framework only when it is already loaded; the controls API fills the rest with one
+    query per page (``api.v1.controls._frameworks_by_requirement``).
+    """
+
+    framework: str | None = None
+    framework_id: uuid.UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _never_lazy_load_the_framework(cls, data):
+        if isinstance(data, (dict, BaseModel)):
+            return data
+        framework = getattr(data, "__dict__", {}).get("framework")
+        return {
+            "id": data.id,
+            "reference": getattr(data, "reference", "") or "",
+            "title": getattr(data, "title", "") or "",
+            "name": getattr(data, "name", "") or "",
+            "framework_id": getattr(data, "framework_id", None),
+            "framework": getattr(framework, "name", None) if framework is not None else None,
+        }
 
 
 _LEGACY = "Legacy free text, accepted for one release; send the *_id instead. "
@@ -266,8 +295,18 @@ class ControlRead(ControlBase):
     last_audit_date: date | None = None
     next_maintenance_date: date | None = None
     last_maintenance_date: date | None = None
+    #: The test log: every test on file, and the result of the newest one recorded
+    #: (reviewed or not).
     audit_count: int = 0
     last_audit_result: TestResult | None = None
+    #: What ratings and reliance read (``control_assurance.latest_counting_test``): tests
+    #: that decide a rating — conclusive, and reviewed or recorded before reviews existed.
+    #: The same count, result and date a risk sees on this control (``ControlAssuranceRef``)
+    #: and the residual engine judges it by; ``pending_review_count`` says how many more
+    #: await a reviewer.
+    reviewed_audit_count: int = 0
+    last_reviewed_result: TestResult | None = None
+    last_reviewed_date: date | None = None
     is_audit_overdue: bool = False
     maintenance_count: int = 0
     last_maintenance_result: TestResult | None = None
@@ -283,15 +322,20 @@ class ControlRead(ControlBase):
     #: Open issues linked to the control; while any is open the operating rating is at
     #: most partially effective.
     open_issues: list[GraphRef] = []
+    #: True when an open issue actually lowered the operating rating (effective →
+    #: partially effective; ``DerivedEffectiveness.capped``). The combined rating reflects
+    #: it only when its basis is "tests": an override or a manual rating is never capped.
+    operating_capped: bool = False
     pending_review_count: int = 0
     business_units: list[GraphRef] = []
     processes: list[GraphRef] = []
     policies: list[ControlLinkRef] = []
-    requirements: list[ControlLinkRef] = []
+    #: Each clause carries its framework's name and id (B7).
+    requirements: list[RequirementLinkRef] = []
     risks: list[ControlLinkRef] = []
-    # Reverse links (read-only).
+    # Reverse links (read-only). Exceptions carry their status and expiry (B3).
     incidents: list[GraphRef] = []
-    exceptions: list[GraphRef] = []
+    exceptions: list[ExceptionRef] = []
     projects: list[GraphRef] = []
     audit_findings: list[GraphRef] = []
     assets: list[GraphRef] = []
@@ -303,6 +347,53 @@ class ControlRef(BaseModel):
     id: uuid.UUID
     name: str
     reference: str
+
+
+class ControlAssuranceRef(ControlRef):
+    """A control as a record that relies on it sees it: who it is, and how far its rating
+    can be trusted (spec B2, on ``GET /risks/{id}``).
+
+    The assurance fields are ``None`` wherever they were not computed (the risk list):
+    they are never read off the ORM row, whose ``audit_count`` and ``last_audit_result``
+    count tests nobody has reviewed yet. Where they are filled
+    (``api.v1.risks.control_assurance_ref``):
+
+    * ``effectiveness`` is the stored combined rating — what the residual engine credits.
+    * ``effectiveness_basis`` is where it comes from: tests | override | manual | none
+      (``services.control_assurance.derive_effectiveness``).
+    * ``audit_count``, ``last_audit_result`` and ``last_audit_date`` count only tests that
+      decide a rating: conclusive, and independently reviewed (or recorded before reviews
+      existed). A test awaiting review is the tester's claim, not assurance.
+    * ``next_audit_date`` / ``is_audit_overdue`` are the control's test clock (none while
+      planned or retired).
+    * ``pending_review_count`` counts tests awaiting a reviewer (not counted above).
+    * ``open_finding_count`` counts open audit findings against the control.
+    * ``open_issue_count`` counts open issues linked to the control.
+
+    The residual engine withholds credit on the same facts
+    (``control_assurance.reliance_note``): the latest counted test failed, the test is
+    overdue, or an audit finding is open — so the page and the suggestion cannot
+    disagree. A viewer without ``control:read`` gets identity only, and one without
+    ``issue:read`` no ``open_issue_count`` (``api.v1.risks._assured_controls``).
+    """
+
+    effectiveness: ControlEffectiveness | None = None
+    effectiveness_basis: str | None = None
+    audit_count: int | None = None
+    last_audit_result: TestResult | None = None
+    last_audit_date: date | None = None
+    next_audit_date: date | None = None
+    is_audit_overdue: bool | None = None
+    pending_review_count: int | None = None
+    open_finding_count: int | None = None
+    open_issue_count: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _identity_only_from_the_row(cls, data):
+        if isinstance(data, (dict, BaseModel)):
+            return data
+        return {"id": data.id, "name": data.name, "reference": getattr(data, "reference", "") or ""}
 
 
 class EffectivenessOverride(BaseModel):

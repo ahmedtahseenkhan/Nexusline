@@ -6,9 +6,10 @@
    Built-in rows (editable === false) keep their name and cannot be deleted: assets
    reference them, and the API answers 409 if you try. */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useEscapeLayer } from "@/lib/escapeLayer";
 import { Badge } from "@/components/badges";
 import {
   LOOKUP_MANAGE_PERMISSION,
@@ -83,6 +84,23 @@ export function InlineLookupCreate({
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const newBtn = useRef<HTMLButtonElement>(null);
+  const refocus = useRef(false);
+
+  // Esc cancels the inline input only (a layer of the shared escape stack, so the form it
+  // sits in stays open), and focus goes back to "New".
+  useEscapeLayer(open, () => cancel());
+  useEffect(() => {
+    if (open || !refocus.current) return;
+    refocus.current = false;
+    newBtn.current?.focus({ preventScroll: true });
+  }, [open]);
+
+  function cancel() {
+    if (busy) return;
+    refocus.current = true;
+    setOpen(false);
+  }
 
   async function create() {
     const trimmed = name.trim();
@@ -109,6 +127,7 @@ export function InlineLookupCreate({
   if (!open) {
     return (
       <button
+        ref={newBtn}
         type="button"
         className="btn secondary sm"
         style={{ marginTop: 6 }}
@@ -132,13 +151,16 @@ export function InlineLookupCreate({
             e.preventDefault();
             create();
           }
-          if (e.key === "Escape") setOpen(false);
+          if (e.key === "Escape") {
+            e.preventDefault(); // consumed here: the escape stack leaves the form open
+            cancel();
+          }
         }}
       />
       <button type="button" className="btn sm" disabled={busy || !name.trim()} onClick={create}>
         Add
       </button>
-      <button type="button" className="btn secondary sm" disabled={busy} onClick={() => setOpen(false)}>
+      <button type="button" className="btn secondary sm" disabled={busy} onClick={cancel}>
         Cancel
       </button>
     </div>

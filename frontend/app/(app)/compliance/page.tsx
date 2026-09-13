@@ -1,10 +1,11 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -341,6 +342,10 @@ function ComplianceInner() {
   // framework library
   type FwTemplate = { key: string; name: string; version: string; authority: string; description: string; requirement_count: number; kind?: string };
   const [showLib, setShowLib] = useState(false);
+  // The library dialog is a layer of the shared escape stack; focus moves in and comes back.
+  useEscapeLayer(showLib, () => setShowLib(false));
+  const libRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(showLib, libRef);
   const [templates, setTemplates] = useState<FwTemplate[]>([]);
   const [loadingTpl, setLoadingTpl] = useState<string | null>(null);
 
@@ -1105,7 +1110,7 @@ function ComplianceInner() {
 
       {showLib && (
         <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setShowLib(false)}>
-          <div className="modal" role="dialog" aria-modal="true" aria-label="Framework library">
+          <div ref={libRef} tabIndex={-1} className="modal" role="dialog" aria-modal="true" aria-label="Framework library" onKeyDown={(e) => trapTab(e, libRef.current)}>
             <div className="modal-head">
               <h2>Framework Library</h2>
               <button className="x" onClick={() => setShowLib(false)} aria-label="Close">✕</button>

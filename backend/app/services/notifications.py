@@ -95,7 +95,11 @@ _I = NotificationCategory.info
 #: ``next_review_date``). Attesting one of these moves that schedule (see
 #: ``api.v1.attestations``), and the native review sweep below raises the overdue alert,
 #: so the attestation sweep must not raise a second one for the same date.
-NATIVE_REVIEW_ENTITY_TYPES: frozenset[str] = frozenset({"risk", "policy", "vendor"})
+#: My Work (``services.my_work``) skips their attestations for the same reason.
+#: The asset joined in record-page spec B4: attesting it, scheduling or completing its
+#: review and editing the date all move ``Asset.next_review_date``, which the asset
+#: review sweep watches — one clock, so the panel, the alert and My Work agree.
+NATIVE_REVIEW_ENTITY_TYPES: frozenset[str] = frozenset({"risk", "policy", "vendor", "asset"})
 
 #: More than this many alerts in one groupable family (for one recipient) collapse into
 #: a single row.
@@ -116,6 +120,9 @@ GROUPABLE_FAMILIES: dict[str, tuple[str, str, str, str]] = {
     "issue-action": ("issue action", "issue actions", "past due", "/issues"),
     "policy-review": ("policy", "policies", "reviews overdue", "/policies"),
     "vendor-review": ("third party", "third parties", "reviews overdue", "/vendors"),
+    # Assets (record-page B4): one family per register, so a grouped row links to it.
+    "asset-review": ("information asset", "information assets", "reviews overdue", "/information-assets"),
+    "itasset-review": ("IT asset", "IT assets", "reviews overdue", "/it-assets"),
     # Third-party certifications (phase 2), one alert per certificate: warned
     # CERT_EXPIRY_WARNING_DAYS out, then flagged once lapsed.
     "vendor-cert-expiring": ("third-party certification", "third-party certifications", "less than 60 days left", "/vendors"),
@@ -1143,6 +1150,29 @@ async def scan_alerts(db: AsyncSession, tenant_id, directory: Directory | None =
             f"Review was due {v.next_review_date}", _W, "vendor", v.id, record_link(v, "/vendors"),
             directory.first_active(v.relationship_owner_id, v.workflow_owner_id))
 
+    # Assets carry their own review date as well (record-page spec B4): attesting an
+    # asset, scheduling or completing its review and editing the date all move it, so
+    # this is the one overdue alert for an asset review (its attestations are skipped
+    # below) — to the same owner the attestation alert went to.
+    from app.models.asset import Asset
+
+    _asset_rows = (
+        await db.execute(
+            select(Asset.id, Asset.name, Asset.asset_class, Asset.next_review_date).where(
+                Asset.deleted.is_(False), Asset.next_review_date < today
+            )
+        )
+    ).all()
+    _asset_owners = (
+        await _record_owners(db, directory, [("asset", a.id) for a in _asset_rows]) if _asset_rows else {}
+    )
+    for a in _asset_rows:
+        it = getattr(a.asset_class, "value", a.asset_class) == "it_asset"
+        to, link = _asset_owners.get(("asset", a.id), ([], link_to("asset", a.id, asset_class=a.asset_class)))
+        add(f"{'itasset-review' if it else 'asset-review'}:{a.id}",
+            f"{'IT asset' if it else 'Information asset'} review overdue: {a.name}",
+            f"Review was due {a.next_review_date}", _W, "asset", a.id, link, to)
+
     # Certifications of live third parties (not offboarded) expiring within the warning
     # window or already lapsed. Expired certs of high/critical vendors are critical.
     _cert_stmt = (
@@ -1181,7 +1211,7 @@ async def scan_alerts(db: AsyncSession, tenant_id, directory: Directory | None =
 
     # Overdue attestations — DISTINCT ON keeps only the latest attestation per record
     # (one row each instead of the full history), then alert if that latest is past due.
-    # Records with a native review schedule (risk, policy, vendor) are skipped: their
+    # Records with a native review schedule (risk, policy, vendor, asset) are skipped: their
     # attestation writes the record's own next_review_date, which the sweeps above
     # already watch. One review clock per record, one alert — to the record's owner.
     _att_stmt = (

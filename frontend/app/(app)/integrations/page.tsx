@@ -15,6 +15,7 @@ import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ConnectorFeed from "@/components/ConnectorFeed";
 import { titleCase } from "@/lib/text";
+import { safeLinkUrl } from "@/lib/sanitize";
 import { useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ local types
@@ -730,7 +731,9 @@ function IntegrationsInner() {
               <strong style={{ fontSize: 13 }}>Connection</strong>
               <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0" }}>
                 {field("Endpoint URL", detail.endpoint_url ? (
-                  <a href={detail.endpoint_url} target="_blank" rel="noreferrer">{detail.endpoint_url}</a>
+                  safeLinkUrl(detail.endpoint_url)
+                    ? <a href={safeLinkUrl(detail.endpoint_url) ?? undefined} target="_blank" rel="noopener noreferrer">{detail.endpoint_url}</a>
+                    : <span>{detail.endpoint_url}</span>
                 ) : "—")}
                 {field("Auth method", detail.auth_method || "—")}
                 {field("Sync frequency", cap(detail.sync_frequency))}

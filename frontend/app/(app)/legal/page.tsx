@@ -18,7 +18,7 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
-import RichText from "@/components/RichText";
+import RichText, { RichTextView } from "@/components/RichText";
 import { Field, TextInput, NumberInput } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
@@ -328,7 +328,7 @@ function LegalInner() {
             {detail.description && (
               <div style={{ marginBottom: 16 }}>
                 <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Description</div>
-                <div style={{ fontSize: 14, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: detail.description }} />
+                <RichTextView html={detail.description} style={{ fontSize: 14, lineHeight: 1.5 }} />
               </div>
             )}
 

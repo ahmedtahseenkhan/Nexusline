@@ -16,8 +16,10 @@ import FileAttachments from "@/components/FileAttachments";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconEvidence, IconPlus } from "@/components/icons";
-import { titleCase } from "@/lib/text";
+import { sentenceCase, titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
+import { safeLinkUrl } from "@/lib/sanitize";
+import { TEST_RESULT_LABEL as RESULT_LABEL, TEST_REVIEW_LABEL as REVIEW_LABEL, controlTestTitle } from "@/lib/record/control";
 
 // ---- inline types (backend: app/schemas/evidence.py, app/schemas/control.py) ----
 type ControlRef = { id: string; name: string; reference: string };
@@ -65,10 +67,8 @@ function statusLabel(ev: Evidence) {
 }
 
 const TYPES = opts(["document", "screenshot", "log", "link", "configuration", "other"]);
-const RESULT_LABEL: Record<string, string> = {
-  passed: "passed", passed_with_exceptions: "passed with exceptions", failed: "failed", not_assessed: "not assessed",
-};
-const REVIEW_LABEL: Record<string, string> = { pending: "pending review", reviewed: "reviewed", returned: "returned", legacy: "before reviews" };
+/* Test results and reviews use the control record's words (RESULT_LABEL / REVIEW_LABEL
+   come from lib/record/control.ts, the one home of that wording). */
 const STATUS = opts(["pending", "valid", "expired"]);
 
 const STATUS_TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
@@ -224,16 +224,34 @@ function EvidenceInner() {
   }
 
   const controlLabel = (e: Evidence) => (e.control ? e.control.reference || e.control.name : "—");
-  /** "12/09/2026 operating test · failed · reviewed" — the test this evidence supports. */
+  /** The control this evidence is collected against, as the control record names it:
+   *  reference chip, then the name, linking to the control. */
+  const controlLink = (e: Evidence) =>
+    e.control ? (
+      <Link
+        href={`/controls?id=${e.control.id}`}
+        className="chip chip-link"
+        title={[e.control.reference, e.control.name].filter(Boolean).join(" ")}
+        onClick={(ev) => ev.stopPropagation()}
+      >
+        {e.control.reference && <span className="ref" style={{ marginRight: 5 }}>{e.control.reference}</span>}
+        {e.control.name}
+      </Link>
+    ) : (
+      <span className="muted">Not set</span>
+    );
+  /** "Operating test of 12 Sep 2026 · Failed · Reviewed" — the test this evidence
+   *  supports, in the words of the control's "Effectiveness & tests" section. */
   const testLabel = (t: ControlTestRef) =>
     [
-      `${t.conducted_date ? formatDate(t.conducted_date) + " " : ""}${t.test_type ? t.test_type + " " : ""}test`,
-      RESULT_LABEL[t.result] ?? t.result,
-      REVIEW_LABEL[t.review_status] ?? t.review_status,
+      controlTestTitle(t, { date: formatDate }),
+      RESULT_LABEL[t.result] ?? sentenceCase(t.result),
+      REVIEW_LABEL[t.review_status] ?? sentenceCase(t.review_status),
     ].join(" · ");
+  /** Opens the control on its "Effectiveness & tests" section (`#tests`), where the test is listed. */
   const testLink = (e: Evidence) =>
     e.control_audit ? (
-      <Link href={`/controls?id=${e.control_audit.control_id}`} className="chip chip-link" onClick={(ev) => ev.stopPropagation()}>
+      <Link href={`/controls?id=${e.control_audit.control_id}#tests`} className="chip chip-link" onClick={(ev) => ev.stopPropagation()}>
         {testLabel(e.control_audit)}
       </Link>
     ) : (
@@ -255,10 +273,13 @@ function EvidenceInner() {
       sortable: true,
       render: (ev) => (
         <span style={{ display: "inline-block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "bottom" }}>
-          {ev.reference ? (
-            <a href={ev.reference} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+          {ev.reference && safeLinkUrl(ev.reference) ? (
+            <a href={safeLinkUrl(ev.reference) ?? undefined} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
               {ev.reference}
             </a>
+          ) : ev.reference ? (
+            // Not a web or mail address (a file path, a folder name, or an unsafe scheme): text only.
+            <span title={ev.reference}>{ev.reference}</span>
           ) : (
             <span className="muted">—</span>
           )}
@@ -395,7 +416,7 @@ function EvidenceInner() {
         {detail && (
           <>
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
-              {field("Control", <span className="chip">{controlLabel(detail)}</span>)}
+              {field("Control", controlLink(detail))}
               {field("Supports test", testLink(detail))}
               {field("Type", <Badge tone="info" plain>{cap(detail.evidence_type)}</Badge>)}
               {field("Status", statusBadge(detail))}
@@ -410,7 +431,9 @@ function EvidenceInner() {
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 18 }}>
               {field("Reference", detail.reference ? (
-                <a href={detail.reference} target="_blank" rel="noreferrer">{detail.reference}</a>
+                safeLinkUrl(detail.reference)
+                  ? <a href={safeLinkUrl(detail.reference) ?? undefined} target="_blank" rel="noopener noreferrer">{detail.reference}</a>
+                  : detail.reference
               ) : "—")}
               {field("Collected at", detail.collected_at ? formatDate(detail.collected_at) : "Not collected")}
               {field("Valid until", detail.valid_until ? (

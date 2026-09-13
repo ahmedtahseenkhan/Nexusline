@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 import { formatDateTime } from "@/lib/format";
 import { records, type ArchivedRow } from "@/lib/records";
 
@@ -95,15 +96,16 @@ function ArchiveDialog({
   const [restoring, setRestoring] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
+  // Esc: a layer of the shared escape stack (a confirm opened from here closes first).
+  useEscapeLayer(true, onClose);
+  // Focus returns to whatever opened the dialog; Tab stays inside it.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(true, dialogRef);
+
   useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
     searchRef.current?.focus();
     return () => {
-      window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
   }, [onClose]);
@@ -156,7 +158,7 @@ function ArchiveDialog({
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wide" role="dialog" aria-modal="true" aria-label={`Archived ${noun}`}>
+      <div ref={dialogRef} tabIndex={-1} className="modal wide" role="dialog" aria-modal="true" aria-label={`Archived ${noun}`} onKeyDown={(e) => trapTab(e, dialogRef.current)}>
         <div className="modal-head">
           <h2>Archived {noun}</h2>
           <button className="x" onClick={onClose} aria-label="Close">✕</button>

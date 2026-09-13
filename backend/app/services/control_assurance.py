@@ -218,6 +218,58 @@ def latest_counting(tests: Iterable[Any], kind: str) -> Any | None:
     return max(candidates, key=_when)
 
 
+def latest_counting_test(tests: Iterable[Any]) -> Any | None:
+    """The most recent test of either kind that decides a rating (by date performed,
+    then recorded), or None. The "last test result" every reliance judgement reads."""
+    candidates = [t for t in tests if counts_towards_rating(t)]
+    return max(candidates, key=_when) if candidates else None
+
+
+def performed_on(test: Any) -> date | None:
+    """The day a test was performed: its date, else the day it was recorded."""
+    when = _when(test)[0]
+    return None if when == date.min else when
+
+
+def pending_review_count(tests: Iterable[Any]) -> int:
+    """Tests recorded and awaiting an independent reviewer."""
+    return sum(1 for t in tests if _value(getattr(t, "review_status", None)) == "pending")
+
+
+def open_finding_count(control: Any) -> int:
+    """Audit findings against the control that are still open."""
+    from app.models.enums import AuditFindingStatus
+
+    done = (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)
+    return sum(1 for f in (getattr(control, "audit_findings", None) or ()) if f.status not in done)
+
+
+# ---------------------------------------------------------------------------
+# Reliance: can a record lean on this control today?
+# ---------------------------------------------------------------------------
+# One rule, read by the residual engine (credit), the risk and requirement health
+# rollups, and the risk page's assurance fields (B2), so no two of them can disagree:
+# a control cannot be relied on while its latest *counting* test failed, its test is
+# overdue, or an audit finding against it is open. A test awaiting review is the
+# tester's claim — it neither withholds nor restores reliance until a reviewer decides
+# it (the same rule the ratings follow). ``pending_review_count`` lets a page say so.
+NOTE_TEST_FAILED = "its last reviewed test failed"
+NOTE_TEST_OVERDUE = "its test is overdue"
+NOTE_OPEN_FINDING = "it has an open audit finding"
+
+
+def reliance_note(control: Any, tests: Iterable[Any], today: date | None = None) -> str:
+    """Why ``control`` cannot be relied on today, or "" when it can. Pure."""
+    latest = latest_counting_test(tests)
+    if latest is not None and latest.result == TestResult.failed:
+        return NOTE_TEST_FAILED
+    if is_cycle_overdue(getattr(control, "status", None), getattr(control, "next_audit_date", None), today):
+        return NOTE_TEST_OVERDUE
+    if open_finding_count(control):
+        return NOTE_OPEN_FINDING
+    return ""
+
+
 def combine(*ratings: ControlEffectiveness | None) -> ControlEffectiveness:
     """The worst of the ratings that have been assessed; not assessed when none has."""
     assessed = [r for r in ratings if r is not None and r != E.not_assessed]

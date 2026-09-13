@@ -168,6 +168,8 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     )
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
         "ExceptionRecord", secondary="exception_controls", lazy="selectin", viewonly=True,
+        # An archived exception is not on the register: never show it as a live link.
+        secondaryjoin="and_(exception_controls.c.exception_id == ExceptionRecord.id, ExceptionRecord.deleted == False)",
     )
     projects: Mapped[list["Project"]] = relationship(  # noqa: F821
         "Project", secondary="project_controls", lazy="selectin", viewonly=True,
@@ -201,6 +203,38 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     @property
     def last_audit_result(self) -> TestResult | None:
         return self._last_result(self.audits)
+
+    # What ratings and reliance read (``services.control_assurance``): only tests that
+    # decide a rating — conclusive, and independently reviewed (or recorded before
+    # reviews existed). ``audit_count`` / ``last_audit_result`` above stay the test log
+    # (every test, newest recorded first); ``pending_review_count`` on the read bridges
+    # the two.
+    @property
+    def reviewed_audit_count(self) -> int:
+        from app.services import control_assurance
+
+        return sum(1 for t in self.audits if control_assurance.counts_towards_rating(t))
+
+    @property
+    def last_reviewed_result(self) -> TestResult | None:
+        from app.services import control_assurance
+
+        latest = control_assurance.latest_counting_test(self.audits)
+        return latest.result if latest is not None else None
+
+    @property
+    def last_reviewed_date(self) -> date | None:
+        from app.services import control_assurance
+
+        latest = control_assurance.latest_counting_test(self.audits)
+        return control_assurance.performed_on(latest) if latest is not None else None
+
+    @property
+    def reliance_note(self) -> str:
+        """Why the control cannot be relied on today, or "" (``control_assurance``)."""
+        from app.services import control_assurance
+
+        return control_assurance.reliance_note(self, self.audits)
 
     @property
     def carries_test_clock(self) -> bool:

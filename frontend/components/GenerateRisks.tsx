@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState, useRef } from "react";
 import {
   api,
   type GenerateRisksCommitResult,
@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import { Badge } from "@/components/badges";
 import { useFormat } from "@/lib/format";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 
 /* Turns the asset register into risk candidates the ISO 27005 way — a threat exploiting
    a vulnerability against an asset. The scenario library supplies the pairs; the asset's
@@ -138,14 +139,14 @@ function GenerateModal({
   const [note, setNote] = useState<string | null>(null);
   const [sent, setSent] = useState<GenerateRisksCommitResult | null>(null);
 
+  // Esc: a layer of the shared escape stack (the asset record it was opened from stays open).
+  useEscapeLayer(true, onClose);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(true, dialogRef);
+
   useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
     return () => {
-      window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
   }, [onClose]);
@@ -251,7 +252,7 @@ function GenerateModal({
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wide" role="dialog" aria-modal="true" aria-label={`Generate risks for ${label}`}>
+      <div ref={dialogRef} tabIndex={-1} className="modal wide" role="dialog" aria-modal="true" aria-label={`Generate risks for ${label}`} onKeyDown={(e) => trapTab(e, dialogRef.current)}>
         <div className="modal-head">
           <h2>Generate risks from {label}</h2>
           <button className="x" onClick={onClose} aria-label="Close">✕</button>

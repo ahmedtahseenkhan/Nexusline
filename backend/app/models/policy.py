@@ -127,6 +127,8 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     # Reverse (read-only) links into the graph.
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
         "ExceptionRecord", secondary="exception_policies", lazy="selectin", viewonly=True,
+        # An archived exception is not on the register: never show it as a live link.
+        secondaryjoin="and_(exception_policies.c.exception_id == ExceptionRecord.id, ExceptionRecord.deleted == False)",
     )
     projects: Mapped[list["Project"]] = relationship(  # noqa: F821
         "Project", secondary="project_policies", lazy="selectin", viewonly=True,

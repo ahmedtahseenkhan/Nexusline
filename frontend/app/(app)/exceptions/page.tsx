@@ -13,7 +13,7 @@ import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
-import RichText from "@/components/RichText";
+import RichText, { RichTextView } from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
@@ -385,7 +385,7 @@ function ExceptionsInner() {
               <div style={{ marginBottom: 12 }}><span className="muted" style={{ fontSize: 12 }}>Description</span><div style={{ fontSize: 13 }}>{detail.description}</div></div>
             )}
             {detail.rationale && (
-              <div style={{ marginBottom: 12 }}><span className="muted" style={{ fontSize: 12 }}>Rationale</span><div style={{ fontSize: 13 }} dangerouslySetInnerHTML={{ __html: detail.rationale }} /></div>
+              <div style={{ marginBottom: 12 }}><span className="muted" style={{ fontSize: 12 }}>Rationale</span><RichTextView html={detail.rationale} style={{ fontSize: 13 }} /></div>
             )}
             {detail.compensating_controls && (
               <div style={{ marginBottom: 16 }}><span className="muted" style={{ fontSize: 12 }}>Compensating controls</span><div style={{ fontSize: 13 }}>{detail.compensating_controls}</div></div>

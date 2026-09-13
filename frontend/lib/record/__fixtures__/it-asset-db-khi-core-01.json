@@ -1,0 +1,270 @@
+{
+  "_source": "Representative IT asset (the dev tenant has no IT assets to capture): a GET /api/v1/assets/{id} payload in the current backend's shape, with B8 business values on the hosted information assets and B8 scores on the risks (R-002 as captured from the dev stack; R-007 illustrative), B3 status on the exception, and an attestation per B1/B4 (native review, last attested with the 2025 review, now overdue). Exercises the stale-discovery, missing-RPO, overdue-review and missing-custodian rules and the B8 inherited and exposure wording.",
+  "type": "itAsset",
+  "input": {
+    "asset": {
+      "id": "0b6c2f4e-8d51-4f0a-9c3e-2f7a1d9e4b10",
+      "name": "DB-KHI-CORE-01",
+      "description": "Primary Oracle database server for the T24 core banking system.",
+      "asset_class": "it_asset",
+      "media_type": {
+        "id": "4a1e2b3c-0000-4000-8000-000000000001",
+        "label": "Server"
+      },
+      "label": null,
+      "owner": {
+        "id": "d364ed33-baae-40a3-aaad-da9d55ee035a",
+        "label": "IT"
+      },
+      "guardian": null,
+      "user": {
+        "id": "7c2d9a10-1111-4222-8333-444455556666",
+        "label": "Retail Banking"
+      },
+      "confidentiality": "medium",
+      "integrity": "medium",
+      "availability": "high",
+      "criticality": "medium",
+      "classification": "high",
+      "potential_liabilities": "",
+      "business_value": "medium",
+      "information_owner": "",
+      "data_categories": "",
+      "records_volume": "",
+      "self_assessed": false,
+      "assessed_by": "",
+      "assessed_date": null,
+      "replacement_cost": 1800000.0,
+      "currency": "PKR",
+      "rto_hours": 4,
+      "rpo_hours": null,
+      "environment": "production",
+      "location": "DC-Karachi",
+      "hostname": "db-khi-core-01",
+      "ip_address": "10.20.0.11",
+      "serial_number": "SN-7Q2K9X3",
+      "manufacturer": "Dell",
+      "model_number": "PowerEdge R760",
+      "os_version": "RHEL 9.3",
+      "discovery_source": "active_directory",
+      "external_id": "AD-KHI-00123",
+      "auto_discovered": true,
+      "last_seen": "2026-07-20T04:10:00Z",
+      "cost_band": "medium",
+      "intrinsic_criticality": "high",
+      "derived_criticality": "critical",
+      "effective_criticality": "critical",
+      "review_frequency": "annual",
+      "next_review_date": "2026-08-31",
+      "last_review_date": "2025-08-31",
+      "expired_reviews": 1,
+      "review_status": "overdue",
+      "workflow_status": "approved",
+      "classifications": [],
+      "tags": [
+        {
+          "id": "9e0f1a2b-0000-4000-8000-00000000000a",
+          "name": "PCI-scope",
+          "category": "compliance",
+          "description": "",
+          "color": ""
+        },
+        {
+          "id": "9e0f1a2b-0000-4000-8000-00000000000b",
+          "name": "DC-Karachi",
+          "category": "site",
+          "description": "",
+          "color": ""
+        }
+      ],
+      "dependencies": [
+        {
+          "id": "e1d2c3b4-0000-4000-8000-000000000101",
+          "relationship_type": "hosts",
+          "notes": "Production schema T24PRD",
+          "information_asset": {
+            "id": "3f9a7c21-5b6d-4e8f-9a0b-1c2d3e4f5a6b",
+            "label": "Customer master data",
+            "business_value": "critical"
+          },
+          "it_asset": null
+        },
+        {
+          "id": "e1d2c3b4-0000-4000-8000-000000000102",
+          "relationship_type": "transmits",
+          "notes": "",
+          "information_asset": {
+            "id": "72a69d43-130c-4f5a-89b1-681eaf7da072",
+            "label": "Corporate Network",
+            "business_value": "medium"
+          },
+          "it_asset": null
+        }
+      ],
+      "processes": [],
+      "legals": [],
+      "requirements": [],
+      "incidents": [],
+      "exceptions": [
+        {
+          "id": "aa11bb22-0000-4000-8000-000000000201",
+          "label": "EXC-004",
+          "status": "approved",
+          "expires_at": "2026-12-31"
+        }
+      ],
+      "related_assets": [],
+      "risks": [
+        {
+          "id": "5deaf5aa-734c-4517-9d55-1243ae638d8c",
+          "label": "Ransomware encrypts production systems",
+          "reference": "R-002",
+          "inherent_score": 20,
+          "inherent_severity": "critical",
+          "residual_score": null,
+          "residual_severity": null,
+          "appetite_status": "breach"
+        },
+        {
+          "id": "6e7f8091-0000-4000-8000-000000000301",
+          "label": "Database credential theft",
+          "reference": "R-007",
+          "inherent_score": 12,
+          "inherent_severity": "high",
+          "residual_score": 6,
+          "residual_severity": "medium",
+          "appetite_status": "within_appetite"
+        }
+      ],
+      "vendors": [
+        {
+          "id": "86790476-5725-48be-8ab0-43d75309da69",
+          "reference": "",
+          "title": "",
+          "name": "Oracle Pakistan"
+        }
+      ],
+      "access_reviews": [],
+      "controls": [
+        {
+          "id": "7e23bf27-1359-4f31-9768-a70f4d96c4c3",
+          "reference": "A.8.13",
+          "title": "",
+          "name": "Information backup"
+        }
+      ],
+      "threats": [],
+      "vulnerabilities": [
+        {
+          "id": "c0ffee00-0000-4000-8000-000000000401",
+          "reference": "",
+          "title": "",
+          "name": "Outdated Oracle Database patch level"
+        }
+      ],
+      "reviews": [],
+      "risk_count": 2,
+      "review_count": 0,
+      "created_at": "2026-07-03T20:35:46.947782Z"
+    }
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "approved",
+      "approvalSteps": 1,
+      "lastStep": {
+        "action": "approve",
+        "at": "2026-07-10T11:02:00Z",
+        "actor": "ciso@acme.com",
+        "reason": ""
+      },
+      "lastSubmitAt": "2026-07-08T09:30:00Z",
+      "attestation": {
+        "status": "overdue",
+        "nativeReview": true,
+        "nextDue": "2026-08-31",
+        "canAttest": true,
+        "blockedReason": null
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "effective",
+        "value": "Critical",
+        "because": "Higher of intrinsic High and inherited Critical.",
+        "basis": {
+          "kind": "derived",
+          "text": "Calculated"
+        }
+      },
+      {
+        "key": "intrinsic",
+        "value": "High",
+        "because": "Higher of cost band Medium (PKR 1,800,000) and availability High.",
+        "basis": {
+          "kind": "derived",
+          "text": "Calculated from cost and availability"
+        }
+      },
+      {
+        "key": "inherited",
+        "value": "Critical",
+        "because": "Highest business value among 2 hosted information assets: Customer master data (Critical).",
+        "basis": {
+          "kind": "derived",
+          "text": "From dependency links"
+        }
+      },
+      {
+        "key": "recovery",
+        "value": "RTO 4 h · RPO not set",
+        "because": "Must be back within 4 h; no RPO recorded, so tolerable data loss can't be checked.",
+        "basis": {
+          "kind": "declared",
+          "text": "Recorded by hand"
+        }
+      },
+      {
+        "key": "vulns",
+        "value": "1 vulnerability",
+        "because": "Outdated Oracle Database patch level.",
+        "basis": {
+          "kind": "derived",
+          "text": "From links"
+        }
+      },
+      {
+        "key": "risk",
+        "value": "2 risks",
+        "because": "R-002 Ransomware encrypts production systems: inherent 20 (Critical), residual not recorded, in breach.",
+        "basis": {
+          "kind": "derived",
+          "text": "From risk links"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "itasset.custodian",
+        "level": "gap"
+      },
+      {
+        "id": "itasset.stale_discovery",
+        "level": "gap"
+      },
+      {
+        "id": "itasset.no_recovery",
+        "level": "gap"
+      },
+      {
+        "id": "itasset.review_overdue",
+        "level": "gap"
+      }
+    ],
+    "headline": "Critical IT asset: criticality inherited from the data it hosts; hosts 2 information assets; 1 vulnerability linked."
+  }
+}

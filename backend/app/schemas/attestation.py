@@ -9,7 +9,7 @@ from app.models.enums import ReviewFrequency
 
 
 class AttestationCreate(BaseModel):
-    #: Ignored for records that carry their own review cycle (risk, policy, vendor): the
+    #: Ignored for records that carry their own review cycle (risk, policy, vendor, asset): the
     #: cadence comes from the record's ``review_frequency`` so there is one clock.
     frequency: ReviewFrequency = ReviewFrequency.annual
     comment: str = ""
@@ -49,3 +49,10 @@ class AttestationStatus(BaseModel):
     native_review: bool = False
     #: The statement the panel pre-fills for this entity type.
     default_statement: str = ""
+    #: Whether the *current user* may attest this record now, decided by the server with
+    #: the attest call's own gates in its order: write permission, the owner / draft rule,
+    #: then four-eyes against whoever entered the record. The panel never infers it.
+    can_attest: bool = False
+    #: Why not, when ``can_attest`` is false — the sentence the attest call would refuse
+    #: with (a friendlier one for a missing permission). ``None`` when the user may attest.
+    blocked_reason: str | None = None

@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { apiCall } from "@/lib/api";
 import { previewControlsPack, type PackDecisions, type PackPreview } from "@/lib/compliance";
 import { toast } from "@/lib/feedback";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 import { Badge } from "@/components/badges";
 import { IconCompliance } from "@/components/icons";
 
@@ -97,6 +98,10 @@ export default function ContentLibraryPage() {
      stays one click. */
   const [review, setReview] = useState<{ pack: ContentPack; preview: PackPreview; mode: "install" | "controls" } | null>(null);
   const [reviewChoice, setReviewChoice] = useState<Record<string, "reuse" | "create">>({});
+  // The review dialog is a layer of the shared escape stack; focus moves in and comes back.
+  useEscapeLayer(!!review, () => setReview(null));
+  const reviewRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(!!review, reviewRef);
 
   async function withPreview(pack: ContentPack, mode: "install" | "controls", force = false) {
     setError(null);
@@ -348,7 +353,7 @@ export default function ContentLibraryPage() {
         const willReuse = review.preview.reuse - overridden;
         return (
           <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setReview(null)}>
-            <div className="modal wide" role="dialog" aria-modal="true" aria-label={`Controls for ${review.pack.name}`}>
+            <div ref={reviewRef} tabIndex={-1} className="modal wide" role="dialog" aria-modal="true" aria-label={`Controls for ${review.pack.name}`} onKeyDown={(e) => trapTab(e, reviewRef.current)}>
               <div className="modal-head">
                 <h2>Controls for {review.pack.name}</h2>
                 <button className="x" onClick={() => setReview(null)} aria-label="Close">✕</button>

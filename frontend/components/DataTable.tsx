@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { apiCall } from "@/lib/api";
 import { type ListQuery, type Page, toQueryString, useDebounced, useLatest } from "@/lib/list";
+import { useEscapeLayer } from "@/lib/escapeLayer";
 
 /* The list workbench every register page shares.
 
@@ -522,7 +523,23 @@ export default function DataTable<T>({
                 return (
                   <tr
                     key={k}
+                    data-row-key={k}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
+                    // A row that opens its record is reachable by keyboard too: Tab lands on
+                    // it and Enter or Space opens it (a click also focuses it, so the record
+                    // gives focus back to this row when it closes).
+                    tabIndex={onRowClick ? 0 : undefined}
+                    onKeyDown={
+                      onRowClick
+                        ? (e) => {
+                            if (e.target !== e.currentTarget) return; // a button or checkbox in the row
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              onRowClick(row);
+                            }
+                          }
+                        : undefined
+                    }
                     className={[activeKey === k ? "active-row" : "", selected.has(k) ? "selected-row" : ""].join(" ").trim() || undefined}
                     style={{ cursor: onRowClick ? "pointer" : undefined }}
                   >
@@ -591,11 +608,8 @@ function ColumnsPanel<T>({
   const hiddenCols = catalogue.filter((c) => !visible.includes(c.key) && c.key !== "actions");
   const label = (k: string) => catalogue.find((c) => c.key === k)?.header ?? k;
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) { if (e.key === "Escape") onClose(); }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Esc: a layer of the shared escape stack.
+  useEscapeLayer(true, onClose);
 
   const commit = (keys: string[]) => onChange(visible.includes("actions") ? [...keys, "actions"] : keys);
 

@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { toast } from "@/lib/feedback";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 import {
   acceptSuggestedRequirements,
   bulkAcceptSuggestions,
@@ -177,13 +178,12 @@ export function BulkSuggestMappings({ controlIds, onClose, onDone }: BulkProps) 
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load suggestions"));
   }, [controlIds, minScore]);
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && !saving) onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, saving]);
+  // Esc: a layer of the shared escape stack; ignored while saving.
+  useEscapeLayer(true, () => {
+    if (!saving) onClose();
+  });
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(true, dialogRef);
 
   const total = useMemo(() => (groups ?? []).reduce((n, g) => n + g.suggestions.length, 0), [groups]);
   const withSuggestions = (groups ?? []).filter((g) => g.suggestions.length > 0);
@@ -218,7 +218,7 @@ export function BulkSuggestMappings({ controlIds, onClose, onDone }: BulkProps) 
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && !saving && onClose()}>
-      <div className="modal wide" role="dialog" aria-modal="true" aria-label="Suggest mappings">
+      <div ref={dialogRef} tabIndex={-1} className="modal wide" role="dialog" aria-modal="true" aria-label="Suggest mappings" onKeyDown={(e) => trapTab(e, dialogRef.current)}>
         <div className="modal-head">
           <h2>Suggest mappings for {controlIds.length} control{controlIds.length === 1 ? "" : "s"}</h2>
           <button className="x" onClick={onClose} aria-label="Close" disabled={saving}>✕</button>

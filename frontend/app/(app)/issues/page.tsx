@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { api, apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
@@ -17,18 +17,29 @@ import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
-import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
+import { type GraphRef } from "@/components/RelatedChips";
 import { useHasPermission } from "@/lib/tenantSettings";
 import UserPicker, { UserName } from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import BusinessUnitSelect, { UnitName } from "@/components/BusinessUnitSelect";
-import WorkflowFields from "@/components/WorkflowFields";
 import ArchivedRecords from "@/components/ArchivedRecords";
+import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import {
+  Disclosure, FactList, LabelledSearch, OpenPoints, PrimaryAction, RecordSection, RelatedGroups, SectionNav, SummaryBand,
+  approvalHintFor, approvalMetaItem, pickPrimary, primaryLabel, relatedCount, rowAction, rowLabel, useRecordCtx,
+  useRecordGovernanceData, useRecordSections, withBaseMoreItems, type MetaItem, type PrimaryCandidate, type RelatedGroup,
+} from "@/components/record";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
 import { titleCase } from "@/lib/text";
+import { plural, sentenceCase, textOnlyPerson, uniqueLabels } from "@/lib/record/text";
+import {
+  ISSUE_CLEAR_TEXT, isIssueClosed, issueClosureGuidance, issueHeadline, issueOpenPoints, issueOverdueText, issueSourceLabel,
+  issueTiles, type IssueInput,
+} from "@/lib/record/issue";
+import type { PointAction } from "@/lib/record/types";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -168,8 +179,6 @@ const ISSUE_STATUS = opts(["open", "in_progress", "remediated", "closed", "risk_
 /** What the edit form may set; closing goes through Validate and Close. */
 const OPEN_STATUS = opts(["open", "in_progress"]);
 const CLOSE_STATUS = opts(["closed", "remediated", "risk_accepted"]);
-const CLOSED_STATES = new Set(["closed", "remediated", "risk_accepted"]);
-const isClosed = (status: string) => CLOSED_STATES.has(status);
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 const CAPA_TYPE = ["corrective", "preventive"];
 /** Register filters, kept in the URL so a link can open the list already filtered
@@ -296,14 +305,13 @@ function SevBadge({ value }: { value: string | null }) {
   return <Badge tone={SEV_TONE[value] || "neutral"}>{cap(value)}</Badge>;
 }
 
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <div className="muted" style={{ fontSize: 12 }}>{label}</div>
-      <div style={{ marginTop: 2, fontSize: 13 }}>{children}</div>
-    </div>
-  );
-}
+// ------------------------------------------------------------------ record copy
+/* The issue's judgement wording (tiles, open points, headline, closure guidance) lives in
+   lib/record/issue.ts, pinned by lib/record/__fixtures__/issue-*.json. */
+const isClosed = isIssueClosed;
+
+/** Labels of the built-in fields a custom field could duplicate (admins get a note). */
+const ISSUE_BUILT_IN_LABELS = ["Owner", "Severity", "Status", "Due date", "Category", "Business unit", "Root cause", "Source"];
 
 // ------------------------------------------------------------------ form state
 type IssueForm = {
@@ -496,6 +504,28 @@ function IssuesInner() {
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
   useEffect(() => { loadSummary(); }, [loadSummary]);
 
+  // ---- the record page (dossier, record-page-spec §4.6) ----
+  // Issues have no status rules (the status-rules engine does not cover them).
+  const gov = useRecordGovernanceData("issue", detail?.id ?? null, { statusRulesModel: null });
+  const canWrite = useHasPermission("issue:write");
+  const ctx = useRecordCtx(gov, canWrite);
+  const sections = useRecordSections();
+  const cf = useCustomFieldFacts("issue", detail?.id, { builtInLabels: ISSUE_BUILT_IN_LABELS });
+  /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
+  const [editTab, setEditTab] = useState<string | undefined>(undefined);
+  const [actionFormOpen, setActionFormOpen] = useState(false);
+  const actionTriggerRef = useRef<HTMLButtonElement>(null);
+  const [progressFormOpen, setProgressFormOpen] = useState(false);
+  const progressTriggerRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { setActionFormOpen(false); setProgressFormOpen(false); }, [openId]);
+  /** After any change: the governance (primary, sign-off), the record, the list and its totals. */
+  const refresh = () => {
+    void gov.reload();
+    if (openId) loadDetail(openId);
+    reload();
+    loadSummary();
+  };
+
   // Place the open issue's source record (for the drawer link).
   const detailSourceId = detail?.source_id ?? null;
   const detailSourceType = detail?.source_type ?? "";
@@ -520,8 +550,8 @@ function IssuesInner() {
   }, [editingSourceId, editingSourceType]);
 
   // ------------------------------------------------------------- issue CRUD
-  function openNew() { setEditing(null); setF(BLANK_ISSUE); setError(null); setShowForm(true); }
-  function openEdit(i: Issue) { setEditing(i); setF(fromIssue(i)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK_ISSUE); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(i: Issue, tab?: string) { setEditing(i); setF(fromIssue(i)); setError(null); setEditTab(tab); setShowForm(true); }
   async function save() {
     setError(null); setSaving(true);
     try {
@@ -535,7 +565,7 @@ function IssuesInner() {
       } else {
         await apiCall<Issue>("POST", "/issues", payload);
       }
-      setShowForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
+      setShowForm(false); refresh();
       toast(message);
     } catch (e) { setError(errMsg(e, "Failed to save issue")); }
     finally { setSaving(false); }
@@ -561,7 +591,7 @@ function IssuesInner() {
         });
         toast(step.approve ? "New due date approved" : "Due-date change rejected");
       }
-      setStep(null); loadDetail(detail.id); reload(); loadSummary();
+      setStep(null); refresh();
     } catch (e) {
       // 409/403 bodies say exactly what is missing (open actions, evidence, validation, SoD).
       setStepError(errMsg(e, "Could not complete this step"));
@@ -582,43 +612,45 @@ function IssuesInner() {
   }
 
   // ------------------------------------------------------------- CAPA actions (inline)
-  async function addAction() {
-    if (!detail) return; setError(null);
+  /** True when the action was added (the form then closes). */
+  async function addAction(): Promise<boolean> {
+    if (!detail) return false;
     try {
       await apiCall<Issue>("POST", `/issues/${detail.id}/actions`, {
         title: ad.title, action_type: ad.action_type, owner_id: ad.owner_id,
         due_date: ad.due_date || null, status: ad.status,
       });
-      setAd(BLANK_ACTION); loadDetail(detail.id); reload(); loadSummary();
-    } catch (e) { setError(errMsg(e, "Failed to add action")); }
+      setAd(BLANK_ACTION); refresh(); toast("Action added");
+      return true;
+    } catch (e) { toast(errMsg(e, "Failed to add action"), "error"); return false; }
   }
   async function setActionStatus(lineId: string, status: string) {
-    if (!detail) return; setError(null);
+    if (!detail) return;
     try {
       await apiCall<IssueAction>("PATCH", `/issue-actions/${lineId}`, { status });
-      loadDetail(detail.id); reload();
-    } catch (e) { setError(errMsg(e, "Failed to update action")); }
+      refresh();
+    } catch (e) { toast(errMsg(e, "Failed to update action"), "error"); }
   }
   async function setActionOwner(lineId: string, ownerId: string | null) {
-    if (!detail) return; setError(null);
+    if (!detail) return;
     try {
       await apiCall<IssueAction>("PATCH", `/issue-actions/${lineId}`, { owner_id: ownerId });
-      loadDetail(detail.id);
-    } catch (e) { setError(errMsg(e, "Failed to change the action owner")); }
+      refresh();
+    } catch (e) { toast(errMsg(e, "Failed to change the action owner"), "error"); }
   }
   async function removeAction(lineId: string) {
     if (!detail) return;
     if (!(await confirmDialog({ title: "Remove this action?", danger: true }))) return;
-    setError(null);
     try {
       await apiCall<void>("DELETE", `/issue-actions/${lineId}`);
-      loadDetail(detail.id); reload();
-    } catch (e) { setError(errMsg(e, "Failed to remove action")); }
+      refresh();
+    } catch (e) { toast(errMsg(e, "Failed to remove action"), "error"); }
   }
 
   // ------------------------------------------------------------- updates (inline)
-  async function addUpdate() {
-    if (!detail) return; setError(null);
+  /** True when the update was logged (the form then closes). */
+  async function addUpdate(): Promise<boolean> {
+    if (!detail) return false;
     try {
       await apiCall<Issue>("POST", `/issues/${detail.id}/updates`, {
         note: ud.note,
@@ -627,8 +659,9 @@ function IssuesInner() {
         update_date: ud.update_date || null,
         status_change: ud.status_change,
       });
-      setUd(BLANK_UPDATE); loadDetail(detail.id); reload();
-    } catch (e) { setError(errMsg(e, "Failed to add update")); }
+      setUd(BLANK_UPDATE); refresh(); toast("Progress logged");
+      return true;
+    } catch (e) { toast(errMsg(e, "Failed to add update"), "error"); return false; }
   }
 
   const ownerName = (i: Issue) => i.owner_ref?.full_name || i.owner_ref?.email || i.owner || "";
@@ -646,7 +679,7 @@ function IssuesInner() {
     { key: "due_date", header: "Due", sortable: true, render: (i) => (i.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(i.due_date)}</span>), text: (i) => (i.due_date ? formatDate(i.due_date) : "") },
     { key: "due_date_moves", header: "Date moved", sortable: true, align: "center", hidden: true, render: (i) => (i.due_date_moves ? <Badge tone={i.due_date_moves > 1 ? "high" : "medium"}>{i.due_date_moves}×</Badge> : <span className="muted">—</span>), text: (i) => String(i.due_date_moves || 0) },
     { key: "closed_date", header: "Closed", sortable: true, hidden: true, render: (i) => <span className="muted">{formatDate(i.closed_date)}</span>, text: (i) => (i.closed_date ? formatDate(i.closed_date) : "") },
-    { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button></div> },
+    { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" {...rowAction("Edit", rowLabel(i.reference, i.title))} onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" {...rowAction("Delete", rowLabel(i.reference, i.title))} onClick={() => remove(i)}>Delete</button></div> },
   ];
 
   const filters = filterParams.values;
@@ -715,7 +748,7 @@ function IssuesInner() {
           label="Status"
           help={editing && isClosed(editing.status)
             ? "Choosing an open status reopens the issue and clears its validation."
-            : "Close an issue from its drawer with Validate and Close."}
+            : "To close an issue, use Validate… and Close… on its record."}
         >
           <Select
             value={f.status}
@@ -769,7 +802,7 @@ function IssuesInner() {
         </Field>
       </div>
       <Field label="Source reference" help='Pointer to the originating record, e.g. "AUD-004 finding 3".'>
-        <TextInput value={f.source_reference} onChange={(v) => setFF("source_reference", v)} placeholder="AUD-004 finding 3" />
+        <TextInput value={f.source_reference} onChange={(v) => setFF("source_reference", v)} placeholder="e.g. AUD-004 finding 3" />
       </Field>
       <div className="field-row">
         <Field label="Repeat finding" help="Recurrence of a previously raised issue.">
@@ -842,15 +875,104 @@ function IssuesInner() {
     </>
   );
 
+  // ------------------------------------------------------------- dossier
+  const primaryCandidates: PrimaryCandidate[] = detail ? [
+    { kind: "workflow", action: "approve" },
+    { kind: "workflow", action: "submit" },
+    {
+      kind: "custom", label: "Close…", onClick: () => openStep({ kind: "close" }),
+      when: canWrite && !isClosed(detail.status) && detail.open_action_count === 0 && detail.validation_result === "effective",
+    },
+    {
+      kind: "custom", label: "Validate…", onClick: () => openStep({ kind: "validate" }),
+      when: canWrite && !isClosed(detail.status) && !detail.validation_result,
+    },
+    { kind: "attest" },
+  ] : [];
+  const primary = pickPrimary(primaryCandidates, gov);
+  const issueInput: IssueInput | null = detail
+    ? { issue: detail, source: detailSource, meId, canApprove, primaryLabel: primary ? primaryLabel(primary) : null }
+    : null;
+
+  function openActionForm() {
+    sections.scrollTo("remediation");
+    setActionFormOpen(true);
+  }
+  function openProgressForm() {
+    sections.scrollTo("progress");
+    setProgressFormOpen(true);
+  }
+  /** Open-point fixes only move: scroll, focus, open Edit on a tab or open a form. */
+  function handlePoint(a: PointAction) {
+    if (!detail) return;
+    if (a.kind === "section") sections.scrollTo(a.target);
+    else if (a.kind === "edit") openEdit(detail, a.target);
+    else if (a.kind === "focus") document.getElementById(a.target)?.focus();
+    else if (a.kind === "attest") gov.openAttest();
+    else if (a.kind === "open" && a.target === "add-action") openActionForm();
+  }
+
+  const detailOwner = detail ? ownerName(detail) : "";
+  // Header meta (record-page-spec §4.6, v1.1 D1): Issue status, Record approval, then
+  // Severity, Owner, Due, Raised against.
+  const statusMeta: MetaItem | undefined = detail ? {
+    key: "status", label: "Issue status",
+    value: <Badge tone={STATUS_TONE[detail.status] || "neutral"} asIs>{sentenceCase(detail.status)}</Badge>,
+    hint: "Where the issue is in remediation. Separate from record approval.",
+  } : undefined;
+  const sourceText = detail ? issueSourceLabel(detail, detailSource) : null;
+  const issueMeta: MetaItem[] = detail ? [
+    { key: "severity", label: "Severity", value: detail.severity ? <Badge tone={SEV_TONE[detail.severity] || "neutral"} asIs>{sentenceCase(detail.severity)}</Badge> : null },
+    {
+      key: "owner", label: "Owner", value: detailOwner || null, hint: "Accountable for remediation.",
+      // Free text with no person picked is a label nobody can be notified at.
+      gap: !detailOwner ? { text: "Not assigned", fix: canWrite ? { label: "Assign", onClick: () => openEdit(detail, "general") } : undefined }
+        : textOnlyPerson(detail.owner_id, detail.owner) ? { text: "Text only", fix: canWrite ? { label: "Pick a person", onClick: () => openEdit(detail, "general") } : undefined }
+        : undefined,
+    },
+    {
+      key: "due", label: "Due",
+      value: detail.is_overdue && detail.due_date
+        ? <Badge tone="high" asIs>{issueOverdueText(detail, ctx.now)}</Badge>
+        : detail.due_date ? formatDate(detail.due_date) : null,
+      sub: detail.due_date_moves > 0 ? `moved ${detail.due_date_moves}×` : undefined,
+      hint: "Target remediation date. Moving an agreed date needs a reason and is logged.",
+      // An open issue with no target date can never go overdue: a gap, not a neutral blank.
+      gap: detail.due_date || isClosed(detail.status) ? undefined
+        : { text: "Not set", fix: canWrite ? { label: "Set due date", onClick: () => openEdit(detail, "remediation") } : undefined },
+    },
+    {
+      key: "source", label: "Raised against",
+      value: !sourceText ? <span className="muted">Not linked</span>
+        : !detailSource || detailSource.kind === OTHER_KIND ? <span className="muted">{sourceText}</span>
+        : <Link href={`${SOURCE_HREF[detailSource.kind]}?id=${detail.source_id}`}>{sourceText}</Link>,
+      sub: sentenceCase(detail.source_type || "other"),
+    },
+  ] : [];
+
+  const itAssets = detail ? detail.assets.filter((a) => a.asset_class === "it_asset") : [];
+  const linkGroups: RelatedGroup[] = detail ? [
+    { key: "risks", label: "Risks", items: detail.risks, href: "/risks" },
+    { key: "controls", label: "Controls", items: detail.controls, href: "/controls" },
+    { key: "requirements", label: "Compliance requirements", items: detail.requirements, href: "/compliance" },
+    ...(itAssets.length ? [{ key: "it_assets", label: "IT assets", items: itAssets, href: "/it-assets" }] : []),
+    {
+      key: "info_assets", label: itAssets.length ? "Information assets" : "Assets",
+      items: detail.assets.filter((a) => a.asset_class !== "it_asset"), href: "/information-assets",
+    },
+    { key: "vendors", label: "Third parties", items: detail.vendors, href: "/vendors" },
+  ] : [];
+
   // ------------------------------------------------------------- render
   return (
     <>
-      <div className="page-head row-between">
-        <div>
+      <div className="page-head row-between" style={{ flexWrap: "wrap" }}>
+        {/* The actions wrap under the title on a phone instead of widening the page. */}
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
           <h1>Issues &amp; Actions</h1>
           <p>One unified register of findings and corrective/preventive actions (CAPA) aggregated from audit, compliance, RCSA, Shariah, assessments, incidents and regulatory inspections.</p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <ImportExport resource="issues" label="Issues" onDone={() => setRefreshKey((k) => k + 1)} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> New issue
@@ -930,301 +1052,352 @@ function IssuesInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="issue" entityId={detail.id} /> : null}
+        variant="dossier"
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
-        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
-        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.source_type)}${ownerName(detail) ? " · owner " + ownerName(detail) : ""} · ${detail.age_days}d old` : ""}
-        width={820}
-        actions={detail && (
-          <>
-            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
-            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
-          </>
-        )}
+        governance={gov}
+        identity={detail ? {
+          kind: "Issue",
+          backLabel: "Issues & Actions",
+          reference: detail.reference || null,
+          name: detail.title,
+          lead: detail.description || null,
+          badges: (detail.repeat_finding || detail.regulator_related) ? (
+            <>
+              {detail.repeat_finding && <Badge tone="medium" asIs>Repeat finding</Badge>}
+              {detail.regulator_related && <Badge tone="info" asIs>Regulator-related</Badge>}
+            </>
+          ) : null,
+          status: statusMeta,
+          approval: approvalMetaItem(gov, ctx.fmt, approvalHintFor("Issue status")),
+          meta: issueMeta,
+          statusRules: null,
+        } : undefined}
+        primaryAction={<PrimaryAction candidates={primaryCandidates} onChanged={refresh} />}
+        onEdit={detail && canWrite ? () => openEdit(detail) : undefined}
+        moreItems={detail ? withBaseMoreItems(
+          canWrite ? [
+            ...(!isClosed(detail.status) ? [
+              { label: "Validate…", onClick: () => openStep({ kind: "validate" }), hint: "Record whether the fix works" },
+              { label: "Close…", onClick: () => openStep({ kind: "close" }) },
+            ] : []),
+            { label: "Add action", onClick: openActionForm },
+            { label: "Log progress", onClick: openProgressForm },
+            { label: "Change due date…", onClick: () => openEdit(detail, "remediation"), hint: "Asks for a reason and records it" },
+          ] : [],
+          { onDelete: canWrite ? () => remove(detail) : undefined },
+        ) : []}
+        aside={detail ? (
+          <RecordPanels model="issue" entityId={detail.id} layout="dossier" signOff={{ onChanged: refresh }} trail={{ reference: detail.reference }} />
+        ) : null}
       >
-        {detail && (
+        {detail && issueInput && (
           <>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-              <SevBadge value={detail.severity} />
-              <StatusBadge value={detail.status} />
-              {detail.is_overdue && <Badge tone="high">Overdue</Badge>}
-            </div>
+            <SummaryBand tiles={issueTiles(issueInput, ctx)} headline={issueHeadline(issueInput, ctx)} />
+            <OpenPoints
+              points={issueOpenPoints(issueInput, ctx)}
+              canAct={canWrite}
+              onAction={handlePoint}
+              clearText={ISSUE_CLEAR_TEXT}
+            />
+            <SectionNav />
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 12, padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <Fact label="Owner"><UserName user={detail.owner_ref} fallback={detail.owner} /></Fact>
-              <Fact label="Business unit"><UnitName unit={detail.business_unit_ref} fallback={detail.business_unit} /></Fact>
-              <Fact label="Category">{detail.category_ref?.label || detail.category || <span className="muted">—</span>}</Fact>
-              <Fact label="Identified">{formatDate(detail.identified_date)}</Fact>
-              <Fact label="Due">
-                {formatDate(detail.due_date)}
-                {detail.due_date_moves > 0 && (
-                  <div className="muted" style={{ fontSize: 11.5 }}>
-                    Date moved {detail.due_date_moves} {detail.due_date_moves === 1 ? "time" : "times"}
-                  </div>
-                )}
-              </Fact>
-              <Fact label="Closed">{detail.closed_date ? formatDate(detail.closed_date) : <span className="muted">—</span>}</Fact>
-              <Fact label="Root cause category">{detail.root_cause_category_ref?.label || <span className="muted">—</span>}</Fact>
-              <Fact label="Source">
-                {cap(detail.source_type)}
-                {detail.source_reference ? <span className="muted"> · {detail.source_reference}</span> : null}
-              </Fact>
-              {detail.source_id && (
-                <Fact label="Raised against">
-                  {!detailSource ? (
-                    <span className="muted">Loading…</span>
-                  ) : detailSource.kind === OTHER_KIND ? (
-                    <span className="muted">A record in another module</span>
-                  ) : (
-                    <Link href={`${SOURCE_HREF[detailSource.kind]}?id=${detail.source_id}`}>{detailSource.label}</Link>
-                  )}
-                </Fact>
-              )}
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, marginBottom: 16 }}>
-              <RelatedChips label="Risks" items={detail.risks} href="/risks" />
-              <RelatedChips label="Controls" items={detail.controls} href="/controls" />
-              <RelatedChips label="Compliance requirements" items={detail.requirements} href="/compliance" />
-              {detail.assets.some((a) => a.asset_class === "it_asset") && (
-                <RelatedChips label="IT assets" items={detail.assets.filter((a) => a.asset_class === "it_asset")} href="/it-assets" />
-              )}
-              <RelatedChips
-                label={detail.assets.some((a) => a.asset_class === "it_asset") ? "Information assets" : "Assets"}
-                items={detail.assets.filter((a) => a.asset_class !== "it_asset")}
-                href="/information-assets"
+            <RecordSection
+              id="finding"
+              title="Finding"
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "remediation")}>Edit finding</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "root_cause", label: "Root cause", value: detail.root_cause?.trim() || null, wide: true, tab: "remediation" },
+                  { key: "response", label: "Management response", value: detail.management_response?.trim() || null, wide: true, tab: "remediation" },
+                  { key: "rc_category", label: "Root-cause category", value: detail.root_cause_category_ref?.label || null, tab: "remediation" },
+                  { key: "category", label: "Category", value: detail.category_ref?.label || detail.category || null, tab: "classification" },
+                  {
+                    key: "unit", label: "Business unit", tab: "general",
+                    value: detail.business_unit_ref || detail.business_unit ? <UnitName unit={detail.business_unit_ref} fallback={detail.business_unit} /> : null,
+                  },
+                  { key: "identified", label: "Identified", value: detail.identified_date ? formatDate(detail.identified_date) : null, tab: "remediation" },
+                  {
+                    key: "source", label: "Source", tab: "classification",
+                    value: `${sentenceCase(detail.source_type || "other")}${detail.source_reference ? ` · ${detail.source_reference}` : ""}`,
+                  },
+                ]}
+                onFillIn={canWrite ? (tab) => openEdit(detail, tab) : undefined}
               />
-              <RelatedChips label="Third parties" items={detail.vendors} href="/vendors" />
-            </div>
+            </RecordSection>
 
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head row-between">
-                <h3>Validation &amp; closure</h3>
-                {!isClosed(detail.status) && (
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button className="btn secondary sm" onClick={() => openStep({ kind: "validate" })}>Validate</button>
-                    <button className="btn sm" onClick={() => openStep({ kind: "close" })}>Close</button>
-                  </div>
-                )}
-              </div>
-              <div className="card-pad" style={{ fontSize: 13 }}>
-                {detail.validation_result ? (
-                  <div style={{ display: "grid", gap: 4 }}>
-                    <div>
-                      <Badge tone={detail.validation_result === "effective" ? "low" : "high"}>
-                        {detail.validation_result === "effective" ? "Validated effective" : "Validated not effective"}
-                      </Badge>{" "}
-                      <span className="muted">
-                        by <UserName user={detail.validated_by_ref} fallback="" /> · {formatDateTime(detail.validated_at)}
-                      </span>
+            <RecordSection
+              id="remediation"
+              title="Remediation (CAPA)"
+              count={detail.actions.length}
+              sub={detail.actions.length ? "Marking an action done stamps its completion date" : undefined}
+              actions={canWrite ? (
+                <button
+                  ref={actionTriggerRef}
+                  type="button"
+                  className="btn secondary sm"
+                  aria-expanded={actionFormOpen}
+                  aria-controls="issue-add-action"
+                  onClick={() => setActionFormOpen((v) => !v)}
+                >
+                  Add action
+                </button>
+              ) : undefined}
+              empty={detail.actions.length === 0 && !actionFormOpen ? "No actions recorded yet." : undefined}
+            >
+              <Disclosure label="Add action" hideTrigger open={actionFormOpen} onOpenChange={setActionFormOpen} id="issue-add-action" triggerRef={actionTriggerRef}>
+                {(close) => (
+                  <form className="row" onSubmit={async (ev) => { ev.preventDefault(); if (await addAction()) close(); }}>
+                    <div style={{ flex: "1 1 200px" }}>
+                      <label className="label" htmlFor="capa-title">Action title</label>
+                      <input id="capa-title" className="input" value={ad.title} onChange={(ev) => setAD("title", ev.target.value)} placeholder="Corrective action" required />
                     </div>
-                    {detail.validation_note && <div>{detail.validation_note}</div>}
-                  </div>
-                ) : (
-                  <span className="muted">Not validated yet.</span>
+                    <div style={{ width: 140 }}>
+                      <label className="label" htmlFor="capa-type">Type</label>
+                      <select id="capa-type" className="select" value={ad.action_type} onChange={(ev) => setAD("action_type", ev.target.value)}>
+                        {CAPA_TYPE.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                      </select>
+                    </div>
+                    <div style={{ width: 210 }}>
+                      <LabelledSearch label="Owner">
+                        <UserPicker value={ad.owner_id} onChange={(id) => setAD("owner_id", id)} placeholder="Action owner…" />
+                      </LabelledSearch>
+                    </div>
+                    <div style={{ width: 140 }}>
+                      <label className="label" htmlFor="capa-due">Due date</label>
+                      <input id="capa-due" className="input" type="date" value={ad.due_date} onChange={(ev) => setAD("due_date", ev.target.value)} />
+                    </div>
+                    <button type="submit" className="btn secondary sm" disabled={!ad.title.trim()}>Add</button>
+                    <button type="button" className="btn secondary sm" onClick={close}>Cancel</button>
+                  </form>
                 )}
-                {isClosed(detail.status) ? (
-                  <p className="muted" style={{ margin: "10px 0 0" }}>
-                    {cap(detail.status)} on {formatDate(detail.closed_date)}. To reopen, edit the issue and choose an open status — its validation is cleared.
-                  </p>
-                ) : (
-                  <p className="muted" style={{ margin: "10px 0 0" }}>
-                    To close: finish or cancel every action ({detail.open_action_count} open), attach closure evidence
-                    (Attachments / Files), and have someone other than the owner and the person who raised it record the fix as effective.
-                    Closing as risk accepted needs an approved acceptance on a linked risk instead, or an approver&apos;s note.
-                  </p>
-                )}
-              </div>
-            </div>
-
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head row-between">
-                <h3>Due date history</h3>
-                <span className="muted" style={{ fontSize: 12.5 }}>
-                  {detail.due_date_moves
-                    ? `Date moved ${detail.due_date_moves} ${detail.due_date_moves === 1 ? "time" : "times"}`
-                    : "Date never moved"}
-                </span>
-              </div>
-              <div className="card-pad">
-                {detail.due_date_changes.length ? (
-                  <div className="table-wrap">
-                    <table>
-                      <thead><tr><th>Asked</th><th>From</th><th>To</th><th>Reason</th><th>Asked by</th><th>Status</th><th></th></tr></thead>
-                      <tbody>
-                        {[...detail.due_date_changes].reverse().map((c) => {
-                          const canDecide = c.status === "pending" && canApprove && !!meId && c.requested_by_id !== meId;
-                          return (
-                            <tr key={c.id}>
-                              <td className="muted">{formatDate(c.created_at)}</td>
-                              <td className="muted">{formatDate(c.old_due_date)}</td>
-                              <td>{c.new_due_date ? formatDate(c.new_due_date) : <span className="muted">No date</span>}</td>
-                              <td className="cell-title">{c.reason || "—"}</td>
-                              <td className="muted"><UserName user={c.requested_by_ref} fallback="" /></td>
-                              <td>
-                                <Badge tone={c.status === "approved" ? "low" : c.status === "rejected" ? "neutral" : "medium"}>
-                                  {c.status === "pending" ? "Awaiting approval" : cap(c.status)}
-                                </Badge>
-                                {c.approved_by_ref && (
-                                  <div className="muted" style={{ fontSize: 11.5 }}>
-                                    <UserName user={c.approved_by_ref} fallback="" /> · {formatDateTime(c.approved_at)}
-                                  </div>
-                                )}
-                              </td>
-                              <td style={{ whiteSpace: "nowrap" }}>
-                                {canDecide && (
-                                  <>
-                                    <button className="btn sm" onClick={() => openStep({ kind: "decide", change: c, approve: true })}>Approve</button>{" "}
-                                    <button className="btn secondary sm" onClick={() => openStep({ kind: "decide", change: c, approve: false })}>Reject</button>
-                                  </>
-                                )}
-                                {c.status === "pending" && !canDecide && (
-                                  <span className="muted" style={{ fontSize: 11.5 }}>
-                                    {c.requested_by_id === meId ? "Someone else must approve" : "Needs an approver"}
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <span className="muted" style={{ fontSize: 13 }}>
-                    No changes. Editing the due date asks for a reason and records it here.
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Approval</h3></div>
-              <div className="card-pad">
-                <WorkflowFields
-                  entityType="issue"
-                  entityId={detail.id}
-                  onChanged={() => { loadDetail(detail.id); reload(); }}
-                />
-              </div>
-            </div>
-
-            {(detail.description || detail.root_cause || detail.management_response) && (
-              <div style={{ marginBottom: 16, display: "grid", gap: 8 }}>
-                {detail.description && <div><span className="muted" style={{ fontSize: 12 }}>Description</span><div>{detail.description}</div></div>}
-                {detail.root_cause && <div><span className="muted" style={{ fontSize: 12 }}>Root cause</span><div>{detail.root_cause}</div></div>}
-                {detail.management_response && <div><span className="muted" style={{ fontSize: 12 }}>Management response</span><div>{detail.management_response}</div></div>}
-              </div>
-            )}
-
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Corrective &amp; preventive actions (CAPA)</h3></div>
-              <div className="card-pad">
-                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
-                  The remediation plan for this issue. Marking an action done stamps its completion date.
-                </p>
-                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); addAction(); }}>
-                  <div style={{ flex: "1 1 200px" }}>
-                    <label className="label">Action title</label>
-                    <input className="input" value={ad.title} onChange={(ev) => setAD("title", ev.target.value)} placeholder="Corrective action" required />
-                  </div>
-                  <div style={{ width: 140 }}>
-                    <label className="label">Type</label>
-                    <select className="select" value={ad.action_type} onChange={(ev) => setAD("action_type", ev.target.value)}>
-                      {CAPA_TYPE.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                    </select>
-                  </div>
-                  <div style={{ width: 210 }}>
-                    <label className="label">Owner</label>
-                    <UserPicker value={ad.owner_id} onChange={(id) => setAD("owner_id", id)} placeholder="Action owner…" />
-                  </div>
-                  <div style={{ width: 140 }}>
-                    <label className="label">Due date</label>
-                    <input className="input" type="date" value={ad.due_date} onChange={(ev) => setAD("due_date", ev.target.value)} />
-                  </div>
-                  <button className="btn">Add</button>
-                </form>
-
-                <div className="table-wrap">
-                  <table>
-                    <thead><tr><th>Title</th><th>Type</th><th>Owner</th><th>Due</th><th>Completed</th><th>Status</th><th></th></tr></thead>
+              </Disclosure>
+              {detail.actions.length > 0 && (
+                <div className="rec-table-wrap" style={{ marginTop: actionFormOpen ? 12 : 0 }}>
+                  <table className="compact">
+                    <thead><tr><th>Title</th><th>Type</th><th>Owner</th><th>Due</th><th>Completed</th><th>Status</th><th aria-label="Actions" /></tr></thead>
                     <tbody>
-                      {detail.actions.map((a) => (
+                      {detail.actions.map((a, ai, all) => {
+                        // The row's name for its controls (decision D3): title, and the due
+                        // date when set; still unique when two actions share both.
+                        const al = uniqueLabels(all.map((x) => (x.due_date ? `${x.title} (due ${formatDate(x.due_date)})` : x.title)))[ai];
+                        return (
                         <tr key={a.id}>
                           <td className="cell-title">{a.title}</td>
-                          <td><Badge tone={a.action_type === "preventive" ? "info" : "neutral"}>{cap(a.action_type)}</Badge></td>
-                          <td style={{ minWidth: 180 }}>
-                            <UserPicker
-                              value={a.owner_id}
-                              selected={a.owner_ref}
-                              legacyText={a.owner_id ? null : a.owner}
-                              onChange={(id) => setActionOwner(a.id, id)}
-                              placeholder="No owner"
-                            />
+                          <td><Badge tone={a.action_type === "preventive" ? "info" : "neutral"} asIs>{sentenceCase(a.action_type)}</Badge></td>
+                          <td style={{ minWidth: canWrite ? 180 : undefined }}>
+                            {canWrite ? (
+                              <LabelledSearch label={`Owner of ${al}`} hideLabel>
+                                <UserPicker
+                                  value={a.owner_id}
+                                  selected={a.owner_ref}
+                                  legacyText={a.owner_id ? null : a.owner}
+                                  onChange={(id) => setActionOwner(a.id, id)}
+                                  placeholder="No owner"
+                                />
+                              </LabelledSearch>
+                            ) : a.owner_ref || a.owner ? <UserName user={a.owner_ref} fallback={a.owner} /> : <span className="muted">Not assigned</span>}
                           </td>
-                          <td>{a.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(a.due_date)}</span>}</td>
-                          <td className="muted">{formatDate(a.completed_date)}</td>
+                          <td style={{ whiteSpace: "nowrap" }}>{a.is_overdue ? <Badge tone="high" asIs>Overdue</Badge> : a.due_date ? <span className="muted">{formatDate(a.due_date)}</span> : <span className="muted">Not set</span>}</td>
+                          <td className="muted" style={{ whiteSpace: "nowrap" }}>{a.completed_date ? formatDate(a.completed_date) : "Not yet"}</td>
                           <td>
-                            <select className="select" value={a.status} onChange={(ev) => setActionStatus(a.id, ev.target.value)} style={{ padding: "2px 6px", height: "auto" }}>
-                              {ACTION_STATUS.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                            </select>
+                            {canWrite ? (
+                              <select className="select" value={a.status} aria-label={`Status of ${al}`} onChange={(ev) => setActionStatus(a.id, ev.target.value)} style={{ padding: "2px 6px", height: "auto" }}>
+                                {ACTION_STATUS.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                              </select>
+                            ) : sentenceCase(a.status)}
                           </td>
-                          <td><button className="btn secondary sm" onClick={() => removeAction(a.id)}>Remove</button></td>
+                          <td>{canWrite && <button type="button" className="btn secondary sm" {...rowAction("Remove", al)} onClick={() => removeAction(a.id)}>Remove</button>}</td>
                         </tr>
-                      ))}
-                      {detail.actions.length === 0 && (<tr><td colSpan={7}><span className="muted">No actions recorded yet.</span></td></tr>)}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
-              </div>
-            </div>
+              )}
+            </RecordSection>
 
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Progress log</h3></div>
-              <div className="card-pad">
-                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>Chronological remediation updates and status changes.</p>
-                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); addUpdate(); }}>
-                  <div style={{ flex: "1 1 220px" }}>
-                    <label className="label">Update note</label>
-                    <input className="input" value={ud.note} onChange={(ev) => setUD("note", ev.target.value)} placeholder="Progress note" required />
-                  </div>
-                  <div style={{ width: 200 }}>
-                    <label className="label">Author</label>
-                    <UserPicker value={ud.author_id} onChange={(id) => setUD("author_id", id)} placeholder="You" />
-                  </div>
-                  <div style={{ width: 140 }}>
-                    <label className="label">Date</label>
-                    <input className="input" type="date" value={ud.update_date} onChange={(ev) => setUD("update_date", ev.target.value)} />
-                  </div>
-                  <div style={{ width: 160 }}>
-                    <label className="label">Status change</label>
-                    <input className="input" value={ud.status_change} onChange={(ev) => setUD("status_change", ev.target.value)} placeholder="open → in_progress" />
-                  </div>
-                  <button className="btn">Log</button>
-                </form>
-
-                <div className="table-wrap">
-                  <table>
+            <RecordSection
+              id="progress"
+              title="Progress log"
+              count={detail.updates.length}
+              actions={canWrite ? (
+                <button
+                  ref={progressTriggerRef}
+                  type="button"
+                  className="btn secondary sm"
+                  aria-expanded={progressFormOpen}
+                  aria-controls="issue-log-progress"
+                  onClick={() => setProgressFormOpen((v) => !v)}
+                >
+                  Log progress
+                </button>
+              ) : undefined}
+              empty={detail.updates.length === 0 && !progressFormOpen ? "No progress logged yet." : undefined}
+            >
+              <Disclosure label="Log progress" hideTrigger open={progressFormOpen} onOpenChange={setProgressFormOpen} id="issue-log-progress" triggerRef={progressTriggerRef}>
+                {(close) => (
+                  <form className="row" onSubmit={async (ev) => { ev.preventDefault(); if (await addUpdate()) close(); }}>
+                    <div style={{ flex: "1 1 220px" }}>
+                      <label className="label" htmlFor="upd-note">Update note</label>
+                      <input id="upd-note" className="input" value={ud.note} onChange={(ev) => setUD("note", ev.target.value)} placeholder="Progress note" required />
+                    </div>
+                    <div style={{ width: 200 }}>
+                      <LabelledSearch label="Author">
+                        <UserPicker value={ud.author_id} onChange={(id) => setUD("author_id", id)} placeholder="You" />
+                      </LabelledSearch>
+                    </div>
+                    <div style={{ width: 140 }}>
+                      <label className="label" htmlFor="upd-date">Date</label>
+                      <input id="upd-date" className="input" type="date" value={ud.update_date} onChange={(ev) => setUD("update_date", ev.target.value)} />
+                    </div>
+                    <div style={{ width: 160 }}>
+                      <label className="label" htmlFor="upd-status">Status change</label>
+                      <input id="upd-status" className="input" value={ud.status_change} onChange={(ev) => setUD("status_change", ev.target.value)} placeholder="open → in_progress" />
+                    </div>
+                    <button type="submit" className="btn secondary sm" disabled={!ud.note.trim()}>Log</button>
+                    <button type="button" className="btn secondary sm" onClick={close}>Cancel</button>
+                  </form>
+                )}
+              </Disclosure>
+              {detail.updates.length > 0 && (
+                <div className="rec-table-wrap" style={{ marginTop: progressFormOpen ? 12 : 0 }}>
+                  <table className="compact">
                     <thead><tr><th>Date</th><th>Author</th><th>Note</th><th>Status change</th></tr></thead>
                     <tbody>
                       {[...detail.updates]
                         .sort((a, b) => (b.update_date || "").localeCompare(a.update_date || ""))
                         .map((u) => (
                           <tr key={u.id}>
-                            <td className="muted">{formatDate(u.update_date)}</td>
+                            <td className="muted" style={{ whiteSpace: "nowrap" }}>{u.update_date ? formatDate(u.update_date) : "Not dated"}</td>
                             <td className="muted"><UserName user={u.author_ref} fallback={u.author} /></td>
-                            <td className="cell-title">{u.note || "—"}</td>
-                            <td className="muted">{u.status_change || "—"}</td>
+                            <td className="cell-title">{u.note || <span className="muted">No note</span>}</td>
+                            <td className="muted">{u.status_change || "None"}</td>
                           </tr>
                         ))}
-                      {detail.updates.length === 0 && (<tr><td colSpan={4}><span className="muted">No progress logged yet.</span></td></tr>)}
                     </tbody>
                   </table>
                 </div>
-              </div>
-            </div>
+              )}
+            </RecordSection>
 
+            <RecordSection
+              id="due"
+              title="Due date history"
+              count={detail.due_date_changes.length}
+              sub={detail.due_date_moves ? `Date moved ${plural(detail.due_date_moves, "time")}` : undefined}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "remediation")}>Change due date</button> : undefined}
+              empty={detail.due_date_changes.length === 0 ? "Date never moved. Editing the due date asks for a reason and records it here." : undefined}
+            >
+              <div className="rec-table-wrap">
+                <table className="compact">
+                  <thead><tr><th>Asked</th><th>From</th><th>To</th><th>Reason</th><th>Asked by</th><th>Status</th><th aria-label="Decision" /></tr></thead>
+                  <tbody>
+                    {[...detail.due_date_changes].reverse().map((c) => {
+                      const canDecide = c.status === "pending" && canApprove && !!meId && c.requested_by_id !== meId;
+                      return (
+                        <tr key={c.id}>
+                          <td className="muted" style={{ whiteSpace: "nowrap" }}>{formatDate(c.created_at)}</td>
+                          <td className="muted" style={{ whiteSpace: "nowrap" }}>{c.old_due_date ? formatDate(c.old_due_date) : "No date"}</td>
+                          <td style={{ whiteSpace: "nowrap" }}>{c.new_due_date ? formatDate(c.new_due_date) : <span className="muted">No date</span>}</td>
+                          <td className="cell-title">{c.reason || <span className="muted">No reason</span>}</td>
+                          <td className="muted"><UserName user={c.requested_by_ref} fallback="" /></td>
+                          <td>
+                            <Badge tone={c.status === "approved" ? "low" : c.status === "rejected" ? "neutral" : "medium"} asIs>
+                              {c.status === "pending" ? "Awaiting approval" : sentenceCase(c.status)}
+                            </Badge>
+                            {c.approved_by_ref && (
+                              <div className="muted" style={{ fontSize: 11.5 }}>
+                                <UserName user={c.approved_by_ref} fallback="" /> · {formatDateTime(c.approved_at)}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            {canDecide && (
+                              <>
+                                <button type="button" className="btn secondary sm" {...rowAction("Approve", `the move to ${c.new_due_date ? formatDate(c.new_due_date) : "no date"}`)} onClick={() => openStep({ kind: "decide", change: c, approve: true })}>Approve</button>{" "}
+                                <button type="button" className="btn secondary sm" {...rowAction("Reject", `the move to ${c.new_due_date ? formatDate(c.new_due_date) : "no date"}`)} onClick={() => openStep({ kind: "decide", change: c, approve: false })}>Reject</button>
+                              </>
+                            )}
+                            {c.status === "pending" && !canDecide && (
+                              <span className="muted" style={{ fontSize: 11.5 }}>
+                                {c.requested_by_id === meId ? "Someone else must approve" : "Needs an approver"}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </RecordSection>
+
+            <RecordSection
+              id="closure"
+              title="Validation & closure"
+              actions={!isClosed(detail.status) && canWrite ? (
+                <>
+                  <button type="button" className="btn secondary sm" aria-label={`Validate ${detail.reference || "this issue"}`} onClick={() => openStep({ kind: "validate" })}>Validate…</button>
+                  <button type="button" className="btn secondary sm" aria-label={`Close ${detail.reference || "this issue"}`} onClick={() => openStep({ kind: "close" })}>Close…</button>
+                </>
+              ) : undefined}
+            >
+              <div style={{ fontSize: 13 }}>
+                {detail.validation_result ? (
+                  <div style={{ display: "grid", gap: 4 }}>
+                    <div>
+                      <Badge tone={detail.validation_result === "effective" ? "low" : "high"} asIs>
+                        {detail.validation_result === "effective" ? "Validated effective" : "Validated not effective"}
+                      </Badge>{" "}
+                      <span className="muted">
+                        by <UserName user={detail.validated_by_ref} fallback="" /> · {formatDateTime(detail.validated_at)}
+                      </span>
+                    </div>
+                    {detail.validation_note && <p className="rec-quote">{detail.validation_note}</p>}
+                  </div>
+                ) : (
+                  <span className="muted">Not validated yet.</span>
+                )}
+                {isClosed(detail.status) ? (
+                  <p className="muted" style={{ margin: "10px 0 0" }}>
+                    {sentenceCase(detail.status)} on {formatDate(detail.closed_date)}. To reopen, edit the issue and choose an open status — its validation is cleared.
+                  </p>
+                ) : (
+                  <p className="muted" style={{ margin: "10px 0 0", maxWidth: "86ch" }}>{issueClosureGuidance(detail.open_action_count)}</p>
+                )}
+              </div>
+            </RecordSection>
+
+            <RecordSection
+              id="details"
+              title="Details"
+              actions={canWrite ? <button type="button" className="btn secondary sm" aria-label="Edit details" onClick={() => openEdit(detail)}>Edit</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "repeat", label: "Repeat finding", value: detail.repeat_finding ? "Yes" : "No", tab: "classification" },
+                  { key: "regulator", label: "Regulator-related", value: detail.regulator_related ? "Yes" : "No", tab: "classification" },
+                  { key: "closed", label: "Closed", value: detail.closed_date ? formatDate(detail.closed_date) : "Not closed" },
+                  { key: "created", label: "Created", value: detail.created_at ? formatDate(detail.created_at) : null },
+                  ...cf.facts,
+                ]}
+                onFillIn={canWrite ? (tab) => (tab === "custom" ? cf.setEditing(true) : openEdit(detail, tab)) : undefined}
+              />
+              {cf.editor}
+              {cf.editLink(canWrite)}
+            </RecordSection>
+
+            <RecordSection
+              id="linked"
+              title="Linked records"
+              count={relatedCount(linkGroups)}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "links")}>Link records</button> : undefined}
+            >
+              {/* The head holds "Link records"; the empty line needs no second one (v1.1 D3). */}
+              <RelatedGroups groups={linkGroups} />
+            </RecordSection>
           </>
         )}
       </RecordDrawer>
@@ -1240,6 +1413,7 @@ function IssuesInner() {
             { id: "links", label: "Links", content: linksTab },
             { id: "remediation", label: "Remediation", content: remediationTab },
           ]}
+          initialTab={editTab}
           onClose={() => setShowForm(false)}
           onSave={save}
           saving={saving}

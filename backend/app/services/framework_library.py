@@ -4062,8 +4062,11 @@ async def install_controls_pack(
 
     Every new control starts ``not_assessed`` / ``planned``: a freshly installed
     catalogue must grant no residual credit until somebody has tested something.
-    ``classification`` records the framework, so the catalogue can be grouped by where
-    its controls came from. Raises 422 for a decision the plan cannot honour.
+    ``classification`` is left blank: it is the control's governed classification
+    (a ``control_classification`` lookup), not its source, and writing the framework's
+    name there minted a lookup value per framework that then read as a classification
+    (spec B10a). Where a control came from is its requirement links — each clause names
+    its framework. Raises 422 for a decision the plan cannot honour.
     """
     from fastapi import HTTPException
     from sqlalchemy import select
@@ -4111,7 +4114,6 @@ async def install_controls_pack(
                 name=step.title,
                 description=step.description,
                 objective=step.description,
-                classification=tpl["name"],
                 control_type=ControlType.production,
                 status=ControlStatus.planned,
                 effectiveness=ControlEffectiveness.not_assessed,

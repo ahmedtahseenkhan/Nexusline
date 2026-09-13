@@ -1,9 +1,10 @@
 "use client";
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState, useRef } from "react";
 import { api, type OrphanedRisk } from "@/lib/api";
 import { Badge } from "@/components/badges";
 import { Field, TextArea } from "@/components/fields";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 
 /* Housekeeping for the register: risks whose linked assets were all deleted and
    that link to nothing else live — no control, business unit, process, policy,
@@ -53,14 +54,14 @@ function CleanupModal({ onClose, onDone }: Props & { onClose: () => void }) {
   const [kept, setKept] = useState(0);
   const [reason, setReason] = useState("");
 
+  // Esc: a layer of the shared escape stack.
+  useEscapeLayer(true, onClose);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(true, dialogRef);
+
   useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
     return () => {
-      window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
   }, [onClose]);
@@ -109,7 +110,7 @@ function CleanupModal({ onClose, onDone }: Props & { onClose: () => void }) {
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wide" role="dialog" aria-modal="true" aria-label="Review risks with no live links">
+      <div ref={dialogRef} tabIndex={-1} className="modal wide" role="dialog" aria-modal="true" aria-label="Review risks with no live links" onKeyDown={(e) => trapTab(e, dialogRef.current)}>
         <div className="modal-head">
           <h2>Review risks with no live links</h2>
           <button className="x" onClick={onClose} aria-label="Close">✕</button>

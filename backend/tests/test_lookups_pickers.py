@@ -225,8 +225,8 @@ def test_seed_content():
             "United Kingdom", "United States", "China", "India", "Singapore", "Germany",
             "Ireland", "Netherlands"} <= countries
     assert {"sbp", "secp", "fmu", "pta", "fbr", "nacta"} == {d.value for d in DEFAULT_LOOKUPS["regulator"]}
-    assert [d.label for d in DEFAULT_LOOKUPS["control_classification"]] == [
-        "Preventive", "Detective", "Corrective", "Directive"]
+    # The four natures are the Nature field's, not classifications (record-page B10a).
+    assert [d.label for d in DEFAULT_LOOKUPS["control_classification"]] == []
 
 
 def test_default_values_are_unique_within_each_list():

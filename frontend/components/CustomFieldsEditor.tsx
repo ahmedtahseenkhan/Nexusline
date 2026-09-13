@@ -1,11 +1,13 @@
 "use client";
 
+import { useId } from "react";
 import type { CustomField } from "@/lib/api";
 
 /** Controlled renderer for org-defined custom fields. Owns no state and does no
  * fetching/saving — the host (a FormModal tab, the record detail panel) supplies
  * definitions + values and persists them. Inputs carry `required`, so FormModal's
- * global client-side validation covers custom fields for free. */
+ * global client-side validation covers custom fields for free. Each control is named by
+ * its field label (`htmlFor` / `aria-labelledby`), not by a placeholder. */
 export default function CustomFieldsEditor({
   fields,
   values,
@@ -15,18 +17,22 @@ export default function CustomFieldsEditor({
   values: Record<string, string>;
   onChange: (id: string, value: string) => void;
 }) {
+  const uid = useId().replace(/:/g, "");
   return (
     <>
       {fields.map((field) => {
         const v = values[field.id] ?? "";
+        const ctlId = `cf-${uid}-${field.id}`;
+        const labelId = `${ctlId}-l`;
         return (
           <div key={field.id} className="field" style={{ marginBottom: 12 }}>
-            <label className="label">
+            <label className="label" id={labelId} htmlFor={field.field_type === "checkbox" ? undefined : ctlId}>
               {field.label}
               {field.required && <span style={{ color: "var(--red)" }}> *</span>}
             </label>
             {field.field_type === "textarea" ? (
               <textarea
+                id={ctlId}
                 className="input"
                 rows={2}
                 value={v}
@@ -35,6 +41,7 @@ export default function CustomFieldsEditor({
               />
             ) : field.field_type === "select" ? (
               <select
+                id={ctlId}
                 className="input"
                 value={v}
                 required={field.required}
@@ -49,6 +56,7 @@ export default function CustomFieldsEditor({
               <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
                 <input
                   type="checkbox"
+                  aria-labelledby={labelId}
                   checked={v === "true"}
                   onChange={(e) => onChange(field.id, e.target.checked ? "true" : "false")}
                 />
@@ -56,6 +64,7 @@ export default function CustomFieldsEditor({
               </label>
             ) : (
               <input
+                id={ctlId}
                 className="input"
                 type={field.field_type === "number" ? "number" : field.field_type === "date" ? "date" : "text"}
                 value={v}
