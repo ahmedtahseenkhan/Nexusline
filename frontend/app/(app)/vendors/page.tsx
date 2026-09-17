@@ -40,6 +40,7 @@ import {
   VENDOR_CLEAR_TEXT, vendorContractsSub, vendorDataTone, vendorHeadline, vendorOpenPoints, vendorOverrideNote, vendorOverrideText,
   vendorOutsourcingDiligence, vendorReviewOverdue, vendorSevTone, vendorTiles, VENDOR_SUBSTITUTABILITY,
   type VendorConcentrationFacts, type VendorInput,
+  type VendorDueDiligenceFacts,
 } from "@/lib/record/vendor";
 import type { PointAction } from "@/lib/record/types";
 
@@ -96,6 +97,8 @@ type Vendor = {
   certifications?: Certification[];
   /** Derived from the "Inherent risk tiering" questionnaire; never typed. */
   inherent_tier?: string | null; tier_override_reason?: string; tiering?: Tiering | null;
+  /** Phase 4E: the latest reviewed due-diligence questionnaire and the rating it proposes. */
+  due_diligence?: VendorDueDiligenceFacts | null; risk_rating_override_reason?: string;
   outsourcing?: OutsourcingFact[];
   concentration?: VendorConcentrationFacts | null;
 };
@@ -154,7 +157,7 @@ type FormState = {
   // due diligence
   legal_name: string; registration_number: string; relationship_owner_id: string | null; data_classification_id: string | null;
   annual_spend: number | ""; spend_currency: string; residency: AsyncOption[]; process_ids: AsyncOption[];
-  subcontractor_ids: AsyncOption[]; tier_override_reason: string;
+  subcontractor_ids: AsyncOption[]; tier_override_reason: string; risk_rating_override_reason: string;
 };
 const BLANK: FormState = {
   name: "", description: "", category_id: null, type_id: "", contact_name: "", contact_email: "", contact_phone: "", website: "",
@@ -162,7 +165,7 @@ const BLANK: FormState = {
   assessment_status: "not_started", last_assessed_at: "", onboarded_at: "", offboarded_at: "", review_frequency: "annual",
   next_review_date: "", risk_ids: [], asset_ids: [], requirement_ids: [], control_ids: [],
   legal_name: "", registration_number: "", relationship_owner_id: null, data_classification_id: null,
-  annual_spend: "", spend_currency: "", residency: [], process_ids: [], subcontractor_ids: [], tier_override_reason: "",
+  annual_spend: "", spend_currency: "", residency: [], process_ids: [], subcontractor_ids: [], tier_override_reason: "", risk_rating_override_reason: "",
 };
 function fromVendor(v: Vendor): FormState {
   return {
@@ -180,6 +183,7 @@ function fromVendor(v: Vendor): FormState {
     residency: (v.data_residency_countries ?? []).map((c) => ({ value: c.id, label: c.label })),
     process_ids: (v.processes ?? []).map(refToOpt), subcontractor_ids: (v.subcontractors ?? []).map(refToOpt),
     tier_override_reason: v.tier_override_reason || "",
+    risk_rating_override_reason: v.risk_rating_override_reason || "",
   };
 }
 function toPayload(f: FormState, editing: boolean): Record<string, unknown> {
@@ -200,6 +204,8 @@ function toPayload(f: FormState, editing: boolean): Record<string, unknown> {
   // The override reason only exists once a tier does; the server clears it when the
   // criticality matches the tier's proposal.
   if (editing) payload.tier_override_reason = f.tier_override_reason;
+  // Phase 4E: the same rule for a risk rating that differs from due diligence's proposal.
+  if (editing) payload.risk_rating_override_reason = f.risk_rating_override_reason;
   return payload;
 }
 type ContractForm = { name: string; description: string; value: number | ""; currency: string; start_date: string; end_date: string };
@@ -472,8 +478,15 @@ function VendorsInner() {
   );
   const riskTab = (
     <>
+      {editing?.due_diligence?.proposed_rating && f.risk_rating !== editing.due_diligence.proposed_rating && (
+        <Field label="Reason for overriding due diligence" required help={`Recorded in the activity log. Pick ${editing.due_diligence.proposed_rating} instead to follow due diligence.`}>
+          <TextArea value={f.risk_rating_override_reason} onChange={(v) => set("risk_rating_override_reason", v)} rows={2} placeholder="e.g. Compensating controls tested by internal audit in August." />
+        </Field>
+      )}
       <div className="field-row">
-        <Field label="Risk Rating" help="Overall residual risk this vendor poses."><Select value={f.risk_rating} onChange={(v) => set("risk_rating", v)} options={RISK_RATING} placeholder="Not rated" /></Field>
+        <Field label="Risk Rating" help={editing?.due_diligence?.proposed_rating
+          ? `Due diligence (${editing.due_diligence.band || "no band"}) proposes ${editing.due_diligence.proposed_rating}. Choosing anything else needs a reason.`
+          : "Overall residual risk this vendor poses. Set by a reviewed due-diligence questionnaire."}><Select value={f.risk_rating} onChange={(v) => set("risk_rating", v)} options={RISK_RATING} placeholder="Not rated" /></Field>
         <Field label="Assessment Status"><Select value={f.assessment_status} onChange={(v) => set("assessment_status", v)} options={ASSESS} /></Field>
         <Field label="Last Assessed"><TextInput value={f.last_assessed_at} onChange={(v) => set("last_assessed_at", v)} type="date" /></Field>
       </div>

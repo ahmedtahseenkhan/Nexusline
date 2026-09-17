@@ -553,6 +553,7 @@ export function PendingSuggestionsHint({ frameworkId, frameworkName, refreshKey,
   return (
     <div
       role="status"
+      title={pending.computed_at ? `Counted ${new Date(pending.computed_at).toLocaleString()}; recounted when controls, clauses or mappings change` : undefined}
       style={{
         display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap",
         background: "var(--primary-weak-2)", border: "1px solid var(--primary-weak)", borderRadius: "var(--radius-sm)",

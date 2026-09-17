@@ -2,11 +2,11 @@
 
 /* Where a signed-in user lands, and getting them back to a deep link after sign-in.
 
-   After sign-in:
-     • someone without administrator permissions (no `settings:manage`, no `user:write`)
-       lands on My Work (/my-work) — first-line users should rarely need the sidebar;
-     • an administrator lands on the dashboard, or on first-run setup (/onboarding) while
-       the organisation hasn't finished it and they may change organisation settings.
+   After sign-in, a user lands on their workspace (GET /my/workspace): first line on My
+   Work, second line on the dashboard, internal audit on Assurance, board members on the
+   board home, administrators on the dashboard — or on the start page they chose in
+   Settings. An administrator who may change organisation settings goes to first-run
+   setup (/onboarding) while the organisation hasn't finished it.
 
    A link opened while signed out (an e-mailed alert's "/risks?id=…") is remembered and
    opened after sign-in instead — through the password, two-factor and SSO flows alike.
@@ -32,19 +32,49 @@ export function isAdmin(me: Pick<Me, "permission_codes"> | null | undefined): bo
   return ADMIN_PERMISSIONS.some((p) => held.has(p));
 }
 
+/** A workspace the user may start on (GET /my/workspace). */
+export type WorkspaceOption = { key: string; label: string; href: string; description: string };
+
+/** Where a user starts, by line of defence (services/workspaces.py):
+ *  first line → My Work, second line → dashboard, internal audit → Assurance,
+ *  board → Board home, administrators → dashboard. Their own choice wins while they can
+ *  still open it. */
+export type Workspace = {
+  line: "first_line" | "second_line" | "audit" | "board";
+  is_admin: boolean;
+  default: string;
+  preference: string | null;
+  landing: string;
+  landing_href: string;
+  available: WorkspaceOption[];
+};
+
+export function getWorkspace(): Promise<Workspace> {
+  return apiCall<Workspace>("GET", "/my/workspace");
+}
+
+/** Choose a start page; null goes back to the default for the user's line of defence. */
+export function setWorkspacePreference(workspace: string | null): Promise<Workspace> {
+  return apiCall<Workspace>("PUT", "/my/workspace", { workspace });
+}
+
 /** The page a user should land on after signing in. */
 export async function landingPath(me: Me): Promise<string> {
-  if (!isAdmin(me)) return "/my-work";
   if ((me.permission_codes || []).includes("settings:manage")) {
     try {
       const org = await apiCall<{ onboarding_completed_at?: string | null }>("GET", "/settings/organisation");
       // Only an explicit "not yet" sends someone to setup (an older server omits the field).
       if (org && "onboarding_completed_at" in org && !org.onboarding_completed_at) return "/onboarding";
     } catch {
-      /* settings unreadable: the dashboard is always a safe landing */
+      /* settings unreadable: fall through to the workspace */
     }
   }
-  return "/dashboard";
+  try {
+    return (await getWorkspace()).landing_href || "/my-work";
+  } catch {
+    // An older server without workspaces: administrators to the dashboard, others to My Work.
+    return isAdmin(me) ? "/dashboard" : "/my-work";
+  }
 }
 
 /** A same-site path to go to after sign-in, or null (never an absolute or protocol-

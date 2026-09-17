@@ -36,6 +36,7 @@ import uuid
 from collections import Counter
 from functools import lru_cache
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from app.services import control_mapping
@@ -358,8 +359,26 @@ KW_ALONE_MIN_COSINE = 0.25
 KW_ALONE_MIN_SHARED = 2
 #: The control already carries this clause's catalogue reference.
 OWN_REFERENCE = 0.95
-#: Propagation from a clause suggested on its own merits.
+#: Propagation from a clause suggested on its own merits. An untyped crosswalk (a plain
+#: set of related clauses) propagates at ``CROSSWALK_FACTOR``; a typed one (phase 4C)
+#: by its relationship read from the suggested clause: a clause that wholly contains the
+#: other (superset) or matches it (equivalent) passes on most, one merely contained in
+#: the other (subset) or overlapping it less, a topical "related" link least.
 CROSSWALK_FACTOR = 0.6
+RELATIONSHIP_FACTORS: dict[str, float] = {
+    "equivalent": 0.8,
+    "superset": 0.7,
+    "subset": 0.55,
+    "intersects": 0.5,
+    "related": 0.4,
+}
+
+
+def crosswalk_factor(relationship: str | None) -> float:
+    """How much of a suggestion's score a crosswalk passes on. Pure."""
+    if relationship is None:
+        return CROSSWALK_FACTOR
+    return RELATIONSHIP_FACTORS.get(relationship, CROSSWALK_FACTOR)
 SCENARIO_FACTOR = 0.5
 SCENARIO_MIN_SHARE = 0.5
 SCENARIO_MIN_SOURCE = 0.4
@@ -420,7 +439,14 @@ class CandidateIndex:
 
     def __init__(self, candidates: Iterable[Candidate], crosswalks: dict | None = None):
         self.candidates: list[Candidate] = list(candidates)
-        self.crosswalks: dict = {k: set(v) for k, v in (crosswalks or {}).items()}
+        # Requirement id -> related ids. Values may be a set (untyped) or a dict of related
+        # id -> relationship read from the key (typed); the relationships are kept apart.
+        self.crosswalks: dict = {}
+        self.relationships: dict = {}
+        for k, v in (crosswalks or {}).items():
+            self.crosswalks[k] = set(v)
+            if isinstance(v, dict):
+                self.relationships[k] = dict(v)
         self.by_id = {c.requirement_id: c for c in self.candidates}
         # (template key, native ref) -> candidates; catalogue ref -> candidates.
         self.by_template_ref: dict[tuple[str, str], list[Candidate]] = {}
@@ -560,7 +586,9 @@ def score_candidates(
             c = index.by_id.get(rid)
             if c is None or rid in excluded or c.framework_id == src.framework_id:
                 continue
-            bump(c, sug.score * CROSSWALK_FACTOR, f"Crosswalked to {label}", propagated)
+            rel = index.relationships.get(src.requirement_id, {}).get(rid)
+            how = f" ({rel})" if rel else ""
+            bump(c, sug.score * crosswalk_factor(rel), f"Crosswalked to {label}{how}", propagated)
         if src.template_key and sug.score >= SCENARIO_MIN_SOURCE:
             cat = control_mapping.catalogue_reference(src.template_key, src.reference)
             for ref, share, scenarios in _scenario_neighbours(cat):
@@ -656,19 +684,25 @@ async def load_index(db) -> CandidateIndex:
     ids = {c.requirement_id for c in candidates}
     crosswalks: dict = {}
     if ids:
+        from app.services.crosswalk_content import INVERSE
+
         pairs = (
             await db.execute(
-                select(requirement_crosswalks.c.requirement_id, requirement_crosswalks.c.related_requirement_id)
+                select(
+                    requirement_crosswalks.c.requirement_id, requirement_crosswalks.c.related_requirement_id,
+                    requirement_crosswalks.c.relationship,
+                )
                 .where(
                     requirement_crosswalks.c.requirement_id.in_(ids)
                     | requirement_crosswalks.c.related_requirement_id.in_(ids)
                 )
             )
         ).all()
-        for a, b in pairs:
+        for a, b, rel in pairs:
             if a in ids and b in ids and a != b:
-                crosswalks.setdefault(a, set()).add(b)
-                crosswalks.setdefault(b, set()).add(a)
+                rel = rel or "related"
+                crosswalks.setdefault(a, {})[b] = rel
+                crosswalks.setdefault(b, {})[a] = INVERSE.get(rel, "related")
     return CandidateIndex(candidates, crosswalks)
 
 
@@ -824,6 +858,102 @@ async def pending_strong(db, *, framework_id=None, cap: int = PENDING_SCAN_CAP) 
         "controls_with_strong": sum(1 for k in strong if k),
         "strong_suggestions": sum(len(k) for k in strong),
     }
+
+
+# --------------------------------------------------------- cached hint (phase 4) ---
+# ``pending_strong`` scores up to 1,000 controls; the hint on the controls register, the
+# compliance page and the dashboard asked for it on every load. The result is kept per
+# organisation (``TenantComputedCache``) with a fingerprint of everything it reads —
+# controls, requirements, frameworks, mappings and crosswalks — and reused while the
+# fingerprint matches. The fingerprint is a count and latest change per table (a soft
+# delete or an edit moves ``updated_at``) plus an order-free hash of the mapping and
+# crosswalk pairs, whose association rows carry no timestamp. One query, no write-path
+# hooks to forget.
+PENDING_CACHE_KEY = "pending_clause_suggestions"
+#: Recompute at least this often even when nothing seems to have changed.
+PENDING_CACHE_MAX_AGE = timedelta(hours=24)
+
+
+def pending_cache_key(framework_id=None) -> str:
+    return f"{PENDING_CACHE_KEY}:{framework_id or 'all'}"
+
+
+def fingerprint_text(parts: Iterable[object]) -> str:
+    """The fingerprint row as one comparable string. Pure."""
+    return "|".join("" if p is None else (p.isoformat() if hasattr(p, "isoformat") else str(p)) for p in parts)
+
+
+def cache_fresh(row, fingerprint: str, now: datetime) -> bool:
+    """Whether a cached row may be served: same fingerprint, younger than the max age. Pure."""
+    return (
+        row is not None
+        and row.fingerprint == fingerprint
+        and row.computed_at is not None
+        and now - row.computed_at < PENDING_CACHE_MAX_AGE
+    )
+
+
+async def suggestion_fingerprint(db) -> str:
+    """Counts, latest changes and pair hashes of what the pending count reads."""
+    from sqlalchemy import BigInteger, String, cast, func, select
+
+    from app.models.compliance import Framework, Requirement, requirement_controls, requirement_crosswalks
+    from app.models.control import Control
+
+    def latest(model):
+        return (
+            select(func.count()).select_from(model).scalar_subquery(),
+            select(func.max(model.updated_at)).scalar_subquery(),
+        )
+
+    def pairs(table, a, b):
+        pair = cast(func.hashtext(cast(a, String) + cast(b, String)), BigInteger)
+        return (
+            select(func.count()).select_from(table).scalar_subquery(),
+            select(func.coalesce(func.sum(pair), 0)).select_from(table).scalar_subquery(),
+        )
+
+    rc, cw = requirement_controls.c, requirement_crosswalks.c
+    row = (
+        await db.execute(
+            select(
+                *latest(Control), *latest(Requirement), *latest(Framework),
+                *pairs(requirement_controls, rc.control_id, rc.requirement_id),
+                *pairs(requirement_crosswalks, cw.requirement_id, cw.related_requirement_id),
+            )
+        )
+    ).one()
+    return fingerprint_text(row)
+
+
+async def pending_strong_cached(db, tenant_id, *, framework_id=None, now: datetime | None = None) -> dict:
+    """:func:`pending_strong`, served from the organisation's cache while the data it
+    read is unchanged. Adds ``computed_at`` and ``cached`` (True when served from the
+    cache)."""
+    from sqlalchemy import select
+    from sqlalchemy.dialects.postgresql import insert
+
+    from app.models.computed_cache import TenantComputedCache
+
+    now = now or datetime.now(timezone.utc)
+    key = pending_cache_key(framework_id)
+    fingerprint = await suggestion_fingerprint(db)
+    row = await db.scalar(select(TenantComputedCache).where(TenantComputedCache.key == key))
+    if cache_fresh(row, fingerprint, now):
+        value = dict(row.value or {})
+        value["framework_id"] = framework_id
+        return {**value, "computed_at": row.computed_at, "cached": True}
+    result = await pending_strong(db, framework_id=framework_id)
+    stored = {k: v for k, v in result.items() if k != "framework_id"}
+    await db.execute(
+        insert(TenantComputedCache)
+        .values(tenant_id=tenant_id, key=key, fingerprint=fingerprint, value=stored, computed_at=now)
+        .on_conflict_do_update(
+            constraint="uq_tenant_computed_cache_key",
+            set_={"fingerprint": fingerprint, "value": stored, "computed_at": now, "updated_at": now},
+        )
+    )
+    return {**result, "computed_at": now, "cached": False}
 
 
 async def link(db, pairs: Iterable[tuple[uuid.UUID, uuid.UUID]]) -> list[tuple[object, object]]:
@@ -1063,6 +1193,10 @@ class CrosswalkContext:
     from_clauses: list[CrosswalkClause]
     to_clauses: list[CrosswalkClause]
     existing: set[frozenset]
+    #: Phase 4C: the typed rows behind ``existing`` (pair -> ``crosswalks.Link``) and the
+    #: pairs this organisation rejected from the shipped content (never suggested again).
+    links: dict = field(default_factory=dict)
+    rejected: set = field(default_factory=set)
 
 
 async def load_crosswalk_context(db, from_framework_id, to_framework_id) -> CrosswalkContext:
@@ -1095,17 +1229,39 @@ async def load_crosswalk_context(db, from_framework_id, to_framework_id) -> Cros
 
     a, b = await clauses(from_framework_id), await clauses(to_framework_id)
     a_ids, b_ids = {c.requirement_id for c in a}, {c.requirement_id for c in b}
+    from app.services import crosswalks as typed
+
     existing: set[frozenset] = set()
+    links: dict = {}
     if a_ids and b_ids:
-        for x, y in (await db.execute(
-            select(requirement_crosswalks.c.requirement_id, requirement_crosswalks.c.related_requirement_id)
+        for row in (await db.execute(
+            select(requirement_crosswalks)
             .where(requirement_crosswalks.c.requirement_id.in_(a_ids | b_ids),
                    requirement_crosswalks.c.related_requirement_id.in_(a_ids | b_ids))
         )).all():
+            link = typed.Link.from_row(row)
+            x, y = link.requirement_id, link.related_requirement_id
             if (x in a_ids and y in b_ids) or (x in b_ids and y in a_ids):
-                existing.add(frozenset((x, y)))
+                existing.add(link.pair)
+                links[link.pair] = link
     fa, fb = frameworks[from_framework_id], frameworks[to_framework_id]
-    return CrosswalkContext(fa, fb, template_key_for_name(fa.name), template_key_for_name(fb.name), a, b, existing)
+    ka, kb = template_key_for_name(fa.name), template_key_for_name(fb.name)
+    rejected: set[frozenset] = set()
+    if ka and kb and a and b:
+        keys = await typed.rejected_keys(db)
+        if keys:
+            ids_a = {_norm_ref(c.reference): c.requirement_id for c in a}
+            ids_b = {_norm_ref(c.reference): c.requirement_id for c in b}
+            for ft, fr, tt, tr in keys:
+                if (ft, tt) == (ka, kb):
+                    x, y = ids_a.get(_norm_ref(fr)), ids_b.get(_norm_ref(tr))
+                elif (ft, tt) == (kb, ka):
+                    x, y = ids_a.get(_norm_ref(tr)), ids_b.get(_norm_ref(fr))
+                else:
+                    continue
+                if x is not None and y is not None:
+                    rejected.add(frozenset((x, y)))
+    return CrosswalkContext(fa, fb, ka, kb, a, b, existing, links, rejected)
 
 
 async def crosswalk_control_links(db, requirement_ids: Iterable) -> dict:
@@ -1137,5 +1293,5 @@ async def crosswalk_suggestions_for(db, from_framework_id, to_framework_id) -> t
     )
     return ctx, suggest_crosswalks(
         ctx.from_clauses, ctx.to_clauses, from_template=ctx.from_template, to_template=ctx.to_template,
-        control_links=links, existing=ctx.existing,
+        control_links=links, existing=ctx.existing | ctx.rejected,
     )

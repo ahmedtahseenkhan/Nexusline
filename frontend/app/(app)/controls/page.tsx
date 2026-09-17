@@ -68,6 +68,8 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import ControlMonitoringSection from "@/components/ControlMonitoring";
+import type { ControlMonitoring } from "@/lib/record/control";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
 import type { MenuItem } from "@/components/Menu";
 import { BulkSuggestMappings, PendingSuggestionsHint } from "@/components/SuggestedClauses";
@@ -423,6 +425,9 @@ function ControlsInner() {
   const [detail, setDetail] = useState<Control | null>(null);
   const [tests, setTests] = useState<ControlTest[]>([]);
   const [maints, setMaints] = useState<ControlMaintenance[]>([]);
+  /** Continuous monitoring of the open control (phase 4D); null until loaded or when unavailable. */
+  const [monitoring, setMonitoring] = useState<ControlMonitoring | null>(null);
+  const [monitoringFailed, setMonitoringFailed] = useState(false);
   /** Suggested clauses from the installed frameworks; null until known. */
   const [suggestionCount, setSuggestionCount] = useState<number | null>(null);
   /** The suggestion engine failed for the open control (distinct from "not loaded yet"). */
@@ -482,6 +487,10 @@ function ControlsInner() {
   const [suggestFor, setSuggestFor] = useState<string[] | null>(null);
   // "Review all suggestions": the whole register, a page at a time (F-19).
   const [reviewAll, setReviewAll] = useState(false);
+  // The dashboard's "strong clause suggestions waiting" card opens /controls#review-suggestions.
+  useEffect(() => {
+    if (window.location.hash === "#review-suggestions") setReviewAll(true);
+  }, []);
   const fetchControls = useCallback((qs: string) => apiCall<PagedList<Control>>("GET", `/controls?${qs}`), []);
 
   /** The control with its tests and maintenance log, set together so the summary never
@@ -499,7 +508,15 @@ function ControlsInner() {
       })
       .catch(() => { if (seq === loadSeq.current) setDetail(null); });
     loadSuggestions(id, seq);
+    loadMonitoring(id, seq);
   }, []);
+  /** Monitoring is optional (the CCM module may be off): a failure never blocks the record. */
+  function loadMonitoring(id: string, seq = loadSeq.current) {
+    setMonitoringFailed(false);
+    apiCall<ControlMonitoring>("GET", `/ccm/controls/${id}/monitoring`)
+      .then((m) => { if (seq === loadSeq.current) setMonitoring(m); })
+      .catch(() => { if (seq === loadSeq.current) { setMonitoring(null); setMonitoringFailed(true); } });
+  }
   /** The suggested-clause count for the open control; a failure is kept apart from "not
    *  loaded yet" so the Linked records section can say so and offer Retry. */
   function loadSuggestions(id: string, seq = loadSeq.current) {
@@ -510,7 +527,7 @@ function ControlsInner() {
   }
   useEffect(() => {
     if (openId) loadDetail(openId);
-    else { loadSeq.current++; setDetail(null); setTests([]); setMaints([]); }
+    else { loadSeq.current++; setDetail(null); setTests([]); setMaints([]); setMonitoring(null); }
     setReviewing(null); setExpanded(null); setSuggestionCount(null); setSuggestionFailed(false);
     setMaintOpen(false); setMaintError(null); setSuggestOpen(false);
   }, [openId, loadDetail]);
@@ -1352,7 +1369,7 @@ function ControlsInner() {
   }
 
   function recordMain(c: Control) {
-    const input: ControlInput = { control: c, tests, maints, suggestionCount };
+    const input: ControlInput = { control: c, tests, maints, suggestionCount, monitoring };
     const points = controlOpenPoints(input, ctx).map((p) => (p.action && !canFollow(p.action) ? { ...p, action: undefined } : p));
     return (
       <>
@@ -1361,6 +1378,7 @@ function ControlsInner() {
         <OpenPoints points={points} canAct={canWrite || canTest} onAction={handlePoint} clearText={CONTROL_CLEAR_TEXT} />
         <SectionNav />
         {testsSection(c)}
+        <ControlMonitoringSection monitoring={monitoring} failed={monitoringFailed} fmt={ctx.fmt} />
         {maintenanceSection(c)}
         {designSection(c)}
         {linkedSection(c)}

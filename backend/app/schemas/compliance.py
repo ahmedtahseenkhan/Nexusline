@@ -108,9 +108,13 @@ class FrameworkPostureRead(BaseModel):
     assured: int = 0
     unassessed: int = 0
     failing: int = 0
+    #: Phase 4C: not tested directly but covered by a tested control of an equivalent or
+    #: containing clause in another framework. Never part of ``mapped`` or ``assured``.
+    via_crosswalk: int = 0
     compliant_pct: float = 0.0
     mapped_pct: float = 0.0
     assured_pct: float = 0.0
+    via_crosswalk_pct: float = 0.0
     #: "0% assessed compliant · 62% mapped · 8% tested".
     line: str = ""
 
@@ -238,6 +242,39 @@ class CrosswalkItem(BaseModel):
     status: ComplianceStatus
     framework_id: uuid.UUID
     framework_name: str
+    #: Phase 4C, read from the requirement asked about: equivalent | subset (it is
+    #: contained in this one) | superset (it contains this one) | intersects | related.
+    relationship: str = "related"
+    rationale: str = ""
+    source: str = ""
+    origin: str = "manual"
+    content_version: str = ""
+    confidence: float | None = None
+    approved_by: str = ""
+    approved_at: datetime | None = None
+
+
+class ViaCrosswalkControlRead(BaseModel):
+    id: uuid.UUID
+    reference: str = ""
+    name: str = ""
+    effectiveness: str = ""
+
+
+class ViaCrosswalkRead(BaseModel):
+    """Why a clause counts as covered via crosswalk: the clause whose tested control
+    covers it, and how the two relate. Not a direct mapping."""
+
+    via_requirement_id: uuid.UUID
+    via_reference: str
+    via_title: str = ""
+    via_framework: str = ""
+    #: Read from the covered clause: equivalent | subset.
+    relationship: str
+    source: str = ""
+    #: "mapped via ISO/IEC 27001:2022 A.8.5".
+    label: str
+    controls: list[ViaCrosswalkControlRead] = []
 
 
 # ----------------------------------------------------------------- Gap analysis
@@ -249,6 +286,8 @@ class GapItem(BaseModel):
     is_covered: bool
     coverage: str = "unmapped"
     reason: str
+    #: "mapped via ISO/IEC 27001:2022 A.8.5" when a crosswalk covers it (still a gap).
+    via_crosswalk: str = ""
 
 
 class GapAnalysis(BaseModel):
@@ -296,6 +335,8 @@ class ComplianceSummary(BaseModel):
     #: and backed by a tested, working control.
     overall_mapped_pct: float = 0.0
     overall_assured_pct: float = 0.0
+    #: Covered via crosswalk only, same scope; never part of mapped or tested.
+    overall_via_crosswalk_pct: float = 0.0
     frameworks: list[FrameworkSummary]
 
 
@@ -327,6 +368,8 @@ class SoaRowRead(BaseModel):
     #: The most recent test across the implementing controls.
     last_test_date: date | None = None
     last_test_result: str | None = None
+    #: Phase 4C: covered via crosswalk (shown apart from the implementing controls).
+    via_crosswalk: ViaCrosswalkRead | None = None
 
 
 class SoaSummary(BaseModel):
@@ -341,6 +384,8 @@ class SoaSummary(BaseModel):
     #: whose control is tested and working — the framework page's "mapped" / "tested".
     mapped: int = 0
     assured: int = 0
+    #: Applicable clauses covered via crosswalk only.
+    via_crosswalk: int = 0
 
 
 class StatementOfApplicabilityRead(BaseModel):
@@ -454,3 +499,7 @@ class PendingSuggestionsRead(BaseModel):
     capped: bool = False
     controls_with_strong: int = 0
     strong_suggestions: int = 0
+    #: When the count was taken (phase 4: served from a per-organisation cache while the
+    #: controls, clauses and mappings it read are unchanged).
+    computed_at: datetime | None = None
+    cached: bool = False

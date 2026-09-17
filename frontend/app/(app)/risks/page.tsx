@@ -239,10 +239,13 @@ type Named = { id: string; name?: string; reference?: string; title?: string };
 type RollupNode = {
   id: string; reference: string; title: string; level: number | null; depth: number;
   exposure: number | null; residual_score: number | null; severity: string | null; appetite_status: string | null;
+  /** On the board register, so counted in the figures; false = listed only. */
+  in_figures?: boolean; scored?: boolean;
 };
 type RiskRollupView = {
   children: RollupNode[]; descendants: RollupNode[]; worst_residual: RollupNode | null;
   worst_exposure: RollupNode | null; by_severity: Record<string, number>; breaches: number; total: number;
+  not_in_figures?: number;
 };
 
 // --------------------------------------------------------------- option helpers
@@ -686,9 +689,8 @@ function RisksPage() {
   );
   const fetchRisks = useCallback((qs: string) => apiCall<PagedList<RiskRow>>("GET", `/risks?${qs}`), []);
 
-  // One scope object, read by the table and by the export. Undefined entries are
-  // dropped from the query string, so "no scope" is the plain register. The review
-  // filter narrows the table only: the register PDF has no such filter yet.
+  // The scope pickers' filters. Undefined entries are dropped from the query string, so
+  // "no scope" is the plain register.
   const scopeFilters = useMemo(
     () => ({
       business_unit_id: scopeUnit?.id || undefined,
@@ -698,8 +700,8 @@ function RisksPage() {
     }),
     [scopeUnit, scopeProcess, scopeAsset, scopeStatus],
   );
-  // The phase-3 URL filters narrow the table only, like the review flag: the register
-  // PDF endpoint does not forward them yet (services/risk_query.py already supports them).
+  // The register PDF takes exactly the list's filters (the server shares one filter
+  // dependency), so the export below sends every filter the table is using.
   const u = urlFilters.values;
   const tableFilters = useMemo(
     () => ({
@@ -745,6 +747,12 @@ function RisksPage() {
         .map((x) => ({ value: x.id, label: `${x.reference} — ${x.title}`, sub: x.level ? `L${x.level} · ${LEVEL_LABEL[x.level]}` : undefined })),
     );
   };
+  /** The table's filters as query-string values, for the register PDF. */
+  const exportFilters = useMemo(() => {
+    const out: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(tableFilters)) out[k] = v === undefined || v === "" ? undefined : String(v);
+    return out;
+  }, [tableFilters]);
   const scopeLabel = useMemo(() => {
     const parts = [
       scopeUnit?.name,
@@ -1823,7 +1831,12 @@ function RisksPage() {
               q.set("id", x.id);
               return `/risks?${q.toString()}`;
             },
-            meta: (x: RollupNode) => (x.severity ? <Badge tone={sevTone(x.severity)} asIs>{sentenceCase(x.severity)}</Badge> : null),
+            meta: (x: RollupNode) => (
+              <>
+                {x.severity ? <Badge tone={sevTone(x.severity)} asIs>{sentenceCase(x.severity)}</Badge> : x.scored === false ? <span className="muted">Not scored</span> : null}
+                {x.in_figures === false && <span className="muted" title="Draft, never scored, accepted or closed: not counted in the roll-up or the dashboard"> · not in figures</span>}
+              </>
+            ),
             action: <button type="button" className="rec-link" onClick={() => showBelow(r.id)}>List the risks directly below</button>,
             footer: rollupFooter(rollup),
           } satisfies RelatedGroup<RollupNode>]
@@ -2219,9 +2232,11 @@ function RisksPage() {
             items={[
               {
                 label: "Register PDF",
-                hint: scopeLabel === "Whole register" ? "Every risk, with detail pages" : scopeLabel,
+                hint: scopeLabel === "Whole register" && !urlFiltered && !scopeReview
+                  ? "Every risk, with detail pages"
+                  : "The risks the table is filtered to; the filters print on the cover",
                 onClick: () =>
-                  api.pdfRiskRegister(scopeFilters, scopeLabel === "Whole register" ? undefined : scopeLabel).catch(() => {}),
+                  api.pdfRiskRegister(exportFilters, scopeLabel === "Whole register" ? undefined : scopeLabel).catch(() => {}),
               },
               { label: "Export CSV", hint: "All risks, every column", onClick: () => io.current?.exportCsv() },
             ]}

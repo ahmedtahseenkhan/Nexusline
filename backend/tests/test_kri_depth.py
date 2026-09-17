@@ -558,7 +558,11 @@ def _feed_session(monkeypatch, db):
         opened.append(tenant_id)
         yield db
 
+    async def unlimited(tenant_id, kid):
+        return None
+
     monkeypatch.setattr(api, "tenant_session", session)
+    monkeypatch.setattr(api, "_feed_rate_check", unlimited)  # the limiter: test_phase4_loose_ends
     return opened
 
 

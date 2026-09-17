@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status as http_status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -54,6 +54,16 @@ from app.models.integrations import (
 )
 from app.schemas.common import Page
 from app.schemas.integrations import (
+    CheckTypeRead,
+    ConnectionTestResult,
+    ConnectorKindRead,
+    ControlMonitoringRead,
+    MonitoringTestRead,
+    ParamSpecRead,
+    RunDetail,
+    RunNowResult,
+    RunRead,
+    SecretsWrite,
     CctCreate,
     CctRead,
     CctUpdate,
@@ -68,6 +78,9 @@ from app.schemas.integrations import (
     RunCreate,
 )
 from app.services.refs import next_reference
+from app.services import ccm_checks, ccm_rate_limit, ccm_runner
+from app.services.rate_limit import too_many_requests
+from app.services.ccm_checks import secrets as ccm_secrets
 from app.services import audit as audit_log
 
 router = APIRouter(tags=["integrations"])
@@ -148,18 +161,29 @@ async def list_connectors(
 
 @router.post("/connectors", response_model=ConnectorRead, status_code=201, dependencies=[_WRITE])
 async def create_connector(body: ConnectorCreate, db: DbSession, user: CurrentUser) -> ConnectorRead:
-    obj = Connector(tenant_id=user.tenant_id, **body.model_dump())
+    data = body.model_dump(exclude={"secrets", "clear_secrets"})
+    _check_connector_settings(data["connector_type"], data.get("config") or {}, body.secrets)
+    obj = Connector(tenant_id=user.tenant_id, **data)
+    changed = ccm_secrets.apply(obj, body.secrets, None)
     obj.reference = await _next_ref(db, Connector, "CON")
     db.add(obj)
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="connector",
-                           entity_id=obj.id, summary=f"Registered connector {obj.reference}: {obj.name}")
+                           entity_id=obj.id, summary=f"Registered connector {obj.reference}: {obj.name}"
+                           + (f"; secrets set: {', '.join(changed)}" if changed else ""))
     return ConnectorRead.model_validate(await _load_connector(db, obj.id))
 
 
 @router.get("/connectors/{cid}", response_model=ConnectorRead, dependencies=[_READ])
 async def get_connector(cid: uuid.UUID, db: DbSession) -> ConnectorRead:
     return ConnectorRead.model_validate(await _load_connector(db, cid))
+
+
+def _check_connector_settings(connector_type, config: dict, secrets: dict | None, clear: list | None = None) -> None:
+    errors = ccm_checks.config_errors(connector_type, config) + ccm_checks.secret_errors(
+        connector_type, list((secrets or {}).keys()) + list(clear or []))
+    if errors:
+        raise HTTPException(status_code=422, detail=" ".join(errors))
 
 
 def _changes(obj, data: dict) -> dict:
@@ -174,10 +198,17 @@ def _changes(obj, data: dict) -> dict:
 @router.patch("/connectors/{cid}", response_model=ConnectorRead, dependencies=[_WRITE])
 async def update_connector(cid: uuid.UUID, body: ConnectorUpdate, db: DbSession, user: CurrentUser) -> ConnectorRead:
     obj = await _load_connector(db, cid)
-    data = body.model_dump(exclude_unset=True)
+    data = body.model_dump(exclude_unset=True, exclude={"secrets", "clear_secrets"})
+    ctype = data.get("connector_type") or obj.connector_type
+    _check_connector_settings(getattr(ctype, "value", ctype), data.get("config", obj.config) or {},
+                              body.secrets, body.clear_secrets)
     changes = _changes(obj, data)
     for k, v in data.items():
         setattr(obj, k, v)
+    secret_changes = ccm_secrets.apply(obj, body.secrets, body.clear_secrets)
+    if secret_changes:
+        # Names only: a secret's value never reaches the activity trail.
+        changes["secrets"] = {"from": "", "to": "changed: " + ", ".join(secret_changes)}
     await db.flush()
     if changes:
         await audit_log.record(db, actor=user, action="update", entity_type="connector", entity_id=obj.id,
@@ -201,6 +232,37 @@ async def delete_connector(cid: uuid.UUID, db: DbSession, user: CurrentUser) -> 
 
 
 # ================================================= automated control tests (CCM) ===
+DEFINITION_FIELDS = frozenset({"check_type", "parameters", "connector_id", "control_id", "kri_id", "control_ref"})
+
+
+async def _check_definition(db, data: dict) -> None:
+    """Refuse a definition that cannot run, in words; fill ``control_ref`` from the picked
+    control. Only reads the database for the links actually set."""
+    from app.models.control import Control
+    from app.models.operational_risk import KeyRiskIndicator
+
+    connector_type = None
+    if data.get("connector_id"):
+        connector = await db.scalar(select(Connector).where(Connector.id == data["connector_id"],
+                                                            Connector.deleted.is_(False)))
+        if connector is None:
+            raise HTTPException(status_code=422, detail="connector_id: no such connector.")
+        connector_type = connector.connector_type.value
+    errors = ccm_checks.definition_errors(data.get("check_type") or "manual", data.get("parameters") or {}, connector_type)
+    if errors:
+        raise HTTPException(status_code=422, detail=" ".join(errors))
+    if data.get("control_id"):
+        control = await db.scalar(select(Control).where(Control.id == data["control_id"], Control.deleted.is_(False)))
+        if control is None:
+            raise HTTPException(status_code=422, detail="control_id: no such control.")
+        data["control_ref"] = control.reference or data.get("control_ref") or ""
+    if data.get("kri_id"):
+        kri = await db.scalar(select(KeyRiskIndicator.id).where(KeyRiskIndicator.id == data["kri_id"],
+                                                                KeyRiskIndicator.deleted.is_(False)))
+        if kri is None:
+            raise HTTPException(status_code=422, detail="kri_id: no such KRI.")
+
+
 async def _load_test(db, tid) -> AutomatedControlTest:
     obj = await db.scalar(
         select(AutomatedControlTest)
@@ -246,7 +308,9 @@ async def list_tests(
 
 @router.post("/automated-control-tests", response_model=CctRead, status_code=201, dependencies=[_WRITE])
 async def create_test(body: CctCreate, db: DbSession, user: CurrentUser) -> CctRead:
-    obj = AutomatedControlTest(tenant_id=user.tenant_id, **body.model_dump())
+    data = body.model_dump()
+    await _check_definition(db, data)
+    obj = AutomatedControlTest(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db, AutomatedControlTest, "CCM")
     db.add(obj)
     await db.flush()
@@ -264,6 +328,10 @@ async def get_test(tid: uuid.UUID, db: DbSession) -> CctRead:
 async def update_test(tid: uuid.UUID, body: CctUpdate, db: DbSession, user: CurrentUser) -> CctRead:
     obj = await _load_test(db, tid)
     data = body.model_dump(exclude_unset=True)
+    if data.keys() & DEFINITION_FIELDS:
+        merged = {f: getattr(obj, f) for f in DEFINITION_FIELDS} | data
+        await _check_definition(db, merged)
+        data.update({k: merged[k] for k in ("control_ref",) if k in merged and merged[k] != obj.control_ref})
     changes = _changes(obj, data)
     for k, v in data.items():
         setattr(obj, k, v)
@@ -330,6 +398,11 @@ class IntegrationsSummary(BaseModel):
     tests_by_result: dict[str, int]
     avg_pass_rate: float
     failing_tests: int
+    # Phase 4
+    executable_tests: int = 0
+    overdue_tests: int = 0
+    error_tests: int = 0
+    controls_failing_monitoring: int = 0
 
 
 @router.get("/integrations-summary", response_model=IntegrationsSummary, dependencies=[_READ],
@@ -357,6 +430,11 @@ async def integrations_summary(db: DbSession) -> IntegrationsSummary:
         tests_by_result=dict(by_result),
         avg_pass_rate=avg_pass,
         failing_tests=failing,
+        executable_tests=sum(1 for t in tests if ccm_runner.is_executable(t)),
+        overdue_tests=sum(1 for t in tests if ccm_runner.is_overdue(t, datetime.now(timezone.utc))),
+        error_tests=by_result.get(CcmResult.error.value, 0),
+        controls_failing_monitoring=len({t.control_id for t in tests
+                                         if t.control_id and t.failing_since and t.status == CcmStatus.active}),
     )
 
 
@@ -367,19 +445,9 @@ INGEST_TOKEN_BYTES = 32
 #: How far a result's timestamp may run ahead of this server's clock (the monitoring
 #: tool's clock may be a little fast) before it is refused as being in the future.
 CLOCK_SKEW = timedelta(minutes=2)
-#: A connector's result maps onto the test-run result; "passed with exceptions" is a
-#: pass whose pass rate says how much passed (the run keeps the words in its findings).
-RUN_RESULT = {
-    "passed": CcmResult.passed,
-    "failed": CcmResult.failed,
-    "passed_with_exceptions": CcmResult.passed,
-}
-FAILED_FAMILY = "ccm-failed"
-
-
-def connector_actor(name: str) -> str:
-    """The actor written on audit entries a connector makes."""
-    return f"Connector {name}"[:255]
+# The result mapping, the failure alert and the connector actor live with the runner,
+# which records pushed and pulled results through one path.
+from app.services.ccm_runner import FAILED_FAMILY, RUN_RESULT, connector_actor, failed_alert  # noqa: E402,F401
 
 
 def new_ingest_token(tenant_id: uuid.UUID, connector_id: uuid.UUID) -> str:
@@ -467,29 +535,6 @@ def match_test(tests, *, connector_id, control_reference: str, test_reference: s
         return TestMatch(None, f"The monitoring test for {control_reference} on this connector is paused, so no run was recorded.")
     return TestMatch(None, f"No monitoring test on this connector covers {control_reference}, so no run was recorded; "
                            "the result is kept as evidence.")
-
-
-def failed_alert(*, connector, control, observed_local: str, summary: str, owner: str, day: date) -> dict:
-    """The event notification a failed result raises. Pure. The dedup key carries the day,
-    so a check that keeps failing raises one alert per control and connector per day."""
-    from app.models.enums import NotificationCategory
-    from app.models.notification import EVENT_PREFIX
-
-    label = " ".join(p for p in (control.reference or "", control.name or "") if p)
-    body = (f"{connector.name} reported a failed check at {observed_local}: {summary}"[:900]
-            + ". The control's effectiveness is unchanged until a person records a test and another "
-              "person reviews it; the result is on the control as evidence.")
-    if owner:
-        body += f" Control owner: {owner}."
-    return {
-        "dedup_key": f"{EVENT_PREFIX}{FAILED_FAMILY}:{connector.id}:{control.id}:{day.isoformat()}",
-        "title": f"Continuous monitoring failed: {label}"[:255],
-        "body": body,
-        "category": NotificationCategory.critical if getattr(control, "is_key", False) else NotificationCategory.warning,
-        "entity_type": "control",
-        "entity_id": control.id,
-        "link": f"/controls?id={control.id}",
-    }
 
 
 async def _token_admin(user: CurrentUser):
@@ -627,6 +672,11 @@ async def _verified_ingest(
         raise _ingest_denied()
     async with tenant_session(parsed[0]) as db:
         await _feed_connector(db, token, *parsed)
+    # Phase 4: per-token rate limit (after authentication, so a stranger cannot spend a
+    # real connector's allowance).
+    decision = await ccm_rate_limit.feed_limiter().hit(parsed[1].hex)
+    if not decision.allowed:
+        raise too_many_requests(decision, "results from this connector")
     return _IngestAuth(token, *parsed)
 
 
@@ -684,8 +734,7 @@ async def ingest_result(body: IngestBody, auth: Annotated[_IngestAuth, Depends(_
     """
     from app.models.enums import EvidenceStatus, EvidenceType
     from app.models.evidence import Evidence
-    from app.models.notification import Notification
-    from app.services import incident_clock, master_data
+    from app.services import incident_clock
 
     async with tenant_session(auth.tenant_id) as db:
         connector = await _feed_connector(db, auth.token, auth.tenant_id, auth.connector_id)
@@ -730,36 +779,16 @@ async def ingest_result(body: IngestBody, auth: Annotated[_IngestAuth, Depends(_
             status=EvidenceStatus.valid, collected_at=observed_day,
             valid_until=ev.valid_until if ev else None,
         )
-        db.add(evidence)
-
-        run = None
         test = match.test
-        if test is not None:
-            run = ControlTestRun(
-                id=uuid.uuid4(), tenant_id=auth.tenant_id, test_id=test.id, run_date=observed_day,
-                result=RUN_RESULT[body.result],
-                findings=(("Passed with exceptions: " if body.result == "passed_with_exceptions" else "")
-                          + body.summary)[:4000],
-                evidence_ref=(link or f"Evidence: {evidence.title}")[:500], pass_rate=pass_rate,
-            )
-            db.add(run)
-            if test.last_run is None or observed_day >= test.last_run:
-                test.last_run, test.last_result, test.pass_rate = observed_day, run.result, pass_rate
-        if connector.last_sync is None or connector.last_sync < observed_day:
-            connector.last_sync = min(observed_day, incident_clock.local_date(now, tz))
-
-        alert_key = ""
-        if body.result == "failed":
-            owners = await master_data.users_by_id(db, [control.owner_id])
-            owner = owners.get(control.owner_id)
-            fields = failed_alert(
-                connector=connector, control=control, observed_local=observed_text, summary=body.summary,
-                owner=(owner.full_name or owner.email) if owner else (control.owner or ""), day=observed_day,
-            )
-            if not await db.scalar(select(Notification.id).where(Notification.dedup_key == fields["dedup_key"]).limit(1)):
-                # Phase 3: to the control's owner; no owner = the whole organisation.
-                db.add(Notification(tenant_id=auth.tenant_id, user_id=control.owner_id, **fields))
-                alert_key = fields["dedup_key"]
+        recorded = await ccm_runner.record_result(
+            db, tenant_id=auth.tenant_id, connector=connector, control=control, test=test, result=body.result,
+            observed_day=observed_day, today=incident_clock.local_date(now, tz), observed_text=observed_text,
+            summary=body.summary, pass_rate=pass_rate, evidence=evidence,
+            findings=("Passed with exceptions: " if body.result == "passed_with_exceptions" else "") + body.summary,
+            evidence_ref=(link or f"Evidence: {evidence.title}"),
+            run_fields={"source": "push", "started_at": observed},
+        )
+        run, alert_key = recorded.run, recorded.alert_key
         await db.flush()
 
         facts = {
@@ -793,10 +822,281 @@ async def ingest_result(body: IngestBody, auth: Annotated[_IngestAuth, Depends(_
                 changes={"run_id": str(run.id), "result": run.result.value, "pass_rate": pass_rate,
                          "run_date": observed_day.isoformat()},
             )
+        # Phase 4: a failure opens (or updates) the test's issue and marks the control as
+        # failing monitoring; a linked KRI gets the pass rate when that is its metric.
+        fu = await ccm_runner.follow_up(
+            db, tenant_id=auth.tenant_id, test=test, control=control, run=run, result=body.result, day=observed_day,
+            actor=actor, summary=body.summary, exceptions=None, population=None, pass_rate=pass_rate,
+            metric_value=None, was_failing=recorded.was_failing, advanced=recorded.advanced,
+        )
         await db.flush()
         return IngestResult(
             connector_reference=connector.reference, control_id=control.id, control_reference=control_ref,
             evidence_id=evidence.id, run_id=run.id if run else None,
             test_reference=test.reference if test is not None else None,
             alert_raised=bool(alert_key), note=match.note,
+            issue_reference=fu.issue_reference or None,
         )
+
+
+# ======================================================= phase 4: executable CCM ===
+def _param_read(p) -> dict:
+    return {"name": p.name, "label": p.label, "kind": p.kind, "required": p.required, "default": p.default,
+            "help": p.help, "options": list(p.options)}
+
+
+@router.get("/ccm/check-types", response_model=list[CheckTypeRead], dependencies=[_READ],
+            summary="The check types a monitoring test can run, with their parameter forms")
+async def list_check_types() -> list[CheckTypeRead]:
+    return [
+        CheckTypeRead(key=s.key, label=s.label, group=s.group, description=s.description,
+                      connector_types=list(s.connector_types), input=s.input,
+                      params=[ParamSpecRead(**_param_read(p)) for p in s.params],
+                      pass_criterion=s.pass_criterion, population=s.population)
+        for s in ccm_checks.CHECKS.values()
+    ]
+
+
+@router.get("/ccm/connector-types", response_model=list[ConnectorKindRead], dependencies=[_READ],
+            summary="How each connector type is reached: its settings and secret fields")
+async def list_connector_kinds() -> list[ConnectorKindRead]:
+    return [
+        ConnectorKindRead(connector_type=t.value, kind=ccm_checks.kind_of(t.value).kind,
+                          config_fields=[ParamSpecRead(**_param_read(p)) for p in ccm_checks.kind_of(t.value).config_fields],
+                          secret_fields=[ParamSpecRead(**_param_read(p)) for p in ccm_checks.kind_of(t.value).secret_fields],
+                          note=ccm_checks.kind_of(t.value).note)
+        for t in ConnectorType
+    ]
+
+
+@router.put("/connectors/{cid}/secrets", response_model=ConnectorRead,
+            summary="Set or clear the connector's secrets (write-only; never returned)")
+async def put_connector_secrets(cid: uuid.UUID, body: SecretsWrite, db: DbSession,
+                                user=Depends(_token_admin)) -> ConnectorRead:
+    connector = await _load_connector(db, cid)
+    _check_connector_settings(connector.connector_type.value, connector.config or {}, body.secrets, body.clear_secrets)
+    changed = ccm_secrets.apply(connector, body.secrets, body.clear_secrets)
+    await db.flush()
+    if changed:
+        await audit_log.record(db, actor=user, action="secrets", entity_type="connector", entity_id=cid,
+                               summary=f"Changed the secrets of connector {connector.reference}: {', '.join(changed)}",
+                               changes={"secrets": changed})
+    return ConnectorRead.model_validate(await _load_connector(db, cid))
+
+
+def _run_connection_test(connector_type: str, config: dict, secrets: dict, timeout: float) -> str:
+    """Stubbable seam: reach the source (synchronous, run in a worker thread)."""
+    from app.services.ccm_checks.http_json import private_urls_allowed
+
+    return ccm_checks.test_connection(connector_type, config, secrets, timeout, allow_private_urls=private_urls_allowed())
+
+
+@router.post("/connectors/{cid}/test-connection", response_model=ConnectionTestResult,
+             summary="Reach the source with the saved settings and secrets")
+async def test_connector_connection(cid: uuid.UUID, db: DbSession, user=Depends(_token_admin)) -> ConnectionTestResult:
+    import asyncio
+
+    connector = await _load_connector(db, cid)
+    timeout = float(connector.timeout_seconds or 30)
+    try:
+        secrets_now = ccm_secrets.decrypt(connector.secrets_encrypted or "")
+        message = await asyncio.wait_for(
+            asyncio.to_thread(_run_connection_test, connector.connector_type.value, dict(connector.config or {}),
+                              secrets_now, timeout),
+            timeout=timeout + ccm_runner.TIMEOUT_GRACE_SECONDS,
+        )
+        ok = True
+    except asyncio.TimeoutError:
+        ok, message = False, f"No answer within {int(timeout)} seconds."
+    except (ccm_checks.CheckError, ccm_secrets.SecretsUnreadable) as exc:
+        ok, message = False, str(exc)
+    except Exception as exc:  # noqa: BLE001 - say what went wrong, never a 500
+        ok, message = False, f"{type(exc).__name__}: {exc}"
+    now = datetime.now(timezone.utc)
+    connector.last_test_at, connector.last_test_ok, connector.last_test_message = now, ok, message[:2000]
+    if ok and connector.status in (ConnectorStatus.configured, ConnectorStatus.error):
+        connector.status = ConnectorStatus.active
+    await db.flush()
+    await audit_log.record(db, actor=user, action="test_connection", entity_type="connector", entity_id=cid,
+                           summary=f"Tested connector {connector.reference}: {'connected' if ok else 'failed'} — {message}"[:500],
+                           changes={"ok": ok})
+    return ConnectionTestResult(ok=ok, message=message, tested_at=now)
+
+
+async def _run_detail(db, run: ControlTestRun) -> RunDetail:
+    from app.models.evidence import Evidence
+    from app.models.issue import Issue
+
+    detail = RunDetail.model_validate(run)
+    test = await db.scalar(select(AutomatedControlTest.reference).where(AutomatedControlTest.id == run.test_id))
+    detail.test_reference = test or ""
+    if run.evidence_id:
+        detail.evidence_title = await db.scalar(select(Evidence.title).where(Evidence.id == run.evidence_id))
+    if run.issue_id:
+        detail.issue_reference = await db.scalar(select(Issue.reference).where(Issue.id == run.issue_id))
+    return detail
+
+
+async def _run_now(db, user, tid: uuid.UUID, upload=None) -> RunNowResult:
+    test = await _load_test(db, tid)
+    if not ccm_runner.is_executable(test):
+        raise HTTPException(status_code=422, detail="This test is recorded by hand or pushed; it has no check to run.")
+    try:
+        report = await ccm_runner.execute_test(db, test, tenant_id=user.tenant_id,
+                                               source="upload" if upload is not None else "run_now", upload=upload)
+    except ccm_checks.CheckError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await audit_log.record(db, actor=user, action="run_now", entity_type="automated_control_test", entity_id=tid,
+                           summary=f"Ran {test.reference} now"
+                                   + (f" with file {upload.filename}" if upload is not None else "")
+                                   + f": {report.result}"[:400],
+                           changes={"run_id": str(report.run.id) if report.run else "", "result": report.result})
+    return RunNowResult(result=report.result, message=report.message,
+                        run=await _run_detail(db, report.run) if report.run is not None else None,
+                        issue_reference=report.issue_reference, kri_note=report.kri_note)
+
+
+@router.post("/automated-control-tests/{tid}/run", response_model=RunNowResult, dependencies=[_WRITE],
+             summary="Run the test now against its connector (or the connector's import folder)")
+async def run_test_now(tid: uuid.UUID, db: DbSession, user: CurrentUser) -> RunNowResult:
+    return await _run_now(db, user, tid)
+
+
+@router.post("/automated-control-tests/{tid}/run-upload", response_model=RunNowResult, dependencies=[_WRITE],
+             summary="Run the test now on an uploaded file (scanner export, SIEM report, HR leavers list, CSV)")
+async def run_test_with_file(tid: uuid.UUID, db: DbSession, user: CurrentUser,
+                             file: UploadFile = File(...)) -> RunNowResult:
+    from app.core.config import settings
+
+    limit = settings.max_upload_mb * 1024 * 1024
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail=f"The file is larger than {settings.max_upload_mb} MB.")
+    if not content:
+        raise HTTPException(status_code=422, detail="The file is empty.")
+    upload = ccm_checks.UploadedFile(filename=(file.filename or "upload")[:255], content=content)
+    return await _run_now(db, user, tid, upload)
+
+
+@router.get("/automated-control-tests/{tid}/runs", response_model=Page[RunRead], dependencies=[_READ],
+            summary="The test's run history, newest first")
+async def list_test_runs(tid: uuid.UUID, db: DbSession,
+                         limit: Annotated[int, Query(ge=1, le=200)] = 50,
+                         offset: Annotated[int, Query(ge=0)] = 0) -> Page[RunRead]:
+    await _load_test(db, tid)
+    stmt = select(ControlTestRun).where(ControlTestRun.test_id == tid)
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (await db.scalars(stmt.order_by(ControlTestRun.run_date.desc().nullslast(), ControlTestRun.created_at.desc())
+                             .limit(limit).offset(offset))).all()
+    return Page(items=[RunRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+
+
+async def _load_run(db, run_id) -> ControlTestRun:
+    run = await db.scalar(select(ControlTestRun).where(ControlTestRun.id == run_id))
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@router.get("/control-test-runs/{run_id}", response_model=RunDetail, dependencies=[_READ],
+            summary="One run with its exception sample and details")
+async def get_run(run_id: uuid.UUID, db: DbSession) -> RunDetail:
+    return await _run_detail(db, await _load_run(db, run_id))
+
+
+def exceptions_csv(rows: list[dict]) -> str:
+    """The exception sample as CSV (columns in first-seen order). Pure."""
+    import csv
+    import io
+
+    columns: list[str] = []
+    for row in rows:
+        for k in row:
+            if k not in columns:
+                columns.append(k)
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=columns or ["exception"], extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        # A cell starting with = + - @ would be a formula in a spreadsheet: quote it.
+        writer.writerow({k: ("'" + v if isinstance(v, str) and v[:1] in ("=", "+", "-", "@") else v)
+                         for k, v in row.items()})
+    return out.getvalue()
+
+
+@router.get("/control-test-runs/{run_id}/exceptions.csv", dependencies=[_READ],
+            summary="Download a run's exception sample as CSV")
+async def download_run_exceptions(run_id: uuid.UUID, db: DbSession):
+    from fastapi.responses import Response
+
+    run = await _load_run(db, run_id)
+    return Response(content=exceptions_csv(list(run.exceptions_sample or [])), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="run-{run_id}-exceptions.csv"'})
+
+
+def monitoring_state(tests: list, now: datetime) -> str:
+    """One word for a control's monitoring. Pure. Worst first among active tests."""
+    active = [t for t in tests if t.status == CcmStatus.active]
+    if not tests:
+        return "not_monitored"
+    if not active:
+        return "paused"
+    results = {getattr(t.last_result, "value", t.last_result) for t in active}
+    if "failed" in results:
+        return "failing"
+    if "error" in results:
+        return "error"
+    if any(ccm_runner.is_overdue(t, now) for t in active):
+        return "overdue"
+    if results <= {"not_run"}:
+        return "not_run"
+    return "passing"
+
+
+@router.get("/ccm/controls/{control_id}/monitoring", response_model=ControlMonitoringRead, dependencies=[_READ],
+            summary="Continuous monitoring of one control: state, failing since, recent pass rate, tests")
+async def control_monitoring(control_id: uuid.UUID, db: DbSession) -> ControlMonitoringRead:
+    from app.models.control import Control
+    from app.models.issue import Issue
+
+    control = await db.scalar(select(Control).where(Control.id == control_id, Control.deleted.is_(False)))
+    if control is None:
+        raise HTTPException(status_code=404, detail="Control not found")
+    ref = _norm(control.reference)
+    cond = AutomatedControlTest.control_id == control_id
+    if ref:
+        cond = cond | ((AutomatedControlTest.control_id.is_(None))
+                       & (func.lower(func.trim(AutomatedControlTest.control_ref)) == ref))
+    tests = (await db.scalars(select(AutomatedControlTest).where(cond, AutomatedControlTest.deleted.is_(False))
+                              .order_by(AutomatedControlTest.reference))).all()
+    connector_ids = {t.connector_id for t in tests if t.connector_id}
+    names = {}
+    if connector_ids:
+        names = {c.id: f"{c.reference} {c.name}".strip()
+                 for c in (await db.scalars(select(Connector).where(Connector.id.in_(connector_ids)))).all()}
+    issue_ids = {t.issue_id for t in tests if t.issue_id}
+    issues = {}
+    if issue_ids:
+        issues = {i.id: i.reference for i in (await db.scalars(select(Issue).where(Issue.id.in_(issue_ids)))).all()}
+    now = datetime.now(timezone.utc)
+    reads = []
+    all_runs = []
+    for t in tests:
+        n, rate = ccm_runner.recent_pass_rate(t.runs)
+        if t.status == CcmStatus.active:
+            all_runs.extend(t.runs)
+        latest = t.recent_runs[0] if t.runs else None
+        reads.append(MonitoringTestRead(
+            id=t.id, reference=t.reference, name=t.name, check_type=t.check_type or "manual",
+            check_label=ccm_checks.CHECKS.get(t.check_type or "manual", ccm_checks.MANUAL).label,
+            status=t.status.value, frequency=t.frequency.value, connector_name=names.get(t.connector_id, ""),
+            last_result=t.last_result.value, last_run=t.last_run, last_run_at=t.last_run_at,
+            failing_since=t.failing_since, last_error=t.last_error or "", recent_runs=n, recent_pass_rate=rate,
+            overdue=ccm_runner.is_overdue(t, now), issue_id=t.issue_id, issue_reference=issues.get(t.issue_id),
+            latest_run_id=latest.id if latest else None, latest_evidence_id=latest.evidence_id if latest else None,
+        ))
+    n, rate = ccm_runner.recent_pass_rate(all_runs)
+    return ControlMonitoringRead(
+        control_id=control_id, state=monitoring_state(list(tests), now),
+        failing_since=control.monitoring_failing_since, recent_runs=n, recent_pass_rate=rate, tests=reads,
+    )

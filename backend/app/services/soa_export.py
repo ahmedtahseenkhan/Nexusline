@@ -124,6 +124,22 @@ class SoaRow:
     controls: list[SoaControl] = field(default_factory=list)
     last_test_date: date | None = None
     last_test_result: str | None = None
+    #: Phase 4C: not tested directly but covered by a tested control of an equivalent or
+    #: containing clause (``crosswalks.ViaCrosswalk``). Never a direct mapping.
+    via_crosswalk: object = None
+
+    @property
+    def via_text(self) -> str:
+        """"Covered via crosswalk, not a direct mapping: mapped via ISO/IEC 27001:2022
+        A.8.5 (equivalent) — A.8.5 Secure authentication (effective)"."""
+        v = self.via_crosswalk
+        if v is None:
+            return ""
+        controls = "; ".join(f"{c.label()} ({_words(c.effectiveness)})" for c in v.controls)
+        return (
+            f"Covered via crosswalk, not a direct mapping: {v.label} ({v.relationship})"
+            + (f" — {controls}" if controls else "")
+        )
 
 
 def _words(value) -> str:
@@ -143,7 +159,7 @@ def control_row(c) -> SoaControl:
     )
 
 
-def build_row(r) -> SoaRow:
+def build_row(r, via=None) -> SoaRow:
     """One SoA row from a loaded requirement (duck-typed: ORM row or test double)."""
     controls = sorted(
         (control_row(c) for c in (r.controls or []) if not getattr(c, "deleted", False)),
@@ -164,12 +180,15 @@ def build_row(r) -> SoaRow:
         controls=controls,
         last_test_date=latest.last_test_date if latest else None,
         last_test_result=latest.last_test_result if latest else None,
+        via_crosswalk=via if getattr(r, "coverage", "unmapped") in ("unmapped", "unassessed") else None,
     )
 
 
-def build_rows(requirements) -> list[SoaRow]:
+def build_rows(requirements, via_crosswalk: dict | None = None) -> list[SoaRow]:
+    """``via_crosswalk``: requirement id → ``crosswalks.ViaCrosswalk``."""
+    via = via_crosswalk or {}
     live = [r for r in requirements if not getattr(r, "deleted", False)]
-    return [build_row(r) for r in sorted(live, key=lambda r: (natural_key(r.reference), r.title or ""))]
+    return [build_row(r, via.get(r.id)) for r in sorted(live, key=lambda r: (natural_key(r.reference), r.title or ""))]
 
 
 def summarize(rows: list[SoaRow]) -> dict[str, int]:
@@ -181,6 +200,7 @@ def summarize(rows: list[SoaRow]) -> dict[str, int]:
         "missing_justification": sum(1 for r in rows if not r.applicable and not r.justification.strip()),
         "mapped": sum(1 for r in rows if r.applicable and r.controls),
         "assured": sum(1 for r in rows if r.applicable and r.coverage == "assured"),
+        "via_crosswalk": sum(1 for r in rows if r.applicable and r.via_crosswalk is not None),
     }
 
 
@@ -191,10 +211,13 @@ def coverage_text(counts: dict) -> str:
     if not applicable:
         return "No applicable clauses"
     mapped = counts.get("mapped", applicable - counts.get("no_control", 0))
-    return (
+    text = (
         f"{mapped} of {applicable} applicable clauses mapped to a control; "
         f"{counts.get('assured', 0)} backed by a tested control"
     )
+    if counts.get("via_crosswalk"):
+        text += f"; {counts['via_crosswalk']} covered via crosswalk (not direct mappings)"
+    return text
 
 
 def filter_rows(rows: list[SoaRow], view: str | None) -> list[SoaRow]:
@@ -249,7 +272,7 @@ def table_rows(rows: list[SoaRow]) -> list[list]:
     return [
         [
             r.reference, r.title, r.domain, "Yes" if r.applicable else "No", r.justification,
-            "\n".join(c.label() for c in r.controls) if r.controls else "",
+            "\n".join([c.label() for c in r.controls] + ([r.via_text] if r.via_text else [])),
             _words(r.implementation_status),
             r.last_test_date.isoformat() if r.last_test_date else "",
             _words(r.last_test_result) if r.last_test_result else "",
@@ -336,6 +359,7 @@ def to_pdf(doc: SoaDocument) -> bytes:
             ("Excluded", str(counts["excluded"])),
             ("Applicable, no control", str(counts["no_control"])),
             ("Applicable, tested control", str(counts.get("assured", 0))),
+            *([("Covered via crosswalk", str(counts["via_crosswalk"]))] if counts.get("via_crosswalk") else []),
         ]),
         Spacer(1, 10),
     ]
@@ -349,7 +373,8 @@ def to_pdf(doc: SoaDocument) -> bytes:
             cell(r.title),
             cell("Yes" if r.applicable else "No", bold=not r.applicable),
             cell(r.justification),
-            cell("\n".join(c.label() for c in r.controls) if r.controls else ("None" if r.applicable else "—")),
+            cell("\n".join([c.label() for c in r.controls] + ([r.via_text] if r.via_text else []))
+                 or ("None" if r.applicable else "—")),
             cell(_words(r.implementation_status).capitalize()),
             cell(
                 f"{r.last_test_date.isoformat()} ({_words(r.last_test_result)})" if r.last_test_date else "Never"

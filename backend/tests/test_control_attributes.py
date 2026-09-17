@@ -164,7 +164,11 @@ class _PackDB:
         pass
 
 
-async def test_a_pack_install_copies_attributes_onto_new_controls_but_never_over_a_tenants():
+async def test_a_pack_install_copies_attributes_onto_new_controls_but_never_over_a_tenants(monkeypatch):
+    async def no_crosswalk_reuse(db, key):
+        return {}
+
+    monkeypatch.setattr(fl, "_crosswalk_reuse", no_crosswalk_reuse)
     own = SimpleNamespace(id=uuid.uuid4(), reference="A.8.5", name="Secure authentication",
                           iso27002_attributes={"control_type": ["detective"]})  # the tenant's call
     bare = SimpleNamespace(id=uuid.uuid4(), reference="A.8.13", name="Information backup",

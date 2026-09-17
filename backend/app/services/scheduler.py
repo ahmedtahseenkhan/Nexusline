@@ -53,6 +53,9 @@ async def run_sweep() -> dict:
     lapsed_acceptances = 0
     purged = 0
     board_packs = 0
+    snapshot_rows = 0
+    ccm_runs = 0
+    questionnaire_actions = 0
     for tenant_id, tenant_name in tenants:
         # Housekeeping runs in its own transaction first, so a purge problem can never
         # hold back the alerts and digests below (and vice versa).
@@ -61,6 +64,15 @@ async def run_sweep() -> dict:
                 purged += sum((await purge_archived(db, tenant_id)).values())
         except Exception:  # noqa: BLE001 - isolate per-tenant failures
             logger.exception("Retention purge failed for tenant %s", tenant_id)
+        # Period snapshots (phase 4B): at each month end, and once reconstructed for the
+        # last four quarter ends. Before board packs, so a pack sees today's snapshot.
+        try:
+            from app.services import snapshots
+
+            async with tenant_session(tenant_id) as db:
+                snapshot_rows += await snapshots.run_due(db, tenant_id)
+        except Exception:  # noqa: BLE001 - isolate per-tenant failures
+            logger.exception("Period snapshot failed for tenant %s", tenant_id)
         # Board packs due for upcoming committee meetings (phase 3), in their own
         # transaction: a pack that cannot be built is kept as a failed pack, never lost,
         # and never holds back the alerts below. Audited as the system actor.
@@ -69,6 +81,27 @@ async def run_sweep() -> dict:
                 board_packs += len(await board_pack.generate_due_packs(db, tenant_id))
         except Exception:  # noqa: BLE001 - isolate per-tenant failures
             logger.exception("Board pack generation failed for tenant %s", tenant_id)
+        # Continuous control monitoring (phase 4D): run the tests that are due, each in its
+        # own transaction under an advisory lock, and raise overdue alerts. Before the
+        # alerts and digests, so a failure found now reaches today's digest.
+        try:
+            from app.services import ccm_runner
+
+            ccm = await ccm_runner.run_due_for_tenant(tenant_id)
+            ccm_runs += ccm.runs
+        except Exception:  # noqa: BLE001 - isolate per-tenant failures
+            logger.exception("Continuous monitoring runs failed for tenant %s", tenant_id)
+        # Questionnaires (phase 4E): reminders before the due date, overdue alerts and
+        # recurring re-issues, in their own transaction and before the digests so an
+        # overdue event reaches today's digest.
+        try:
+            from app.services import questionnaire_workflow
+
+            async with tenant_session(tenant_id) as db:
+                q_due = await questionnaire_workflow.run_due(db, tenant_id, tenant_name)
+                questionnaire_actions += sum(q_due.values())
+        except Exception:  # noqa: BLE001 - isolate per-tenant failures
+            logger.exception("Questionnaire reminders failed for tenant %s", tenant_id)
         try:
             async with tenant_session(tenant_id) as db:
                 # State first, alerts second: lapsing an acceptance puts its risk back in
@@ -90,6 +123,9 @@ async def run_sweep() -> dict:
         "acceptances_expired": lapsed_acceptances,
         "records_purged": purged,
         "board_packs_generated": board_packs,
+        "snapshot_rows": snapshot_rows,
+        "ccm_runs": ccm_runs,
+        "questionnaire_actions": questionnaire_actions,
     }
 
 
@@ -306,6 +342,9 @@ async def send_digests(db, tenant_id: uuid.UUID, tenant_name: str, now: datetime
             ).all()
         }
 
+    # Phase 4: route stages assigned to a role pass the same eligibility rule as the
+    # Approvals page, so a digest never carries a link its reader would be refused.
+    gates = await notifications.load_stage_gates(db, list(approvals.values()), directory) if approvals else {}
     sent = 0
     for person in people:
         mine = digest_for(rows, user_id=person.id, role_names=person.roles, since=since[person.id])
@@ -319,6 +358,7 @@ async def send_digests(db, tenant_id: uuid.UUID, tenant_name: str, now: datetime
                 if approval is None or notifications.approval_refusal(
                     approval, user_id=person.id, email=person.email, permissions=permissions,
                     voted_ids=[a.actor_id for a in approval.actions],
+                    role_names=person.roles, stage=gates.get(approval.id),
                 ) is not None:
                     continue
                 token = await action_tokens.issue_token(

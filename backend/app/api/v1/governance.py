@@ -21,7 +21,7 @@ from typing import Annotated
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import Select, func, select
 
@@ -40,6 +40,11 @@ from app.models.governance import (
 )
 from app.schemas.common import Page
 from app.schemas.governance import (
+    BoardPackBrandingRead,
+    BoardPackBrandingUpdate,
+    BoardPackCommentary,
+    BoardPackDecision,
+    CommitteeMembersUpdate,
     BoardPackCreate,
     BoardPackFile,
     BoardPackRead,
@@ -64,6 +69,17 @@ router = APIRouter(tags=["governance"])
 
 _READ = Depends(require("governance:read"))
 _WRITE = Depends(require("governance:write"))
+_RELEASE = Depends(require("boardpack:release"))
+
+
+def _sections_or_422(value):
+    """A committee's saved section choice, validated and de-duplicated in its order."""
+    if value is None:
+        return None
+    try:
+        return board_pack.normalise_sections(value, keep_order=True)
+    except board_pack.PackError as exc:
+        raise HTTPException(status_code=422, detail=f"board_pack_sections: {exc}") from exc
 
 
 async def _next_ref(db, model, prefix: str) -> str:
@@ -136,7 +152,9 @@ async def list_committees(
 
 @router.post("/governance", response_model=CommitteeRead, status_code=201, dependencies=[_WRITE])
 async def create_committee(body: CommitteeCreate, db: DbSession, user: CurrentUser) -> CommitteeRead:
-    obj = Committee(tenant_id=user.tenant_id, **body.model_dump())
+    data = body.model_dump()
+    data["board_pack_sections"] = _sections_or_422(data.get("board_pack_sections"))
+    obj = Committee(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db, Committee, "CMT")
     db.add(obj)
     await db.flush()
@@ -155,7 +173,7 @@ def _plain(value):
 
 
 #: Fields that may be cleared (sent as null); every other null in a PATCH is ignored.
-_NULLABLE_COMMITTEE_FIELDS = frozenset({"board_pack_days_before"})
+_NULLABLE_COMMITTEE_FIELDS = frozenset({"board_pack_days_before", "board_pack_sections"})
 
 
 @router.patch("/governance/{cid}", response_model=CommitteeRead, dependencies=[_WRITE])
@@ -165,6 +183,8 @@ async def update_committee(cid: uuid.UUID, body: CommitteeUpdate, db: DbSession,
     for k, v in body.model_dump(exclude_unset=True).items():
         if v is None and k not in _NULLABLE_COMMITTEE_FIELDS:
             continue
+        if k == "board_pack_sections":
+            v = _sections_or_422(v)
         before = getattr(obj, k)
         if before != v:
             changes[k] = {"from": _plain(before), "to": _plain(v)}
@@ -190,6 +210,48 @@ async def delete_committee(cid: uuid.UUID, db: DbSession, user: CurrentUser) -> 
     await db.flush()
     await audit_log.record(db, actor=user, action="delete", entity_type="committee", entity_id=obj.id,
                            summary=f"Archived committee {obj.reference}: {obj.name}")
+
+
+@router.put("/governance/{cid}/members", response_model=CommitteeRead, dependencies=[_WRITE],
+            summary="Set the committee's member users (chair, secretary, members, in attendance)")
+async def set_committee_members(cid: uuid.UUID, body: CommitteeMembersUpdate, db: DbSession,
+                                user: CurrentUser) -> CommitteeRead:
+    """Replaces the list. Members receive released board packs and see the committee's
+    decisions on the board home. The free-text roll (``members``) is kept as it is."""
+    from app.models.governance import CommitteeMember
+
+    obj = await _load_committee(db, cid)
+    wanted: dict = {}
+    for m in body.members:
+        await master_data.check_user(db, m.user_id, "members.user_id")
+        wanted[m.user_id] = m.role
+    before = {m.user_id: m.role for m in obj.member_users}
+    for m in list(obj.member_users):
+        if m.user_id not in wanted:
+            obj.member_users.remove(m)
+        elif m.role != wanted[m.user_id]:
+            m.role = wanted[m.user_id]
+    for uid, role in wanted.items():
+        if uid not in before:
+            obj.member_users.append(CommitteeMember(tenant_id=user.tenant_id, user_id=uid, role=role))
+    await db.flush()
+    if before != wanted:
+        people = await master_data.users_by_id(db, list(set(before) | set(wanted)))
+
+        def name(uid):
+            ref = people.get(uid)
+            return (ref.full_name or ref.email) if ref else str(uid)
+
+        added = [name(u) for u in wanted if u not in before]
+        removed = [name(u) for u in before if u not in wanted]
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="committee", entity_id=obj.id,
+            summary=(f"Updated the members of committee {obj.reference}"
+                     + (f"; added {', '.join(added)}" if added else "")
+                     + (f"; removed {', '.join(removed)}" if removed else ""))[:500],
+            changes={"members_added": added, "members_removed": removed},
+        )
+    return CommitteeRead.model_validate(await _load_committee(db, cid))
 
 
 # ================================================================= meetings ===
@@ -269,6 +331,7 @@ def _stamp_decision(obj: MeetingDecision, data: dict) -> None:
 @router.post("/governance-meetings/{mid}/decisions", response_model=MeetingRead, status_code=201, dependencies=[_WRITE])
 async def add_decision(mid: uuid.UUID, body: DecisionCreate, db: DbSession, user: CurrentUser) -> MeetingRead:
     await _load_meeting(db, mid)
+    await master_data.check_user(db, body.owner_id, "owner_id")
     decision = MeetingDecision(tenant_id=user.tenant_id, meeting_id=mid, **body.model_dump())
     decision.reference = await _next_ref(db, MeetingDecision, "DEC")
     if decision.status == DecisionStatus.done and decision.completed_date is None:
@@ -291,6 +354,8 @@ async def _load_decision(db, did: uuid.UUID) -> MeetingDecision:
 async def update_decision(did: uuid.UUID, body: DecisionUpdate, db: DbSession, user: CurrentUser) -> DecisionRead:
     obj = await _load_decision(db, did)
     data = body.model_dump(exclude_unset=True)
+    if data.get("owner_id") is not None:
+        await master_data.check_user(db, data["owner_id"], "owner_id")
     _stamp_decision(obj, data)
     changes = {k: {"from": str(_plain(getattr(obj, k))), "to": str(_plain(v))}
                for k, v in data.items() if getattr(obj, k) != v}
@@ -422,9 +487,17 @@ async def _load_pack(db, pack_id: uuid.UUID) -> BoardPack:
     return obj
 
 
-async def _pack_reads(db, packs) -> list[BoardPackRead]:
-    """Read models with committee, meeting, file and author names — one query each."""
+async def _pack_reads(db, packs, user=None) -> list[BoardPackRead]:
+    """Read models with committee, meeting, file and author names — one query each —
+    and, for ``user``, whether they may review or release each pack now."""
+    from app.services import dual_control
+
     packs = list(packs)
+    sod = False
+    if user is not None and any(p.review_state in (board_pack.DRAFT, board_pack.REVIEWED) for p in packs):
+        sod, _rule = await dual_control.dual_control_required(
+            db, board_pack.DUAL_CONTROL_MODULE, board_pack.DUAL_CONTROL_ACTION)
+    may_release = user is not None and "boardpack:release" in set(user.permission_codes or [])
     committee_ids = {p.committee_id for p in packs if p.committee_id}
     meeting_ids = {p.meeting_id for p in packs if p.meeting_id}
     file_ids = {f for p in packs for f in (p.pdf_file_id, p.xlsx_file_id) if f}
@@ -435,7 +508,13 @@ async def _pack_reads(db, packs) -> list[BoardPackRead]:
         select(Meeting.id, Meeting.title, Meeting.meeting_date).where(Meeting.id.in_(meeting_ids))
     )).all()} if meeting_ids else {}
     files = {f.id: f for f in (await db.scalars(select(StoredFile).where(StoredFile.id.in_(file_ids)))).all()} if file_ids else {}
-    people = await master_data.users_by_id(db, [p.generated_by_id for p in packs])
+    people = await master_data.users_by_id(
+        db, [x for p in packs for x in (p.generated_by_id, getattr(p, "reviewed_by_id", None),
+                                         getattr(p, "released_by_id", None))])
+
+    def person(uid) -> str:
+        ref = people.get(uid) if uid else None
+        return (ref.full_name or ref.email) if ref else ""
 
     def file_ref(fid):
         f = files.get(fid) if fid else None
@@ -446,6 +525,19 @@ async def _pack_reads(db, packs) -> list[BoardPackRead]:
     for p in packs:
         who = people.get(p.generated_by_id) if p.generated_by_id else None
         meeting = meetings.get(p.meeting_id)
+        state = getattr(p, "review_state", board_pack.RELEASED) or board_pack.RELEASED
+        blocked = ""
+        can_review = can_release = False
+        if user is not None and state != board_pack.RELEASED:
+            action = "review" if state == board_pack.DRAFT else "release"
+            refusal = board_pack.lifecycle_refusal(
+                action=action, review_state=state, status=p.status, actor_id=user.id,
+                contributor_ids=p.contributor_ids or [], dual_control=sod)
+            if not may_release:
+                refusal = refusal or "Reviewing and releasing packs needs the boardpack:release permission."
+            can_review = action == "review" and refusal is None
+            can_release = action == "release" and refusal is None
+            blocked = refusal or ""
         out.append(BoardPackRead(
             id=p.id, committee_id=p.committee_id, committee_name=committees.get(p.committee_id, ""),
             meeting_id=p.meeting_id, meeting_title=meeting.title if meeting else "",
@@ -455,6 +547,12 @@ async def _pack_reads(db, packs) -> list[BoardPackRead]:
             generated_by_id=p.generated_by_id,
             generated_by=(who.full_name or who.email) if who else ("" if p.generated_by_id else board_pack.SCHEDULER_NAME),
             generated_at=p.generated_at, created_at=p.created_at,
+            review_state=state, reviewed_by=person(getattr(p, "reviewed_by_id", None)),
+            reviewed_at=getattr(p, "reviewed_at", None), released_by=person(getattr(p, "released_by_id", None)),
+            released_at=getattr(p, "released_at", None), commentary=dict(getattr(p, "commentary", None) or {}),
+            basis=dict(getattr(p, "basis", None) or {}), distribution=list(getattr(p, "distribution", None) or []),
+            can_review=can_review, can_release=can_release, blocked_reason=blocked,
+            editable=bool(getattr(p, "content", None)) and state != board_pack.RELEASED and p.status == board_pack.READY,
         ))
     return out
 
@@ -489,20 +587,27 @@ async def create_board_pack(body: BoardPackCreate, db: DbSession, user: CurrentU
         )
     except board_pack.PackError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return (await _pack_reads(db, [pack]))[0]
+    return (await _pack_reads(db, [pack], user))[0]
 
 
 @router.get("/board-packs", response_model=Page[BoardPackRead], dependencies=[_READ],
             summary="Board packs, newest first")
 async def list_board_packs(
     db: DbSession,
+    user: CurrentUser,
     committee_id: uuid.UUID | None = None,
     meeting_id: uuid.UUID | None = None,
     status_filter: Annotated[str | None, Query(alias="status", pattern="^(ready|failed)$")] = None,
+    review_state: Annotated[str | None, Query(pattern="^(draft|reviewed|released)$")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[BoardPackRead]:
     stmt = select(BoardPack)
+    # Someone who can't prepare packs (a board member) sees released packs only.
+    if user is not None and "governance:write" not in set(user.permission_codes or []):
+        stmt = stmt.where(BoardPack.review_state == board_pack.RELEASED)
+    if review_state is not None:
+        stmt = stmt.where(BoardPack.review_state == review_state)
     if committee_id is not None:
         stmt = stmt.where(BoardPack.committee_id == committee_id)
     if meeting_id is not None:
@@ -514,16 +619,166 @@ async def list_board_packs(
         stmt.order_by(BoardPack.generated_at.desc().nulls_last(), BoardPack.created_at.desc())
         .limit(limit).offset(offset)
     )).all()
-    return Page(items=await _pack_reads(db, rows), total=total, limit=limit, offset=offset)
+    return Page(items=await _pack_reads(db, rows, user), total=total, limit=limit, offset=offset)
 
 
 @router.get("/board-packs/{pack_id}", response_model=BoardPackRead, dependencies=[_READ])
-async def get_board_pack(pack_id: uuid.UUID, db: DbSession) -> BoardPackRead:
-    return (await _pack_reads(db, [await _load_pack(db, pack_id)]))[0]
+async def get_board_pack(pack_id: uuid.UUID, db: DbSession, user: CurrentUser) -> BoardPackRead:
+    pack = await _load_pack(db, pack_id)
+    _visible_or_404(pack, user)
+    return (await _pack_reads(db, [pack], user))[0]
+
+
+def _visible_or_404(pack, user) -> None:
+    """A draft or reviewed pack is for the people preparing it, not yet the committee."""
+    state = getattr(pack, "review_state", board_pack.RELEASED)
+    if state != board_pack.RELEASED and "governance:write" not in set(getattr(user, "permission_codes", None) or []):
+        raise HTTPException(status_code=404, detail="Board pack not found")
+
+
+async def _org_and_pack(db, user, pack_id):
+    pack = await db.scalar(select(BoardPack).where(BoardPack.id == pack_id).with_for_update())
+    if pack is None:
+        raise HTTPException(status_code=404, detail="Board pack not found")
+    return await board_pack.org_context(db, user.tenant_id), pack
+
+
+def _pack_error(exc: board_pack.PackError) -> HTTPException:
+    text = str(exc)
+    code = 403 if text.startswith("Segregation of duties") else 409 if (
+        "released" in text or "draft" in text or "reviewed" in text) else 422
+    return HTTPException(status_code=code, detail=text)
+
+
+@router.put("/board-packs/{pack_id}/commentary", response_model=BoardPackRead, dependencies=[_WRITE],
+            summary="Write the pack's commentary per section; the files are re-rendered with it")
+async def set_board_pack_commentary(pack_id: uuid.UUID, body: BoardPackCommentary, db: DbSession,
+                                    user: CurrentUser) -> BoardPackRead:
+    org, pack = await _org_and_pack(db, user, pack_id)
+    try:
+        await board_pack.set_commentary(db, org, pack, user, body.commentary)
+    except board_pack.PackError as exc:
+        raise _pack_error(exc) from exc
+    return (await _pack_reads(db, [pack], user))[0]
+
+
+@router.post("/board-packs/{pack_id}/review", response_model=BoardPackRead, dependencies=[_RELEASE],
+             summary="Mark a draft pack reviewed (not by anyone who prepared it)")
+async def review_board_pack(pack_id: uuid.UUID, body: BoardPackDecision, db: DbSession,
+                            user: CurrentUser) -> BoardPackRead:
+    _org, pack = await _org_and_pack(db, user, pack_id)
+    try:
+        await board_pack.review_pack(db, pack, user, body.note.strip())
+    except board_pack.PackError as exc:
+        raise _pack_error(exc) from exc
+    return (await _pack_reads(db, [pack], user))[0]
+
+
+@router.post("/board-packs/{pack_id}/return", response_model=BoardPackRead, dependencies=[_RELEASE],
+             summary="Send a reviewed pack back to draft")
+async def return_board_pack(pack_id: uuid.UUID, body: BoardPackDecision, db: DbSession,
+                            user: CurrentUser) -> BoardPackRead:
+    _org, pack = await _org_and_pack(db, user, pack_id)
+    try:
+        await board_pack.return_pack(db, pack, user, body.note.strip())
+    except board_pack.PackError as exc:
+        raise _pack_error(exc) from exc
+    return (await _pack_reads(db, [pack], user))[0]
+
+
+@router.post("/board-packs/{pack_id}/release", response_model=BoardPackRead, dependencies=[_RELEASE],
+             summary="Release a reviewed pack to the committee's members (notified and e-mailed)")
+async def release_board_pack(pack_id: uuid.UUID, db: DbSession, user: CurrentUser) -> BoardPackRead:
+    org, pack = await _org_and_pack(db, user, pack_id)
+    try:
+        await board_pack.release_pack(db, org, pack, user)
+    except board_pack.PackError as exc:
+        raise _pack_error(exc) from exc
+    return (await _pack_reads(db, [pack], user))[0]
+
+
+# ------------------------------------------------------------ pack branding ---
+async def _branding_read(db, row) -> BoardPackBrandingRead:
+    if row is None:
+        return BoardPackBrandingRead()
+    filename = ""
+    if row.logo_file_id:
+        sf = await db.get(StoredFile, row.logo_file_id)
+        filename = sf.filename if sf else ""
+    return BoardPackBrandingRead(cover_title=row.cover_title, primary_colour=row.primary_colour,
+                                 classification=row.classification, logo_file_id=row.logo_file_id if filename else None,
+                                 logo_filename=filename)
+
+
+@router.get("/board-pack-branding", response_model=BoardPackBrandingRead, dependencies=[_READ],
+            summary="How the organisation's board packs look")
+async def get_board_pack_branding(db: DbSession) -> BoardPackBrandingRead:
+    from app.models.governance import BoardPackBranding
+
+    return await _branding_read(db, await db.scalar(select(BoardPackBranding)))
+
+
+async def _branding_row(db, user):
+    from app.models.governance import BoardPackBranding
+
+    row = await db.scalar(select(BoardPackBranding))
+    if row is None:
+        row = BoardPackBranding(tenant_id=user.tenant_id)
+        db.add(row)
+    return row
+
+
+@router.put("/board-pack-branding", response_model=BoardPackBrandingRead,
+            dependencies=[Depends(require("settings:manage"))],
+            summary="Set the cover title, primary colour and classification (administrators)")
+async def update_board_pack_branding(body: BoardPackBrandingUpdate, db: DbSession,
+                                     user: CurrentUser) -> BoardPackBrandingRead:
+    row = await _branding_row(db, user)
+    changes = {}
+    for k in ("cover_title", "primary_colour", "classification"):
+        v = getattr(body, k)
+        if v is not None and v.strip() != getattr(row, k):
+            changes[k] = {"from": getattr(row, k), "to": v.strip()}
+            setattr(row, k, v.strip())
+    if not row.classification:
+        row.classification = board_pack.DEFAULT_CLASSIFICATION
+    if body.remove_logo and row.logo_file_id:
+        changes["logo"] = {"from": str(row.logo_file_id), "to": None}
+        row.logo_file_id = None
+    row.updated_by_id = user.id
+    await db.flush()
+    if changes:
+        await audit_log.record(db, actor=user, action="update", entity_type="board_pack_branding", entity_id=row.id,
+                               summary=f"Updated board pack branding: {', '.join(changes)}"[:500], changes=changes)
+    return await _branding_read(db, row)
+
+
+@router.post("/board-pack-branding/logo", response_model=BoardPackBrandingRead,
+             dependencies=[Depends(require("settings:manage"))],
+             summary="Upload the logo printed on board pack covers (PNG or JPEG)")
+async def upload_board_pack_logo(db: DbSession, user: CurrentUser, file: UploadFile = File(...)) -> BoardPackBrandingRead:
+    kind = (file.content_type or "").lower()
+    if kind not in ("image/png", "image/jpeg", "image/jpg"):
+        raise HTTPException(status_code=422, detail="The logo must be a PNG or JPEG image.")
+    row = await _branding_row(db, user)
+    await db.flush()
+    blob = await storage.save_upload(user.tenant_id, file)
+    sf = StoredFile(tenant_id=user.tenant_id, entity_type="board_pack_branding", entity_id=row.id,
+                    title="Board pack logo", filename=blob.filename, content_type=blob.content_type,
+                    size_bytes=blob.size_bytes, sha256=blob.sha256, storage_key=blob.storage_key,
+                    uploaded_by_email=(user.email or "")[:255])
+    db.add(sf)
+    await db.flush()
+    row.logo_file_id, row.updated_by_id = sf.id, user.id
+    await db.flush()
+    await audit_log.record(db, actor=user, action="update", entity_type="board_pack_branding", entity_id=row.id,
+                           summary=f"Uploaded the board pack logo ({blob.filename})"[:500])
+    return await _branding_read(db, row)
 
 
 async def _pack_download(db, user, pack_id: uuid.UUID, kind: str) -> FileResponse:
     pack = await _load_pack(db, pack_id)
+    _visible_or_404(pack, user)
     file_id = pack.pdf_file_id if kind == "pdf" else pack.xlsx_file_id
     sf = await db.get(StoredFile, file_id) if file_id else None
     if sf is None:

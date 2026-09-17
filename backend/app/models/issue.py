@@ -56,6 +56,8 @@ class IssueSource(str, enum.Enum):
     risk_assessment = "risk_assessment"
     self_identified = "self_identified"
     other = "other"
+    #: Phase 4: opened by a failing continuous-monitoring test (one per test while open).
+    ccm = "ccm"
 
 
 class IssueStatus2(str, enum.Enum):

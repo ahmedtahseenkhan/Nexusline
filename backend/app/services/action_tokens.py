@@ -125,6 +125,8 @@ class TokenContext:
     user: Any
     approval: ApprovalRequest | None
     organisation: str = ""
+    #: The route-stage gate when the request is a stage assigned to a role (phase 4).
+    stage: Any = None
 
 
 #: Token states the confirmation page distinguishes.
@@ -132,12 +134,14 @@ READY, USED, EXPIRED, NOT_ELIGIBLE, DECIDED = "ready", "used", "expired", "not_e
 
 
 def token_state(
-    row: Any, user: Any, approval: Any, now: datetime, *, sod: bool | None = None
+    row: Any, user: Any, approval: Any, now: datetime, *, sod: bool | None = None, stage: Any = None,
 ) -> tuple[str, str]:
     """``(state, message)`` for an opened token. Pure.
 
     ``ready`` only when the token is unused and unexpired, its user is active, and that
-    user may decide the request right now (see ``notifications.approval_refusal``)."""
+    user may decide the request right now (``notifications.approval_refusal`` — the rule
+    the Approvals page and the decide endpoint use, route-stage roles included via
+    ``stage``)."""
     from app.services.notifications import approval_refusal
 
     if getattr(row, "used_at", None) is not None:
@@ -154,6 +158,7 @@ def token_state(
     refusal = approval_refusal(
         approval, user_id=user.id, email=user.email, permissions=user.permission_codes,
         voted_ids=[a.actor_id for a in (approval.actions or [])], sod=sod,
+        role_names=getattr(user, "role_names", None) or (), stage=stage,
     )
     if refusal:
         return NOT_ELIGIBLE, refusal
@@ -187,7 +192,16 @@ async def open_token(db: AsyncSession, token: str) -> TokenContext | None:
         .where(ApprovalRequest.id == row.entity_id)
         .options(selectinload(ApprovalRequest.actions))
     )
-    return TokenContext(row=row, user=user, approval=approval, organisation=tenant.name)
+    stage = await _stage_gate(db, approval) if approval is not None else None
+    return TokenContext(row=row, user=user, approval=approval, organisation=tenant.name, stage=stage)
+
+
+async def _stage_gate(db: AsyncSession, approval: ApprovalRequest):
+    """The route-stage gate for ``approval`` (None when it is not a role-assigned stage)."""
+    from app.services import notifications
+
+    directory = await notifications.load_directory(db)
+    return (await notifications.load_stage_gates(db, [approval], directory)).get(approval.id)
 
 
 async def claim(db: AsyncSession, row: ActionToken, now: datetime) -> bool:
@@ -202,14 +216,17 @@ async def claim(db: AsyncSession, row: ActionToken, now: datetime) -> bool:
 
 
 # ========================================================== decision e-mails ===
-def decision_makers(approval: Any, directory: Any, *, sod: bool | None = None) -> list[uuid.UUID]:
+def decision_makers(
+    approval: Any, directory: Any, *, sod: bool | None = None, stage: Any = None,
+) -> list[uuid.UUID]:
     """The active users a pending request is waiting on who may decide it now: the named
-    person, or the members of the named (or approving) roles — minus the maker and
-    anyone who has already voted. Pure."""
+    person, or the members of the named (or approving, or stage) roles — minus the maker,
+    anyone who has already voted and, on a route stage, anyone the stage role excludes.
+    Pure."""
     from app.services.notifications import USER, approval_recipients, approval_refusal
 
     candidates: list[uuid.UUID] = []
-    for kind, value in approval_recipients(approval, directory):
+    for kind, value in approval_recipients(approval, directory, stage):
         candidates.extend([value] if kind == USER else directory.members(value))
     voted = {a.actor_id for a in (getattr(approval, "actions", None) or [])}
     out: list[uuid.UUID] = []
@@ -219,7 +236,7 @@ def decision_makers(approval: Any, directory: Any, *, sod: bool | None = None) -
             continue
         if approval_refusal(
             approval, user_id=uid, email=person.email, permissions=directory.permissions_of(uid),
-            voted_ids=voted, sod=sod,
+            voted_ids=voted, sod=sod, role_names=directory.roles_of(uid), stage=stage,
         ) is None:
             out.append(uid)
     return out
@@ -247,7 +264,8 @@ async def email_decision_request(db: AsyncSession, tenant_id: uuid.UUID, approva
     org = tenant.name if tenant is not None else "NexusLine"
     now = datetime.now(timezone.utc)
     sent = 0
-    for uid in decision_makers(approval, directory):
+    stage = (await notifications.load_stage_gates(db, [approval], directory)).get(approval.id)
+    for uid in decision_makers(approval, directory, stage=stage):
         person = directory.users[uid]
         token = await issue_token(db, tenant_id=tenant_id, user_id=uid, approval_id=approval.id, now=now)
         subject, html, text = email_service.render_decision_request(

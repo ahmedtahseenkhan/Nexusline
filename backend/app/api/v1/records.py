@@ -81,6 +81,8 @@ class RestoreResult(BaseModel):
     reference: str = ""
     title: str = ""
     label: str = ""
+    #: What else the restore changed, in a sentence (e.g. a risk candidate withdrawn).
+    note: str = ""
 
 
 class WorkflowActionBody(BaseModel):
@@ -289,6 +291,13 @@ async def restore_record(
         cleared = await clear_asset_removed(db, record)
         if cleared:
             summary += f"; cleared the review flag on {cleared} linked risk(s)"
+    note = ""
+    from app.models.risk import Risk
+
+    if isinstance(record, Risk):
+        note = await _release_migrated_candidate(db, user, record)
+        if note:
+            summary += f"; {note}"
     await audit.record(
         db, actor=user, action="restore", entity_type=entity_type, entity_id=record.id,
         summary=summary[:500],
@@ -297,7 +306,17 @@ async def restore_record(
         entity_type=entity_type, id=record.id,
         reference=record_registry.reference_of(record),
         title=record_registry.title_of(record), label=label,
+        note=(note[:1].upper() + note[1:] + ".") if note else "",
     )
+
+
+async def _release_migrated_candidate(db, user: CurrentUser, risk) -> str:
+    """A risk the legacy migration moved into the candidate queue is back: withdraw or
+    trim its still-pending candidate so the same risk isn't proposed twice
+    (``legacy_risk_migration.release_on_restore``)."""
+    from app.services.legacy_risk_migration import release_on_restore
+
+    return await release_on_restore(db, user, risk)
 
 
 # ---------------------------------------------------------------- bulk edit ---

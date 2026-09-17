@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -493,12 +493,25 @@ async def _seed_sample_data(db: AsyncSession, tenant_id, admin: User) -> None:
         if ctrls["Access Control Policy"] not in cc61.controls:
             cc61.controls.append(ctrls["Access Control Policy"])
         await db.flush()
+        # Installing SOC 2 already records the library's crosswalk rows; add the pair only
+        # if the content doesn't carry it (either direction).
         if "A.5.15" in iso_reqs:
-            await db.execute(
-                requirement_crosswalks.insert().values(
-                    requirement_id=iso_reqs["A.5.15"].id, related_requirement_id=cc61.id
+            a515 = iso_reqs["A.5.15"].id
+            rc = requirement_crosswalks.c
+            existing = await db.scalar(
+                select(func.count()).select_from(requirement_crosswalks).where(
+                    or_(
+                        (rc.requirement_id == a515) & (rc.related_requirement_id == cc61.id),
+                        (rc.requirement_id == cc61.id) & (rc.related_requirement_id == a515),
+                    )
                 )
             )
+            if not existing:
+                await db.execute(
+                    requirement_crosswalks.insert().values(
+                        requirement_id=a515, related_requirement_id=cc61.id
+                    )
+                )
 
     # Evidence attached to controls (demonstrates every requirement those controls map to).
     db.add_all(

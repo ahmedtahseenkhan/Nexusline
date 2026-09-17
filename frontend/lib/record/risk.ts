@@ -545,8 +545,11 @@ export function rollupParts(x: {
   worst_exposure: (RollupRef & { exposure: number | null }) | null;
   by_severity: Record<string, number>;
   breaches: number;
+  /** Listed below but left out of the figures (drafts, never scored, accepted, closed). */
+  not_in_figures?: number;
 }): RollupPart[] {
   const parts: RollupPart[] = [`${x.total} below in all`];
+  if (x.not_in_figures) parts.push(`${x.not_in_figures} not in figures (draft, unscored, accepted or closed)`);
   if (x.worst_residual) parts.push({ pre: "worst residual ", ref: x.worst_residual, post: ` (${x.worst_residual.residual_score ?? "not recorded"})` });
   if (x.worst_exposure) parts.push({ pre: "worst exposure ", ref: x.worst_exposure, post: x.worst_exposure.exposure != null ? ` (${x.worst_exposure.exposure})` : "" });
   parts.push((["critical", "high", "medium", "low"] as const).map((b) => `${x.by_severity[b] ?? 0} ${b}`).join(", "));

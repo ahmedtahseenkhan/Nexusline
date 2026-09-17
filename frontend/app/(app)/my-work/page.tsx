@@ -52,7 +52,11 @@ type MyWork = {
 };
 
 /** Kinds that are somebody else's work waiting on the reader's decision. */
-const DECISIONS = new Set(["approval", "record_review", "test_review", "issue_validation", "due_date_change"]);
+const DECISIONS = new Set([
+  "approval", "record_review", "test_review", "issue_validation", "due_date_change",
+  // Phase 4B: submitted vendor assessments and audit findings whose agreed date has come.
+  "assessment_review", "finding_follow_up",
+]);
 
 function StatusBadge({ item }: { item: MyWorkItem }) {
   if (item.overdue) return <Badge tone="critical">Overdue</Badge>;
@@ -136,7 +140,9 @@ export default function MyWorkPage() {
           <h1>My work</h1>
           <p>
             Everything waiting for you, most urgent first: decisions other people are waiting on, then what you
-            own that is overdue or due in the next {data?.horizon_days ?? 14} days, then policies to acknowledge.
+            own that is overdue or due in the next {data?.horizon_days ?? 14} days — including audit engagements and
+            findings, access reviews, regulatory changes and returns, regulator notification deadlines, expiring
+            exceptions and declarations — then policies to acknowledge.
             Each row opens its record.
           </p>
         </div>

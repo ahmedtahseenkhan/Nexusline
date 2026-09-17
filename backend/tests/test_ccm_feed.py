@@ -300,6 +300,13 @@ def ingest_env(monkeypatch):
     monkeypatch.setattr(incident_clock, "now_utc", lambda: datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc))
     monkeypatch.setattr(modules, "is_enabled", lambda key: True)
     monkeypatch.setattr(webhooks, "dispatch", no_hooks)
+    # Phase 4 follow-up (issue, reliance signal, KRI) is pinned in test_phase4_ccm.py.
+    from app.services import ccm_runner
+
+    async def no_follow_up(*a, **kw):
+        return ccm_runner.FollowUp()
+
+    monkeypatch.setattr(ccm_runner, "follow_up", no_follow_up)
     return SimpleNamespace(db=db, token=token, control=control, test=test)
 
 

@@ -12,6 +12,7 @@ import {
   type RiskMatrix,
   type TopRisk,
 } from "@/lib/api";
+import { getPendingSuggestions, type PendingSuggestions } from "@/lib/compliance";
 import { toast } from "@/lib/feedback";
 import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
@@ -43,6 +44,14 @@ const CARD: React.CSSProperties = {
 };
 const H2: React.CSSProperties = { fontSize: 16, fontWeight: 700, margin: 0 };
 const SUB: React.CSSProperties = { fontSize: 12.5, color: "#64748b" };
+/** The heat map's hierarchy levels: 0 plots every risk; 1–3 aggregate to that level. */
+const HEAT_LEVELS = [
+  { level: 0, label: "All", noun: "risks" },
+  { level: 1, label: "L1", noun: "enterprise risks" },
+  { level: 2, label: "L2", noun: "category risks" },
+  { level: 3, label: "L3", noun: "scenario risks" },
+] as const;
+type HeatLevel = (typeof HEAT_LEVELS)[number]["level"];
 
 type Range = "30d" | "quarter" | "ytd";
 
@@ -225,6 +234,8 @@ export default function DashboardPage() {
   const [matrix, setMatrix] = useState<RiskMatrix | null>(null);
   const [activity, setActivity] = useState<AuditEntry[]>([]);
   const [heatMode, setHeatMode] = useState<"inherent" | "residual">("residual");
+  const [heatLevel, setHeatLevel] = useState<HeatLevel>(0);
+  const [pendingSuggestions, setPendingSuggestions] = useState<PendingSuggestions | null>(null);
   const [range, setRange] = useState<Range>("30d");
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -235,9 +246,15 @@ export default function DashboardPage() {
     api.dashboardOverview(days).then(setO).catch((e) => setError(e instanceof Error ? e.message : "Could not load the dashboard"));
   }, [days]);
   useEffect(() => {
-    // The board view: the same validated risks the posture figures count.
-    api.riskMatrix("board").then(setMatrix).catch(() => {});
+    // The board view: the same validated risks the posture figures count — every risk,
+    // or aggregated to one hierarchy level (each bubble a branch at its worst risk).
+    api.riskMatrix("board", heatLevel || undefined).then(setMatrix).catch(() => {});
+  }, [heatLevel]);
+  useEffect(() => {
     api.audit(30).then((r) => setActivity(r.items)).catch(() => {});
+    // Counted once and cached on the server until controls, clauses or mappings change.
+    // Hidden when nothing is waiting or the viewer can't read controls and compliance.
+    getPendingSuggestions().then(setPendingSuggestions).catch(() => setPendingSuggestions(null));
   }, []);
 
   // The "as of" date comes from the API's own as_of (a bare YYYY-MM-DD, which formatDate
@@ -258,7 +275,8 @@ export default function DashboardPage() {
         key: `${cell.likelihood}-${cell.impact}`, count,
         left: `${((cell.likelihood - 0.5) / matrix.size) * 100}%`, top: `${100 - ((cell.impact - 0.5) / matrix.size) * 100}%`,
         size: 24 + Math.min(count, 5) * 5, color: SEV[band],
-        title: `Likelihood ${cell.likelihood} × Impact ${cell.impact} · ${count} risk${count > 1 ? "s" : ""} · ${band}`,
+        title: `Likelihood ${cell.likelihood} × Impact ${cell.impact} · ${count} risk${count > 1 ? "s" : ""} · ${band}` +
+          (matrix.level ? ` · ${(heatMode === "residual" ? cell.residual_refs : cell.inherent_refs).join(", ")}` : ""),
       };
     }).filter(Boolean) as { key: string; count: number; left: string; top: string; size: number; color: string; title: string }[];
   }, [matrix, heatMode]);
@@ -315,6 +333,24 @@ export default function DashboardPage() {
       {error && <div className="error">{error}</div>}
 
       {o?.completeness && <Completeness c={o.completeness} />}
+
+      {pendingSuggestions && pendingSuggestions.controls_with_strong > 0 && (
+        <div role="status" style={{ ...CARD, padding: "12px 18px", display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>
+              {pendingSuggestions.controls_with_strong} {pendingSuggestions.controls_with_strong === 1 ? "control has" : "controls have"} strong clause suggestions waiting
+            </div>
+            <div style={{ ...SUB, marginTop: 2 }}>
+              {pendingSuggestions.controls_with_strong === 1 ? "It has" : "They have"} no framework clause mapped yet, so compliance can&apos;t count {pendingSuggestions.controls_with_strong === 1 ? "it" : "them"}.
+              {pendingSuggestions.capped && <> Counted from the first {pendingSuggestions.scanned} of {pendingSuggestions.unmapped_controls} unmapped controls.</>}
+              {" "}Accepting a suggestion maps the control; the clause still needs testing and assessment.
+            </div>
+          </div>
+          <Link href="/controls#review-suggestions" className="btn" style={{ whiteSpace: "nowrap" }}>
+            Review suggestions →
+          </Link>
+        </div>
+      )}
 
       {/* --------------------------------------- hero: health + the decision queue */}
       <div style={{ background: "linear-gradient(135deg,#0b1220 0%,#111c33 100%)", borderRadius: 18, padding: 22, display: "grid", gridTemplateColumns: "300px 1fr", gap: 22, color: "#e2e8f0" }}>
@@ -409,11 +445,30 @@ export default function DashboardPage() {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
             <div>
               <h2 style={H2}>Risk matrix</h2>
-              <div style={SUB}>Bubble = risks in cell{o ? ` · ${o.posture.total_risks} plotted` : ""}</div>
+              <div style={SUB}>
+                {heatLevel === 0
+                  ? <>Bubble = risks in cell{o ? ` · ${o.posture.total_risks} plotted` : ""}</>
+                  : <>Bubble = {HEAT_LEVELS[heatLevel].noun}, each at the worst risk in its branch{matrix ? ` · ${matrix.total} plotted` : ""}</>}
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 2, background: "#f3f4f7", borderRadius: 9, padding: 3 }}>
-              <button onClick={() => setHeatMode("inherent")} style={{ ...tab(heatMode === "inherent"), border: "none", fontFamily: "inherit" }}>Inherent</button>
-              <button onClick={() => setHeatMode("residual")} style={{ ...tab(heatMode === "residual"), border: "none", fontFamily: "inherit" }}>Residual</button>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+              <div style={{ display: "flex", gap: 2, background: "#f3f4f7", borderRadius: 9, padding: 3 }}>
+                <button onClick={() => setHeatMode("inherent")} style={{ ...tab(heatMode === "inherent"), border: "none", fontFamily: "inherit" }}>Inherent</button>
+                <button onClick={() => setHeatMode("residual")} style={{ ...tab(heatMode === "residual"), border: "none", fontFamily: "inherit" }}>Residual</button>
+              </div>
+              <div role="group" aria-label="Hierarchy level" style={{ display: "flex", gap: 2, background: "#f3f4f7", borderRadius: 9, padding: 3 }}>
+                {HEAT_LEVELS.map((l) => (
+                  <button
+                    key={l.level}
+                    onClick={() => setHeatLevel(l.level)}
+                    aria-pressed={heatLevel === l.level}
+                    title={l.level === 0 ? "Every risk on the board register" : `Each ${l.noun.replace(/s$/, "")} at the worst risk below it`}
+                    style={{ ...tab(heatLevel === l.level), border: "none", fontFamily: "inherit" }}
+                  >
+                    {l.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
           <div style={{ position: "relative", aspectRatio: "1 / 1", maxHeight: 360, margin: "14px 0 6px 18px" }}>

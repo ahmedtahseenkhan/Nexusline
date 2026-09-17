@@ -10,10 +10,14 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
-import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
+import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ConnectorFeed from "@/components/ConnectorFeed";
+import AsyncSelect from "@/components/AsyncSelect";
+import ParamFields from "@/components/ccm/ParamFields";
+import RunHistory from "@/components/ccm/RunHistory";
+import { initialParams, KRI_METRIC_LABEL, paramsPayload, type CheckType, type ConnectorKind, type ParamValues } from "@/lib/ccm";
 import { titleCase } from "@/lib/text";
 import { safeLinkUrl } from "@/lib/sanitize";
 import { useFormat } from "@/lib/format";
@@ -37,6 +41,15 @@ interface Connector {
   created_at: string;
   /** A monitoring-feed token is live (the token itself is never returned). */
   has_ingest_token?: boolean;
+  /** Phase 4: non-secret settings for the connector type. */
+  config?: Record<string, unknown>;
+  timeout_seconds?: number;
+  /** Names of the secrets on file — never their values. */
+  secrets_set?: string[];
+  kind?: string;
+  last_test_at?: string | null;
+  last_test_ok?: boolean | null;
+  last_test_message?: string;
 }
 interface ControlTestRun {
   id: string;
@@ -47,6 +60,8 @@ interface ControlTestRun {
   evidence_ref: string;
   pass_rate: number;
   created_at: string;
+  /** manual | scheduled | run_now | upload | push */
+  source?: string;
 }
 interface AutomatedControlTest {
   id: string;
@@ -66,6 +81,22 @@ interface AutomatedControlTest {
   run_count: number;
   created_at: string;
   runs: ControlTestRun[];
+  // Phase 4: the executable definition.
+  control_id?: string | null;
+  check_type?: string;
+  parameters?: Record<string, unknown>;
+  threshold_max_failures?: number | null;
+  threshold_max_percent?: number | null;
+  population_description?: string;
+  pass_criterion?: string;
+  kri_id?: string | null;
+  kri_metric?: string;
+  last_run_at?: string | null;
+  failing_since?: string | null;
+  last_error?: string;
+  issue_id?: string | null;
+  is_executable?: boolean;
+  is_overdue?: boolean;
 }
 interface IntegrationsSummary {
   total_connectors: number;
@@ -76,6 +107,10 @@ interface IntegrationsSummary {
   tests_by_result: Record<string, number>;
   avg_pass_rate: number;
   failing_tests: number;
+  executable_tests?: number;
+  overdue_tests?: number;
+  error_tests?: number;
+  controls_failing_monitoring?: number;
 }
 
 // ------------------------------------------------------------------ helpers
@@ -99,11 +134,13 @@ const CONNECTOR_TYPE = opts([
   "webhook",
   "csv_feed",
   "api",
+  "vuln_scanner",
 ]);
 const CONNECTOR_STATUS = opts(["configured", "active", "error", "disabled"]);
 const CCM_RESULT = opts(["passed", "failed", "error", "not_run"]);
+const KRI_METRICS: Option[] = Object.entries(KRI_METRIC_LABEL).map(([value, label]) => ({ value, label }));
 const CCM_STATUS = opts(["active", "paused"]);
-const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
+const FREQ = opts(["none", "daily", "weekly", "fortnightly", "monthly", "quarterly", "semiannual", "annual"]);
 
 // ------------------------------------------------------------------ tones
 const CONNECTOR_STATUS_TONE: Record<string, Tone> = {
@@ -153,6 +190,11 @@ type ConnectorForm = {
   config_note: string;
   status: string;
   last_sync: string;
+  config: ParamValues;
+  timeout_seconds: string;
+  /** Write-only: a typed value replaces the stored secret; blank keeps it. */
+  secrets: Record<string, string>;
+  clear_secrets: string[];
 };
 const BLANK_CONNECTOR: ConnectorForm = {
   name: "",
@@ -165,6 +207,10 @@ const BLANK_CONNECTOR: ConnectorForm = {
   config_note: "",
   status: "configured",
   last_sync: "",
+  config: {},
+  timeout_seconds: "30",
+  secrets: {},
+  clear_secrets: [],
 };
 function fromConnector(c: Connector): ConnectorForm {
   return {
@@ -178,10 +224,21 @@ function fromConnector(c: Connector): ConnectorForm {
     config_note: c.config_note || "",
     status: c.status || "configured",
     last_sync: c.last_sync || "",
+    config: { ...(c.config || {}) },
+    timeout_seconds: String(c.timeout_seconds ?? 30),
+    secrets: {},
+    clear_secrets: [],
   };
 }
-function connectorPayload(f: ConnectorForm): Record<string, unknown> {
+function connectorPayload(f: ConnectorForm, kind: ConnectorKind | undefined): Record<string, unknown> {
+  const { params: config, errors } = paramsPayload(kind?.config_fields ?? [], f.config);
+  if (errors.length) throw new Error(errors.join(" "));
+  const secrets = Object.fromEntries(Object.entries(f.secrets).filter(([, v]) => v.trim() !== ""));
   return {
+    config,
+    timeout_seconds: Number(f.timeout_seconds) || 30,
+    ...(Object.keys(secrets).length ? { secrets } : {}),
+    ...(f.clear_secrets.length ? { clear_secrets: f.clear_secrets } : {}),
     name: f.name,
     connector_type: f.connector_type,
     description: f.description,
@@ -205,6 +262,17 @@ type CctForm = {
   frequency: string;
   owner: string;
   status: string;
+  control_id: string;
+  control_label: string;
+  check_type: string;
+  parameters: ParamValues;
+  threshold_max_failures: string;
+  threshold_max_percent: string;
+  pass_criterion: string;
+  population_description: string;
+  kri_id: string;
+  kri_label: string;
+  kri_metric: string;
 };
 const BLANK_CCT: CctForm = {
   name: "",
@@ -215,6 +283,17 @@ const BLANK_CCT: CctForm = {
   frequency: "monthly",
   owner: "",
   status: "active",
+  control_id: "",
+  control_label: "",
+  check_type: "manual",
+  parameters: {},
+  threshold_max_failures: "",
+  threshold_max_percent: "",
+  pass_criterion: "",
+  population_description: "",
+  kri_id: "",
+  kri_label: "",
+  kri_metric: "exceptions",
 };
 function fromCct(t: AutomatedControlTest): CctForm {
   return {
@@ -226,10 +305,33 @@ function fromCct(t: AutomatedControlTest): CctForm {
     frequency: t.frequency || "monthly",
     owner: t.owner || "",
     status: t.status || "active",
+    control_id: t.control_id || "",
+    control_label: t.control_ref || "",
+    check_type: t.check_type || "manual",
+    parameters: { ...(t.parameters || {}) },
+    threshold_max_failures: t.threshold_max_failures == null ? "" : String(t.threshold_max_failures),
+    threshold_max_percent: t.threshold_max_percent == null ? "" : String(t.threshold_max_percent),
+    pass_criterion: t.pass_criterion || "",
+    population_description: t.population_description || "",
+    kri_id: t.kri_id || "",
+    kri_label: t.kri_id ? "Linked KRI" : "",
+    kri_metric: t.kri_metric || "exceptions",
   };
 }
-function cctPayload(f: CctForm): Record<string, unknown> {
+function cctPayload(f: CctForm, check: CheckType | undefined): Record<string, unknown> {
+  const { params, errors } = paramsPayload(check?.params ?? [], f.parameters);
+  const metricOnly = Boolean(f.parameters.metric_only);
+  if (errors.length) throw new Error(errors.join(" "));
   return {
+    control_id: f.control_id || null,
+    check_type: f.check_type || "manual",
+    parameters: metricOnly ? { ...params, metric_only: true } : params,
+    threshold_max_failures: f.threshold_max_failures === "" ? null : Number(f.threshold_max_failures),
+    threshold_max_percent: f.threshold_max_percent === "" ? null : Number(f.threshold_max_percent),
+    pass_criterion: f.pass_criterion,
+    population_description: f.population_description,
+    kri_id: f.kri_id || null,
+    kri_metric: f.kri_metric || "exceptions",
     name: f.name,
     control_ref: f.control_ref,
     connector_id: f.connector_id || null,
@@ -279,6 +381,14 @@ function IntegrationsInner() {
   // the connector-name lookup in the tests table (independent of the paged table view).
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [summary, setSummary] = useState<IntegrationsSummary | null>(null);
+  // Phase 4: server specs for connector settings and check types.
+  const [kinds, setKinds] = useState<ConnectorKind[]>([]);
+  const [checkTypes, setCheckTypes] = useState<CheckType[]>([]);
+  const [testParam, setTestParam] = useRecordParam("test");
+  const [runParam] = useRecordParam("run");
+  const [testingConnection, setTestingConnection] = useState(false);
+  const kindOf = (type: string) => kinds.find((k) => k.connector_type === type);
+  const checkOf = (key: string | undefined) => checkTypes.find((c) => c.key === (key || "manual"));
 
   const reloadConnectors = useCallback(() => setConnectorsKey((k) => k + 1), []);
   const reloadTests = useCallback(() => setTestsKey((k) => k + 1), []);
@@ -349,7 +459,16 @@ function IntegrationsInner() {
   useEffect(() => {
     loadConnectors();
     loadSummary();
+    apiCall<ConnectorKind[]>("GET", "/ccm/connector-types").then(setKinds).catch(() => setKinds([]));
+    apiCall<CheckType[]>("GET", "/ccm/check-types").then(setCheckTypes).catch(() => setCheckTypes([]));
   }, []);
+
+  // ?test=<id> (from a control's Monitoring section or an evidence link) opens that test.
+  useEffect(() => {
+    if (!testParam) return;
+    setSection("ccm");
+    apiCall<AutomatedControlTest>("GET", `/automated-control-tests/${testParam}`).then(setOpenTest).catch(() => setOpenTest(null));
+  }, [testParam]);
 
   useEffect(() => {
     if (recordId) loadConnectorDetail(recordId);
@@ -371,7 +490,7 @@ function IntegrationsInner() {
     setError(null);
     setSavingConnector(true);
     try {
-      const payload = connectorPayload(cf);
+      const payload = connectorPayload(cf, kindOf(cf.connector_type));
       if (editingConnector) await apiCall<Connector>("PATCH", `/connectors/${editingConnector.id}`, payload);
       else await apiCall<Connector>("POST", "/connectors", payload);
       setShowConnectorForm(false);
@@ -417,7 +536,7 @@ function IntegrationsInner() {
     setError(null);
     setSavingCct(true);
     try {
-      const payload = cctPayload(tf);
+      const payload = cctPayload(tf, checkOf(tf.check_type));
       if (editingCct) await apiCall<AutomatedControlTest>("PATCH", `/automated-control-tests/${editingCct.id}`, payload);
       else await apiCall<AutomatedControlTest>("POST", "/automated-control-tests", payload);
       setShowCctForm(false);
@@ -447,9 +566,31 @@ function IntegrationsInner() {
   }
   async function toggleTest(t: AutomatedControlTest) {
     setRd(BLANK_RUN);
-    if (openTest?.id === t.id) { setOpenTest(null); return; }
+    if (openTest?.id === t.id) { setOpenTest(null); if (testParam) setTestParam(null); return; }
     await refreshTest(t.id);
   }
+
+  async function testConnection(c: Connector) {
+    setTestingConnection(true);
+    setError(null);
+    try {
+      const res = await apiCall<{ ok: boolean; message: string }>("POST", `/connectors/${c.id}/test-connection`);
+      toast(res.ok ? "Connected" : "Connection failed");
+      loadConnectorDetail(c.id);
+      reloadConnectors();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Connection test failed");
+    } finally {
+      setTestingConnection(false);
+    }
+  }
+
+  const searchControls = (q: string) =>
+    apiCall<PagedList<{ id: string; reference: string; name: string }>>("GET", `/controls?search=${encodeURIComponent(q)}&limit=20`)
+      .then((r) => r.items.map((x) => ({ value: x.id, label: `${x.reference ? x.reference + " · " : ""}${x.name}` })));
+  const searchKris = (q: string) =>
+    apiCall<PagedList<{ id: string; reference: string; name: string; unit?: string }>>("GET", `/kris?search=${encodeURIComponent(q)}&limit=20`)
+      .then((r) => r.items.map((x) => ({ value: x.id, label: `${x.reference ? x.reference + " · " : ""}${x.name}`, sub: x.unit || undefined })));
 
   // ------------------------------------------------------------- runs (inline)
   async function addRun() {
@@ -514,58 +655,144 @@ function IntegrationsInner() {
       </div>
     </>
   );
+  const ckind = kindOf(cf.connector_type);
+  const setConfig = (name: string, value: unknown) => setCf((p) => ({ ...p, config: { ...p.config, [name]: value } }));
   const connectorConnection = (
     <>
-      <Field label="Endpoint URL" help="Base URL / host of the source (informational for now).">
-        <TextInput value={cf.endpoint_url} onChange={(v) => setC("endpoint_url", v)} placeholder="https://…" />
-      </Field>
-      <Field label="Auth method" help='For example: "OAuth2 client credentials", "API key", "service account".'>
-        <TextInput value={cf.auth_method} onChange={(v) => setC("auth_method", v)} placeholder="OAuth2 / API key / service account" />
-      </Field>
-      <Field label="Last sync" help="Date of the most recent sync — drives the stale flag (older than 35 days).">
+      {ckind?.note && <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>{ckind.note}</p>}
+      {ckind && ckind.config_fields.length > 0 && (
+        <ParamFields specs={ckind.config_fields} values={initialParams(ckind.config_fields, cf.config)} onChange={setConfig} />
+      )}
+      {ckind && ckind.kind !== "push" && (
+        <Field label="Timeout (seconds)" help="A run or connection test that takes longer is recorded as an error.">
+          <TextInput type="number" value={cf.timeout_seconds} onChange={(v) => setC("timeout_seconds", v)} />
+        </Field>
+      )}
+      {ckind && ckind.secret_fields.length > 0 && (
+        <div style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8, margin: "4px 0 14px" }}>
+          <strong style={{ fontSize: 13 }}>Secrets</strong>
+          <p className="muted" style={{ margin: "4px 0 10px", fontSize: 12.5 }}>
+            Encrypted on the server and never shown again. Leave a field blank to keep what is stored.
+          </p>
+          {ckind.secret_fields.map((sf) => {
+            const isSet = (editingConnector?.secrets_set ?? []).includes(sf.name) && !cf.clear_secrets.includes(sf.name);
+            return (
+              <Field key={sf.name} label={sf.label} help={isSet ? "Set. Type a new value to replace it." : "Not set."}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input className="input" type="password" autoComplete="new-password" value={cf.secrets[sf.name] ?? ""}
+                    placeholder={isSet ? "••••••••" : ""}
+                    onChange={(e) => setCf((p) => ({ ...p, secrets: { ...p.secrets, [sf.name]: e.target.value } }))} />
+                  {isSet && (
+                    <button type="button" className="btn secondary sm"
+                      onClick={() => setCf((p) => ({ ...p, clear_secrets: [...p.clear_secrets, sf.name], secrets: { ...p.secrets, [sf.name]: "" } }))}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </Field>
+            );
+          })}
+        </div>
+      )}
+      <Field label="Last sync" help="Date of the most recent sync — drives the stale flag (older than 35 days). Runs and the feed set it.">
         <TextInput type="date" value={cf.last_sync} onChange={(v) => setC("last_sync", v)} />
       </Field>
-      <Field label="Config note" help="Secrets are never stored here — connection notes only.">
-        <TextArea value={cf.config_note} onChange={(v) => setC("config_note", v)} rows={3} placeholder="Connection notes, scopes, tenant IDs…" />
+      <Field label="Notes" help="Scopes, owners on the source side, change tickets. Never put secrets here.">
+        <TextArea value={cf.config_note} onChange={(v) => setC("config_note", v)} rows={3} placeholder="Connection notes" />
       </Field>
     </>
   );
 
   // ------------------------------------------------------------- ccm form tabs
+  const tcheck = checkOf(tf.check_type);
+  const setParam = (name: string, value: unknown) => setTf((p) => ({ ...p, parameters: { ...p.parameters, [name]: value } }));
+  const checkOptions: Option[] = checkTypes.map((c) => ({ value: c.key, label: `${c.group} — ${c.label}` }));
   const cctGeneral = (
     <>
-      <Field label="Name" required help="For example: Privileged accounts have MFA enabled.">
+      <Field label="Name" required help="For example: Privileged accounts are approved.">
         <TextInput value={tf.name} onChange={(v) => setT("name", v)} placeholder="Control test name" required />
       </Field>
       <div className="field-row">
-        <Field label="Control reference" help="Free-text link to a control (e.g. AC-2, CIS 5.3).">
-          <TextInput value={tf.control_ref} onChange={(v) => setT("control_ref", v)} placeholder="Control ref" />
+        <Field label="Control" help="The control this test monitors. Its runs become evidence on it; failures open issues against it.">
+          <AsyncSelect search={searchControls} value={tf.control_id || null} selectedLabel={tf.control_label}
+            placeholder="Search controls…" onChange={(v, o) => setTf((p) => ({ ...p, control_id: v || "", control_label: o?.label || "" }))} />
         </Field>
-        <Field label="Connector" help="The source this test runs against (optional).">
+        <Field label="Connector" help="The source this test runs against.">
           <Select value={tf.connector_id} onChange={(v) => setT("connector_id", v)} options={CONNECTOR_OPTS} placeholder="No connector" />
         </Field>
       </div>
-      <Field label="Test logic" help='Plain-language rule, e.g. "all privileged accounts have MFA enabled".'>
-        <TextArea value={tf.test_logic} onChange={(v) => setT("test_logic", v)} rows={3} placeholder="What a passing state looks like." />
-      </Field>
+      {!tf.control_id && (
+        <Field label="Control reference" help="Used when no control is picked, and by the monitoring feed to match results.">
+          <TextInput value={tf.control_ref} onChange={(v) => setT("control_ref", v)} placeholder="e.g. A.5.18" />
+        </Field>
+      )}
       <Field label="Description">
-        <TextArea value={tf.description} onChange={(v) => setT("description", v)} rows={3} placeholder="Context for this continuous control test." />
+        <TextArea value={tf.description} onChange={(v) => setT("description", v)} rows={2} placeholder="Why this control is monitored." />
+      </Field>
+    </>
+  );
+  const cctCheck = (
+    <>
+      <Field label="Check" help="Recorded by hand or pushed: runs come from people or the monitoring feed. Any other check runs on its schedule.">
+        <select className="select" value={tf.check_type}
+          onChange={(e) => setTf((p) => ({ ...p, check_type: e.target.value, parameters: {} }))}>
+          {checkOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </Field>
+      {tcheck && tcheck.description && <p className="muted" style={{ margin: "-4px 0 12px", fontSize: 13 }}>{tcheck.description}</p>}
+      {tcheck && tcheck.connector_types.length > 0 && (
+        <p className="muted" style={{ margin: "-6px 0 12px", fontSize: 12.5 }}>
+          Runs on: {tcheck.connector_types.map((t) => cap(t)).join(", ")}{tcheck.input === "file" ? " (from the import folder or an uploaded file)" : ""}.
+        </p>
+      )}
+      {tcheck && <ParamFields specs={tcheck.params} values={initialParams(tcheck.params, tf.parameters)} onChange={setParam} />}
+      {tf.check_type !== "manual" && (
+        <>
+          <div className="field-row">
+            <Field label="Most exceptions allowed" help="Blank with no percentage = none allowed.">
+              <TextInput type="number" value={tf.threshold_max_failures} onChange={(v) => setT("threshold_max_failures", v)} placeholder="0" />
+            </Field>
+            <Field label="Most exceptions allowed (% of population)">
+              <TextInput type="number" value={tf.threshold_max_percent} onChange={(v) => setT("threshold_max_percent", v)} placeholder="Not set" />
+            </Field>
+          </div>
+          <Field label="Pass criterion" help={tcheck?.pass_criterion ? `Blank = "${tcheck.pass_criterion}"` : "What a passing run means, in words."}>
+            <TextArea value={tf.pass_criterion} onChange={(v) => setT("pass_criterion", v)} rows={2} placeholder={tcheck?.pass_criterion} />
+          </Field>
+          <Field label="Population" help={tcheck?.population ? `Blank = "${tcheck.population}"` : "What the check looks at."}>
+            <TextInput value={tf.population_description} onChange={(v) => setT("population_description", v)} placeholder={tcheck?.population} />
+          </Field>
+          <Toggle checked={Boolean(tf.parameters.metric_only)} onChange={(v) => setParam("metric_only", v)}
+            label="Metric only: post the numbers to the KRI, never pass or fail and never open an issue" />
+        </>
+      )}
+      <Field label="Test logic (notes)" help="Anything a reviewer should know about how the check works.">
+        <TextArea value={tf.test_logic} onChange={(v) => setT("test_logic", v)} rows={2} />
       </Field>
     </>
   );
   const cctConfig = (
     <>
       <div className="field-row">
-        <Field label="Frequency" help="How often this test is expected to run.">
+        <Field label="Frequency" help="How often the test runs. A test that has not run for twice this long raises an overdue alert.">
           <Select value={tf.frequency} onChange={(v) => setT("frequency", v)} options={FREQ} />
         </Field>
-        <Field label="Status" help="Whether the test is actively monitored.">
+        <Field label="Status" help="Paused tests do not run and raise no alerts.">
           <Select value={tf.status} onChange={(v) => setT("status", v)} options={CCM_STATUS} />
         </Field>
       </div>
       <Field label="Owner">
         <TextInput value={tf.owner} onChange={(v) => setT("owner", v)} placeholder="Owner" />
       </Field>
+      <div className="field-row">
+        <Field label="Key risk indicator" help="Each run posts a reading to this KRI through its thresholds and escalation.">
+          <AsyncSelect search={searchKris} value={tf.kri_id || null} selectedLabel={tf.kri_label} placeholder="No KRI"
+            onChange={(v, o) => setTf((p) => ({ ...p, kri_id: v || "", kri_label: o?.label || "" }))} />
+        </Field>
+        <Field label="Reading posted">
+          <Select value={tf.kri_metric} onChange={(v) => setT("kri_metric", v)} options={KRI_METRICS} />
+        </Field>
+      </div>
     </>
   );
 
@@ -595,6 +822,9 @@ function IntegrationsInner() {
     { key: "reference", header: "Ref", sortable: true, render: (t) => <span className="ref">{t.reference || "—"}</span> },
     { key: "name", header: "Name", sortable: true, render: (t) => <span className="cell-title">{t.name}</span> },
     { key: "control_ref", header: "Control", sortable: true, render: (t) => <span className="muted">{t.control_ref || "—"}</span> },
+    { key: "check_type", header: "Check", render: (t) => (
+      <span className="muted">{checkOf(t.check_type)?.label ?? "Recorded by hand or pushed"}{t.is_overdue ? <> <Badge tone="medium">Overdue</Badge></> : null}</span>
+    ) },
     { key: "connector", header: "Connector", render: (t) => <span className="muted">{connectorName(t.connector_id)}</span> },
     { key: "last_result", header: "Last result", sortable: true, render: (t) => <ResultBadge value={t.last_result} /> },
     { key: "pass_rate", header: "Pass rate", sortable: true, render: (t) => <PassRateBar value={t.pass_rate} /> },
@@ -642,11 +872,15 @@ function IntegrationsInner() {
         </div>
         <div className="card stat">
           <div className="stat-top"><span className="n">{summary ? summary.failing_tests.toLocaleString() : "—"}</span></div>
-          <span className="l">Failing controls</span>
+          <span className="l">Failing tests</span>
         </div>
         <div className="card stat">
           <div className="stat-top"><span className="n">{summary ? `${summary.avg_pass_rate.toFixed(0)}%` : "—"}</span></div>
           <span className="l">Avg pass rate</span>
+        </div>
+        <div className="card stat">
+          <div className="stat-top"><span className="n">{summary ? (summary.overdue_tests ?? 0).toLocaleString() : "—"}</span></div>
+          <span className="l">Tests overdue</span>
         </div>
       </div>
 
@@ -751,6 +985,31 @@ function IntegrationsInner() {
               {field("Created", formatDateTime(detail.created_at))}
             </div>
 
+            {kindOf(detail.connector_type) && kindOf(detail.connector_type)!.kind !== "push" && (
+              <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
+                <div className="row-between" style={{ gap: 8, flexWrap: "wrap" }}>
+                  <strong style={{ fontSize: 13 }}>Pull settings</strong>
+                  <button type="button" className="btn secondary sm" disabled={testingConnection} onClick={() => testConnection(detail)}>
+                    {testingConnection ? "Testing…" : "Test connection"}
+                  </button>
+                </div>
+                <div style={{ display: "flex", gap: 22, flexWrap: "wrap", margin: "10px 0 6px" }}>
+                  {kindOf(detail.connector_type)!.config_fields
+                    .filter((f) => detail.config?.[f.name] !== undefined && detail.config?.[f.name] !== "")
+                    .map((f) => <div key={f.name}>{field(f.label, String(detail.config?.[f.name]))}</div>)}
+                  {field("Secrets", (detail.secrets_set ?? []).length ? `Set: ${(detail.secrets_set ?? []).join(", ")}` : "None set")}
+                  {field("Timeout", `${detail.timeout_seconds ?? 30} s`)}
+                </div>
+                {detail.last_test_at ? (
+                  <div className={detail.last_test_ok ? "muted" : "error"} style={{ fontSize: 13 }}>
+                    {detail.last_test_ok ? "Connected" : "Failed"} on {formatDateTime(detail.last_test_at)}: {detail.last_test_message}
+                  </div>
+                ) : (
+                  <div className="muted" style={{ fontSize: 13 }}>Not tested yet.</div>
+                )}
+              </div>
+            )}
+
             <ConnectorFeed connectorId={detail.id} onChanged={() => { reloadConnectors(); loadConnectorDetail(detail.id); }} />
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
@@ -763,7 +1022,7 @@ function IntegrationsInner() {
       {section === "ccm" && (
         <>
           <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
-            Click a row to record a run by hand, or let a connector&apos;s monitoring feed record runs for the test whose control and connector match (Connectors → open the connector → Monitoring feed). The latest run rolls up onto the test&apos;s last result and pass-rate.
+            Click a row to see its runs. Tests with a check run on their schedule (or with Run now) against their connector; tests recorded by hand take runs from people or from a connector&apos;s monitoring feed. The latest run rolls up onto the test&apos;s last result and pass rate.
           </p>
           <DataTable<AutomatedControlTest>
             columns={testColumns}
@@ -809,77 +1068,86 @@ function IntegrationsInner() {
                 </div>
 
                 <div className="card-pad">
+                  <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 12 }}>
+                    {field("Check", checkOf(openTest.check_type)?.label ?? "Recorded by hand or pushed")}
+                    {field("Runs", cap(openTest.frequency))}
+                    {openTest.check_type && openTest.check_type !== "manual" && field("Threshold",
+                      openTest.threshold_max_failures == null && openTest.threshold_max_percent == null
+                        ? "No exceptions"
+                        : [openTest.threshold_max_failures != null ? `at most ${openTest.threshold_max_failures}` : "",
+                           openTest.threshold_max_percent != null ? `at most ${openTest.threshold_max_percent}%` : ""].filter(Boolean).join(" and "))}
+                    {field("Last run", openTest.last_run_at ? formatDateTime(openTest.last_run_at) : formatDate(openTest.last_run))}
+                    {openTest.failing_since && field("Failing since", <Badge tone="critical">{formatDate(openTest.failing_since)}</Badge>)}
+                    {openTest.issue_id && field("Issue", <a href={`/issues?id=${openTest.issue_id}`}>Open the issue</a>)}
+                    {openTest.is_overdue && field("Schedule", <Badge tone="medium">Overdue</Badge>)}
+                  </div>
+                  {(openTest.pass_criterion || checkOf(openTest.check_type)?.pass_criterion) && (
+                    <p className="muted" style={{ margin: "0 0 8px", fontSize: 13 }}>
+                      <strong>Pass criterion:</strong> {openTest.pass_criterion || checkOf(openTest.check_type)?.pass_criterion}
+                    </p>
+                  )}
                   {openTest.test_logic && (
                     <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
                       <strong>Test logic:</strong> {openTest.test_logic}
                     </p>
                   )}
+                  {openTest.last_error && <div className="error" style={{ marginBottom: 12 }}>Last run could not complete: {openTest.last_error}</div>}
                   <strong>Run history</strong>
                   <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
-                    Recorded executions. The most recent run drives the test&apos;s last result and pass-rate.
+                    Each run is evidence on the control. A failed run opens an issue (or updates the open one) and stops risks relying on the control until a run passes; no run changes the control&apos;s effectiveness.
                   </p>
-                  <form
-                    style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
-                    onSubmit={(ev) => { ev.preventDefault(); addRun(); }}
-                  >
-                    <div style={{ width: 150 }}>
-                      <label className="label">Run date</label>
-                      <input className="input" type="date" value={rd.run_date} onChange={(ev) => setRD("run_date", ev.target.value)} />
-                    </div>
-                    <div style={{ width: 140 }}>
-                      <label className="label">Result</label>
-                      <select className="select" value={rd.result} onChange={(ev) => setRD("result", ev.target.value)}>
-                        {CCM_RESULT.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                      </select>
-                    </div>
-                    <div style={{ width: 120 }}>
-                      <label className="label">Pass rate (%)</label>
-                      <input className="input" type="number" min={0} max={100} value={rd.pass_rate} onChange={(ev) => setRD("pass_rate", ev.target.value)} />
-                    </div>
-                    <div style={{ flex: "1 1 200px" }}>
-                      <label className="label">Findings</label>
-                      <input className="input" value={rd.findings} onChange={(ev) => setRD("findings", ev.target.value)} placeholder="What the run observed" />
-                    </div>
-                    <div style={{ width: 170 }}>
-                      <label className="label">Evidence ref</label>
-                      <input className="input" value={rd.evidence_ref} onChange={(ev) => setRD("evidence_ref", ev.target.value)} placeholder="Log / ticket / URL" />
-                    </div>
-                    <button className="btn">Record</button>
-                  </form>
-
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Run date</th>
-                          <th>Result</th>
-                          <th>Pass rate</th>
-                          <th>Findings</th>
-                          <th>Evidence</th>
-                          <th></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {[...openTest.runs]
-                          .sort((a, b) => (b.run_date || b.created_at || "").localeCompare(a.run_date || a.created_at || ""))
-                          .map((r) => (
-                            <tr key={r.id}>
-                              <td className="muted">{formatDate(r.run_date)}</td>
-                              <td><ResultBadge value={r.result} /></td>
-                              <td><PassRateBar value={r.pass_rate} /></td>
-                              <td className="muted">{r.findings || "—"}</td>
-                              <td className="muted">{r.evidence_ref || "—"}</td>
-                              <td>
-                                <button className="btn secondary sm" onClick={() => removeRun(r.id)}>Remove</button>
-                              </td>
-                            </tr>
+                  <RunHistory
+                    key={openTest.id}
+                    testId={openTest.id}
+                    executable={Boolean(openTest.is_executable)}
+                    acceptsFile={["file", "connector_or_file"].includes(checkOf(openTest.check_type)?.input ?? "")}
+                    controlId={openTest.control_id ?? null}
+                    canWrite
+                    openRunId={runParam}
+                    onRan={() => { void refreshTest(openTest.id); reloadTests(); void loadSummary(); }}
+                  />
+                  {!openTest.is_executable && (
+                    <>
+                      <p className="muted" style={{ margin: "14px 0 8px", fontSize: 13 }}>Record a run by hand:</p>
+                      <form
+                        style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
+                        onSubmit={(ev) => { ev.preventDefault(); addRun(); }}
+                      >
+                        <div style={{ width: 150 }}>
+                          <label className="label">Run date</label>
+                          <input className="input" type="date" value={rd.run_date} onChange={(ev) => setRD("run_date", ev.target.value)} />
+                        </div>
+                        <div style={{ width: 140 }}>
+                          <label className="label">Result</label>
+                          <select className="select" value={rd.result} onChange={(ev) => setRD("result", ev.target.value)}>
+                            {CCM_RESULT.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+                          </select>
+                        </div>
+                        <div style={{ width: 120 }}>
+                          <label className="label">Pass rate (%)</label>
+                          <input className="input" type="number" min={0} max={100} value={rd.pass_rate} onChange={(ev) => setRD("pass_rate", ev.target.value)} />
+                        </div>
+                        <div style={{ flex: "1 1 200px" }}>
+                          <label className="label">Findings</label>
+                          <input className="input" value={rd.findings} onChange={(ev) => setRD("findings", ev.target.value)} placeholder="What the run observed" />
+                        </div>
+                        <div style={{ width: 170 }}>
+                          <label className="label">Evidence ref</label>
+                          <input className="input" value={rd.evidence_ref} onChange={(ev) => setRD("evidence_ref", ev.target.value)} placeholder="Log / ticket / URL" />
+                        </div>
+                        <button className="btn">Record</button>
+                      </form>
+                      {openTest.runs.some((r) => r.source === "manual" || !r.source) && (
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {openTest.runs.filter((r) => !r.source || r.source === "manual").slice(0, 10).map((r) => (
+                            <button key={r.id} type="button" className="btn secondary sm" onClick={() => removeRun(r.id)}>
+                              Remove run of {formatDate(r.run_date)}
+                            </button>
                           ))}
-                        {openTest.runs.length === 0 && (
-                          <tr><td colSpan={6}><span className="muted">No runs recorded yet.</span></td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -926,7 +1194,8 @@ function IntegrationsInner() {
           wide
           tabs={[
             { id: "general", label: "General", content: cctGeneral, required: true },
-            { id: "config", label: "Config", content: cctConfig },
+            { id: "check", label: "Check", content: cctCheck },
+            { id: "config", label: "Schedule & KRI", content: cctConfig },
           ]}
           onClose={() => setShowCctForm(false)}
           onSave={saveCct}

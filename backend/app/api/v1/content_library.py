@@ -21,6 +21,7 @@ from app.schemas.content_library import (
     InstallResult,
     InstalledPack,
     PackControlRef,
+    PackCrosswalkMatch,
     PackInstallBody,
     PackPreview,
     PackPreviewRow,
@@ -28,6 +29,7 @@ from app.schemas.content_library import (
 from app.services import control_mapping
 from app.services.framework_library import (
     CREATE,
+    MATCH_CROSSWALK,
     MATCH_NAME,
     MATCH_REFERENCE,
     TEMPLATES,
@@ -161,6 +163,7 @@ async def install_pack(
         requirements_linked=outcome.requirements_linked,
         upgraded=outcome.upgraded,
         previous_name=outcome.previous_name,
+        crosswalks_added=outcome.crosswalks_added,
     )
 
 
@@ -209,6 +212,17 @@ def _check_control_pack(pack_id: str) -> None:
         raise HTTPException(status_code=422, detail="This framework has management clauses, not controls")
 
 
+def _crosswalk_match(c) -> PackCrosswalkMatch | None:
+    if c is None:
+        return None
+    return PackCrosswalkMatch(
+        control=PackControlRef(id=c.control_id, reference=c.control_reference, name=c.control_name),
+        via_reference=c.via_reference, via_framework=c.via_framework, via_template=c.via_template,
+        relationship=c.relationship, confidence=c.confidence, rationale=c.rationale, source=c.source,
+        default_reuse=c.default_reuse,
+    )
+
+
 def _ref(c) -> PackControlRef | None:
     return PackControlRef(id=c.id, reference=c.reference, name=c.name) if c is not None else None
 
@@ -242,6 +256,7 @@ async def preview_install_controls(
             action=s.action,
             control=_ref(s.control),
             name_match=_ref(s.name_match),
+            crosswalk_match=_crosswalk_match(s.crosswalk_match),
         )
         for s in steps
     ]
@@ -255,5 +270,10 @@ async def preview_install_controls(
         reuse=len(rows) - created,
         match_reference=sum(1 for r in rows if r.action == MATCH_REFERENCE),
         match_name=sum(1 for r in rows if r.action == MATCH_NAME),
+        match_crosswalk=sum(1 for r in rows if r.action == MATCH_CROSSWALK),
+        crosswalk_to_decide=sum(
+            1 for r in rows
+            if r.crosswalk_match is not None and not r.crosswalk_match.default_reuse and r.action == CREATE
+        ),
         rows=rows,
     )

@@ -6,10 +6,11 @@ frameworks ("map once, comply many").
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import selectinload
 
 from app.services import control_assurance
@@ -48,6 +49,7 @@ from app.schemas.compliance import (
     SoaRowRead,
     SoaSummary,
     StatementOfApplicabilityRead,
+    ViaCrosswalkRead,
 )
 from app.services import audit, compliance_posture, soa_export
 from app.services.framework_library import normalize_name
@@ -540,13 +542,14 @@ def _soa_row(row: soa_export.SoaRow) -> SoaRowRead:
         controls=[SoaControlRead(**vars(c)) for c in row.controls],
         last_test_date=row.last_test_date,
         last_test_result=row.last_test_result,
+        via_crosswalk=_via_read(row.via_crosswalk),
     )
 
 
 async def _soa_document(db, user, framework_id: uuid.UUID, view: str | None = None):
     fw = await _load_framework(db, framework_id)
     _require_compliance_kind(fw)
-    rows = soa_export.build_rows(fw.requirements)
+    rows = soa_export.build_rows(fw.requirements, await _via_crosswalks(db, fw.requirements))
     return fw, soa_export.SoaDocument(
         org_name=await _org_name(db, user),
         framework_name=fw.name,
@@ -684,17 +687,40 @@ async def set_applicability(
 
 
 # ----------------------------------------------------------------- crosswalking
+# Phase 4C: crosswalks are typed (relationship, rationale, source, content version,
+# confidence, origin, approval) and the library ships content between its frameworks
+# (``services.crosswalk_content``), materialised on install and at boot
+# (``services.crosswalks.sync_shipped``). Removing a shipped row records a rejection so
+# a content upgrade never adds it back.
+from pydantic import BaseModel as _Model, Field as _Field  # noqa: E402
+from typing import Literal as _Literal  # noqa: E402
+
+from app.models.compliance import CrosswalkRejection  # noqa: E402
+from app.services import clause_suggestions, crosswalks as typed_crosswalks  # noqa: E402
+from app.services.crosswalk_content import RELATIONSHIPS as _RELATIONSHIPS  # noqa: E402
+
+_Relationship = _Literal["equivalent", "subset", "superset", "intersects", "related"]
+
+
+def _clause_label(req) -> str:
+    fw = req.framework.name if req.framework else ""
+    return f"{req.reference or req.title}" + (f" ({fw})" if fw else "")
+
+
 @router.put(
     "/requirements/{requirement_id}/crosswalks",
     response_model=list[CrosswalkItem],
     dependencies=[Depends(require("compliance:write"))],
-    summary="Map equivalent requirements across frameworks",
+    summary="Set the requirements crosswalked from this one",
 )
 async def set_crosswalks(
     requirement_id: uuid.UUID, body: CrosswalkUpdate, db: DbSession, user: CurrentUser
 ) -> list[CrosswalkItem]:
-    await _load_requirement(db, requirement_id)
-    targets = [rid for rid in body.related_requirement_ids if rid != requirement_id]
+    """Replace this requirement's outgoing crosswalks. Rows it keeps keep their type and
+    provenance; new ones are manual and ``related`` (retype them in the crosswalk view);
+    a removed row the library ships is recorded as rejected."""
+    source_req = await _load_requirement(db, requirement_id)
+    targets = list(dict.fromkeys(rid for rid in body.related_requirement_ids if rid != requirement_id))
     if targets:
         found = (
             await db.scalars(
@@ -709,21 +735,39 @@ async def set_crosswalks(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unknown requirement id(s): {sorted(map(str, missing))}",
             )
-    # Replace this requirement's outgoing crosswalks.
-    await db.execute(
-        delete(requirement_crosswalks).where(
-            requirement_crosswalks.c.requirement_id == requirement_id
+    current = {
+        link.related_requirement_id: link
+        for link in await typed_crosswalks.load_links(db, [requirement_id], both=False)
+        if link.requirement_id == requirement_id
+    }
+    incoming = {
+        link.requirement_id
+        for link in await typed_crosswalks.load_links(db, [requirement_id], both=False)
+        if link.related_requirement_id == requirement_id
+    }
+    gone = [rid for rid in current if rid not in targets]
+    if gone:
+        await _reject_shipped(db, user, [(requirement_id, rid) for rid in gone], "")
+        await db.execute(
+            delete(requirement_crosswalks).where(
+                requirement_crosswalks.c.requirement_id == requirement_id,
+                requirement_crosswalks.c.related_requirement_id.in_(gone),
+            )
         )
-    )
-    for target in targets:
+    added = [rid for rid in targets if rid not in current and rid not in incoming]
+    for target in added:
         await db.execute(
             requirement_crosswalks.insert().values(
-                requirement_id=requirement_id, related_requirement_id=target
+                requirement_id=requirement_id, related_requirement_id=target,
+                relationship="related", origin=typed_crosswalks.ORIGIN_MANUAL,
+                **typed_crosswalks.approver_values(user),
             )
         )
     await audit.record(
         db, actor=user, action="crosswalk", entity_type="requirement",
-        entity_id=requirement_id, summary=f"Set {len(targets)} crosswalk(s)",
+        entity_id=requirement_id,
+        summary=f"Set {len(targets)} crosswalk(s) from {source_req.reference or source_req.title}"[:500],
+        changes={"added": [str(t) for t in added], "removed": [str(t) for t in gone]},
     )
     return await _crosswalks_for(db, requirement_id)
 
@@ -736,16 +780,6 @@ async def set_crosswalks(
 async def get_crosswalks(requirement_id: uuid.UUID, db: DbSession) -> list[CrosswalkItem]:
     await _load_requirement(db, requirement_id)
     return await _crosswalks_for(db, requirement_id)
-
-
-# ------------------------------------------------- crosswalks between two frameworks
-# Phase 3: suggested crosswalks (``services.clause_suggestions.suggest_crosswalks``) from
-# the topic synonym table and from controls two clauses share. Suggestions are never
-# written on their own; ``accept`` writes the pairs a person ticked, ``remove`` takes
-# pairs out, and both are in the activity trail of the clauses involved.
-from pydantic import BaseModel as _Model, Field as _Field  # noqa: E402
-
-from app.services import clause_suggestions  # noqa: E402
 
 
 class CrosswalkFrameworkRef(_Model):
@@ -790,28 +824,107 @@ class CrosswalkPairRead(_Model):
     related_requirement_id: uuid.UUID
     related_reference: str
     related_title: str
+    #: Read from ``requirement_id`` (the *from* framework's clause) to the related one.
+    relationship: str = "related"
+    rationale: str = ""
+    source: str = ""
+    content_version: str = ""
+    confidence: float | None = None
+    #: shipped | accepted | manual
+    origin: str = "manual"
+    approved_by: str = ""
+    approved_at: datetime | None = None
+    #: The library ships this pair (so removing it records a rejection).
+    shipped: bool = False
 
 
 class CrosswalkPairsRead(_Model):
     from_framework: CrosswalkFrameworkRef
     to_framework: CrosswalkFrameworkRef
+    #: Before filters.
+    total: int = 0
+    #: Rows per relationship / origin, before filters.
+    by_relationship: dict[str, int] = {}
+    by_origin: dict[str, int] = {}
+    sources: list[str] = []
+    content_version: str = ""
     pairs: list[CrosswalkPairRead]
 
 
 class CrosswalkPair(_Model):
     requirement_id: uuid.UUID
     related_requirement_id: uuid.UUID
+    #: Read from ``requirement_id``. Accept: defaults to related.
+    relationship: _Relationship | None = None
+    rationale: str | None = _Field(default=None, max_length=2000)
 
 
 class CrosswalkPairsBody(_Model):
     pairs: list[CrosswalkPair] = _Field(min_length=1, max_length=1000)
+    #: Accept: ``accepted`` (from suggestions) or ``manual`` (picked by hand).
+    origin: _Literal["accepted", "manual"] = "accepted"
+    #: Remove: why (kept on the rejection of a shipped row).
+    reason: str = _Field(default="", max_length=2000)
 
 
 class CrosswalkWriteResult(_Model):
-    #: Pairs written (accept) or removed (remove).
+    #: Pairs written (accept), removed (remove), approved or retyped.
     changed: int
     #: Pairs that were already crosswalked (accept) or not crosswalked (remove).
     skipped: int
+    #: Remove: shipped pairs recorded as rejected.
+    rejected: int = 0
+
+
+class CrosswalkRejectionRead(_Model):
+    id: uuid.UUID
+    from_template: str
+    from_reference: str
+    to_template: str
+    to_reference: str
+    relationship: str
+    content_version: str = ""
+    reason: str = ""
+    rejected_by: str = ""
+    rejected_at: datetime | None = None
+    from_title: str = ""
+    to_title: str = ""
+
+
+class CrosswalkRestoreBody(_Model):
+    ids: list[uuid.UUID] = _Field(min_length=1, max_length=1000)
+
+
+class CrosswalkSyncRead(_Model):
+    inserted: int = 0
+    updated: int = 0
+    removed: int = 0
+    skipped_rejected: int = 0
+
+
+class CrosswalkContentPair(_Model):
+    module: str
+    from_template: str
+    to_template: str
+    from_name: str = ""
+    to_name: str = ""
+    source: str
+    rows: int
+    by_relationship: dict[str, int]
+    #: Both frameworks are installed in this organisation.
+    installed: bool = False
+
+
+class CrosswalkContentRead(_Model):
+    version: str
+    relationships: list[str]
+    pairs: list[CrosswalkContentPair]
+
+
+class AdoptMappingBody(_Model):
+    via_requirement_id: uuid.UUID
+    #: Controls of the covering clause to link; all of its tested controls when omitted.
+    control_ids: list[uuid.UUID] | None = None
 
 
 def _fw_ref(fw, template_key) -> CrosswalkFrameworkRef:
@@ -842,30 +955,71 @@ async def suggest_crosswalks(
     )
 
 
+def _is_shipped(ctx, a_ref: str, b_ref: str) -> bool:
+    from app.services import crosswalk_content
+
+    if not (ctx.from_template and ctx.to_template):
+        return False
+    return crosswalk_content.lookup(ctx.from_template, a_ref.strip(), ctx.to_template, b_ref.strip()) is not None
+
+
 @router.get(
     "/compliance/crosswalks",
     response_model=CrosswalkPairsRead,
     dependencies=[Depends(require("compliance:read"))],
-    summary="Crosswalks already recorded between two frameworks",
+    summary="Crosswalks recorded between two frameworks",
 )
-async def list_framework_crosswalks(db: DbSession, from_framework: uuid.UUID, to_framework: uuid.UUID) -> CrosswalkPairsRead:
+async def list_framework_crosswalks(
+    db: DbSession, from_framework: uuid.UUID, to_framework: uuid.UUID,
+    relationship: _Relationship | None = None,
+    origin: _Literal["shipped", "accepted", "manual"] | None = None,
+    source: str | None = None,
+) -> CrosswalkPairsRead:
+    """Every recorded pair, read from ``from_framework``, with its type and provenance.
+    ``relationship``, ``origin`` and ``source`` (substring) filter the rows; the counts
+    are over all of them."""
+    from app.services.crosswalk_content import CONTENT_VERSION
+
     ctx = await clause_suggestions.load_crosswalk_context(db, from_framework, to_framework)
     left = {c.requirement_id: c for c in ctx.from_clauses}
     right = {c.requirement_id: c for c in ctx.to_clauses}
-    pairs = []
+    rows: list[CrosswalkPairRead] = []
     for pair in ctx.existing:
         x, y = tuple(pair)
         a, b = (x, y) if x in left else (y, x)
-        pairs.append(CrosswalkPairRead(
+        link = ctx.links.get(pair)
+        rel = link.relationship_from(a) if link else "related"
+        rows.append(CrosswalkPairRead(
             requirement_id=a, reference=left[a].reference, title=left[a].title,
             related_requirement_id=b, related_reference=right[b].reference, related_title=right[b].title,
+            relationship=rel,
+            rationale=link.rationale if link else "", source=link.source if link else "",
+            content_version=link.content_version if link else "",
+            confidence=link.confidence if link else None,
+            origin=link.origin if link else "manual",
+            approved_by=link.approved_by if link else "",
+            approved_at=link.approved_at if link else None,
+            shipped=_is_shipped(ctx, left[a].reference, right[b].reference),
         ))
+    by_rel: dict[str, int] = {}
+    by_origin: dict[str, int] = {}
+    for r in rows:
+        by_rel[r.relationship] = by_rel.get(r.relationship, 0) + 1
+        by_origin[r.origin] = by_origin.get(r.origin, 0) + 1
+    sources = sorted({r.source for r in rows if r.source})
+    kept = [
+        r for r in rows
+        if (relationship is None or r.relationship == relationship)
+        and (origin is None or r.origin == origin)
+        and (not source or source.lower() in r.source.lower())
+    ]
     nk = clause_suggestions.natural_key
-    pairs.sort(key=lambda p: (nk(p.reference), nk(p.related_reference)))
+    kept.sort(key=lambda p: (nk(p.reference), nk(p.related_reference)))
     return CrosswalkPairsRead(
         from_framework=_fw_ref(ctx.from_framework, ctx.from_template),
         to_framework=_fw_ref(ctx.to_framework, ctx.to_template),
-        pairs=pairs,
+        total=len(rows), by_relationship=by_rel, by_origin=by_origin, sources=sources,
+        content_version=CONTENT_VERSION, pairs=kept,
     )
 
 
@@ -902,32 +1056,52 @@ async def _crosswalk_pairs(db, pairs: list[CrosswalkPair]) -> tuple[dict, list[t
 
 
 async def _existing_crosswalks(db, ids) -> set[frozenset]:
-    ids = list(ids)
-    rows = (await db.execute(
-        select(requirement_crosswalks.c.requirement_id, requirement_crosswalks.c.related_requirement_id)
-        .where(requirement_crosswalks.c.requirement_id.in_(ids),
-               requirement_crosswalks.c.related_requirement_id.in_(ids))
-    )).all()
-    return {frozenset((x, y)) for x, y in rows}
+    return set((await _existing_links(db, ids)).keys())
 
 
-def _clause_label(req) -> str:
-    fw = req.framework.name if req.framework else ""
-    return f"{req.reference or req.title}" + (f" ({fw})" if fw else "")
+async def _existing_links(db, ids) -> dict:
+    """Pair -> typed link among ``ids``."""
+    return {link.pair: link for link in await typed_crosswalks.load_links(db, list(ids))}
 
 
-async def _audit_crosswalk_change(db, user, reqs: dict, pairs: list[tuple[uuid.UUID, uuid.UUID]], verb: str) -> None:
+async def _reject_shipped(db, user, pairs, reason: str) -> int:
+    """Record a rejection for every pair the library ships. Returns how many were new."""
+    ids = {x for p in pairs for x in p}
+    if not ids:
+        return 0
+    reqs = {
+        r.id: r for r in (await db.scalars(
+            select(Requirement).options(selectinload(Requirement.framework)).where(Requirement.id.in_(ids))
+        )).all()
+    }
+    n = 0
+    for a, b in pairs:
+        if a in reqs and b in reqs:
+            row = typed_crosswalks.shipped_row_for(reqs[a], reqs[b])
+            if row is not None and await typed_crosswalks.record_rejection(db, user, row, reason):
+                n += 1
+    return n
+
+
+def _pair_body(p: CrosswalkPair) -> dict:
+    return {"relationship": p.relationship, "rationale": p.rationale}
+
+
+async def _audit_crosswalk_change(db, user, reqs: dict, pairs: list[tuple[uuid.UUID, uuid.UUID]], verb: str,
+                                  extra: dict | None = None) -> None:
     """One activity entry per source clause, naming the clauses it was linked to."""
     by_source: dict[uuid.UUID, list[uuid.UUID]] = {}
     for a, b in pairs:
         by_source.setdefault(a, []).append(b)
+    key = "added" if verb.startswith("Crosswalked") else ("removed" if verb.startswith("Removed") else "changed")
     for a, targets in by_source.items():
         names = ", ".join(_clause_label(reqs[b]) for b in targets)
         await audit.record(
             db, actor=user, action="crosswalk", entity_type="requirement", entity_id=a,
             summary=f"{verb} {_clause_label(reqs[a])} and {names}"[:500],
-            changes={("added" if verb.startswith("Crosswalked") else "removed"): [
-                {"id": str(b), "reference": reqs[b].reference, "framework": reqs[b].framework.name if reqs[b].framework else ""}
+            changes={key: [
+                {"id": str(b), "reference": reqs[b].reference, "framework": reqs[b].framework.name if reqs[b].framework else "",
+                 **((extra or {}).get((a, b), {}))}
                 for b in targets
             ], "via": "crosswalk view"},
         )
@@ -941,12 +1115,21 @@ async def _audit_crosswalk_change(db, user, reqs: dict, pairs: list[tuple[uuid.U
 )
 async def accept_crosswalks(body: CrosswalkPairsBody, db: DbSession, user: CurrentUser) -> CrosswalkWriteResult:
     reqs, pairs = await _crosswalk_pairs(db, body.pairs)
+    given = {(p.requirement_id, p.related_requirement_id): p for p in body.pairs}
     existing = await _existing_crosswalks(db, list(reqs))
     new = [(a, b) for a, b in pairs if frozenset((a, b)) not in existing]
+    extra = {}
     for a, b in new:
-        await db.execute(requirement_crosswalks.insert().values(requirement_id=a, related_requirement_id=b))
+        p = given.get((a, b))
+        rel = (p.relationship if p else None) or "related"
+        await db.execute(requirement_crosswalks.insert().values(
+            requirement_id=a, related_requirement_id=b, relationship=rel,
+            rationale=((p.rationale if p else None) or "").strip(),
+            origin=body.origin, **typed_crosswalks.approver_values(user),
+        ))
+        extra[(a, b)] = {"relationship": rel}
     await db.flush()
-    await _audit_crosswalk_change(db, user, reqs, new, "Crosswalked")
+    await _audit_crosswalk_change(db, user, reqs, new, "Crosswalked", extra)
     return CrosswalkWriteResult(changed=len(new), skipped=len(pairs) - len(new))
 
 
@@ -954,7 +1137,7 @@ async def accept_crosswalks(body: CrosswalkPairsBody, db: DbSession, user: Curre
     "/compliance/crosswalks/remove",
     response_model=CrosswalkWriteResult,
     dependencies=[Depends(require("compliance:write"))],
-    summary="Remove crosswalks between pairs of clauses",
+    summary="Remove crosswalks between pairs of clauses (a shipped pair is recorded as rejected)",
 )
 async def remove_crosswalks(body: CrosswalkPairsBody, db: DbSession, user: CurrentUser) -> CrosswalkWriteResult:
     reqs, pairs = await _crosswalk_pairs(db, body.pairs)
@@ -965,50 +1148,257 @@ async def remove_crosswalks(body: CrosswalkPairsBody, db: DbSession, user: Curre
             ((requirement_crosswalks.c.requirement_id == a) & (requirement_crosswalks.c.related_requirement_id == b))
             | ((requirement_crosswalks.c.requirement_id == b) & (requirement_crosswalks.c.related_requirement_id == a))
         ))
+    rejected = await _reject_shipped(db, user, pairs, body.reason)
     await db.flush()
     await _audit_crosswalk_change(db, user, reqs, gone, "Removed the crosswalk between")
-    return CrosswalkWriteResult(changed=len(gone), skipped=len(pairs) - len(gone))
+    return CrosswalkWriteResult(changed=len(gone), skipped=len(pairs) - len(gone), rejected=rejected)
+
+
+@router.post(
+    "/compliance/crosswalks/approve",
+    response_model=CrosswalkWriteResult,
+    dependencies=[Depends(require("compliance:write"))],
+    summary="Record that crosswalks were reviewed and are right",
+)
+async def approve_crosswalks(body: CrosswalkPairsBody, db: DbSession, user: CurrentUser) -> CrosswalkWriteResult:
+    reqs, pairs = await _crosswalk_pairs(db, body.pairs)
+    links = await _existing_links(db, list(reqs))
+    done = []
+    for a, b in pairs:
+        link = links.get(frozenset((a, b)))
+        if link is None:
+            continue
+        await db.execute(update(requirement_crosswalks).where(
+            requirement_crosswalks.c.requirement_id == link.requirement_id,
+            requirement_crosswalks.c.related_requirement_id == link.related_requirement_id,
+        ).values(**typed_crosswalks.approver_values(user)))
+        done.append((a, b))
+    await db.flush()
+    await _audit_crosswalk_change(db, user, reqs, done, "Approved the crosswalk between")
+    return CrosswalkWriteResult(changed=len(done), skipped=len(pairs) - len(done))
+
+
+@router.post(
+    "/compliance/crosswalks/retype",
+    response_model=CrosswalkWriteResult,
+    dependencies=[Depends(require("compliance:write"))],
+    summary="Change how recorded crosswalks relate (relationship and rationale)",
+)
+async def retype_crosswalks(body: CrosswalkPairsBody, db: DbSession, user: CurrentUser) -> CrosswalkWriteResult:
+    """Set each pair's relationship (read from ``requirement_id``) and rationale. The row
+    becomes the organisation's own (origin manual, approved by the caller), so a content
+    upgrade no longer changes it."""
+    reqs, pairs = await _crosswalk_pairs(db, body.pairs)
+    given = {frozenset((p.requirement_id, p.related_requirement_id)): p for p in body.pairs}
+    links = await _existing_links(db, list(reqs))
+    done, extra = [], {}
+    for a, b in pairs:
+        link = links.get(frozenset((a, b)))
+        p = given[frozenset((a, b))]
+        if link is None or p.relationship is None:
+            continue
+        stored = p.relationship if link.requirement_id == p.requirement_id else typed_crosswalks.inverse(p.relationship)
+        values = {"relationship": stored, "origin": typed_crosswalks.ORIGIN_MANUAL, **typed_crosswalks.approver_values(user)}
+        if p.rationale is not None:
+            values["rationale"] = p.rationale.strip()
+        await db.execute(update(requirement_crosswalks).where(
+            requirement_crosswalks.c.requirement_id == link.requirement_id,
+            requirement_crosswalks.c.related_requirement_id == link.related_requirement_id,
+        ).values(**values))
+        done.append((a, b))
+        extra[(a, b)] = {"relationship": {"from": link.relationship_from(a), "to": p.relationship if a == p.requirement_id
+                                          else typed_crosswalks.inverse(p.relationship)}}
+    await db.flush()
+    await _audit_crosswalk_change(db, user, reqs, done, "Retyped the crosswalk between", extra)
+    return CrosswalkWriteResult(changed=len(done), skipped=len(pairs) - len(done))
+
+
+@router.get(
+    "/compliance/crosswalks/rejections",
+    response_model=list[CrosswalkRejectionRead],
+    dependencies=[Depends(require("compliance:read"))],
+    summary="Shipped crosswalks this organisation rejected",
+)
+async def list_crosswalk_rejections(
+    db: DbSession, from_framework: uuid.UUID | None = None, to_framework: uuid.UUID | None = None,
+) -> list[CrosswalkRejectionRead]:
+    from app.services.framework_library import TEMPLATES, template_key_for_name
+
+    keys: set[str] | None = None
+    if from_framework and to_framework:
+        names = dict((await db.execute(
+            select(Framework.id, Framework.name).where(Framework.id.in_([from_framework, to_framework]))
+        )).all())
+        keys = {template_key_for_name(names.get(from_framework)), template_key_for_name(names.get(to_framework))} - {None}
+    titles = {
+        (k, r["reference"]): r["title"] for k, t in TEMPLATES.items() for r in t["requirements"]
+    }
+    out = []
+    for r in (await db.scalars(select(CrosswalkRejection).order_by(CrosswalkRejection.created_at.desc()))).all():
+        if keys is not None and {r.from_template, r.to_template} != keys:
+            continue
+        out.append(CrosswalkRejectionRead(
+            id=r.id, from_template=r.from_template, from_reference=r.from_reference,
+            to_template=r.to_template, to_reference=r.to_reference, relationship=r.relationship,
+            content_version=r.content_version, reason=r.reason, rejected_by=r.rejected_by,
+            rejected_at=r.created_at, from_title=titles.get((r.from_template, r.from_reference), ""),
+            to_title=titles.get((r.to_template, r.to_reference), ""),
+        ))
+    return out
+
+
+@router.post(
+    "/compliance/crosswalks/rejections/restore",
+    response_model=CrosswalkSyncRead,
+    dependencies=[Depends(require("compliance:write"))],
+    summary="Withdraw rejections and record those shipped crosswalks again",
+)
+async def restore_crosswalk_rejections(body: CrosswalkRestoreBody, db: DbSession, user: CurrentUser) -> CrosswalkSyncRead:
+    rows = (await db.scalars(select(CrosswalkRejection).where(CrosswalkRejection.id.in_(body.ids)))).all()
+    for r in rows:
+        await db.delete(r)
+        await audit.record(
+            db, actor=user, action="crosswalk", entity_type="crosswalk_rejection", entity_id=r.id,
+            summary=f"Restored the shipped crosswalk {r.from_reference} ({r.from_template}) and "
+                    f"{r.to_reference} ({r.to_template})"[:500],
+        )
+    await db.flush()
+    result = await typed_crosswalks.sync_shipped(db)
+    return CrosswalkSyncRead(**vars(result))
+
+
+@router.post(
+    "/compliance/crosswalks/sync",
+    response_model=CrosswalkSyncRead,
+    dependencies=[Depends(require("compliance:write"))],
+    summary="Record the shipped crosswalks between installed frameworks now",
+)
+async def sync_crosswalk_content(db: DbSession, user: CurrentUser) -> CrosswalkSyncRead:
+    result = await typed_crosswalks.sync_shipped(db)
+    if result.changed:
+        await audit.record(
+            db, actor=user, action="crosswalk", entity_type="framework", entity_id=None,
+            summary=f"Crosswalk content synced: {result.inserted} added, {result.updated} updated, {result.removed} removed",
+        )
+    return CrosswalkSyncRead(**vars(result))
+
+
+@router.get(
+    "/compliance/crosswalks/content",
+    response_model=CrosswalkContentRead,
+    dependencies=[Depends(require("compliance:read"))],
+    summary="The shipped crosswalk content: version, framework pairs, sources and counts",
+)
+async def crosswalk_content_note(db: DbSession) -> CrosswalkContentRead:
+    from app.services.framework_library import TEMPLATES, installed_template_keys
+
+    installed = await installed_template_keys(db)
+    note = typed_crosswalks.content_note()
+    return CrosswalkContentRead(
+        version=note["version"], relationships=list(_RELATIONSHIPS),
+        pairs=[
+            CrosswalkContentPair(
+                **p, from_name=TEMPLATES[p["from_template"]]["name"], to_name=TEMPLATES[p["to_template"]]["name"],
+                installed=p["from_template"] in installed and p["to_template"] in installed,
+            )
+            for p in note["pairs"]
+        ],
+    )
+
+
+async def _via_crosswalks(db, requirements) -> dict:
+    """Coverage via crosswalk for loaded requirements (a seam tests stub; no database, no
+    crosswalk coverage)."""
+    if db is None:
+        return {}
+    return await typed_crosswalks.via_crosswalk_for(db, requirements)
+
+
+def _via_read(via) -> ViaCrosswalkRead | None:
+    return ViaCrosswalkRead(**via.as_dict()) if via is not None else None
+
+
+@router.get(
+    "/requirements/{requirement_id}/coverage-via-crosswalk",
+    response_model=ViaCrosswalkRead | None,
+    dependencies=[Depends(require("compliance:read"))],
+    summary="Whether a clause is covered via crosswalk, and by what",
+)
+async def requirement_via_crosswalk(requirement_id: uuid.UUID, db: DbSession) -> ViaCrosswalkRead | None:
+    req = await _load_requirement(db, requirement_id)
+    return _via_read((await _via_crosswalks(db, [req])).get(req.id))
+
+
+@router.post(
+    "/requirements/{requirement_id}/adopt-crosswalk-mapping",
+    response_model=RequirementRead,
+    dependencies=[Depends(require("compliance:write"))],
+    summary="Map the covering clause's tested controls directly to this clause",
+)
+async def adopt_crosswalk_mapping(
+    requirement_id: uuid.UUID, body: AdoptMappingBody, db: DbSession, user: CurrentUser,
+) -> RequirementRead:
+    """Turn "covered via crosswalk" into a direct mapping: link the covering clause's
+    tested controls (or the ``control_ids`` given, which must be among them) to this
+    clause. 422 when the crosswalk does not cover it."""
+    req = await _load_requirement(db, requirement_id)
+    via = (await _via_crosswalks(db, [req])).get(req.id)
+    if via is None or via.via_requirement_id != body.via_requirement_id:
+        raise HTTPException(
+            status_code=422,
+            detail="That clause does not cover this one through an equivalent or containing crosswalk "
+                   "with a tested control.",
+        )
+    offered = {c.id for c in via.controls}
+    chosen = list(body.control_ids) if body.control_ids is not None else [c.id for c in via.controls]
+    stray = [str(c) for c in chosen if c not in offered]
+    if stray or not chosen:
+        raise HTTPException(status_code=422, detail="Pick tested controls of the covering clause to adopt.")
+    controls = await _resolve_controls(db, chosen)
+    added = [c for c in controls if c not in req.controls]
+    req.controls.extend(added)
+    await db.flush()
+    await audit.record(
+        db, actor=user, action="map_controls", entity_type="requirement", entity_id=req.id,
+        summary=(f"Adopted the mapping {via.label} ({via.relationship}) for {req.reference or req.title}: "
+                 + ", ".join(" ".join(p for p in (c.reference, c.name) if p) for c in added))[:500],
+        changes={"controls": {"added": [str(c.id) for c in added]}, "via": {
+            "requirement_id": str(via.via_requirement_id), "reference": via.via_reference,
+            "framework": via.via_framework, "relationship": via.relationship, "source": "crosswalk"}},
+    )
+    loaded = await _load_requirement(db, req.id)
+    await _attach_counts(db, [loaded])
+    return RequirementRead.model_validate(loaded)
 
 
 async def _crosswalks_for(db, requirement_id: uuid.UUID) -> list[CrosswalkItem]:
-    out = (
-        await db.scalars(
-            select(requirement_crosswalks.c.related_requirement_id).where(
-                requirement_crosswalks.c.requirement_id == requirement_id
-            )
-        )
-    ).all()
-    inc = (
-        await db.scalars(
-            select(requirement_crosswalks.c.requirement_id).where(
-                requirement_crosswalks.c.related_requirement_id == requirement_id
-            )
-        )
-    ).all()
-    related_ids = set(out) | set(inc)
-    if not related_ids:
+    links = {
+        link.other(requirement_id): link
+        for link in await typed_crosswalks.load_links(db, [requirement_id], both=False)
+    }
+    if not links:
         return []
     reqs = (
         await db.scalars(
             select(Requirement)
             .options(selectinload(Requirement.framework))
-            .where(Requirement.id.in_(related_ids), Requirement.deleted.is_(False))
+            .where(Requirement.id.in_(list(links)), Requirement.deleted.is_(False))
         )
     ).all()
-    return [
-        CrosswalkItem(
-            id=r.id,
-            reference=r.reference,
-            title=r.title,
-            status=r.status,
-            framework_id=r.framework_id,
+    out = []
+    for r in sorted(
+        reqs,
+        key=lambda r: ((r.framework.name if r.framework else "").lower(), soa_export.natural_key(r.reference), r.title),
+    ):
+        link = links[r.id]
+        out.append(CrosswalkItem(
+            id=r.id, reference=r.reference, title=r.title, status=r.status, framework_id=r.framework_id,
             framework_name=r.framework.name if r.framework else "",
-        )
-        for r in sorted(
-            reqs,
-            key=lambda r: ((r.framework.name if r.framework else "").lower(), soa_export.natural_key(r.reference), r.title),
-        )
-    ]
+            relationship=link.relationship_from(requirement_id), rationale=link.rationale, source=link.source,
+            origin=link.origin, content_version=link.content_version, confidence=link.confidence,
+            approved_by=link.approved_by, approved_at=link.approved_at,
+        ))
+    return out
 
 
 # ----------------------------------------------------------------- gap analysis
@@ -1101,6 +1491,7 @@ def _gap_predicate():
 async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
     fw = await _load_framework(db, framework_id)
     reqs = fw.requirements
+    via = await _via_crosswalks(db, reqs)
     by_status: dict[str, int] = {}
     covered = 0
     by_coverage: dict[str, int] = {}
@@ -1117,6 +1508,7 @@ async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
                 GapItem(
                     id=r.id, reference=r.reference, title=r.title, status=r.status,
                     is_covered=r.is_covered, coverage=coverage, reason=reason,
+                    via_crosswalk=via[r.id].label if r.id in via else "",
                 )
             )
     compliant, _applicable, pct = _compliant_pct(reqs)
@@ -1134,7 +1526,7 @@ async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
         failing=by_coverage.get(control_assurance.FAILING, 0),
         compliant_pct=pct,
         gaps=gaps,
-        posture=_posture_read(compliance_posture.posture(reqs)),
+        posture=_posture_read(compliance_posture.posture(reqs, via)),
     )
 
 
@@ -1150,9 +1542,10 @@ async def compliance_summary(db: DbSession) -> ComplianceSummary:
     rows: list[FrameworkSummary] = []
     total_reqs = 0
     counted: list[compliance_posture.Posture] = []
+    via = await _via_crosswalks(db, [r for fw in frameworks for r in fw.requirements if not r.deleted])
     for fw in frameworks:
         reqs = [r for r in fw.requirements if not r.deleted]
-        fw_posture = compliance_posture.posture(reqs)
+        fw_posture = compliance_posture.posture(reqs, via)
         compliant, pct = fw_posture.compliant, fw_posture.compliant_pct
         total_reqs += len(reqs)
         kind = fw.kind or "compliance"
@@ -1179,6 +1572,7 @@ async def compliance_summary(db: DbSession) -> ComplianceSummary:
         overall_compliant_pct=overall.compliant_pct,
         overall_mapped_pct=overall.mapped_pct,
         overall_assured_pct=overall.assured_pct,
+        overall_via_crosswalk_pct=overall.via_crosswalk_pct,
         frameworks=rows,
     )
 

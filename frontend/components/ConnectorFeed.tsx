@@ -4,8 +4,9 @@
 
    A monitoring tool posts control results with a token instead of a login. Each result
    becomes evidence on the control, a run of the connector's test for that control when
-   there is one, and an alert when it failed. It never changes the control's
-   effectiveness: a person records a test and another person reviews it. The token is
+   there is one, and an alert, an issue and a reliance hold when it failed (phase 4D). It
+   never changes the control's effectiveness: a person records a test and another person
+   reviews it. The token is
    shown once; only a fingerprint of it is kept. */
 
 import { useCallback, useEffect, useState } from "react";
@@ -136,9 +137,10 @@ export default function ConnectorFeed({ connectorId, onChanged }: { connectorId:
         </div>
         <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
           A monitoring tool can post control results with a token instead of a user login. Each result is kept as evidence on
-          the control and as a run of this connector&apos;s test for that control; a failed result raises an alert. The
-          control&apos;s effectiveness does not change until a person records a test and another person reviews it. Recorded
-          in the activity trail as “Connector {"<name>"}”.
+          the control and as a run of this connector&apos;s test for that control. A failed result raises an alert, opens an
+          issue on the test (or updates the open one) and stops risks relying on the control until a result passes. The
+          control&apos;s effectiveness does not change until a person records a test and another person reviews it. Results beyond the rate limit (60 a minute per token by
+          default) are refused. Recorded in the activity trail as “Connector {"<name>"}”.
         </p>
         {error && <div className="error" style={{ marginBottom: 10 }}>{error}</div>}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

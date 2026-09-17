@@ -256,6 +256,17 @@ def open_finding_count(control: Any) -> int:
 NOTE_TEST_FAILED = "its last reviewed test failed"
 NOTE_TEST_OVERDUE = "its test is overdue"
 NOTE_OPEN_FINDING = "it has an open audit finding"
+#: Phase 4D: an active continuous-monitoring test on the control is failing
+#: (``controls.monitoring_failing_since``, kept by ``services/ccm_runner.py``). It withholds
+#: reliance like a failed reviewed test, but never changes the effectiveness rating.
+NOTE_MONITORING_FAILING = "its continuous monitoring has been failing since {since}"
+
+
+def monitoring_note(since: Any) -> str:
+    """ "its continuous monitoring has been failing since 12 Sep 2026", or "". Pure."""
+    if not isinstance(since, date):
+        return ""
+    return NOTE_MONITORING_FAILING.format(since=since.strftime("%d %b %Y"))
 
 
 def reliance_note(control: Any, tests: Iterable[Any], today: date | None = None) -> str:
@@ -263,6 +274,9 @@ def reliance_note(control: Any, tests: Iterable[Any], today: date | None = None)
     latest = latest_counting_test(tests)
     if latest is not None and latest.result == TestResult.failed:
         return NOTE_TEST_FAILED
+    monitoring = monitoring_note(getattr(control, "monitoring_failing_since", None))
+    if monitoring:
+        return monitoring
     if is_cycle_overdue(getattr(control, "status", None), getattr(control, "next_audit_date", None), today):
         return NOTE_TEST_OVERDUE
     if open_finding_count(control):

@@ -40,6 +40,7 @@ import { approvalLine, approvalWithoutStepText, exceptionStateText, importedAppr
 import { orderMeta } from "../../components/record/metaOrder";
 import { creditedControlLines, type RiskInput } from "../../lib/record/risk";
 import { incidentDurationNote } from "../../lib/record/incident";
+import { monitoringStatusText, monitoringTestLine, type ControlMonitoring } from "../../lib/record/control";
 
 // Calendar-day wording ("Overdue 13 days") reads the local calendar: pin it, so the
 // result does not depend on the machine's timezone. Dates are computed at call time,
@@ -157,6 +158,16 @@ function kitChecks(): string[] {
     assert.equal(incidentDurationNote({ ...base, status: "investigating" }, "mttc", fmt), "Not contained yet");
     assert.equal(incidentDurationNote({ ...base, status: "contained" }, "mttc", fmt), "Needs Contained");
     assert.equal(incidentDurationNote({ ...base, status: "investigating" }, "mttd", fmt), "Needs Occurred");
+  });
+  check("4D monitoring wording: passing streak, failing since, never a rating", () => {
+    const t = { id: "t", reference: "CCM-005", name: "Inactive", check_label: "Enabled accounts inactive", status: "active", last_result: "passed", last_run: "2026-09-14", failing_since: null, last_error: "", recent_runs: 30, recent_pass_rate: 96.7, overdue: false };
+    const m: ControlMonitoring = { state: "passing", failing_since: null, recent_runs: 30, recent_pass_rate: 97, tests: [t] };
+    assert.equal(monitoringStatusText(m, fmt), "Monitored: passing (last 30 runs 97%)");
+    assert.equal(monitoringStatusText({ ...m, state: "failing", failing_since: "2026-09-12" }, fmt), "Monitoring failing since 12 Sep 2026");
+    assert.equal(monitoringStatusText({ ...m, state: "not_monitored", tests: [] }, fmt), "Not monitored");
+    assert.equal(monitoringStatusText({ ...m, state: "error", tests: [{ ...t, last_result: "error" }] }, fmt), "Monitoring could not run: CCM-005");
+    assert.equal(monitoringTestLine(t, fmt), "Passed 14 Sep 2026 · last 30 runs 96.7% · Enabled accounts inactive");
+    assert.equal(monitoringTestLine({ ...t, last_result: "failed", failing_since: "2026-09-12", issue_reference: "ISS-021" }, fmt), "Failing since 12 Sep 2026 · ISS-021 open · Enabled accounts inactive");
   });
   check("D1 status first, approval second", () => {
     const m = (key: string, label: string) => ({ key, label });

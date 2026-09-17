@@ -108,6 +108,10 @@ class RcsaRiskRead(RcsaRiskBase):
     category_ref: LookupRef | None = None
     action_owner_ref: UserRef | None = None
     created_at: datetime
+    # Phase 4E: self-ratings from a reviewed control self-assessment questionnaire.
+    self_design_rating: str | None = None
+    self_operation_rating: str | None = None
+    self_assessment_id: uuid.UUID | None = None
 
 
 # --------------------------------------------------------------- RCSA campaigns ---

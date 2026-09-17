@@ -44,3 +44,7 @@ async def mark_treatment_action_done(action_id: uuid.UUID, db: DbSession, user: 
 
 
 router.include_router(email_router)
+# Phase 4B: workspaces, the board home, the assurance workspace and period snapshots.
+from app.api.v1.workspaces import router as workspaces_router  # noqa: E402
+
+router.include_router(workspaces_router)

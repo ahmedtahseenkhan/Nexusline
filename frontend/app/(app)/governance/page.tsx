@@ -12,6 +12,9 @@ import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, NumberInput, type Option } from "@/components/fields";
 import BoardPacks from "@/components/BoardPacks";
+import CommitteeMembers, { type CommitteeMember } from "@/components/CommitteeMembers";
+import UserPicker from "@/components/UserPicker";
+import { useTenantSettings } from "@/lib/tenantSettings";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
@@ -25,6 +28,9 @@ interface MeetingDecision {
   description: string;
   decision_type: string;
   owner: string;
+  /** The user the item is assigned to (phase 4B), and their name. */
+  owner_id?: string | null;
+  owner_name?: string;
   due_date: string | null;
   status: string;
   completed_date: string | null;
@@ -64,6 +70,9 @@ interface Committee {
   meetings: Meeting[];
   /** Generate the board pack automatically this many days before each meeting; null = by hand. */
   board_pack_days_before: number | null;
+  /** The sections this committee's packs carry, in order; null = every section. */
+  board_pack_sections?: string[] | null;
+  member_users?: CommitteeMember[];
 }
 interface DecisionTrackerRow extends MeetingDecision {
   committee_id: string | null;
@@ -226,6 +235,7 @@ type DecisionDraft = {
   description: string;
   decision_type: string;
   owner: string;
+  owner_id: string | null;
   due_date: string;
   status: string;
 };
@@ -233,6 +243,7 @@ const BLANK_DECISION_DRAFT: DecisionDraft = {
   description: "",
   decision_type: "decision",
   owner: "",
+  owner_id: null,
   due_date: "",
   status: "open",
 };
@@ -247,6 +258,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 // ================================================================ page ===== */
 function GovernanceInner() {
   const [section, setSection] = useState<SectionId>("committees");
+  const canWriteGovernance = useTenantSettings().permissions.includes("governance:write");
   const { formatDate } = useFormat();
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -428,6 +440,7 @@ function GovernanceInner() {
         description: decisionDraft.description,
         decision_type: decisionDraft.decision_type,
         owner: decisionDraft.owner,
+        owner_id: decisionDraft.owner_id,
         due_date: decisionDraft.due_date || null,
         status: decisionDraft.status,
       });
@@ -571,7 +584,7 @@ function GovernanceInner() {
     { key: "decision_type", header: "Type", sortable: true, render: (d) => <Badge tone={DECISION_TYPE_TONE[d.decision_type] || "neutral"}>{cap(d.decision_type)}</Badge> },
     { key: "committee", header: "Committee", sortable: true, render: (d) => <span className="muted">{d.committee_name || "—"}</span> },
     { key: "meeting", header: "Meeting", sortable: true, render: (d) => <span className="muted">{d.meeting_title || "—"}</span> },
-    { key: "owner", header: "Owner", sortable: true, render: (d) => <span className="muted">{d.owner || "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (d) => <span className="muted">{d.owner_name || d.owner || "—"}</span> },
     { key: "due_date", header: "Due", sortable: true, render: (d) => (d.is_overdue ? <Badge tone="critical">Overdue · {formatDate(d.due_date)}</Badge> : <span className="muted">{formatDate(d.due_date)}</span>) },
     {
       key: "status",
@@ -777,7 +790,15 @@ function GovernanceInner() {
               </div>
             </div>
 
-            <BoardPacks committeeId={detail.id} meetings={detail.meetings} autoDays={detail.board_pack_days_before ?? null} />
+            <CommitteeMembers committeeId={detail.id} members={detail.member_users || []} canWrite={canWriteGovernance} onSaved={() => loadDetail(detail.id)} />
+
+            <BoardPacks
+              committeeId={detail.id}
+              meetings={detail.meetings}
+              autoDays={detail.board_pack_days_before ?? null}
+              savedSections={detail.board_pack_sections ?? null}
+              onSectionsSaved={() => loadDetail(detail.id)}
+            />
           </>
         )}
       </RecordDrawer>
@@ -923,9 +944,13 @@ function MeetingRows({
                     {DECISION_TYPE.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
                   </select>
                 </div>
+                <div style={{ width: 200 }}>
+                  <label className="label">Assigned to</label>
+                  <UserPicker value={decisionDraft.owner_id} onChange={(id) => setDD("owner_id", id)} placeholder="A user…" />
+                </div>
                 <div style={{ width: 150 }}>
-                  <label className="label">Owner</label>
-                  <input className="input" value={decisionDraft.owner} onChange={(ev) => setDD("owner", ev.target.value)} placeholder="Owner" />
+                  <label className="label">Owner (if not a user)</label>
+                  <input className="input" value={decisionDraft.owner} onChange={(ev) => setDD("owner", ev.target.value)} placeholder="Name" />
                 </div>
                 <div style={{ width: 150 }}>
                   <label className="label">Due date</label>
@@ -959,7 +984,7 @@ function MeetingRows({
                         <td className="ref">{d.reference || "—"}</td>
                         <td className="cell-title">{d.description}</td>
                         <td><Badge tone={DECISION_TYPE_TONE[d.decision_type] || "neutral"}>{cap(d.decision_type)}</Badge></td>
-                        <td className="muted">{d.owner || "—"}</td>
+                        <td className="muted">{d.owner_name || d.owner || "—"}</td>
                         <td>
                           {d.is_overdue ? (
                             <Badge tone="critical">Overdue · {formatDate(d.due_date)}</Badge>

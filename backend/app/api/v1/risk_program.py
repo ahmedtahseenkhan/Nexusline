@@ -90,6 +90,8 @@ class RiskMatrix(BaseModel):
     likelihood_levels: list[MatrixLevel] = []
     impact_levels: list[MatrixLevel] = []
     bands: list[MatrixBand] = []
+    #: Phase 4: the hierarchy level the map is aggregated to (None = every risk plotted).
+    level: int | None = None
 
 
 def _levels_for(
@@ -475,16 +477,37 @@ async def risk_matrix(
     db: DbSession,
     user: CurrentUser,
     scope: Annotated[Literal["register", "board"], Query()] = "register",
+    level: Annotated[int | None, Query(ge=1, le=3)] = None,
 ) -> RiskMatrix:
     """``scope=register`` plots every scored live risk; ``scope=board`` (the dashboard)
     only the board register — out of Draft, not accepted or closed (F-21). A draft never
-    scored is never plotted: its stored 1x1 is a placeholder, not a cell."""
-    settings = await get_or_create_settings(db, user.tenant_id)
-    where = board_register_clause() if scope == "board" else and_(Risk.deleted.is_(False), scored_clause())
-    risks = (await db.scalars(select(Risk).where(where))).all()
+    scored is never plotted: its stored 1x1 is a placeholder, not a cell.
 
+    ``level`` (phase 4) aggregates the map to one hierarchy level: each live risk at that
+    level (1 enterprise, 2 category, 3 scenario) is one bubble, plotted at the cell of the
+    worst risk in its branch that the scope counts (``risk_hierarchy.level_cells``). A
+    branch with nothing counted is not plotted; risks not placed in the hierarchy are not
+    on a level map."""
+    settings = await get_or_create_settings(db, user.tenant_id)
     inherent: dict[tuple[int, int], list[str]] = defaultdict(list)
     residual: dict[tuple[int, int], list[str]] = defaultdict(list)
+    if level is not None:
+        from app.api.v1.risks import _hierarchy_facts
+        from app.services.risk_hierarchy import level_cells
+
+        counted = (lambda r: r.in_figures) if scope == "board" else (lambda r: r.scored)
+        plotted = level_cells(await _hierarchy_facts(db), level, counted=counted)
+        for cell in plotted:
+            if cell.inherent:
+                inherent[cell.inherent].append(cell.risk.reference)
+            if cell.residual:
+                residual[cell.residual].append(cell.risk.reference)
+        risks: list = []
+        total = len(plotted)
+    else:
+        where = board_register_clause() if scope == "board" else and_(Risk.deleted.is_(False), scored_clause())
+        risks = (await db.scalars(select(Risk).where(where))).all()
+        total = len(risks)
     for r in risks:
         il, ii = getattr(r, "inherent_likelihood", None), getattr(r, "inherent_impact", None)
         if il and ii:
@@ -519,12 +542,13 @@ async def risk_matrix(
         cells=cells,
         appetite_score=settings.appetite_score,
         tolerance_score=settings.tolerance_score,
-        total=len(risks),
+        total=total,
         size=size,
         max_score=max_score_for(size),
         likelihood_levels=_levels_for("likelihood", size, configured),
         impact_levels=_levels_for("impact", size, configured),
         bands=_bands_for(scale),
+        level=level,
     )
 
 

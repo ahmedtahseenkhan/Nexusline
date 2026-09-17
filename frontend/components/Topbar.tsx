@@ -6,10 +6,13 @@ import { usePathname, useRouter } from "next/navigation";
 import { api, clearToken, type Me, type SearchHit } from "@/lib/api";
 import { useMobileNav } from "@/lib/mobileNav";
 import { IconBell, IconLogout } from "./icons";
+import WorkspaceSwitcher from "./WorkspaceSwitcher";
 
 const TITLES: Record<string, string> = {
   "/my-work": "My Work",
   "/dashboard": "Dashboard",
+  "/board": "Board",
+  "/assurance": "Assurance",
   "/goals": "Strategy & Goals",
   "/risks": "Risk Register",
   "/operational-risk": "Operational Risk",
@@ -139,6 +142,7 @@ export default function Topbar({ user }: { user: Me | null }) {
         <div className="topbar-title">{title}</div>
       </div>
       <div className="topbar-right">
+        <WorkspaceSwitcher />
         <div ref={searchRef} style={{ position: "relative" }}>
           <input
             className="input sm"

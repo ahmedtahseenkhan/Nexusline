@@ -199,6 +199,13 @@ async def review_all_suggestions(
     dependencies=[_READ],
     summary="How many unmapped controls have strong clause suggestions waiting",
 )
-async def pending_suggestions(db: DbSession, framework_id: uuid.UUID | None = None) -> PendingSuggestionsRead:
+async def pending_suggestions(
+    db: DbSession, user: CurrentUser, framework_id: uuid.UUID | None = None,
+) -> PendingSuggestionsRead:
+    """Served from the organisation's cache while controls, clauses, frameworks, mappings
+    and crosswalks are unchanged (``computed_at`` says when it was counted); recounted
+    otherwise, and at least daily."""
     await _check_framework(db, framework_id)
-    return PendingSuggestionsRead(**await engine.pending_strong(db, framework_id=framework_id))
+    return PendingSuggestionsRead(
+        **await engine.pending_strong_cached(db, user.tenant_id, framework_id=framework_id)
+    )

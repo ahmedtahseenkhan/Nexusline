@@ -44,6 +44,11 @@ from app.models.assessment import (
     QuestionOption,
     Questionnaire,
 )
+from app.models.assessment import (  # phase 4E: questionnaire engine
+    AssessmentAccessLog,
+    AssessmentLink,
+    QuestionnaireSection,
+)
 from app.models.collab import Attachment, Comment, EntityTag, StoredFile, Tag
 from app.models.continuity import ContinuityPlan, ContinuityTask, ContinuityTest
 from app.models.control import Control, ControlAudit, ControlMaintenance, control_policies
@@ -71,6 +76,7 @@ from app.models.threat import (
     risk_vulnerabilities,
 )
 from app.models.compliance import (
+    CrosswalkRejection,
     ComplianceFinding,
     Framework,
     Requirement,
@@ -187,6 +193,11 @@ from app.models.status_rule import StatusRule
 from app.models.version import RecordVersion
 from app.models.webhook import Webhook, WebhookDelivery
 from app.models.widget import DashboardWidget
+# Phase 4A: per-organisation computed-figure cache
+from app.models.computed_cache import TenantComputedCache
+# Phase 4B: workspaces, period snapshots, committee members and board-pack branding
+from app.models.governance import BoardPackBranding, CommitteeMember
+from app.models.workspace import MetricSnapshot, UserWorkspacePreference
 
 __all__ = [
     "RiskProposal",
@@ -242,6 +253,7 @@ __all__ = [
     "requirement_risks",
     "requirement_policies",
     "requirement_crosswalks",
+    "CrosswalkRejection",
     "Evidence",
     "Incident",
     "IncidentStage",
@@ -361,4 +373,15 @@ __all__ = [
     "FraudControlCheck",
     "AuthorityMatrix",
     "DualControlRule",
+    # Phase 4A
+    "TenantComputedCache",
+    # Phase 4B
+    "BoardPackBranding",
+    "CommitteeMember",
+    "MetricSnapshot",
+    "UserWorkspacePreference",
+    # Phase 4E: questionnaire engine
+    "QuestionnaireSection",
+    "AssessmentLink",
+    "AssessmentAccessLog",
 ]

@@ -138,14 +138,17 @@ function ArchiveDialog({
     const ok = await confirmDialog({
       title: `Restore ${name}?`,
       message:
-        "It goes back into the register exactly as it was archived, with its links. The activity log records who restored it.",
+        "It goes back into the register exactly as it was archived, with its links. The activity log records who restored it." +
+        (entityType === "risk"
+          ? " If it was moved to the risk candidates queue and that candidate is still waiting, the candidate is withdrawn — or, when it also holds other archived risks, loses this risk's assets — so the same risk isn't proposed twice."
+          : ""),
       confirmLabel: "Restore",
     });
     if (!ok) return;
     setRestoring(row.id);
     try {
       const res = await records.restore(entityType, row.id);
-      toast(`Restored ${res.reference || res.title || name}`);
+      toast(`Restored ${res.reference || res.title || name}${res.note ? `. ${res.note}` : ""}`);
       setRows((prev) => prev.filter((r) => r.id !== row.id));
       setTotal((n) => Math.max(0, n - 1));
       onRestored(row);

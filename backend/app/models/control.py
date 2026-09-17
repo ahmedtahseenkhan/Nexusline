@@ -86,6 +86,10 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
         default=ControlEffectiveness.not_assessed, nullable=False,
     )
     effectiveness_override_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Phase 4 (CCM): the day an active continuous-monitoring test on this control started
+    # failing, while one still is; read by ``control_assurance.reliance_note``. Written
+    # only by ``services/ccm_runner.py``; never changes effectiveness by itself.
+    monitoring_failing_since: Mapped[date | None] = mapped_column(Date, nullable=True)
     test_procedure: Mapped[str] = mapped_column(Text, default="", nullable=False)
     evidence_expected: Mapped[str] = mapped_column(Text, default="", nullable=False)
 

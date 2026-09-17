@@ -25,7 +25,17 @@ import StatementOfApplicability from "@/components/StatementOfApplicability";
 import FrameworkCrosswalk from "@/components/FrameworkCrosswalk";
 import { BulkSuggestMappings, PendingSuggestionsHint } from "@/components/SuggestedClauses";
 import { useHasPermission } from "@/lib/tenantSettings";
-import type { FrameworkPosture } from "@/lib/compliance";
+import {
+  adoptCrosswalkMapping,
+  getViaCrosswalk,
+  ORIGIN_LABEL,
+  RELATIONSHIP_HELP,
+  RELATIONSHIP_LABEL,
+  type CrosswalkOrigin,
+  type CrosswalkRelationship,
+  type FrameworkPosture,
+  type ViaCrosswalk,
+} from "@/lib/compliance";
 
 /* ------------------------------------------------------------------ types */
 type Framework = {
@@ -104,6 +114,12 @@ type CrosswalkItem = {
   status: string;
   framework_id: string;
   framework_name: string;
+  /** Read from this requirement to the related one. */
+  relationship?: CrosswalkRelationship;
+  rationale?: string;
+  source?: string;
+  origin?: CrosswalkOrigin;
+  approved_by?: string;
 };
 
 type Evidence = {
@@ -122,6 +138,8 @@ type GapItem = {
   is_covered: boolean;
   coverage: string;
   reason: string;
+  /** "mapped via ISO/IEC 27001:2022 A.8.5" when a crosswalk covers it (still a gap). */
+  via_crosswalk?: string;
 };
 
 type GapAnalysis = {
@@ -164,6 +182,11 @@ function PostureLine({ p, style }: { p: FrameworkPosture; style?: React.CSSPrope
       <b style={{ color: "var(--text-strong)" }}>{pctText(p.compliant_pct)}</b> assessed compliant ·{" "}
       <b style={{ color: "var(--text-strong)" }}>{pctText(p.mapped_pct)}</b> mapped ·{" "}
       <b style={{ color: "var(--text-strong)" }}>{pctText(p.assured_pct)}</b> tested
+      {!!p.via_crosswalk && (
+        <>
+          {" "}· <b style={{ color: "var(--text-strong)" }}>{pctText(p.via_crosswalk_pct || 0)}</b> via crosswalk
+        </>
+      )}
     </span>
   );
 }
@@ -352,6 +375,10 @@ function ComplianceInner() {
   // requirement detail (drawer)
   const [detail, setDetail] = useState<Requirement | null>(null);
   const [crosswalks, setCrosswalks] = useState<CrosswalkItem[]>([]);
+  // Covered via crosswalk: not tested directly, but a tested control of an equivalent or
+  // containing clause in another framework covers it. Adopting makes the mapping direct.
+  const [viaCrosswalk, setViaCrosswalk] = useState<ViaCrosswalk | null>(null);
+  const [adopting, setAdopting] = useState(false);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
 
   // framework modal
@@ -478,6 +505,7 @@ function ComplianceInner() {
     apiCall<Requirement>("GET", `/requirements/${id}`).then(setDetail).catch(() => setDetail(null));
     setCrosswalks([]);
     setEvidence([]);
+    setViaCrosswalk(null);
     Promise.all([
       apiCall<CrosswalkItem[]>("GET", `/requirements/${id}/crosswalks`),
       apiCall<Evidence[]>("GET", `/requirements/${id}/evidence`),
@@ -487,6 +515,7 @@ function ComplianceInner() {
         setEvidence(ev);
       })
       .catch(() => {});
+    getViaCrosswalk(id).then(setViaCrosswalk).catch(() => setViaCrosswalk(null));
   }, []);
   useEffect(() => {
     if (openId) loadDetail(openId);
@@ -790,7 +819,7 @@ function ComplianceInner() {
           placeholder="None"
         />
       </Field>
-      <Field label="Crosswalks" help="Equivalent requirements in other frameworks (e.g. ISO A.5.15 ≡ SOC2 CC6.1).">
+      <Field label="Crosswalks" help="Related clauses in other frameworks. New links are recorded as related; set how they relate in the framework's Crosswalk tab.">
         <AsyncMultiSelect search={searchCrosswalks} value={crosswalkSel} onChange={setCrosswalkSel} />
       </Field>
     </>
@@ -1005,6 +1034,16 @@ function ComplianceInner() {
                 : `${gap.covered} mapped · ${gap.unassessed} not yet tested · ${gap.failing} failing`}
             </div>
           </div>
+          {!!gap.posture?.via_crosswalk && (
+            <div className="card stat" title="Not direct mappings: open a clause to see which control covers it and adopt the mapping.">
+              <div className="stat-top"><span className="n">{pctText(gap.posture.via_crosswalk_pct || 0)}</span></div>
+              <span className="l">Covered via crosswalk</span>
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                {gap.posture.via_crosswalk} of {gap.posture.applicable} applicable clauses have no tested control of their own but an
+                equivalent clause elsewhere does. Not counted as mapped or tested.
+              </div>
+            </div>
+          )}
           <div className="card stat warn">
             <div className="stat-top"><span className="n" style={{ color: "var(--orange)" }}>{gap.gaps.length}</span></div>
             <span className="l">{isSelfAssessed(gap.kind) ? "Improvement areas" : "Open gaps"}</span>
@@ -1147,15 +1186,64 @@ function ComplianceInner() {
               </div>
             )}
 
+            {viaCrosswalk && (
+              <div className="card" style={{ marginBottom: 14 }}>
+                <div className="card-head"><h3>Covered via crosswalk</h3><span className="sub">Not a direct mapping</span></div>
+                <div className="card-pad" style={{ fontSize: 13 }}>
+                  <p style={{ marginTop: 0, lineHeight: 1.55 }}>
+                    This clause has no tested control of its own, but it is{" "}
+                    {viaCrosswalk.relationship === "equivalent" ? "equivalent to" : "wholly contained in"}{" "}
+                    <span className="ref">{viaCrosswalk.via_reference}</span> {viaCrosswalk.via_title} ({viaCrosswalk.via_framework}),
+                    whose tested control{viaCrosswalk.controls.length === 1 ? "" : "s"} cover{viaCrosswalk.controls.length === 1 ? "s" : ""} it.
+                    It does not count as mapped or tested until you adopt the mapping.
+                  </p>
+                  <div style={{ display: "grid", gap: 4, marginBottom: 10 }}>
+                    {viaCrosswalk.controls.map((c) => (
+                      <div key={c.id}><span className="ref">{c.reference || "—"}</span> {c.name} <Badge tone="low" plain>{c.effectiveness.replace(/_/g, " ")}</Badge></div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={adopting}
+                    onClick={async () => {
+                      setAdopting(true);
+                      try {
+                        await adoptCrosswalkMapping(detail.id, viaCrosswalk.via_requirement_id);
+                        toast(`Mapped ${viaCrosswalk.controls.length} control${viaCrosswalk.controls.length === 1 ? "" : "s"} directly to ${detail.reference || detail.title}. The change is in the activity trail.`);
+                        reload();
+                        loadDetail(detail.id);
+                      } catch (e) {
+                        toast(e instanceof Error ? e.message : "Could not adopt the mapping", "error");
+                      } finally {
+                        setAdopting(false);
+                      }
+                    }}
+                  >
+                    {adopting ? "Adopting…" : "Adopt mapping"}
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Crosswalks</h3><span className="sub">Equivalent requirements</span></div>
+              <div className="card-head"><h3>Crosswalks</h3><span className="sub">Related clauses in other frameworks</span></div>
               <div className="card-pad">
                 {crosswalks.length ? (
                   crosswalks.map((c) => (
                     <div key={c.id} className="activity-item">
                       <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 13 }}><span className="ref">{c.reference}</span> — {c.title}</div>
-                        <div className="when"><Badge tone="info" plain>{c.framework_name}</Badge> <ComplianceBadge value={c.status} /></div>
+                        <div style={{ fontSize: 13 }}>
+                          {c.relationship && (
+                            <span className="muted" title={RELATIONSHIP_HELP[c.relationship]}>{RELATIONSHIP_LABEL[c.relationship]}: </span>
+                          )}
+                          <span className="ref">{c.reference}</span> — {c.title}
+                        </div>
+                        <div className="when">
+                          <Badge tone="info" plain>{c.framework_name}</Badge> <ComplianceBadge value={c.status} />
+                          {c.origin && <span className="muted" style={{ fontSize: 11.5 }}> · {ORIGIN_LABEL[c.origin]}</span>}
+                          {c.rationale && <span className="muted" style={{ fontSize: 11.5 }}> · {c.rationale}</span>}
+                        </div>
                       </div>
                     </div>
                   ))

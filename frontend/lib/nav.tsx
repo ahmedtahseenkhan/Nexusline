@@ -53,6 +53,9 @@ export type NavSection = NavGate & { title: string; icon: ReactNode; href?: stri
 export const NAV: NavSection[] = [
   { title: "My work", icon: <IconCheck />, href: "/my-work", items: [] },
   { title: "Dashboard", icon: <IconDashboard />, href: "/dashboard", items: [], permission: "risk:read" },
+  // Phase 4B workspaces: the board home and internal audit's assurance view.
+  { title: "Board", icon: <IconGauge />, href: "/board", items: [], permission: "board:read" },
+  { title: "Assurance", icon: <IconShield />, href: "/assurance", items: [], permission: "internal_audit:read" },
   {
     title: "Program",
     icon: <IconGauge />,
@@ -269,6 +272,8 @@ const ROLE_RULES: [RegExp, NavPreset][] = [
 ];
 const SECOND_LINE_PERMISSIONS = ["risk:write", "risk:accept", "compliance:write", "control:write"];
 
+/* Kept in step with `line_of_defence` in backend/app/services/workspaces.py, which decides
+   where each user lands (GET /my/workspace). */
 export function navPreset(roles: readonly string[], permissions: readonly string[]): NavPreset {
   for (const [pattern, preset] of ROLE_RULES) if (roles.some((r) => pattern.test(r))) return preset;
   const writes = permissions.filter((p) => !p.endsWith(":read"));

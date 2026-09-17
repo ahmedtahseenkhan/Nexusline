@@ -118,6 +118,22 @@ class Settings(BaseSettings):
     # Backups (pg_dump) target directory.
     backup_dir: str = "./var/backups"
 
+    # Continuous control monitoring (phase 4D).
+    # Key for connector secrets at rest (Fernet). Blank = derived from ``secret_key``, so
+    # rotating ``secret_key`` then makes stored connector secrets unreadable (re-enter
+    # them); set this separately to rotate one without the other.
+    connector_secret_key: str = ""
+    # May an HTTP connector call a private, loopback or link-local address? Blank = the
+    # deployment decides: yes on-prem (core banking, SIEM and CMDB APIs are internal),
+    # no on SaaS (server-side request forgery into the hosting network). "true"/"false"
+    # overrides.
+    ccm_allow_private_urls: bool | None = None
+    # Folder scanner and log-health exports are dropped into; a connector's import path
+    # must resolve inside it.
+    ccm_import_dir: str = "./var/ccm-imports"
+    # Monitoring-feed (POST /connectors/ingest) requests allowed per token per minute.
+    ccm_ingest_rate_per_minute: int = 60
+
     # Regulatory incident reporting SLA windows (verify against the current SBP circular).
     default_regulator: str = "SBP"
     regulatory_initial_report_hours: int = 24   # initial breach notification

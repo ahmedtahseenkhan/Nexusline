@@ -104,6 +104,11 @@ class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     spend_currency: Mapped[str] = mapped_column(String(3), default="", nullable=False)
     inherent_tier: Mapped[str | None] = mapped_column(String(16), nullable=True)  # derived from tiering answers
     tier_override_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Phase 4E: the due-diligence questionnaire's band proposes ``risk_rating``; a different
+    # rating needs this reason. Dates of the last reviewed due diligence and the next one due.
+    risk_rating_override_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_due_diligence_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_due_diligence_on: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")

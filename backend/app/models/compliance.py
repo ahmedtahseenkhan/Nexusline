@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Column, Date, ForeignKey, Index, Integer, String, Table, Text, Uuid, event, func, text
+from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Index, Integer, String, Table, Text, UniqueConstraint, Uuid, event, func, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,12 +50,34 @@ requirement_policies = Table(
     Column("policy_id", Uuid, ForeignKey("policies.id", ondelete="CASCADE"), primary_key=True),
 )
 
-# Crosswalk: equivalent requirements across frameworks (e.g. ISO A.5.15 ≡ SOC2 CC6.1).
+# Crosswalk: related requirements across frameworks (e.g. ISO A.8.5 ≡ NIST CSF PR.AA-03).
+# Phase 4 (4C) types the link. One row per clause pair (either order; the API keeps the
+# pair unique), read **requirement → related requirement**:
+#
+# * ``relationship`` — equivalent | subset | superset | intersects | related, with NIST
+#   OLIR's set semantics: ``subset`` means the requirement is wholly contained in the
+#   related one (meeting the related one meets it). See ``services.crosswalk_content``.
+# * ``origin`` — shipped (library content) | accepted (a suggestion someone accepted) |
+#   manual. Rows written before typing existed were backfilled as manual / related.
+# * ``source`` / ``content_version`` / ``confidence`` / ``rationale`` — where the mapping
+#   comes from and how sure it is.
+# * ``approved_by*`` / ``approved_at`` — who reviewed it in this organisation (empty for a
+#   shipped row nobody has reviewed yet).
 requirement_crosswalks = Table(
     "requirement_crosswalks",
     Base.metadata,
     Column("requirement_id", Uuid, ForeignKey("requirements.id", ondelete="CASCADE"), primary_key=True),
     Column("related_requirement_id", Uuid, ForeignKey("requirements.id", ondelete="CASCADE"), primary_key=True),
+    Column("relationship", String(16), nullable=False, server_default="related", default="related"),
+    Column("rationale", Text, nullable=False, server_default="", default=""),
+    Column("source", String(200), nullable=False, server_default="", default=""),
+    Column("content_version", String(32), nullable=False, server_default="", default=""),
+    Column("confidence", Float, nullable=True),
+    Column("origin", String(16), nullable=False, server_default="manual", default="manual"),
+    Column("approved_by", String(200), nullable=False, server_default="", default=""),
+    Column("approved_by_id", Uuid, nullable=True),
+    Column("approved_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=True, server_default=func.now()),
 )
 
 
@@ -248,3 +270,30 @@ class ComplianceFinding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, SoftDe
     deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     requirement: Mapped[Requirement] = relationship(back_populates="findings")
+
+
+class CrosswalkRejection(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """A shipped crosswalk this organisation rejected (phase 4, 4C).
+
+    Keyed by library template and reference, not by requirement id, so the rejection
+    survives a framework being archived and reinstalled, and a content upgrade never adds
+    the row back. Stored in the orientation the content ships it (``from`` → ``to``).
+    Restoring deletes the row and re-materialises the crosswalk."""
+
+    __tablename__ = "crosswalk_rejections"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "from_template", "from_reference", "to_template", "to_reference",
+            name="uq_crosswalk_rejections_pair",
+        ),
+    )
+
+    from_template: Mapped[str] = mapped_column(String(64), nullable=False)
+    from_reference: Mapped[str] = mapped_column(String(64), nullable=False)
+    to_template: Mapped[str] = mapped_column(String(64), nullable=False)
+    to_reference: Mapped[str] = mapped_column(String(64), nullable=False)
+    relationship: Mapped[str] = mapped_column(String(16), default="related", nullable=False)
+    content_version: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    rejected_by: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    rejected_by_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)

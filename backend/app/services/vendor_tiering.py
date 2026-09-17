@@ -44,9 +44,9 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-#: Name of the seeded questionnaire. Matched case- and space-insensitively; a tenant
-#: that renames it simply stops getting write-backs from it (and gets a fresh copy on
-#: the next start, since reference data is insert-only by name).
+#: Name of the seeded questionnaire. Since phase 4E the questionnaire is recognised by
+#: ``purpose = vendor_tiering`` (:data:`TIERING_PURPOSE`), not by this name; the seed is
+#: still insert-only (skipped when a tiering questionnaire or this name exists).
 TIERING_QUESTIONNAIRE_NAME = "Inherent risk tiering"
 TIERING_QUESTIONNAIRE_DESCRIPTION = (
     "Eight scored questions that set a third party's inherent risk tier (low, medium, "
@@ -193,8 +193,20 @@ def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", (text or "").strip()).lower()
 
 
+#: The questionnaire purpose that drives tiering (phase 4E). A questionnaire is recognised
+#: by its purpose, so renaming it (or installing a second tiering questionnaire) keeps the
+#: write-back working. An object with no ``purpose`` at all (a pre-4E caller) falls back
+#: to the name.
+TIERING_PURPOSE = "vendor_tiering"
+
+
 def is_tiering_questionnaire(questionnaire: Any) -> bool:
-    return questionnaire is not None and _norm(getattr(questionnaire, "name", "")) == _norm(TIERING_QUESTIONNAIRE_NAME)
+    if questionnaire is None:
+        return False
+    purpose = getattr(questionnaire, "purpose", None)
+    if purpose is not None:
+        return purpose == TIERING_PURPOSE
+    return _norm(getattr(questionnaire, "name", "")) == _norm(TIERING_QUESTIONNAIRE_NAME)
 
 
 def _status(value: Any) -> str:

@@ -238,13 +238,16 @@ def test_default_rules_have_unique_keys():
 
 
 _LITERAL_KEY = re.compile(r'module="([a-z_]+)",\s*action="([a-z_]+)"')
+# dual_control_required(db, "assessment", "review") and similar positional calls.
+_POSITIONAL_KEY = re.compile(r'dual_control_required\(\s*\w+,\s*"([a-z_]+)",\s*"([a-z_]+)"')
 
 
 def test_every_literal_dual_control_key_in_the_code_has_a_default_rule():
     covered = {(r.module, r.action) for r in gov.DEFAULT_RULES}
     found: set[tuple[str, str]] = set()
     for path in (APP / "api").rglob("*.py"):
-        found |= set(_LITERAL_KEY.findall(path.read_text()))
+        text = path.read_text()
+        found |= set(_LITERAL_KEY.findall(text)) | set(_POSITIONAL_KEY.findall(text))
     found |= {("risk", "bulk_archive")}  # called positionally in api/v1/risks.py
     found |= {("issue", "validate"), ("issue", "close")}  # api/v1/issues.py passes `action`
     assert found and found <= covered, sorted(found - covered)
@@ -423,27 +426,38 @@ async def test_cancel_is_refused_server_side_for_anyone_else(monkeypatch):
 
 
 async def test_a_stage_role_is_enforced_when_someone_else_holds_it(monkeypatch):
-    obj = SimpleNamespace(id=uuid.uuid4(), requested_by=MAKER)
+    from app.services import notifications as ns
+
+    obj = SimpleNamespace(id=uuid.uuid4(), requested_by=MAKER, requested_by_email="maker@bank.pk")
 
     async def stage_roles(db, ids):
         return {obj.id: "Risk Approver"}
 
-    async def holders(db):
-        return {"risk approver": {HOLDER}}
+    def directory(holder_roles, perms=frozenset({"workflow:approve"})):
+        async def load(db):
+            return ns.Directory(
+                users={
+                    HOLDER: ns.DirectoryUser(HOLDER, "checker@bank.pk", "Checker", True, holder_roles),
+                    MAKER: ns.DirectoryUser(MAKER, "maker@bank.pk", "Maker", True, ("Risk Approver",)),
+                },
+                role_permissions={"Risk Approver": perms, "Admin": frozenset({"workflow:approve"})},
+            )
+        return load
 
     monkeypatch.setattr(gov, "stage_roles", stage_roles)
-    monkeypatch.setattr(gov, "role_holders", holders)
+    monkeypatch.setattr(ns, "load_directory", directory(("Risk Approver",)))
     outsider = SimpleNamespace(role_names=["Admin"])
     with pytest.raises(HTTPException) as exc:
         await approvals.enforce_stage_role(object(), obj, outsider)
     assert exc.value.status_code == 403 and "Risk Approver" in exc.value.detail
     await approvals.enforce_stage_role(object(), obj, SimpleNamespace(role_names=["Risk Approver"]))
 
-    async def nobody(db):
-        return {"risk approver": {MAKER}}
-
-    monkeypatch.setattr(gov, "role_holders", nobody)
+    monkeypatch.setattr(ns, "load_directory", directory(("Admin",)))  # only the maker holds it
     await approvals.enforce_stage_role(object(), obj, outsider)  # falls back, no dead end
+
+    # Phase 4: a holder who can't approve can't decide, so the stage falls back too.
+    monkeypatch.setattr(ns, "load_directory", directory(("Risk Approver",), perms=frozenset()))
+    await approvals.enforce_stage_role(object(), obj, outsider)
 
 
 def test_the_compliance_head_can_decide_the_policy_route():

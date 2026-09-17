@@ -12,7 +12,11 @@ import type { UserRef } from "@/lib/masterData";
 /* ------------------------------------------------------------------ types --- */
 export type ArchivedRow = { id: string; reference: string; title: string; deleted_date: string | null };
 export type ArchivedPage = { items: ArchivedRow[]; total: number; limit: number; offset: number };
-export type RestoreResult = { entity_type: string; id: string; reference: string; title: string; label: string };
+export type RestoreResult = {
+  entity_type: string; id: string; reference: string; title: string; label: string;
+  /** What else the restore changed, in a sentence (e.g. a risk candidate withdrawn). */
+  note?: string;
+};
 
 export type ImpactLink = { type: string; label: string; count: number };
 export type ImpactReport = { entity_type: string; id: string; label: string; links: ImpactLink[]; total: number };

@@ -47,6 +47,25 @@ export type VendorOutsourcingFacts = {
   concentration_note?: string;
   status?: string;
 };
+/** Phase 4E: the latest reviewed due-diligence questionnaire (api/v1/vendors._due_diligence_view). */
+export type VendorDueDiligenceFacts = {
+  assessment_id: string | null;
+  title: string;
+  reviewed_at: string | null;
+  score_pct: number | null;
+  band: string;
+  /** The band's rating: what the risk rating should be. */
+  proposed_rating: string | null;
+  overridden: boolean;
+  override_reason: string;
+  last_on: string | null;
+  next_on: string | null;
+  overdue: boolean;
+  /** Open findings across the vendor's due-diligence assessments. */
+  open_findings: number;
+  /** Due-diligence assessments not yet reviewed. */
+  in_progress: number;
+};
 /** Derived on the server (api/v1/vendors.concentration_view). */
 export type VendorConcentrationFacts = {
   material_arrangements: number;
@@ -87,6 +106,9 @@ export type VendorFacts = {
   tiering?: VendorTieringFacts | null;
   outsourcing?: VendorOutsourcingFacts[];
   concentration?: VendorConcentrationFacts | null;
+  /** Absent from an older API. */
+  due_diligence?: VendorDueDiligenceFacts | null;
+  risk_rating_override_reason?: string;
 };
 
 export type VendorInput = { vendor: VendorFacts };
@@ -283,7 +305,24 @@ export function vendorTiles({ vendor: v }: VendorInput, ctx: Ctx): TileModel[] {
   const onFile = linked.length > 0;
   const onFileName = linked.length === 1 ? (linked[0].reference || linked[0].title || linked[0].name || "").trim() : "";
   const onFileText = linked.length > 1 ? `From ${linked.length} linked assessments` : `From assessment ${onFileName || "on file"}`;
-  const rating: TileModel = {
+  const dd = v.due_diligence ?? null;
+  const ddScore = dd && dd.score_pct != null ? `${Math.round(dd.score_pct)}%` : "no score";
+  const ddReason = (dd?.override_reason || v.risk_rating_override_reason || "").trim();
+  const rating: TileModel = dd?.assessment_id && dd.proposed_rating
+    ? dd.overridden
+      ? {
+          key: "rating", label: "Risk rating", section: "diligence",
+          value: sevValue(v.risk_rating, "Not rated"),
+          because: [`Set to ${lower(v.risk_rating)} instead of the ${lower(dd.proposed_rating)} proposed by due diligence (${ddScore}, ${truncate(dd.band || "no band", 30)})${ddReason ? `: ${quote(ddReason)}` : "; no reason recorded"}.`],
+          basis: { kind: "declared", text: "Overridden by hand" },
+        }
+      : {
+          key: "rating", label: "Risk rating", section: "diligence",
+          value: sevValue(v.risk_rating, "Not rated"),
+          because: [`Due diligence ${ddScore} → ${truncate(dd.band || "no band", 30)}${dd.reviewed_at ? `, reviewed ${fmt.date(dd.reviewed_at.slice(0, 10))}` : ""}${dd.next_on ? `; next due ${fmt.date(dd.next_on)}` : ""}.`],
+          basis: { kind: "evidenced", text: truncate(`From ${dd.title || "the due-diligence questionnaire"}`, 60) },
+        }
+    : {
     key: "rating", label: "Risk rating", section: "diligence",
     value: sevValue(v.risk_rating, "Not rated"),
     because: [v.risk_rating ? assessment : `No risk rating recorded; the assessment is ${lower(v.assessment_status)}.`],
@@ -422,6 +461,24 @@ export function vendorOpenPoints({ vendor: v }: VendorInput, ctx: Ctx): OpenPoin
         ? { kind: "focus", target: "rec-signoff", label: "See sign-off" }
         : { kind: "attest", target: "attest", label: "Attest…" },
     });
+  }
+  const dd = v.due_diligence ?? null;
+  if (dd && v.status !== "offboarded") {
+    if (dd.overdue && dd.next_on) {
+      gaps.push({
+        id: "vendor.due_diligence_overdue", level: "gap", text: [`Due diligence overdue since ${fmt.date(dd.next_on)}.`],
+        action: { kind: "section", target: "diligence", label: "See due diligence" },
+      });
+    }
+    if (dd.open_findings > 0) {
+      gaps.push({
+        id: "vendor.due_diligence_findings", level: "gap", text: [`${plural(dd.open_findings, "open due-diligence finding")}.`],
+        action: dd.assessment_id ? { kind: "href", target: `/assessments?id=${encodeURIComponent(dd.assessment_id)}`, label: "See findings" } : { kind: "section", target: "diligence", label: "See due diligence" },
+      });
+    }
+    if (dd.overridden && !(dd.override_reason || v.risk_rating_override_reason || "").trim()) {
+      gaps.push({ id: "vendor.rating_override_no_reason", level: "gap", text: ["Risk rating differs from due diligence without a reason."], action: { kind: "edit", target: "general", label: "Give a reason" } });
+    }
   }
   const liveOutsourcing = (v.outsourcing ?? []).filter((o) => o.status !== "terminated");
   // Most urgent first: a material service the bank cannot easily replace, with no tested

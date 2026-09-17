@@ -71,7 +71,10 @@ export default function StatementOfApplicability({ frameworkId, frameworkName, o
   function replaceRow(row: SoaRow) {
     setSoa((cur) => {
       if (!cur) return cur;
-      const nextRows = cur.rows.map((r) => (r.requirement_id === row.requirement_id ? row : r));
+      // The applicability response does not recompute crosswalk coverage; keep what was shown.
+      const nextRows = cur.rows.map((r) =>
+        r.requirement_id === row.requirement_id ? { ...row, via_crosswalk: row.via_crosswalk ?? r.via_crosswalk } : r,
+      );
       const summary = {
         total: nextRows.length,
         applicable: nextRows.filter((r) => r.applicable).length,
@@ -80,6 +83,7 @@ export default function StatementOfApplicability({ frameworkId, frameworkName, o
         missing_justification: nextRows.filter((r) => !r.applicable && !r.justification.trim()).length,
         mapped: nextRows.filter((r) => r.applicable && r.controls.length > 0).length,
         assured: nextRows.filter((r) => r.applicable && r.coverage === "assured").length,
+        via_crosswalk: nextRows.filter((r) => r.applicable && !!r.via_crosswalk).length,
       };
       return { ...cur, rows: nextRows, summary };
     });
@@ -136,6 +140,7 @@ export default function StatementOfApplicability({ frameworkId, frameworkName, o
             {s.total} clauses · {s.applicable} applicable · {s.excluded} excluded ·{" "}
             <span style={{ color: s.no_control ? "var(--orange)" : undefined }}>{s.no_control} applicable without a control</span>
             {s.assured !== undefined && <> · {s.assured} backed by a tested control</>}
+            {!!s.via_crosswalk && <> · {s.via_crosswalk} covered via crosswalk (not direct mappings)</>}
             {s.missing_justification > 0 && (
               <> · <span style={{ color: "var(--amber)" }}>{s.missing_justification} excluded without a justification</span></>
             )}
@@ -261,11 +266,29 @@ export default function StatementOfApplicability({ frameworkId, frameworkName, o
                   </td>
                   <td>
                     {r.controls.length === 0 ? (
-                      r.applicable ? <Badge tone="medium" plain>None</Badge> : <span className="muted">—</span>
+                      r.applicable ? (
+                        r.via_crosswalk ? null : <Badge tone="medium" plain>None</Badge>
+                      ) : <span className="muted">—</span>
                     ) : (
                       <div style={{ display: "grid", gap: 4 }}>
                         {r.controls.map((c) => (
                           <div key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
+                            <Link href={`/controls?id=${c.id}`} className="ref">{c.reference || c.name}</Link>
+                            {c.reference && <span className="muted">{c.name}</span>}
+                            <EffectivenessBadge value={c.effectiveness} />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {r.applicable && r.via_crosswalk && (
+                      <div
+                        style={{ marginTop: r.controls.length ? 6 : 0, fontSize: 12, padding: "4px 6px", borderRadius: 6, border: "1px dashed var(--border)" }}
+                        title="Not a direct mapping: a tested control of an equivalent or containing clause in another framework covers this clause. Adopt the mapping from the clause's record to make it direct."
+                      >
+                        <Badge tone="info" plain>Via crosswalk</Badge>{" "}
+                        <span className="muted">{r.via_crosswalk.label} ({r.via_crosswalk.relationship})</span>
+                        {r.via_crosswalk.controls.map((c) => (
+                          <div key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 2 }}>
                             <Link href={`/controls?id=${c.id}`} className="ref">{c.reference || c.name}</Link>
                             {c.reference && <span className="muted">{c.name}</span>}
                             <EffectivenessBadge value={c.effectiveness} />

@@ -37,7 +37,25 @@ async def sync_permission_catalog(db: AsyncSession) -> dict[str, Permission]:
 #: code, so an administrator who later removes it from a role keeps that decision.
 IMPLIED_ON_INTRODUCTION: dict[str, str] = {
     "control:test": "control:write",  # recording control tests (phase 2)
+    "board:read": "governance:read",  # the board home (phase 4B)
+    "boardpack:release": "governance:write",  # signing a board pack off (phase 4B)
 }
+
+#: A default role that first ships with a permission code: organisations created before it
+#: receive the role on the start-up that introduces the code, once — so an administrator
+#: who later deletes the role keeps that decision.
+ROLES_INTRODUCED_WITH: dict[str, str] = {
+    "Board Member": "board:read",  # phase 4B
+}
+
+
+def roles_to_introduce(new_codes: set[str], existing_role_names: set[str]) -> list[str]:
+    """Default roles an existing organisation should receive now. Pure."""
+    have = {n.lower() for n in existing_role_names}
+    return [
+        name for name, code in ROLES_INTRODUCED_WITH.items()
+        if code in new_codes and name.lower() not in have and name in DEFAULT_ROLES
+    ]
 
 
 def implied_grants(new_codes: set[str], held: set[str]) -> set[str]:
@@ -85,6 +103,14 @@ async def reconcile_permissions() -> int:
                     role.permissions = list(role.permissions) + missing
                     added += len(missing)
             if introduced:
+                names = set((await db.scalars(select(Role.name).where(Role.tenant_id == tenant.id))).all())
+                for role_name in roles_to_introduce(introduced, names):
+                    description, codes = DEFAULT_ROLES[role_name]
+                    new_role = Role(tenant_id=tenant.id, name=role_name, description=description, is_system=True)
+                    new_role.permissions = [perms[c] for c in codes if c in perms]
+                    db.add(new_role)
+                    added += len(new_role.permissions)
+                await db.flush()
                 every_role = (
                     await db.scalars(
                         select(Role)

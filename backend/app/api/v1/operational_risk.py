@@ -58,6 +58,7 @@ from app.services import audit as audit_log
 from app.services import master_data
 from app.services import notifications
 from app.services import ref_fields as rf
+from app.services.rate_limit import RateLimiter, too_many_requests
 
 router = APIRouter(tags=["operational risk"])
 
@@ -790,6 +791,18 @@ _FEED_AUTH = HTTPBearer(
     auto_error=False, scheme_name="KriFeedToken",
     description="The KRI's feed token from POST /kris/{id}/feed-token (not a user session).",
 )
+#: A KRI feed posts a reading a day, or a few an hour from a monitoring job: 20 in a burst,
+#: then one every 3 seconds per KRI, across every API worker when Redis is up.
+KRI_FEED_LIMIT = RateLimiter("kri-feed", capacity=20, per_second=1 / 3)
+
+
+async def _feed_rate_check(tenant_id: uuid.UUID, kid: uuid.UUID) -> None:
+    """429 (with ``Retry-After``) when this KRI's feed is over its rate."""
+    decision = await KRI_FEED_LIMIT.hit(f"{tenant_id}:{kid}")
+    if not decision.allowed:
+        raise too_many_requests(decision, "readings for this KRI")
+
+
 def _feed_denied() -> HTTPException:
     """One answer for every failure (no token, malformed, unknown org, wrong or revoked
     token, archived KRI), so a caller learns nothing about which part was wrong."""
@@ -819,6 +832,8 @@ async def feed_measurement(
     tenant_id = feed_token_tenant(token)
     if tenant_id is None:
         raise _feed_denied()
+    # Before any database work, so a flood of posts (valid token or not) stays cheap.
+    await _feed_rate_check(tenant_id, kid)
     async with tenant_session(tenant_id) as db:
         tenant = await db.get(Tenant, tenant_id)
         kri = None

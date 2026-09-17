@@ -3,7 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { apiCall } from "@/lib/api";
-import { previewControlsPack, type PackDecisions, type PackPreview } from "@/lib/compliance";
+import {
+  previewControlsPack,
+  RELATIONSHIP_HELP,
+  RELATIONSHIP_LABEL,
+  type PackDecisions,
+  type PackPreview,
+  type PackPreviewRow,
+} from "@/lib/compliance";
 import { toast } from "@/lib/feedback";
 import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 import { Badge } from "@/components/badges";
@@ -46,6 +53,8 @@ type InstallResult = {
   requirements_linked: number;
   upgraded: boolean;
   previous_name: string | null;
+  /** Library crosswalks recorded between this framework and the ones already installed. */
+  crosswalks_added?: number;
 };
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -61,6 +70,12 @@ function controlsSummary(res: InstallResult): string {
   if (res.controls_linked) parts.push(`${res.controls_linked} matched to existing controls`);
   return parts.join(", ");
 }
+
+/** A clause decided in the review: a same-named control, or a control reached through a
+ *  library crosswalk to a clause of an installed framework (common control set). */
+const isNameRow = (r: PackPreviewRow) => r.action === "match-by-name";
+const isCrosswalkRow = (r: PackPreviewRow) =>
+  !isNameRow(r) && !!r.crosswalk_match && (r.action === "reuse-via-crosswalk" || r.action === "create");
 
 export default function ContentLibraryPage() {
   const [packs, setPacks] = useState<ContentPack[]>([]);
@@ -108,13 +123,18 @@ export default function ContentLibraryPage() {
     setInstallingId(pack.id);
     try {
       const preview = await previewControlsPack(pack.id);
-      const decidable = preview.rows.filter((r) => r.action === "match-by-name");
+      const decidable = preview.rows.filter((r) => isNameRow(r) || isCrosswalkRow(r));
       if (!decidable.length && !force) {
         if (mode === "install") await install(pack, {});
         else await installControls(pack, {});
         return;
       }
-      setReviewChoice(Object.fromEntries(decidable.map((r) => [r.requirement_ref, "reuse" as const])));
+      // Name matches and equivalent crosswalks default to reuse; a contained, containing or
+      // overlapping crosswalk defaults to a new control until you choose to reuse.
+      setReviewChoice(Object.fromEntries(decidable.map((r) => [
+        r.requirement_ref,
+        isNameRow(r) || r.action === "reuse-via-crosswalk" ? ("reuse" as const) : ("create" as const),
+      ])));
       setReview({ pack, preview, mode });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not preview the controls");
@@ -127,8 +147,12 @@ export default function ContentLibraryPage() {
     if (!review) return {};
     const out: PackDecisions = {};
     for (const r of review.preview.rows) {
-      if (r.action !== "match-by-name" || !r.control) continue;
-      out[r.requirement_ref] = reviewChoice[r.requirement_ref] === "create" ? "create" : r.control.id;
+      const choice = reviewChoice[r.requirement_ref];
+      if (isNameRow(r) && r.control) {
+        out[r.requirement_ref] = choice === "create" ? "create" : r.control.id;
+      } else if (isCrosswalkRow(r) && r.crosswalk_match) {
+        out[r.requirement_ref] = choice === "reuse" ? r.crosswalk_match.control.id : "create";
+      }
     }
     return out;
   }
@@ -168,7 +192,8 @@ export default function ContentLibraryPage() {
         const renamed = res.previous_name && res.previous_name !== res.name ? ` (was “${res.previous_name}”)` : "";
         toast(`Upgraded ${res.name}${renamed}: +${plural(res.requirements_added, "requirement")}${controls ? `, ${controls}` : ""}. Existing statuses and links were kept.`);
       } else {
-        toast(`Installed ${res.name}: ${plural(res.requirement_count, "requirement")}${controls ? `, ${controls}` : ""}. It now appears in Compliance.`);
+        const cw = res.crosswalks_added ? ` ${plural(res.crosswalks_added, "library crosswalk")} to your other frameworks recorded for review.` : "";
+        toast(`Installed ${res.name}: ${plural(res.requirement_count, "requirement")}${controls ? `, ${controls}` : ""}. It now appears in Compliance.${cw}`);
       }
       await loadPacks();
     } catch (e) {
@@ -271,7 +296,7 @@ export default function ContentLibraryPage() {
                   />
                   <span>
                     Also create its {p.control_count} controls in the Control Catalogue, linked to their clauses.
-                    <span className="muted"> Generated risks link to them automatically. An existing control with the same reference or the same name is reused, not duplicated — you review name matches before anything is written.</span>
+                    <span className="muted"> Generated risks link to them automatically. An existing control with the same reference or the same name, or one implementing an equivalent clause of a framework you already have, is reused, not duplicated — you review these before anything is written.</span>
                   </span>
                 </label>
               )}
@@ -346,11 +371,14 @@ export default function ContentLibraryPage() {
       )}
 
       {review && (() => {
-        const nameRows = review.preview.rows.filter((r) => r.action === "match-by-name");
+        const nameRows = review.preview.rows.filter(isNameRow);
+        const crosswalkRows = review.preview.rows.filter(isCrosswalkRow);
         const refRows = review.preview.rows.filter((r) => r.action === "match-by-reference" || r.action === "map-to-existing");
         const overridden = nameRows.filter((r) => reviewChoice[r.requirement_ref] === "create").length;
-        const willCreate = review.preview.create + overridden;
-        const willReuse = review.preview.reuse - overridden;
+        const cwDefaultReuse = crosswalkRows.filter((r) => r.action === "reuse-via-crosswalk").length;
+        const cwReuse = crosswalkRows.filter((r) => reviewChoice[r.requirement_ref] === "reuse").length;
+        const willReuse = review.preview.reuse - overridden - cwDefaultReuse + cwReuse;
+        const willCreate = review.preview.rows.length - willReuse;
         return (
           <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setReview(null)}>
             <div ref={reviewRef} tabIndex={-1} className="modal wide" role="dialog" aria-modal="true" aria-label={`Controls for ${review.pack.name}`} onKeyDown={(e) => trapTab(e, reviewRef.current)}>
@@ -363,7 +391,7 @@ export default function ContentLibraryPage() {
                   <Badge tone="info">Will create {willCreate}</Badge>
                   <Badge tone="low">Will reuse {willReuse}</Badge>
                   <span className="muted" style={{ fontSize: 12.5, alignSelf: "center" }}>
-                    {review.preview.match_reference} by reference · {nameRows.length - overridden} by name
+                    {review.preview.match_reference} by reference · {nameRows.length - overridden} by name · {cwReuse} through a crosswalk
                   </span>
                 </div>
                 {nameRows.length > 0 ? (
@@ -401,7 +429,56 @@ export default function ContentLibraryPage() {
                     </div>
                   </>
                 ) : (
-                  <p className="muted" style={{ fontSize: 13 }}>No clause shares a name with an existing control — nothing to decide.</p>
+                  <p className="muted" style={{ fontSize: 13 }}>No clause shares a name with an existing control.</p>
+                )}
+                {crosswalkRows.length > 0 && (
+                  <>
+                    <p className="muted" style={{ fontSize: 13, lineHeight: 1.6, marginTop: 4 }}>
+                      These clauses relate, through the library&apos;s crosswalk content, to a clause of a framework you already have
+                      that a control implements. Reusing that control builds one common control set instead of a parallel one.
+                      Equivalent clauses reuse it unless you choose otherwise; for a clause that is contained in, contains or overlaps
+                      the other, decide whether the control really meets it.
+                    </p>
+                    <div className="table-wrap" style={{ maxHeight: 360, overflowY: "auto", marginBottom: 12 }}>
+                      <table>
+                        <thead>
+                          <tr><th style={{ width: 90 }}>Clause</th><th>Title</th><th>Existing control</th><th style={{ width: 130 }}>Relationship</th><th style={{ width: 190 }}>Decision</th></tr>
+                        </thead>
+                        <tbody>
+                          {crosswalkRows.map((r) => {
+                            const m = r.crosswalk_match!;
+                            return (
+                              <tr key={r.requirement_ref}>
+                                <td><span className="ref">{r.catalogue_reference}</span></td>
+                                <td>{r.title}</td>
+                                <td>
+                                  <span className="ref">{m.control.reference || "—"}</span> {m.control.name}
+                                  <div className="muted" style={{ fontSize: 11.5 }}>
+                                    Mapped to {m.via_framework} {m.via_reference}
+                                    {m.rationale ? ` · ${m.rationale}` : ""}
+                                  </div>
+                                </td>
+                                <td title={RELATIONSHIP_HELP[m.relationship]}>
+                                  <Badge tone={m.relationship === "equivalent" ? "low" : "info"} plain>{RELATIONSHIP_LABEL[m.relationship]}</Badge>
+                                </td>
+                                <td>
+                                  <select
+                                    className="select"
+                                    value={reviewChoice[r.requirement_ref] || (m.default_reuse ? "reuse" : "create")}
+                                    onChange={(e) => setReviewChoice((c) => ({ ...c, [r.requirement_ref]: e.target.value as "reuse" | "create" }))}
+                                    aria-label={`Decision for ${r.catalogue_reference}`}
+                                  >
+                                    <option value="reuse">Reuse {m.control.reference || "existing control"}</option>
+                                    <option value="create">Create new control</option>
+                                  </select>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
                 )}
                 {refRows.length > 0 && (
                   <details style={{ fontSize: 12.5 }}>

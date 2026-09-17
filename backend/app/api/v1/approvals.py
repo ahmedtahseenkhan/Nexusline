@@ -115,43 +115,51 @@ def enforce_sod(obj: ApprovalRequest, user_id: uuid.UUID | None, user_email: str
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_SOD_DETAIL)
 
 
+async def _decision_context(db, rows) -> tuple[object, dict]:
+    """The directory and the stage gates for ``rows`` — what the shared eligibility rule
+    (``notifications.decision_refusal``) reads."""
+    from app.services import notifications
+
+    directory = await notifications.load_directory(db)
+    return directory, await notifications.load_stage_gates(db, rows, directory)
+
+
 async def _annotate(db, rows, user) -> list[ApprovalRead]:
     """``ApprovalRead`` for each request, with what this user may do and — for a route
-    stage assigned to a role — whether anyone other than the maker holds that role."""
-    from app.services import default_governance as governance
+    stage assigned to a role — how many people other than the maker could decide it.
 
-    roles = await governance.stage_roles(db, [r.id for r in rows])
-    holders = await governance.role_holders(db) if roles else {}
+    ``can_decide`` / ``decide_blocked_reason`` come from ``notifications.decision_refusal``,
+    the rule the decide endpoint, My Work, the alert recipients and the e-mail links use,
+    so a request offered anywhere can be decided and vice versa."""
+    from app.services import default_governance as governance
+    from app.services import notifications
+
+    _directory, gates = await _decision_context(db, rows)
     codes = set(user.permission_codes) if user is not None else set()
     out = []
     for r in rows:
         read = ApprovalRead.model_validate(r)
-        role = roles.get(r.id)
+        gate = gates.get(r.id)
         extra: dict = {}
-        if role:
-            eligible = governance.eligible_holder_count(holders, role, r.requested_by)
-            extra["approver_role"] = role
-            extra["approver_role_holders"] = eligible
-            if eligible == 0 and r.status == ApprovalStatus.pending:
-                only_maker = governance.eligible_holder_count(holders, role, None) > 0
-                extra["approver_role_gap"] = governance.role_gap_message(role, only_maker=only_maker)
+        if gate is not None:
+            extra["approver_role"] = gate.role
+            extra["approver_role_holders"] = gate.eligible
+            if gate.eligible == 0 and r.status == ApprovalStatus.pending:
+                only_maker = gate.holders > 0 and gate.maker_holds and gate.holders == 1
+                lacks = gate.holders > (1 if gate.maker_holds else 0)
+                extra["approver_role_gap"] = governance.role_gap_message(
+                    gate.role, only_maker=only_maker and not lacks, lacks_permission=lacks,
+                )
         if user is not None:
-            mine = is_maker(r.requested_by, r.requested_by_email, user.id, user.email)
             extra["can_cancel"] = r.status == ApprovalStatus.pending and may_cancel(
                 r, user.id, user.email, codes
             )
             blocked = None
             if r.status == ApprovalStatus.pending:
-                if "workflow:approve" not in codes:
-                    blocked = "You don't have permission to decide approval requests."
-                elif mine and settings.enforce_segregation_of_duties:
-                    blocked = "You submitted this — an independent checker must decide."
-                elif any(a.actor_id == user.id for a in r.actions):
-                    blocked = "You have already recorded a decision on this request."
-                elif role:
-                    blocked = governance.stage_decision_refusal(
-                        role, user.role_names, extra.get("approver_role_holders", 0)
-                    )
+                blocked = notifications.approval_refusal(
+                    r, user_id=user.id, email=user.email, permissions=codes,
+                    role_names=user.role_names, voted_ids=[a.actor_id for a in r.actions], stage=gate,
+                )
             extra["can_decide"] = r.status == ApprovalStatus.pending and blocked is None
             extra["decide_blocked_reason"] = blocked
         out.append(read.model_copy(update=extra))
@@ -160,15 +168,16 @@ async def _annotate(db, rows, user) -> list[ApprovalRead]:
 
 async def enforce_stage_role(db, obj: ApprovalRequest, user) -> None:
     """403 when the request is a route stage assigned to a role this user does not hold
-    and someone other than the maker does. With no such holder the stage falls back to
-    anyone who can approve, and the Approvals page says so."""
+    and someone other than the maker holds it and can approve. With no such person the
+    stage falls back to anyone who can approve, and the Approvals page says so."""
     from app.services import default_governance as governance
 
-    role = (await governance.stage_roles(db, [obj.id])).get(obj.id)
-    if not role:
+    _directory, gates = await _decision_context(db, [obj])
+    gate = gates.get(obj.id)
+    if gate is None:
         return
-    eligible = governance.eligible_holder_count(await governance.role_holders(db), role, obj.requested_by)
-    refusal = governance.stage_decision_refusal(role, user.role_names, eligible)
+    # The stage step of ``notifications.decision_refusal``, with the same gate.
+    refusal = governance.stage_decision_refusal(gate.role, user.role_names, gate.eligible)
     if refusal:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
 
@@ -488,7 +497,7 @@ async def preview_email_action(token: str) -> EmailActionPreview:
         if ctx is None:
             raise _link_denied()
         state, message = action_tokens.token_state(
-            ctx.row, ctx.user, ctx.approval, datetime.now(timezone.utc)
+            ctx.row, ctx.user, ctx.approval, datetime.now(timezone.utc), stage=ctx.stage
         )
         locale = (await db.execute(select(TenantSettings.date_format, TenantSettings.timezone))).first()
         return EmailActionPreview(
@@ -513,7 +522,7 @@ async def confirm_email_action(token: str, body: EmailActionConfirm) -> EmailAct
         ctx = await action_tokens.open_token(db, token)
         if ctx is None:
             raise _link_denied()
-        state, message = action_tokens.token_state(ctx.row, ctx.user, ctx.approval, now)
+        state, message = action_tokens.token_state(ctx.row, ctx.user, ctx.approval, now, stage=ctx.stage)
         if state != action_tokens.READY:
             raise HTTPException(status_code=_TOKEN_STATE_STATUS.get(state, 403), detail=message)
         if not await action_tokens.claim(db, ctx.row, now):

@@ -213,9 +213,14 @@ def tiering_view(vendor, questionnaire_id=None) -> VendorTiering:
 
 
 async def _tiering_questionnaire_id(db):
-    rows = (await db.execute(select(Questionnaire.id, Questionnaire.name))).all()
-    for qid, name in rows:
-        if vt.is_tiering_questionnaire(SimpleNamespace(name=name)):
+    """The published tiering questionnaire (``purpose = vendor_tiering``, phase 4E): the
+    newest published version, so a new tiering assessment pins it."""
+    rows = (await db.execute(
+        select(Questionnaire.id, Questionnaire.purpose, Questionnaire.status, Questionnaire.version)
+        .order_by(Questionnaire.version.desc())
+    )).all()
+    for qid, purpose, q_status, _version in rows:
+        if vt.is_tiering_questionnaire(SimpleNamespace(purpose=purpose)) and q_status == "published":
             return qid
     return None
 
@@ -234,6 +239,7 @@ async def _reads(db, rows) -> list[VendorRead]:
         item.outsourcing = outsourcing_facts(getattr(row, "outsourcing_arrangements", None) or [], labels)
         item.concentration = concentration_view(row)
         item.tiering = tiering_view(row, qid)
+        item.due_diligence = _due_diligence_view(row)
     return items
 
 
@@ -426,6 +432,7 @@ async def update_vendor(
         if name in data and data[name] is None:
             data.pop(name)
     changes = criticality_changes(obj, data)
+    changes.update(rating_changes(obj, data))
     for field, value in data.items():
         setattr(obj, field, value)
     await _apply_links(db, obj, links, vendor_id=obj.id)
@@ -444,6 +451,49 @@ async def update_vendor(
         summary=summary, changes=changes or None,
     )
     return await _read(db, obj.id)
+
+
+def _due_diligence_view(row):
+    """Phase 4E: the vendor's latest reviewed due-diligence questionnaire (pure)."""
+    from app.schemas.vendor import VendorDueDiligence
+    from app.services import questionnaire_workflow as qwf
+
+    try:
+        view = qwf.due_diligence_view(row)
+    except AttributeError:  # a partial record (tests, imports) without assessments loaded
+        return None
+    return VendorDueDiligence(**view) if view else None
+
+
+def rating_changes(obj, data: dict) -> dict:
+    """Phase 4E: the due-diligence override rule on an update's set fields (in place), like
+    the tier rule: a risk rating different from the latest reviewed due diligence's
+    proposal needs ``risk_rating_override_reason`` (a 422 otherwise)."""
+    from app.services import questionnaire_workflow as qwf
+
+    if "risk_rating" not in data and "risk_rating_override_reason" not in data:
+        return {}
+    latest = qwf.latest_due_diligence(getattr(obj, "assessments", None) or [])
+    proposed = getattr(latest, "result_rating", None) if latest is not None else None
+    try:
+        reason = qwf.resolve_rating(
+            proposed=proposed, band=getattr(latest, "result_band", "") if latest is not None else "",
+            stored_rating=obj.risk_rating, stored_reason=getattr(obj, "risk_rating_override_reason", "") or "", sent=data,
+        )
+    except qwf.WorkflowError as exc:
+        raise _unprocessable(str(exc)) from exc
+    if reason is None:
+        data.pop("risk_rating_override_reason", None)
+    else:
+        data["risk_rating_override_reason"] = reason
+    changes: dict = {}
+    old = getattr(obj.risk_rating, "value", obj.risk_rating)
+    new = getattr(data.get("risk_rating"), "value", data.get("risk_rating"))
+    if "risk_rating" in data and new != old:
+        changes["risk_rating"] = {"from": old, "to": new}
+    if "risk_rating_override_reason" in data and (data["risk_rating_override_reason"] or "") != (getattr(obj, "risk_rating_override_reason", "") or ""):
+        changes["risk_rating_override_reason"] = {"from": getattr(obj, "risk_rating_override_reason", "") or "", "to": data["risk_rating_override_reason"]}
+    return changes
 
 
 def criticality_changes(obj, data: dict) -> dict:

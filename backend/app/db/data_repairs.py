@@ -86,6 +86,8 @@ class RepairReport:
     title_asset_flags_cleared: int = 0
     governance_defaults_added: int = 0
     requirement_sort_keys_filled: int = 0
+    #: Phase 4C: shipped crosswalks materialised / retyped / withdrawn between installed frameworks.
+    crosswalks_synced: int = 0
     indexes_skipped: list[str] = field(default_factory=list)
     repairs_failed: list[str] = field(default_factory=list)
 
@@ -783,7 +785,20 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
         report.governance_defaults_added += await _guarded(
             db, report, "default_governance", lambda: seed_default_governance(db, tenant_id),
         ) or 0
+        # --- phase4c: shipped crosswalk content (idempotent; rejected rows stay out) ---
+        report.crosswalks_synced += await _guarded(
+            db, report, "phase4c_crosswalk_content", lambda: _sync_crosswalk_content(db),
+        ) or 0
     await db.flush()
+
+
+async def _sync_crosswalk_content(db) -> int:
+    """Phase 4C: materialise the shipped crosswalks between this tenant's installed library
+    frameworks (``services.crosswalks.sync_shipped``). A content upgrade lands here on the
+    next start; a tenant's rejections and its own typed rows are never overwritten."""
+    from app.services.crosswalks import sync_shipped
+
+    return (await sync_shipped(db)).changed
 
 
 UNIQUE_INDEXES: tuple[tuple[str, str], ...] = (

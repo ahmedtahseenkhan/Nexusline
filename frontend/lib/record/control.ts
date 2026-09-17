@@ -107,12 +107,40 @@ export type ControlTestRecord = {
 
 export type ControlMaintenanceRecord = { id: string; result: string; task: string; conducted_date: string | null };
 
+/** One continuous-monitoring test of the control (GET /ccm/controls/{id}/monitoring). */
+export type ControlMonitoringTest = {
+  id: string;
+  reference: string;
+  name: string;
+  check_label: string;
+  status: string;
+  last_result: string;
+  last_run: string | null;
+  failing_since: string | null;
+  last_error: string;
+  recent_runs: number;
+  recent_pass_rate: number | null;
+  overdue: boolean;
+  issue_reference?: string | null;
+};
+/** Phase 4D: the control's continuous monitoring. `state` is not_monitored | paused |
+ *  not_run | passing | failing | error | overdue (server). */
+export type ControlMonitoring = {
+  state: string;
+  failing_since: string | null;
+  recent_runs: number;
+  recent_pass_rate: number | null;
+  tests: ControlMonitoringTest[];
+};
+
 export type ControlInput = {
   control: ControlRecord;
   tests: ControlTestRecord[];
   maints: ControlMaintenanceRecord[];
   /** Suggested clauses from the installed frameworks; null until known. */
   suggestionCount: number | null;
+  /** Continuous monitoring; absent or null until loaded (and on an older API). */
+  monitoring?: ControlMonitoring | null;
 };
 
 /* ------------------------------------------------------------------ vocabulary */
@@ -401,6 +429,55 @@ export function exceptionMeta(x: ControlExceptionRef, fmt: Fmt): string | null {
   return exceptionStateText(x.status, x.expires_at, fmt);
 }
 
+/* ------------------------------------------------------------------ monitoring (phase 4D) */
+
+/** Under the Monitoring section title. */
+export const MONITORING_RATING_NOTE =
+  "Monitoring never changes effectiveness. A failing run opens an issue and stops risks relying on the control until it passes.";
+export const MONITORING_EMPTY_TEXT = "Not monitored. Add a continuous monitoring test for this control under Integrations & CCM.";
+
+/** A share of runs as a whole or one-decimal percentage: "97%", "96.7%". */
+function pct(n: number): string {
+  return `${Number.isInteger(n) ? n : n.toFixed(1)}%`;
+}
+
+/** The control's monitoring in one line: "Monitored: passing (last 30 runs 97%)",
+ *  "Monitoring failing since 12 Sep 2026". */
+export function monitoringStatusText(m: ControlMonitoring | null | undefined, fmt: Pick<Fmt, "date">): string {
+  if (!m || m.state === "not_monitored" || m.tests.length === 0) return "Not monitored";
+  const streak = m.recent_runs > 0 && m.recent_pass_rate !== null ? ` (last ${plural(m.recent_runs, "run")} ${pct(m.recent_pass_rate)})` : "";
+  switch (m.state) {
+    case "failing":
+      return m.failing_since ? `Monitoring failing since ${fmt.date(m.failing_since)}` : "Monitoring failing";
+    case "error": {
+      const t = m.tests.find((x) => x.last_result === "error");
+      return `Monitoring could not run${t ? `: ${t.reference}` : ""}`;
+    }
+    case "overdue": {
+      const t = m.tests.find((x) => x.overdue);
+      return `Monitoring overdue${t ? `: ${t.reference} ${t.last_run ? `last ran ${fmt.date(t.last_run)}` : "has never run"}` : ""}`;
+    }
+    case "paused":
+      return "Monitoring paused";
+    case "not_run":
+      return "Monitored: no run yet";
+    default:
+      return `Monitored: passing${streak}`;
+  }
+}
+
+/** One test's line in the Monitoring section. */
+export function monitoringTestLine(t: ControlMonitoringTest, fmt: Pick<Fmt, "date">): string {
+  const check = t.check_label ? ` · ${t.check_label}` : "";
+  if (t.status !== "active") return `Paused${check}`;
+  if (t.last_result === "failed")
+    return `Failing since ${fmt.date(t.failing_since ?? t.last_run)}${t.issue_reference ? ` · ${t.issue_reference} open` : ""}${check}`;
+  if (t.last_result === "error") return `Could not run on ${fmt.date(t.last_run)}${t.last_error ? `: ${truncate(t.last_error, 80)}` : ""}`;
+  if (t.last_result === "not_run" || !t.last_run) return `No run yet${check}`;
+  const rate = t.recent_runs > 0 && t.recent_pass_rate !== null ? ` · last ${plural(t.recent_runs, "run")} ${pct(t.recent_pass_rate)}` : "";
+  return `Passed ${fmt.date(t.last_run)}${rate}${t.overdue ? " · overdue" : ""}${check}`;
+}
+
 /* ------------------------------------------------------------------ headline */
 
 /** "{E}{basisClause}; {clock}; {reliedOn}." (spec §4.2) */
@@ -669,7 +746,7 @@ function evidenceTile({ control: c, tests }: ControlInput, { fmt }: Ctx): TileMo
 /** Gaps first, then notes, each in the rule order of spec §4.2. Fix actions only scroll,
  *  focus, open Edit on a tab, open a form ("record-test", "record-maintenance",
  *  "suggest-clauses") or attest — never change state. */
-export function controlOpenPoints({ control: c, suggestionCount }: ControlInput, { fmt, gov }: Ctx): OpenPoint[] {
+export function controlOpenPoints({ control: c, suggestionCount, monitoring }: ControlInput, { fmt, gov }: Ctx): OpenPoint[] {
   const out: OpenPoint[] = [];
   const live = LIVE_STATUSES.has(c.status);
   const planned = c.status === "planned";
@@ -759,6 +836,28 @@ export function controlOpenPoints({ control: c, suggestionCount }: ControlInput,
       action: { kind: "focus", target: "rec-signoff", label: "See sign-off" },
     });
   }
+  const mon = monitoring;
+  if (mon && mon.state === "failing")
+    out.push({
+      id: "control.monitoring_failing",
+      level: "gap",
+      text: [mon.failing_since ? "Continuous monitoring failing since " : "Continuous monitoring failing", ...(mon.failing_since ? [{ b: fmt.date(mon.failing_since) }] : []), ": risks do not rely on it until it passes."],
+      action: { kind: "section", target: "monitoring", label: "Open monitoring" },
+    });
+  if (mon && mon.state === "error")
+    out.push({
+      id: "control.monitoring_error",
+      level: "note",
+      text: [monitoringStatusText(mon, fmt)],
+      action: { kind: "section", target: "monitoring", label: "Open monitoring" },
+    });
+  if (mon && mon.state === "overdue")
+    out.push({
+      id: "control.monitoring_overdue",
+      level: "note",
+      text: [monitoringStatusText(mon, fmt)],
+      action: { kind: "section", target: "monitoring", label: "Open monitoring" },
+    });
   if (pending > 0)
     out.push({
       id: "control.pending_review",

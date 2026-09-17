@@ -160,7 +160,7 @@ def test_the_schemas_bound_the_level():
 
 
 # ====================================================================== roll-ups ===
-def _risk(ref, parent=None, level=None, inh=(1, 1), res=(None, None), category=None, status="draft"):
+def _risk(ref, parent=None, level=None, inh=(1, 1), res=(None, None), category=None, status="assessed"):
     return RiskFacts(
         id=_id(), parent_id=parent.id if parent else None, level=level, reference=ref, title=ref,
         status=status, category_id=category, inherent_likelihood=inh[0], inherent_impact=inh[1],

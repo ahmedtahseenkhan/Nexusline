@@ -3698,6 +3698,22 @@ class InstallOutcome:
     #: An existing (legacy-named or shallow) copy was upgraded in place.
     upgraded: bool = False
     previous_name: str | None = None
+    #: Shipped crosswalks materialised between this framework and the installed ones.
+    crosswalks_added: int = 0
+
+
+async def _sync_crosswalks(db):
+    """Materialise shipped crosswalks (a module-level seam tests can stub)."""
+    from app.services import crosswalks
+
+    return await crosswalks.sync_shipped(db)
+
+
+async def _crosswalk_reuse(db, key: str) -> dict:
+    """Common-control candidates for ``key`` (a module-level seam tests can stub)."""
+    from app.services import crosswalks
+
+    return await crosswalks.reuse_candidates_for(db, key)
 
 
 class PackResult(NamedTuple):
@@ -3721,6 +3737,9 @@ MATCH_REFERENCE = "match-by-reference"
 MATCH_NAME = "match-by-name"
 #: An existing control the user chose for the clause (a decision naming a control id).
 MAP_EXISTING = "map-to-existing"
+#: Phase 4C common control set: an existing control mapped to a clause of another
+#: installed framework that the shipped crosswalk content calls *equivalent* to this one.
+MATCH_CROSSWALK = "reuse-via-crosswalk"
 
 #: Words that carry no identity in a control name: "Review of access rights" and
 #: "Access rights review" are still different strings, but "Access Control Policy" and
@@ -3765,6 +3784,11 @@ class PackStep:
     #: The name match that was found, even when a decision overrode it — so a preview
     #: can offer "reuse" again after the user picked "create".
     name_match: ControlFacts | None = None
+    #: The best common-control candidate through a shipped crosswalk
+    #: (``crosswalks.ReuseCandidate``), kept whatever the action so the preview can show
+    #: "reuse MFA for privileged access (mapped to ISO A.8.5)". Equivalent reuses by
+    #: default; contained / containing / overlapping ones wait for a decision.
+    crosswalk_match: object = None
 
 
 class PackDecisionError(ValueError):
@@ -3784,6 +3808,7 @@ def plan_pack(
     key: str,
     controls: list[ControlFacts],
     decisions: dict[str, str] | None = None,
+    crosswalk_matches: dict | None = None,
 ) -> list[PackStep]:
     """The plan for installing ``wanted`` (the pack's control-type requirements).
 
@@ -3794,9 +3819,13 @@ def plan_pack(
        reference would make the reference ambiguous everywhere it is resolved);
     2. otherwise a decision naming a control id → **map-to-existing**, or ``create`` →
        **create** even if a same-named control exists;
-    3. otherwise a *pre-existing* control whose normalised name equals the clause's
+    3. otherwise an existing control mapped to a clause the shipped crosswalk content
+       calls *equivalent* (``crosswalk_matches``, from ``crosswalks.reuse_candidates``)
+       → **reuse-via-crosswalk** — the common control set. A subset, superset or
+       overlapping crosswalk is recorded on the step for a decision, not applied;
+    4. otherwise a *pre-existing* control whose normalised name equals the clause's
        normalised title → **match-by-name**;
-    4. otherwise **create**.
+    5. otherwise **create**.
 
     Name matching only looks at controls that existed before this install and are not
     already this framework's own: PCI DSS has two clauses titled "Vulnerabilities
@@ -3842,6 +3871,7 @@ def plan_pack(
         )
         name_match = by_name.get(normalize_control_name(r["title"]))
         step.name_match = name_match
+        step.crosswalk_match = _crosswalk_pick((crosswalk_matches or {}).get(r["reference"]), by_id, key)
         ref_match = by_ref.get(cat_ref.strip().lower())
         choice = decisions.get(r["reference"])
         if ref_match is not None:
@@ -3850,11 +3880,26 @@ def plan_pack(
             step.action = CREATE
         elif choice is not None:
             step.action, step.control = MAP_EXISTING, by_id[str(choice)]
+        elif step.crosswalk_match is not None and step.crosswalk_match.default_reuse:
+            step.action, step.control = MATCH_CROSSWALK, by_id[str(step.crosswalk_match.control_id)]
         elif name_match is not None:
             step.action, step.control = MATCH_NAME, name_match
         steps.append(step)
     return steps
 
+
+def _crosswalk_pick(candidates, by_id: dict, key: str):
+    """The best crosswalk candidate whose control still exists in the catalogue and is
+    not one of this framework's own controls."""
+    for c in candidates or ():
+        facts = by_id.get(str(c.control_id))
+        if facts is None:
+            continue
+        located = control_mapping.template_for_reference(facts.reference or "")
+        if located is not None and located[0] == key:
+            continue
+        return c
+    return None
 
 
 def _apply_template_meta(fw, key: str) -> None:
@@ -3974,6 +4019,8 @@ async def install_template(
     if create_controls and control_mapping.is_control_framework(key):
         pack = await install_controls_pack(db, user, fw, key, decisions=decisions)
         outcome.controls_created, outcome.controls_linked, outcome.requirements_linked = pack
+    # Phase 4C: the shipped crosswalks between this framework and the others installed.
+    outcome.crosswalks_added = (await _sync_crosswalks(db)).inserted
 
     controls = ""
     if outcome.controls_created or outcome.controls_linked or outcome.requirements_linked:
@@ -3981,6 +4028,8 @@ async def install_template(
             f", {outcome.controls_created} controls created, {outcome.controls_linked} matched "
             f"to existing controls, {outcome.requirements_linked} requirement links"
         )
+    if outcome.crosswalks_added:
+        controls += f", {outcome.crosswalks_added} shipped crosswalks to installed frameworks"
     if outcome.upgraded:
         renamed = f" (was '{previous_name}')" if previous_name != fw.name else ""
         await audit.record(
@@ -4049,7 +4098,7 @@ async def preview_controls_pack(db, key: str, decisions: dict[str, str] | None =
     wanted = control_mapping.control_requirements(tpl, key)
     if not wanted:
         return []
-    return plan_pack(wanted, key, await _catalogue_facts(db), decisions)
+    return plan_pack(wanted, key, await _catalogue_facts(db), decisions, await _crosswalk_reuse(db, key))
 
 
 async def install_controls_pack(
@@ -4081,7 +4130,7 @@ async def install_controls_pack(
         return PackResult(0, 0, 0)
 
     try:
-        steps = plan_pack(wanted, key, await _catalogue_facts(db), decisions)
+        steps = plan_pack(wanted, key, await _catalogue_facts(db), decisions, await _crosswalk_reuse(db, key))
     except PackDecisionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

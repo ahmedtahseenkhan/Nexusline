@@ -198,6 +198,8 @@ DEFAULT_RULES: tuple[RuleSpec, ...] = (
     _delete_rule("incident", "incident"),
     _delete_rule("vendor", "third party"),
     _attest_rule("vendor", "third party"),
+    RuleSpec("assessment", "review", "", "",
+             "Completing the review of a questionnaire assessment: not whoever sent it."),
     RuleSpec("aml", "file_sar", "", "",
              "Marking an STR / SAR as filed with the FMU: not whoever prepared it."),
     RuleSpec("shariah", "charity_approved", "", "",
@@ -253,8 +255,14 @@ SECOND_USER_MESSAGE = (
 )
 
 
-def role_gap_message(role: str, *, only_maker: bool = False) -> str:
+def role_gap_message(role: str, *, only_maker: bool = False, lacks_permission: bool = False) -> str:
     """What the Approvals page and Settings say about a stage role nobody can decide."""
+    if lacks_permission:
+        return (
+            f"No one other than the submitter who holds the {role} role can approve requests "
+            "(the role lacks the workflow:approve permission) — grant it in Roles. Until then "
+            "anyone who can approve may decide it."
+        )
     if only_maker:
         return (
             f"Only the person who submitted this holds the {role} role — assign it to "
@@ -272,8 +280,9 @@ def stage_decision_refusal(
     """Why this user may not decide a route stage assigned to ``stage_role``, or None.
 
     ``eligible_holders`` counts active users holding the role other than the request's
-    maker. With none, the stage falls back to anyone who can approve (the page warns);
-    otherwise only a holder decides it.
+    maker who can approve (``workflow:approve``) — ``notifications.stage_gate`` counts
+    them for every caller. With none, the stage falls back to anyone who can approve
+    (the page warns); otherwise only a holder decides it.
     """
     if not (stage_role or "").strip() or eligible_holders <= 0:
         return None
@@ -435,7 +444,9 @@ async def role_holders(db: AsyncSession) -> dict[str, set[uuid.UUID]]:
 def eligible_holder_count(
     holders: Mapping[str, set[uuid.UUID]], role: str | None, maker_id: uuid.UUID | None
 ) -> int:
-    """Active holders of ``role`` other than the maker. Pure."""
+    """Active holders of ``role`` other than the maker. Pure. Ignores permissions: the
+    decision rule counts with ``notifications.stage_gate``, which also requires
+    ``workflow:approve``; this stays for Settings' plain head count."""
     ids = holders.get(_key(role), set())
     return len(ids - ({maker_id} if maker_id is not None else set()))
 

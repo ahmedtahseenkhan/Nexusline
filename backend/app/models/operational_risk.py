@@ -126,6 +126,16 @@ class RcsaRisk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     risk: Mapped["Risk | None"] = relationship("Risk", lazy="selectin")  # noqa: F821
     control: Mapped["Control | None"] = relationship("Control", lazy="selectin")  # noqa: F821
 
+    # Phase 4E: the control self-rating from a reviewed questionnaire run of this RCSA
+    # (effective | partially_effective | ineffective | not_assessed), per dimension, and
+    # the questionnaire assessment it came from. The worse of the two sets
+    # ``control_effectiveness``.
+    self_design_rating: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    self_operation_rating: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    self_assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("assessments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     assessment: Mapped[RcsaAssessment] = relationship(back_populates="risks")
 
     @property

@@ -51,7 +51,9 @@ def _email_actions_switched_on(monkeypatch):
     an installation that has opted in. The off case sets it back to False itself."""
     monkeypatch.setattr(settings, "email_actions_enabled", True, raising=False)
 
-NOW = datetime(2026, 9, 12, 9, 0, tzinfo=timezone.utc)
+# Relative to the real clock: the endpoints check expiry against ``datetime.now``, so a
+# fixed date here expires the test tokens once it has passed.
+NOW = datetime.now(timezone.utc).replace(second=0, microsecond=0)
 TENANT = uuid.uuid4()
 ME, OTHER, MAKER, IDLE = (uuid.uuid4() for _ in range(4))
 
@@ -169,6 +171,10 @@ def test_token_states(monkeypatch):
     assert "already recorded" in at.token_state(ready, _user(), voted, NOW)[1]
     decided = _approval(status=ApprovalStatus.rejected)
     assert at.token_state(ready, _user(), decided, NOW) == (at.DECIDED, "This request is already rejected.")
+
+
+async def _no_stage_gates(db, approvals, directory):
+    return {}
 
 
 # =========================================================== who gets links ===
@@ -338,7 +344,7 @@ async def test_a_refused_decision_propagates_so_the_claim_rolls_back(monkeypatch
     assert exc.value.status_code == 422 and endpoint_env.audit == []
 
 
-async def test_open_token_checks_tenant_hash_and_binding():
+async def test_open_token_checks_tenant_hash_and_binding(monkeypatch):
     from app.models.tenant import Tenant
 
     token = at.new_token(TENANT, uuid.uuid4())
@@ -357,6 +363,10 @@ async def test_open_token_checks_tenant_hash_and_binding():
 
         return DB()
 
+    async def no_stage(db, approval):
+        return None
+
+    monkeypatch.setattr(at, "_stage_gate", no_stage)  # not a route stage
     ctx = await at.open_token(make_db(good), token)
     assert ctx is not None and ctx.organisation == "Acme Bank" and ctx.approval.id == good.entity_id
     assert await at.open_token(make_db(good, tenant_active=False), token) is None
@@ -417,6 +427,7 @@ def test_hooks_are_installed_once():
 
 async def test_decision_request_emails_mint_one_token_per_decider(monkeypatch):
     monkeypatch.setattr(settings, "enforce_segregation_of_duties", True)
+    monkeypatch.setattr(ns, "load_stage_gates", _no_stage_gates)  # not a route stage
     ap = _approval()
     added, mails = [], []
 
@@ -519,6 +530,7 @@ def test_where_a_digest_starts():
 
 async def test_each_person_is_mailed_their_own_digest_with_decision_links(monkeypatch):
     monkeypatch.setattr(settings, "enforce_segregation_of_duties", True)
+    monkeypatch.setattr(ns, "load_stage_gates", _no_stage_gates)  # not a route stage
     ap = _approval()
     rows = [
         _n(f"approval-pending:{ap.id}@r:Risk Approver", role_name="Risk Approver", entity_id=ap.id,

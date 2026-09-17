@@ -513,11 +513,18 @@ class RiskRollupNode(BaseModel):
     exposure: int | None = None
     severity: Severity | None = None
     appetite_status: str | None = None
+    #: On the board register (scored, out of Draft, not accepted or closed): counted in
+    #: the roll-up's bands, worst exposure and breaches. False = listed, not counted.
+    in_figures: bool = True
+    #: False for a draft nobody has scored — no score, severity or appetite position.
+    scored: bool = True
 
 
 class RiskRollup(BaseModel):
     """Everything below one risk: its live children, every live descendant, the worst
-    residual (assessed descendants only) and worst exposure among them, and counts."""
+    residual (assessed descendants only) and worst exposure among them, and counts.
+    Worsts, bands and breaches read the board register; ``not_in_figures`` counts the
+    descendants listed but left out of them."""
 
     model_config = ConfigDict(from_attributes=True)
     risk: RiskRollupNode
@@ -528,6 +535,7 @@ class RiskRollup(BaseModel):
     by_severity: dict[str, int] = Field(default_factory=dict)
     breaches: int = 0
     total: int = 0
+    not_in_figures: int = 0
 
 
 class RiskHierarchyNode(RiskRollupNode):
@@ -539,6 +547,8 @@ class RiskHierarchyNode(RiskRollupNode):
     worst: RiskRollupNode | None = None
     by_severity: dict[str, int] = Field(default_factory=dict)
     breaches: int = 0
+    #: Risks below the node left out of its figures (drafts, unscored, accepted, closed).
+    not_in_figures: int = 0
     children: list["RiskHierarchyNode"] = []
 
 

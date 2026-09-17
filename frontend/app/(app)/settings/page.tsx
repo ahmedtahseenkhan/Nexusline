@@ -6,6 +6,7 @@ import { api, type Me, type RiskSetting } from "@/lib/api";
 import SecuritySettings from "@/components/SecuritySettings";
 import LdapSettings from "@/components/LdapSettings";
 import SystemSettings from "@/components/SystemSettings";
+import StartPageSetting from "@/components/StartPageSetting";
 
 type TestState =
   | { status: "idle" }
@@ -101,6 +102,9 @@ export default function SettingsPage() {
 
       {/* System: version, health, license, backups, support bundle */}
       <SystemSettings />
+
+      {/* Your start page after sign-in (phase 4B workspaces) */}
+      <StartPageSetting />
 
       {/* Account security: MFA + password */}
       <SecuritySettings />

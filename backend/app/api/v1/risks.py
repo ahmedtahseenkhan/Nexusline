@@ -471,71 +471,130 @@ _RISK_SORTABLE = {
 }
 
 
+class RiskListFilters:
+    """Every filter the register's list takes, as one FastAPI dependency.
+
+    ``GET /risks`` and the register PDF (``GET /reports/pdf/risk-register``) both declare
+    ``filters: Annotated[RiskListFilters, Depends()]``, so a filter added here reaches the
+    export the same day it reaches the screen — the PDF cannot quietly drift from the list
+    it was launched from. :meth:`statement` builds the query; :meth:`active` names what is
+    set, for the PDF cover.
+    """
+
+    def __init__(
+        self,
+        status_filter: Annotated[RiskStatus | None, Query(alias="status")] = None,
+        category: str | None = None,
+        business_unit_id: uuid.UUID | None = None,
+        process_id: uuid.UUID | None = None,
+        asset_id: uuid.UUID | None = None,
+        owner_id: uuid.UUID | None = None,
+        treatment_owner_id: uuid.UUID | None = None,
+        category_id: uuid.UUID | None = None,
+        needs_review: bool | None = None,
+        risk_type: str | None = None,
+        source: str | None = None,
+        search: str | None = None,
+        # Phase 3: hierarchy ("none" = not placed) and the dashboard's drill-through
+        # filters, defined in services.risk_query exactly as the dashboard counts them.
+        level: Annotated[str | None, Query(pattern="^(1|2|3|none)$")] = None,
+        max_level: Annotated[int | None, Query(ge=1, le=3)] = None,
+        parent_id: uuid.UUID | None = None,
+        roots_only: bool | None = None,
+        review: Annotated[str | None, Query(pattern="^(overdue|due_30d)$")] = None,
+        appetite: Annotated[str | None, Query(pattern="^(within|within_appetite|elevated|breach)$")] = None,
+        has_controls: bool | None = None,
+        treatment_overdue: bool | None = None,
+        # F-21: drafts the dashboard's figures leave out ("N risks pending validation").
+        pending_validation: bool | None = None,
+    ) -> None:
+        self.status_filter = status_filter
+        self.category = category
+        self.business_unit_id = business_unit_id
+        self.process_id = process_id
+        self.asset_id = asset_id
+        self.owner_id = owner_id
+        self.treatment_owner_id = treatment_owner_id
+        self.category_id = category_id
+        self.needs_review = needs_review
+        self.risk_type = risk_type
+        self.source = source
+        self.search = search
+        self.level = level
+        self.max_level = max_level
+        self.parent_id = parent_id
+        self.roots_only = roots_only
+        self.review = review
+        self.appetite = appetite
+        self.has_controls = has_controls
+        self.treatment_overdue = treatment_overdue
+        self.pending_validation = pending_validation
+
+    def statement(self, appetite_book) -> Select:
+        """Live risks matching every set filter (``services.risk_query`` plus the
+        register-only columns)."""
+        stmt: Select = build_risk_query(
+            status=self.status_filter,
+            category=self.category,
+            business_unit_id=self.business_unit_id,
+            process_id=self.process_id,
+            asset_id=self.asset_id,
+            search=self.search,
+            owner_id=self.owner_id,
+            treatment_owner_id=self.treatment_owner_id,
+            category_id=self.category_id,
+            level=(UNPLACED if self.level == "none" else int(self.level)) if self.level else None,
+            max_level=self.max_level,
+            parent_id=self.parent_id,
+            roots_only=self.roots_only,
+            review=self.review,
+            appetite=self.appetite,
+            appetite_book=appetite_book,
+            has_controls=self.has_controls,
+            treatment_overdue=self.treatment_overdue,
+            pending_validation=self.pending_validation,
+        )
+        if self.needs_review is not None:
+            stmt = stmt.where(Risk.needs_review.is_(self.needs_review))
+        if self.risk_type:
+            stmt = stmt.where(Risk.risk_type == self.risk_type)
+        if self.source:
+            stmt = stmt.where(Risk.source == self.source)
+        return stmt
+
+    #: Filter name -> how the PDF cover labels it. Ids are resolved to names by the caller.
+    LABELS: dict[str, str] = {
+        "status_filter": "Status", "category": "Category", "business_unit_id": "Business unit",
+        "process_id": "Process", "asset_id": "Asset", "owner_id": "Owner",
+        "treatment_owner_id": "Treatment owner", "category_id": "Risk category",
+        "needs_review": "Flagged for review", "risk_type": "Risk type", "source": "Source",
+        "search": "Matching", "level": "Level", "max_level": "Level up to", "parent_id": "Below",
+        "roots_only": "Top of the tree only", "review": "Review", "appetite": "Appetite",
+        "has_controls": "Has controls", "treatment_overdue": "Treatment overdue",
+        "pending_validation": "Pending validation",
+    }
+
+    def active(self) -> dict[str, object]:
+        """The filters that are set, in :attr:`LABELS` order."""
+        return {k: getattr(self, k) for k in self.LABELS if getattr(self, k) not in (None, "")}
+
+
 @router.get("", response_model=Page[RiskRead], dependencies=[Depends(require("risk:read"))])
 async def list_risks(
     db: DbSession,
     user: CurrentUser,
-    status_filter: Annotated[RiskStatus | None, Query(alias="status")] = None,
-    category: str | None = None,
-    business_unit_id: uuid.UUID | None = None,
-    process_id: uuid.UUID | None = None,
-    asset_id: uuid.UUID | None = None,
-    owner_id: uuid.UUID | None = None,
-    treatment_owner_id: uuid.UUID | None = None,
-    category_id: uuid.UUID | None = None,
-    needs_review: bool | None = None,
-    risk_type: str | None = None,
-    source: str | None = None,
-    search: str | None = None,
-    # Phase 3: hierarchy ("none" = not placed) and the dashboard's drill-through filters,
-    # defined in services.risk_query exactly as the dashboard counts them.
-    level: Annotated[str | None, Query(pattern="^(1|2|3|none)$")] = None,
-    max_level: Annotated[int | None, Query(ge=1, le=3)] = None,
-    parent_id: uuid.UUID | None = None,
-    roots_only: bool | None = None,
-    review: Annotated[str | None, Query(pattern="^(overdue|due_30d)$")] = None,
-    appetite: Annotated[str | None, Query(pattern="^(within|within_appetite|elevated|breach)$")] = None,
-    has_controls: bool | None = None,
-    treatment_overdue: bool | None = None,
-    # F-21: drafts the dashboard's figures leave out ("N risks pending validation").
-    pending_validation: bool | None = None,
+    filters: Annotated[RiskListFilters, Depends()],
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[RiskRead]:
     context = await _read_context(db, user)
-    stmt: Select = build_risk_query(
-        status=status_filter,
-        category=category,
-        business_unit_id=business_unit_id,
-        process_id=process_id,
-        asset_id=asset_id,
-        search=search,
-        owner_id=owner_id,
-        treatment_owner_id=treatment_owner_id,
-        category_id=category_id,
-        level=(UNPLACED if level == "none" else int(level)) if level else None,
-        max_level=max_level,
-        parent_id=parent_id,
-        roots_only=roots_only,
-        review=review,
-        appetite=appetite,
-        appetite_book=context["appetite"],
-        has_controls=has_controls,
-        treatment_overdue=treatment_overdue,
-        pending_validation=pending_validation,
-    )
-    if needs_review is not None:
-        stmt = stmt.where(Risk.needs_review.is_(needs_review))
-    if risk_type:
-        stmt = stmt.where(Risk.risk_type == risk_type)
-    if source:
-        stmt = stmt.where(Risk.source == source)
+    stmt = filters.statement(context["appetite"])
 
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
-        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
+        params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=filters.search)
         stmt = apply_sort(stmt, params, _RISK_SORTABLE, default=Risk.inherent_score)
     else:
         stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
@@ -787,7 +846,7 @@ async def _hierarchy_facts(db) -> list[risk_hierarchy.RiskFacts]:
             select(
                 Risk.id, Risk.parent_id, Risk.level, Risk.reference, Risk.title, Risk.status,
                 Risk.category_id, Risk.inherent_likelihood, Risk.inherent_impact,
-                Risk.residual_likelihood, Risk.residual_impact,
+                Risk.residual_likelihood, Risk.residual_impact, Risk.last_assessed_at,
             ).where(Risk.deleted.is_(False), or_(Risk.parent_id.is_not(None), Risk.level.is_not(None)))
         )
     ).all()
@@ -800,6 +859,7 @@ def _facts_of(row) -> risk_hierarchy.RiskFacts:
         title=row.title or "", status=_status_value(row.status) or "", category_id=row.category_id,
         inherent_likelihood=row.inherent_likelihood, inherent_impact=row.inherent_impact,
         residual_likelihood=row.residual_likelihood, residual_impact=row.residual_impact,
+        last_assessed_at=getattr(row, "last_assessed_at", None),
     )
 
 
@@ -817,7 +877,12 @@ async def get_risk_hierarchy(
     """The enterprise → category (→ scenario) tree. Each node carries its direct child
     count, how many live risks sit anywhere below it, the worst exposure among them
     (residual when assessed, else inherent — at any level, so a category shows its worst
-    scenario even when the tree stops at categories) and their severity counts."""
+    scenario even when the tree stops at categories) and their severity counts.
+
+    Worst exposure, severity counts and breaches read the board register only (scored,
+    out of Draft, not accepted or closed) so a node never disagrees with the dashboard;
+    drafts and settled risks stay in the tree marked ``in_figures=false`` and each node's
+    ``not_in_figures`` says how many below it were left out."""
     context = await _read_context(db, user)
     facts = await _hierarchy_facts(db)
     tree = risk_hierarchy.build_tree(

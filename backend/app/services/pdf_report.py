@@ -733,15 +733,190 @@ def _pack_kpis(ss, items: list[tuple[str, str]], width: float = CONTENT_WIDTH):
     return t
 
 
-def board_pack_pdf(*, title: str, subtitle: str, cover: list[tuple[str, str]], views: list, org_name: str) -> bytes:
-    """The board pack: a cover page (what, for whom, which period, generated when and by
-    whom), then each section — headline figures, facts, tables and the note on how the
-    figures were worked out. ``views`` are ``board_pack.SectionView`` objects."""
+def _pack_table(ss, headers: list[str], rows: list[list], col_widths, colour: str):
+    """A board-pack table in the organisation's colour."""
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table, TableStyle
+
+    head = [Paragraph(f"<font color='white'>{h}</font>", ss["NxCellB"]) for h in headers]
+    body = [[Paragraph(str(c) if c not in (None, "") else "—", ss["NxCell"]) for c in r] for r in rows]
+    t = Table([head] + body, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(colour)),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor(ZEBRA)]),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor(LINE)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return t
+
+
+def _commentary_box(ss, text: str, colour: str):
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table, TableStyle
+
+    body = _pack_text(text).replace("\n", "<br/>")
+    t = Table([[Paragraph(f"<font color='{colour}'><b>Commentary</b></font><br/>{body}", ss["NxBody"])]],
+              colWidths=[CONTENT_WIDTH])
+    t.setStyle(TableStyle([
+        ("LINEBEFORE", (0, 0), (0, -1), 2.5, colors.HexColor(colour)),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(ZEBRA)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10), ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    return t
+
+
+def _heatmap_drawing(data: dict):
+    """Likelihood (rows, high at the top) x impact (columns); each cell coloured by its
+    band with the number of risks in it."""
+    from reportlab.graphics.shapes import Drawing, Rect, String
+    from reportlab.lib import colors
+
+    size = max(1, min(10, int(data.get("size") or 5)))
+    cells = data.get("cells") or {}
+    bands = data.get("bands") or {}
+    cell, left, bottom = 34, 34, 22
+    fill = {"low": "#dcfce7", "medium": "#fef3c7", "high": "#ffedd5", "critical": "#fee2e2"}
+    d = Drawing(left + size * cell + 10, bottom + size * cell + 16)
+    for like in range(1, size + 1):
+        for imp in range(1, size + 1):
+            key = f"{like},{imp}"
+            x, y = left + (imp - 1) * cell, bottom + (like - 1) * cell
+            d.add(Rect(x, y, cell, cell, fillColor=colors.HexColor(fill.get(str(bands.get(key) or ""), "#f3f4f6")),
+                       strokeColor=colors.HexColor(LINE), strokeWidth=0.5))
+            n = int(cells.get(key, 0) or 0)
+            if n:
+                d.add(String(x + cell / 2, y + cell / 2 - 4, str(n), fontName="Helvetica-Bold", fontSize=10,
+                             fillColor=colors.HexColor(_SEV_COLOR.get(str(bands.get(key) or ""), INK)),
+                             textAnchor="middle"))
+    for i in range(1, size + 1):
+        d.add(String(left + (i - 1) * cell + cell / 2, bottom - 12, str(i), fontSize=7.5,
+                     fillColor=colors.HexColor(MUTED), textAnchor="middle"))
+        d.add(String(left - 8, bottom + (i - 1) * cell + cell / 2 - 3, str(i), fontSize=7.5,
+                     fillColor=colors.HexColor(MUTED), textAnchor="middle"))
+    d.add(String(left + size * cell / 2, 0, "Impact", fontSize=8, fillColor=colors.HexColor(MUTED), textAnchor="middle"))
+    d.add(String(2, bottom + size * cell + 4, "Likelihood", fontSize=8, fillColor=colors.HexColor(MUTED)))
+    return d
+
+
+def _appetite_trend_drawing(data: dict):
+    """Stacked bars per point: within appetite, elevated, above tolerance. A point with
+    no snapshot is drawn empty and labelled."""
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.graphics.shapes import Drawing, String
+    from reportlab.lib import colors
+
+    points = data.get("points") or []
+    d = Drawing(CONTENT_WIDTH, 170)
+    chart = VerticalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 40, 30, CONTENT_WIDTH - 170, 120
+    series = [[int(p.get(k) or 0) for p in points] for k in ("within", "elevated", "breach")]
+    chart.data = series
+    chart.categoryAxis.style = "stacked"
+    chart.categoryAxis.categoryNames = [
+        str(p.get("label")) + ("" if any(p.get(k) is not None for k in ("within", "elevated", "breach")) else "*")
+        for p in points
+    ]
+    chart.categoryAxis.labels.fontSize = 7
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.valueMin = 0
+    for i, colour in enumerate(("#16a34a", "#d97706", "#dc2626")):
+        chart.bars[i].fillColor = colors.HexColor(colour)
+        chart.bars[i].strokeColor = None
+    d.add(chart)
+    lx = chart.x + chart.width + 16
+    for i, (label, colour) in enumerate((("Within appetite", "#16a34a"), ("Elevated", "#d97706"),
+                                         ("Above tolerance", "#dc2626"))):
+        y = 130 - i * 16
+        from reportlab.graphics.shapes import Rect
+
+        d.add(Rect(lx, y, 9, 9, fillColor=colors.HexColor(colour), strokeColor=None))
+        d.add(String(lx + 14, y + 1, label, fontSize=8, fillColor=colors.HexColor(INK)))
+    if any(not any(p.get(k) is not None for k in ("within", "elevated", "breach")) for p in points):
+        d.add(String(lx, 70, "* no snapshot", fontSize=7.5, fillColor=colors.HexColor(MUTED)))
+    return d
+
+
+def _kri_trend_drawing(series: dict, colour: str):
+    from reportlab.graphics.charts.lineplots import LinePlot
+    from reportlab.graphics.shapes import Drawing, String
+    from reportlab.lib import colors
+
+    readings = [r for r in series.get("readings", []) if r.get("value") is not None]
+    width = (CONTENT_WIDTH - 12) / 2
+    d = Drawing(width, 110)
+    d.add(String(4, 98, str(series.get("name") or "")[:48], fontName="Helvetica-Bold", fontSize=8,
+                 fillColor=colors.HexColor(INK)))
+    if len(readings) < 2:
+        return d
+    plot = LinePlot()
+    plot.x, plot.y, plot.width, plot.height = 34, 22, width - 46, 66
+    plot.data = [[(i, float(r["value"])) for i, r in enumerate(readings)]]
+    plot.lines[0].strokeColor = colors.HexColor(colour)
+    plot.lines[0].strokeWidth = 1.5
+    plot.xValueAxis.valueMin, plot.xValueAxis.valueMax = 0, len(readings) - 1
+    plot.xValueAxis.valueSteps = list(range(len(readings)))
+    plot.xValueAxis.labelTextFormat = lambda v: str(readings[int(v)].get("label") or "")[:5] if 0 <= int(v) < len(readings) else ""
+    plot.xValueAxis.labels.fontSize = 6
+    plot.yValueAxis.labels.fontSize = 6.5
+    d.add(plot)
+    return d
+
+
+def _pack_footer(org_name: str, classification: str, draft: bool):
+    from reportlab.lib.units import mm
+
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    def draw(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7.5)
+        canvas.setFillColor(MUTED)
+        canvas.drawString(18 * mm, 12 * mm, f"{org_name} — {classification}")
+        canvas.drawCentredString(canvas._pagesize[0] / 2, 12 * mm, f"Generated {generated}")
+        canvas.drawRightString(canvas._pagesize[0] - 18 * mm, 12 * mm, f"Page {doc.page}")
+        if draft:
+            canvas.setFont("Helvetica-Bold", 8)
+            canvas.setFillColor("#b7791f")
+            canvas.drawRightString(canvas._pagesize[0] - 18 * mm, canvas._pagesize[1] - 11 * mm,
+                                   "DRAFT — not yet released to the committee")
+        canvas.restoreState()
+
+    return draw
+
+
+def board_pack_pdf(*, title: str, subtitle: str, cover: list[tuple[str, str]], views: list, org_name: str,
+                   colour: str = PRIMARY, cover_title: str = "", classification: str = "Confidential",
+                   logo_path: str | None = None, draft: bool = False) -> bytes:
+    """The board pack: a cover page (the organisation's logo and cover title; what, for
+    whom, which period, generated when and by whom), then each section — commentary,
+    headline figures, charts, facts, tables and the note on how the figures were worked
+    out. ``views`` are ``board_pack.SectionView`` objects. Every page carries the
+    classification; a draft or reviewed pack is marked as not yet released."""
     _require_reportlab()
-    from reportlab.platypus import CondPageBreak, PageBreak, Paragraph, Spacer
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.platypus import CondPageBreak, Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer
 
     ss = _styles()
-    story = _title_block(ss, _pack_text(title), _pack_text(subtitle), _pack_text(org_name))
+    ss["NxTitle"].textColor = colour
+    story = []
+    if logo_path:
+        try:
+            from reportlab.lib.utils import ImageReader
+
+            iw, ih = ImageReader(logo_path).getSize()
+            height = 18 * mm
+            width = min(60 * mm, iw * height / ih) if ih else 40 * mm
+            story += [Image(logo_path, width=width, height=width * ih / iw if iw else height, hAlign="LEFT"),
+                      Spacer(1, 6)]
+        except Exception:  # noqa: BLE001 - an unreadable logo never stops the pack
+            pass
+    if cover_title:
+        story.append(Paragraph(f"<font color='{colour}'><b>{_pack_text(cover_title)}</b></font>", ss["NxSub"]))
+    story += _title_block(ss, _pack_text(title), _pack_text(subtitle), _pack_text(org_name))
     story += [_kv(ss, [(_pack_text(k), _pack_text(v)) for k, v in cover]), Spacer(1, 8)]
     story.append(_body(ss, "Position figures (health score, appetite, top risks, control assurance, compliance, "
                            "issues, KRIs and third parties) are as at the date shown. Risk movement, failed tests "
@@ -750,8 +925,31 @@ def board_pack_pdf(*, title: str, subtitle: str, cover: list[tuple[str, str]], v
     for index, view in enumerate(views):
         story.append(PageBreak() if index == 0 else CondPageBreak(180))
         story.append(_h2(ss, _pack_text(view.title)))
+        if getattr(view, "commentary", ""):
+            story += [_commentary_box(ss, view.commentary, colour), Spacer(1, 6)]
         if view.kpis:
             story += [_pack_kpis(ss, list(view.kpis)[:4]), Spacer(1, 6)]
+        for chart in getattr(view, "charts", []) or []:
+            flow = []
+            flow.append(Paragraph(f"<b>{_pack_text(chart.title)}</b>", ss["NxBody"]))
+            try:
+                if chart.kind == "heatmap":
+                    flow.append(_heatmap_drawing(chart.data))
+                elif chart.kind == "appetite_trend":
+                    flow.append(_appetite_trend_drawing(chart.data))
+                elif chart.kind == "kri_trend":
+                    from reportlab.platypus import Table
+
+                    drawings = [_kri_trend_drawing(sr, colour) for sr in chart.data.get("series", [])]
+                    rows = [drawings[i:i + 2] + [""] * (2 - len(drawings[i:i + 2])) for i in range(0, len(drawings), 2)]
+                    if rows:
+                        flow.append(Table(rows, colWidths=[CONTENT_WIDTH / 2] * 2))
+            except Exception:  # noqa: BLE001 - a chart that cannot be drawn is skipped, the table remains
+                continue
+            if chart.note:
+                flow.append(Paragraph(f"<font size=8 color='{MUTED}'>{_pack_text(chart.note)}</font>", ss["NxBody"]))
+            flow.append(Spacer(1, 8))
+            story.append(KeepTogether(flow))
         if view.facts:
             story += [_kv(ss, [(_pack_text(k), _pack_text(v)) for k, v in view.facts]), Spacer(1, 6)]
         for table in view.tables:
@@ -760,8 +958,8 @@ def board_pack_pdf(*, title: str, subtitle: str, cover: list[tuple[str, str]], v
             if table.rows:
                 total = float(sum(table.widths) or 1)
                 widths = [max(28, available * w / total) for w in table.widths]
-                story.append(_table(ss, [_pack_text(h) for h in table.headers],
-                                    [[_pack_text(c) for c in row] for row in table.rows], col_widths=widths))
+                story.append(_pack_table(ss, [_pack_text(h) for h in table.headers],
+                                         [[_pack_text(c) for c in row] for row in table.rows], widths, colour))
                 if table.total is not None and table.total > len(table.rows):
                     story.append(Paragraph(
                         f"<font size=8 color='{MUTED}'>Showing {len(table.rows)} of {table.total}; "
@@ -771,4 +969,9 @@ def board_pack_pdf(*, title: str, subtitle: str, cover: list[tuple[str, str]], v
             story.append(Spacer(1, 8))
         for note in view.notes:
             story.append(Paragraph(f"<font size=8 color='{MUTED}'>{_pack_text(note)}</font>", ss["NxBody"]))
-    return _render(story, org_name)
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
+                            topMargin=18 * mm, bottomMargin=20 * mm)
+    foot = _pack_footer(org_name, classification or "Confidential", draft)
+    doc.build(story, onFirstPage=foot, onLaterPages=foot)
+    return buf.getvalue()

@@ -680,19 +680,87 @@ def _raised_by(approval: Any, user_id: Any, email: str | None) -> bool:
     )
 
 
-def approval_recipients(approval: Any, directory: Directory) -> list[Recipient]:
+# ------------------------------------------------------ who may decide (phase 4) ---
+# One eligibility rule for every place that offers a decision: the Approvals list
+# (``can_decide`` / ``decide_blocked_reason``), ``POST /approvals/{id}/decision``, My
+# Work, the notification recipients and the e-mail decision links. Anyone offered a
+# decision can make it; anyone who can make it is offered it.
+REFUSAL_DECIDED, REFUSAL_PERMISSION, REFUSAL_MAKER, REFUSAL_STAGE, REFUSAL_VOTED = "decided", "no_permission", "maker", "stage_role", "voted"
+
+
+@dataclass(frozen=True)
+class StageGate:
+    """A route stage assigned to a role, as the eligibility rule sees it.
+
+    ``eligible`` counts the people other than the request's maker who could decide it:
+    active, holding the role *and* ``workflow:approve``. With none, the stage falls back
+    to anyone who can approve (so it never dead-ends) and the Approvals page says why.
+    ``holders`` counts active holders of the role, maker and permission aside;
+    ``maker_holds`` says whether the maker is one of them."""
+
+    role: str
+    eligible: int
+    holders: int = 0
+    maker_holds: bool = False
+
+
+def stage_gate(approval: Any, role: str | None, directory: Directory) -> StageGate | None:
+    """The gate for ``approval`` when it is a stage assigned to ``role``, else None. Pure."""
+    name = " ".join((role or "").split())
+    if not name:
+        return None
+    canonical = directory.role(name) or name
+    members = directory.members(canonical)
+    makers = {
+        uid for uid in members
+        if _raised_by(approval, uid, directory.users[uid].email if uid in directory.users else None)
+    }
+    eligible = sum(1 for uid in members if uid not in makers and APPROVE_PERMISSION in directory.permissions_of(uid))
+    return StageGate(role=canonical, eligible=eligible, holders=len(members), maker_holds=bool(makers))
+
+
+async def load_stage_gates(db: Any, approvals: Sequence[Any], directory: Directory) -> dict[Any, StageGate]:
+    """Gates for the route-stage approvals among ``approvals`` (one query)."""
+    from app.services import default_governance as governance
+
+    if not approvals:
+        return {}
+    roles = await governance.stage_roles(db, [a.id for a in approvals])
+    out: dict[Any, StageGate] = {}
+    for approval in approvals:
+        gate = stage_gate(approval, roles.get(approval.id), directory)
+        if gate is not None:
+            out[approval.id] = gate
+    return out
+
+
+def approval_recipients(approval: Any, directory: Directory, stage: StageGate | None = None) -> list[Recipient]:
     """Who a pending approval request is waiting on. Pure.
 
-    The named approver when the label resolves to a person (unless that person raised
-    the request — segregation of duties means they can't decide it) or a role;
+    A route stage assigned to a role (``stage``) goes to that role while someone other
+    than the maker in it may decide (holds ``workflow:approve``); otherwise to that role
+    and every approving role, as the stage falls back to anyone who can approve.
+
+    Else: the named approver when the label resolves to a person (unless that person
+    raised the request — segregation of duties means they can't decide it) or a role;
     otherwise every role that grants ``workflow:approve``. When the person or role named
-    can't decide it (nobody there holds ``workflow:approve``), the approving roles are
-    told as well, so a request never waits unseen by everyone who could decide it. No
-    approving role at all → everyone."""
+    can't decide it (nobody there other than the maker holds ``workflow:approve``), the
+    approving roles are told as well, so a request never waits unseen by everyone who
+    could decide it. No approving role at all → everyone."""
     approvers = to_roles(*directory.roles_granting(APPROVE_PERMISSION))
+    if stage is not None:
+        name = directory.role(stage.role)
+        target = [(ROLE, name)] if name else []
+        if stage.eligible > 0 and target:
+            return target
+        return target + [r for r in approvers if r not in target]
     target = resolve_approver(getattr(approval, "approver", ""), directory)
     if target is not None and target[0] == ROLE:
-        can = any(APPROVE_PERMISSION in directory.permissions_of(uid) for uid in directory.members(target[1]))
+        can = any(
+            APPROVE_PERMISSION in directory.permissions_of(uid)
+            and not _raised_by(approval, uid, directory.users[uid].email)
+            for uid in directory.members(target[1])
+        )
         return [target] if can else [target] + [r for r in approvers if r != target]
     if target is not None:
         person = directory.users.get(target[1])
@@ -703,28 +771,54 @@ def approval_recipients(approval: Any, directory: Directory) -> list[Recipient]:
     return approvers
 
 
-def approval_refusal(
+@dataclass(frozen=True)
+class Refusal:
+    code: str
+    message: str
+
+
+def decision_refusal(
     approval: Any, *, user_id: Any, email: str | None, permissions: Iterable[str],
-    voted_ids: Iterable[Any] = (), sod: bool | None = None,
-) -> str | None:
+    role_names: Iterable[str] = (), voted_ids: Iterable[Any] = (), sod: bool | None = None,
+    stage: StageGate | None = None,
+) -> Refusal | None:
     """Why this user can't decide this approval request now, or None. Pure.
 
-    The same checks, in the same order, as ``POST /approvals/{id}/decision``: the
-    request is pending, the user holds ``workflow:approve``, segregation of duties (not
-    the maker), one decision per checker."""
+    The checks ``POST /approvals/{id}/decision`` makes, in its order: the request is
+    pending; the user holds ``workflow:approve``; segregation of duties (not the maker);
+    a route stage assigned to a role is decided by a holder of it while anyone other than
+    the maker could (``stage``); one decision per checker."""
     from app.core.config import settings
+    from app.services.default_governance import stage_decision_refusal
 
     status_value = getattr(getattr(approval, "status", None), "value", getattr(approval, "status", None))
     if status_value != ApprovalStatus.pending.value:
-        return f"This request is already {status_value}."
+        return Refusal(REFUSAL_DECIDED, f"This request is already {status_value}.")
     if APPROVE_PERMISSION not in set(permissions):
-        return f"Deciding approval requests needs the {APPROVE_PERMISSION} permission."
+        return Refusal(REFUSAL_PERMISSION, f"Deciding approval requests needs the {APPROVE_PERMISSION} permission.")
     enforce = settings.enforce_segregation_of_duties if sod is None else sod
     if enforce and _raised_by(approval, user_id, email):
-        return "You raised this request, so an independent checker must decide it."
+        return Refusal(REFUSAL_MAKER, "You raised this request, so an independent checker must decide it.")
+    if stage is not None:
+        refused = stage_decision_refusal(stage.role, role_names, stage.eligible)
+        if refused:
+            return Refusal(REFUSAL_STAGE, refused)
     if user_id in set(voted_ids):
-        return "You have already recorded a decision on this request."
+        return Refusal(REFUSAL_VOTED, "You have already recorded a decision on this request.")
     return None
+
+
+def approval_refusal(
+    approval: Any, *, user_id: Any, email: str | None, permissions: Iterable[str],
+    voted_ids: Iterable[Any] = (), sod: bool | None = None,
+    role_names: Iterable[str] = (), stage: StageGate | None = None,
+) -> str | None:
+    """:func:`decision_refusal`'s sentence, or None. Pure."""
+    refusal = decision_refusal(
+        approval, user_id=user_id, email=email, permissions=permissions, role_names=role_names,
+        voted_ids=voted_ids, sod=sod, stage=stage,
+    )
+    return refusal.message if refusal else None
 
 
 # ================================================================== KRIs ===
@@ -1450,15 +1544,18 @@ async def scan_alerts(db: AsyncSession, tenant_id, directory: Directory | None =
             named(sc.reviewer) or directory.first_active(sc.workflow_owner_id))
 
     # A pending approval goes to whoever it names (a person or a role), else to the
-    # roles that may decide approval requests.
+    # roles that may decide approval requests; a route stage to its role while someone
+    # other than the maker there may decide it (phase 4: the shared eligibility rule).
     _ap_stmt = select(ApprovalRequest).where(ApprovalRequest.status == ApprovalStatus.pending)
-    for ap in (await db.scalars(_ap_stmt)).all():
+    _pending_aps = (await db.scalars(_ap_stmt)).all()
+    _gates = await load_stage_gates(db, _pending_aps, directory)
+    for ap in _pending_aps:
         overdue = ap.due_date is not None and ap.due_date < today
         add(f"approval-pending:{ap.id}",
             f"Approval {'overdue' if overdue else 'pending'}: {ap.reference}",
             f"{ap.title} — awaiting {ap.approver or 'a decision'}",
             _W if overdue else _I, "approval", ap.id, with_id("/approvals", ap.id),
-            approval_recipients(ap, directory))
+            approval_recipients(ap, directory, _gates.get(ap.id)))
 
     # Phase 3 — issue (CAPA) actions past due, to their owner (else the issue's owner),
     # and later due dates on serious issues waiting for someone to approve them, to the

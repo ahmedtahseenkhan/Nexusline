@@ -28,6 +28,30 @@ cover the period. The pack says so on its cover.
 Everything that decides a number is pure (the period, sections, trend, the section
 views both renderers print) and unit-tested; the async functions at the bottom load
 the rows for one organisation, store the files and write the ``BoardPack`` row.
+
+**Phase 4B.**
+
+* **Sign-off.** A pack is generated as a *draft*; someone other than the people who
+  shaped it (generated it or wrote its commentary) marks it *reviewed*, and it is then
+  *released* — to the committee's member users, each notified in the app and by e-mail
+  with a link. Four-eyes follows the ``board_pack`` / ``release`` dual-control key.
+  Changing the commentary of a reviewed pack returns it to draft; a released pack is
+  frozen (generate a new one to change it).
+* **Commentary.** A narrative per section (the CRO's words), printed at the top of the
+  section in the PDF and the spreadsheet. The figures a pack was built from are kept on
+  the row (``content``), so adding commentary re-renders the same numbers, not today's.
+* **Saved sections.** A committee keeps its own section choice and order
+  (``Committee.board_pack_sections``); packs generated for it — by hand without a choice,
+  or by the scheduler — use it.
+* **Charts.** The appetite section carries the heat map of current exposure and the
+  appetite position over the last four quarter ends; the KRI section each listed KRI's
+  recent readings.
+* **Branding.** Logo, primary colour, cover title and the classification printed on
+  every page (``BoardPackBranding``; "Confidential" unless set).
+* **Past periods.** A pack whose period ended before today takes its position figures
+  from the period snapshot nearest the period end (``services/snapshots.py``) and says so
+  on the cover and in each section; with no snapshot near enough they are as at
+  generation, and the cover says that instead.
 """
 from __future__ import annotations
 
@@ -65,6 +89,19 @@ OVERVIEW_SECTIONS = frozenset({"summary", "appetite", "top_risks", "assurance", 
 
 #: BoardPack.status values.
 READY, FAILED = "ready", "failed"
+#: BoardPack.review_state values (phase 4B).
+DRAFT, REVIEWED, RELEASED = "draft", "reviewed", "released"
+REVIEW_STATES = (DRAFT, REVIEWED, RELEASED)
+#: The dual-control key that governs reviewing and releasing a pack.
+DUAL_CONTROL_MODULE, DUAL_CONTROL_ACTION = "board_pack", "release"
+#: Longest commentary per section, in characters.
+COMMENTARY_MAX = 6000
+#: Quarter ends the appetite trend chart covers.
+TREND_QUARTERS = 4
+#: KRI readings drawn per KRI.
+KRI_TREND_READINGS = 8
+#: KRIs given a trend chart in the PDF.
+KRI_TREND_CHARTS = 6
 
 #: Rows listed per table in a pack (the counts above each table are never capped).
 LIST_LIMIT = 50
@@ -129,12 +166,14 @@ def resolve_period(
     return start, end
 
 
-def normalise_sections(requested: Iterable[str] | None) -> list[str]:
-    """The sections to include, in pack order. None means all; an unknown key or an
-    empty choice is refused."""
+def normalise_sections(requested: Iterable[str] | None, keep_order: bool = False) -> list[str]:
+    """The sections to include, in pack order (or, with ``keep_order``, in the order
+    asked for — a committee's saved order). None means all; an unknown key or an empty
+    choice is refused. Duplicates are dropped."""
     if requested is None:
         return list(SECTION_KEYS)
-    chosen = {str(s).strip() for s in requested if str(s).strip()}
+    listed = [str(s).strip() for s in requested if str(s).strip()]
+    chosen = set(listed)
     unknown = sorted(chosen - set(SECTION_KEYS))
     if unknown:
         raise PackError(
@@ -142,6 +181,8 @@ def normalise_sections(requested: Iterable[str] | None) -> list[str]:
         )
     if not chosen:
         raise PackError("Choose at least one section for the pack.")
+    if keep_order:
+        return list(dict.fromkeys(listed))
     return [k for k in SECTION_KEYS if k in chosen]
 
 
@@ -443,7 +484,8 @@ def kri_summary(kris: Iterable[Any], owner_names: Mapping[Any, str] | None = Non
         "green": counts["green"], "amber": counts["amber"], "red": counts["red"],
         "no_data": counts["no_data"],
         "rows": [
-            {"reference": k.reference or "", "name": k.name, "status": str(_v(k.status)),
+            {"id": str(getattr(k, "id", "") or ""), "reference": k.reference or "", "name": k.name,
+             "status": str(_v(k.status)),
              "value": _num(k.current_value), "unit": k.unit or "",
              "warning": _num(k.warning_threshold), "limit": _num(k.limit_threshold),
              "lower": _num(getattr(k, "lower_bound", None)), "upper": _num(getattr(k, "upper_bound", None)),
@@ -563,6 +605,22 @@ class TableView:
 
 
 @dataclass
+class ChartView:
+    """A chart the PDF draws (and the spreadsheet lists as a table of its data).
+
+    * ``heatmap`` — ``data = {"size": n, "cells": {"L,I": count}, "bands": {"L,I": band}}``
+    * ``appetite_trend`` — ``data = {"points": [{"label", "within", "elevated", "breach"}]}``
+      (counts None where no snapshot stands for the date)
+    * ``kri_trend`` — ``data = {"series": [{"name", "unit", "readings": [{"label", "value"}]}]}``
+    """
+
+    kind: str
+    title: str
+    data: dict
+    note: str = ""
+
+
+@dataclass
 class SectionView:
     key: str
     title: str
@@ -570,6 +628,9 @@ class SectionView:
     facts: list[tuple[str, str]] = field(default_factory=list)
     tables: list[TableView] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: The narrative written for the committee (phase 4B), printed first.
+    commentary: str = ""
+    charts: list[ChartView] = field(default_factory=list)
 
 
 def _limited(rows: list, limit: int | None = LIST_LIMIT) -> tuple[list, int]:
@@ -623,6 +684,18 @@ def _view_appetite(data: dict, fmt: str, limit: int | None = LIST_LIMIT) -> Sect
           str(r["elevated"]), str(r["breach"])] for r in data.get("rows", [])],
         [30, 11, 12, 9, 10, 11, 10],
     ))
+    heat = data.get("heatmap")
+    if heat and heat.get("cells") is not None:
+        view.charts.append(ChartView("heatmap", "Where current exposure sits (likelihood x impact)", heat,
+                                     note="Risks on the board register, at their residual cell once assessed."))
+    trend = data.get("trend") or []
+    if trend:
+        view.charts.append(ChartView(
+            "appetite_trend", "Appetite position over the last four quarter ends",
+            {"points": [{"label": format_date(t.get("date"), fmt), "within": t.get("within"),
+                         "elevated": t.get("elevated"), "breach": t.get("breach")} for t in trend]},
+            note="A quarter end with no period snapshot near it is left blank rather than estimated.",
+        ))
     return view
 
 
@@ -807,6 +880,17 @@ def _view_kris(data: dict, fmt: str, limit: int | None = LIST_LIMIT) -> SectionV
         rows, [9, 25, 8, 11, 20, 13, 14], total=total,
         empty="No KRI is at red or amber.",
     ))
+    series = []
+    for r in data.get("rows", []):
+        readings = (data.get("trend") or {}).get(str(r.get("id") or ""), [])
+        if len(readings) >= 2:
+            series.append({"name": " ".join(p for p in (r.get("reference") or "", r["name"]) if p),
+                           "unit": r.get("unit", ""),
+                           "readings": [{"label": format_date(x.get("as_of"), fmt), "value": x.get("value")}
+                                        for x in readings]})
+    if series:
+        view.charts.append(ChartView("kri_trend", "Recent readings of the KRIs at red or amber",
+                                     {"series": series[:KRI_TREND_CHARTS]}))
     return view
 
 
@@ -856,15 +940,20 @@ def section_views(pack: Mapping[str, Any], limit: int | None = LIST_LIMIT) -> li
     cover = pack.get("cover", {})
     fmt = cover.get("date_format", "DD/MM/YYYY")
     tz = cover.get("tz")
+    commentary = pack.get("commentary") or {}
+    position_notes = pack.get("position_notes") or {}
     out = []
     for key in pack.get("sections", []):
         data = pack.get(key)
         if data is None:
             continue
         if key == "incidents":
-            out.append(_view_incidents(data, fmt, limit, tz))
+            view = _view_incidents(data, fmt, limit, tz)
         else:
-            out.append(_VIEW_BUILDERS[key](data, fmt, limit))
+            view = _VIEW_BUILDERS[key](data, fmt, limit)
+        view.commentary = str(commentary.get(key) or "").strip()
+        view.notes = list(position_notes.get(key, [])) + view.notes
+        out.append(view)
     return out
 
 
@@ -878,9 +967,17 @@ def cover_facts(pack: Mapping[str, Any]) -> list[tuple[str, str]]:
         meeting = " ".join(p for p in (c.get("meeting_reference", ""), c["meeting"]) if p)
         when = format_date(c.get("meeting_date"), fmt) if c.get("meeting_date") else ""
         facts.append(("Meeting", f"{meeting}, {when}" if when else meeting))
+    basis = pack.get("basis") or {}
+    if basis.get("position") == "snapshot" and basis.get("snapshot_as_of"):
+        position = (f"{format_date(basis['snapshot_as_of'], fmt)} (the period snapshot nearest the period end)")
+    elif basis.get("position") == "live" and basis.get("reason") == "no_snapshot":
+        position = (f"{format_date(c.get('as_of'), fmt)} (no period snapshot is held near the period end, "
+                    "so position figures are as at generation)")
+    else:
+        position = format_date(c.get("as_of"), fmt)
     facts += [
         ("Period", period_text(c["period_start"], c["period_end"], fmt)),
-        ("Position as at", format_date(c.get("as_of"), fmt)),
+        ("Position as at", position),
         ("Generated", format_datetime(c.get("generated_at"), fmt, c.get("tz"))
          + (f" ({c.get('timezone')})" if c.get("timezone") else "")),
         ("Generated by", c.get("generated_by") or "—"),
@@ -931,7 +1028,8 @@ def to_xlsx(pack: Mapping[str, Any]) -> bytes:
 
     bold = Font(bold=True)
     head_font = Font(bold=True, color="FFFFFF")
-    head_fill = PatternFill("solid", fgColor="1D4FD7")
+    colour = brand_colour((pack.get("cover") or {}).get("branding"))
+    head_fill = PatternFill("solid", fgColor=colour.lstrip("#").upper())
     wrap = Alignment(wrap_text=True, vertical="top")
     used: set[str] = set()
 
@@ -952,6 +1050,11 @@ def to_xlsx(pack: Mapping[str, Any]) -> bytes:
         ws = wb.create_sheet(sheet_name(view.title, used))
         ws.append([view.title])
         ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+        if view.commentary:
+            ws.append(["Commentary", view.commentary])
+            ws.cell(row=ws.max_row, column=1).font = bold
+            ws.cell(row=ws.max_row, column=2).alignment = wrap
+            ws.append([])
         for label, value in list(view.kpis) + list(view.facts):
             ws.append([label, value])
             ws.cell(row=ws.max_row, column=1).font = bold
@@ -973,6 +1076,18 @@ def to_xlsx(pack: Mapping[str, Any]) -> bytes:
             if table.total is not None and table.total > len(table.rows):
                 ws.append([f"Showing {len(table.rows)} of {table.total}."])
             widest = max(widest, len(table.headers))
+        for chart in view.charts:
+            caption, headers, rows = chart_table(chart)
+            ws.append([])
+            ws.append([caption])
+            ws.cell(row=ws.max_row, column=1).font = bold
+            ws.append(list(headers))
+            for cell in ws[ws.max_row]:
+                cell.font = head_font
+                cell.fill = head_fill
+            for row in rows:
+                ws.append(list(row))
+            widest = max(widest, len(headers))
         for note in view.notes:
             ws.append([])
             ws.append([note])
@@ -984,13 +1099,54 @@ def to_xlsx(pack: Mapping[str, Any]) -> bytes:
     return buf.getvalue()
 
 
+def chart_table(chart: ChartView) -> tuple[str, list[str], list[list]]:
+    """A chart's data as a caption, headers and rows (for the spreadsheet). Pure."""
+    if chart.kind == "heatmap":
+        size = int(chart.data.get("size") or 5)
+        cells = chart.data.get("cells") or {}
+        headers = ["Likelihood \\ impact"] + [str(i) for i in range(1, size + 1)]
+        rows = [[str(like)] + [int(cells.get(f"{like},{imp}", 0)) for imp in range(1, size + 1)]
+                for like in range(size, 0, -1)]
+        return f"{chart.title} (risks per cell)", headers, rows
+    if chart.kind == "appetite_trend":
+        rows = [[p.get("label"), *(("No snapshot" if p.get(k) is None else p.get(k)) for k in ("within", "elevated", "breach"))]
+                for p in chart.data.get("points", [])]
+        return chart.title, ["As at", "Within appetite", "Elevated", "Above tolerance"], rows
+    rows = []
+    for s in chart.data.get("series", []):
+        for r in s.get("readings", []):
+            rows.append([s.get("name"), r.get("label"), r.get("value"), s.get("unit", "")])
+    return chart.title, ["KRI", "As of", "Value", "Unit"], rows
+
+
+DEFAULT_CLASSIFICATION = "Confidential"
+
+
+def brand_colour(branding: Mapping[str, Any] | None) -> str:
+    """The pack's primary colour: the organisation's when it is a valid ``#RRGGBB``, else
+    the product colour. Pure."""
+    import re
+
+    from app.services.pdf_report import PRIMARY
+
+    value = str((branding or {}).get("primary_colour") or "").strip()
+    return value if re.fullmatch(r"#[0-9a-fA-F]{6}", value) else PRIMARY
+
+
 def to_pdf(pack: Mapping[str, Any]) -> bytes:
     from app.services import pdf_report
 
+    cover = pack.get("cover", {})
+    branding = dict(cover.get("branding") or {})
     return pdf_report.board_pack_pdf(
         title=pack.get("title", "Board pack"), subtitle=pack_subtitle(pack),
         cover=cover_facts(pack), views=section_views(pack),
-        org_name=pack.get("cover", {}).get("organisation") or "Organisation",
+        org_name=cover.get("organisation") or "Organisation",
+        colour=brand_colour(branding),
+        cover_title=str(branding.get("cover_title") or ""),
+        classification=str(branding.get("classification") or DEFAULT_CLASSIFICATION),
+        logo_path=branding.get("logo_path") or None,
+        draft=str(pack.get("review_state") or "") in (DRAFT, REVIEWED),
     )
 
 
@@ -1453,6 +1609,22 @@ async def build_pack(
         pack["kris"] = await _kris(db)
     if "third_parties" in sections:
         pack["third_parties"] = await _third_parties(db, org.today)
+    # Phase 4B: branding, charts, and position figures for a past period.
+    pack["cover"]["branding"] = await load_branding(db)
+    pack["basis"] = {"position": "live"}
+    snapshot = None
+    if period_end < org.today:
+        snapshot = await snapshot_for(db, period_end)
+        if snapshot is None:
+            pack["basis"] = {"position": "live", "reason": "no_snapshot"}
+        else:
+            as_of, figures = snapshot
+            apply_snapshot(pack, figures, as_of, date_format=org.date_format)
+            pack["basis"] = {"position": "snapshot", "snapshot_as_of": as_of, "period_end": period_end}
+    if "appetite" in sections:
+        await add_appetite_charts(db, pack, org, period_end, snapshot)
+    if "kris" in sections:
+        await add_kri_trend(db, pack, period_end)
     return pack
 
 
@@ -1517,7 +1689,9 @@ async def generate(
     from app.services import audit, storage
 
     start, end = resolve_period(period_start, period_end, today=org.today, fiscal_start_month=org.fiscal_start_month)
-    keys = normalise_sections(sections)
+    if sections is None and getattr(committee, "board_pack_sections", None):
+        sections = committee.board_pack_sections
+    keys = normalise_sections(sections, keep_order=True)
     pack_id = uuid.uuid4()
     title = (title or "").strip()[:255] or pack_title(
         committee=getattr(committee, "name", None), meeting=getattr(meeting, "title", None),
@@ -1528,6 +1702,8 @@ async def generate(
         id=pack_id, tenant_id=org.tenant_id, committee_id=getattr(committee, "id", None),
         meeting_id=getattr(meeting, "id", None), title=title, period_start=start, period_end=end,
         sections=keys, generated_by_id=getattr(actor, "id", None), status=READY, error="",
+        review_state=DRAFT, contributor_ids=[str(actor.id)] if getattr(actor, "id", None) else [],
+        commentary={}, basis={}, distribution=[],
     )
     written: list[str] = []
     files: dict[str, str] = {}
@@ -1535,6 +1711,9 @@ async def generate(
         async with db.begin_nested():
             data = await build_pack(db, org, period_start=start, period_end=end, sections=keys, title=title,
                                     committee=committee, meeting=meeting, generated_by=by, viewer=actor)
+            data["review_state"] = DRAFT
+            row.content = encode_content(data)
+            row.basis = encode_content(data.get("basis") or {})
             pdf, xlsx = to_pdf(data), to_xlsx(data)
             entity_type, entity_id = attach_target(pack_id, committee, meeting)
             stem = file_stem(title, end)
@@ -1556,6 +1735,7 @@ async def generate(
         logger.exception("Board pack generation failed for tenant %s", org.tenant_id)
         row.status, row.error = FAILED, error_text(exc)
         row.pdf_file_id = row.xlsx_file_id = None
+        row.content = None
         files = {}
     row.generated_at = datetime.now(timezone.utc)
     db.add(row)
@@ -1602,7 +1782,8 @@ async def generate_due_packs(db, tenant_id, *, today: date | None = None) -> lis
     org = await org_context(db, tenant_id)
     today = today or org.today
     committees = (await db.execute(
-        select(Committee.id, Committee.name, Committee.reference, Committee.board_pack_days_before)
+        select(Committee.id, Committee.name, Committee.reference, Committee.board_pack_days_before,
+               Committee.board_pack_sections)
         .where(Committee.deleted.is_(False), Committee.status == CommitteeStatus.active,
                Committee.board_pack_days_before.is_not(None), Committee.board_pack_days_before > 0)
     )).all()
@@ -1625,8 +1806,526 @@ async def generate_due_packs(db, tenant_id, *, today: date | None = None) -> lis
             if not await db.scalar(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": _lock_key(m.id)}):
                 continue
             made.append(await generate(
-                db, org, committee=SimpleNamespace(id=c.id, name=c.name, reference=c.reference),
+                db, org, committee=SimpleNamespace(id=c.id, name=c.name, reference=c.reference,
+                                                   board_pack_sections=getattr(c, "board_pack_sections", None)),
                 meeting=SimpleNamespace(id=m.id, title=m.title, reference=m.reference, meeting_date=m.meeting_date),
                 reason=f"{days} day(s) before the meeting",
             ))
     return made
+
+
+# ===========================================================================
+# Phase 4B: branding, past-period snapshots, charts, stored content, sign-off
+# ===========================================================================
+async def load_branding(db) -> dict:
+    """The organisation's pack branding (defaults when none is set). ``logo_path`` is the
+    on-disk path of the logo file when one is set and still present."""
+    from sqlalchemy import select
+
+    from app.models.collab import StoredFile
+    from app.models.governance import BoardPackBranding
+
+    row = await db.scalar(select(BoardPackBranding))
+    if row is None:
+        return {"cover_title": "", "primary_colour": "", "classification": DEFAULT_CLASSIFICATION, "logo_path": None}
+    logo_path = None
+    if row.logo_file_id:
+        sf = await db.scalar(select(StoredFile).where(StoredFile.id == row.logo_file_id))
+        if sf is not None:
+            try:
+                from app.services import storage
+
+                path = storage.resolve_path(sf.tenant_id, sf.storage_key)
+                logo_path = str(path) if path.exists() else None
+            except Exception:  # noqa: BLE001 - a missing logo never stops a pack
+                logo_path = None
+    return {"cover_title": row.cover_title or "", "primary_colour": row.primary_colour or "",
+            "classification": row.classification or DEFAULT_CLASSIFICATION, "logo_path": logo_path}
+
+
+async def snapshot_for(db, period_end: date) -> tuple[date, dict] | None:
+    """The period snapshot nearest ``period_end`` and its figures ({key: {dimension:
+    value}}), or None when none is near enough."""
+    from app.services import snapshots
+
+    dates = await snapshots.available_dates(
+        db, since=period_end - timedelta(days=snapshots.MAX_DISTANCE_DAYS))
+    as_of = snapshots.nearest_date(dates, period_end)
+    if as_of is None:
+        return None
+    index = snapshots.index_rows(await snapshots.load_rows(db, [as_of]))
+    return as_of, index.get(as_of, {})
+
+
+def apply_snapshot(pack: dict, figures: Mapping[str, Mapping[str, dict]], as_of: date,
+                   date_format: str = "DD/MM/YYYY") -> None:
+    """Replace the pack's position figures with those of the period snapshot ``figures``
+    (``snapshots`` keys). A figure the snapshot doesn't hold stays as at generation, and
+    the section says so. Movement, failed tests and incidents are period figures and are
+    never replaced. Pure (mutates ``pack``)."""
+    from app.services import snapshots as sn
+
+    when = format_date(as_of, date_format)
+    notes: dict[str, list[str]] = pack.setdefault("position_notes", {})
+    said = f"Position figures are from the period snapshot of {when}, the one nearest the period end."
+    missing = "No period snapshot holds these figures, so they are as at the day the pack was generated."
+
+    def one(key):
+        return (figures.get(key) or {}).get("")
+
+    if "summary" in pack:
+        health = one(sn.HEALTH)
+        total = one(sn.APPETITE_TOTAL)
+        assurance = one(sn.ASSURANCE)
+        comp = one(sn.COMPLIANCE_OVERALL)
+        kri = one(sn.KRI_STATUS)
+        if health or total:
+            summary = pack["summary"]
+            if health:
+                summary["score"], summary["band"] = health.get("score"), health.get("band") or "no_data"
+                summary["components"], summary["scored"], summary["total"], summary["weight_pct"] = [], 0, 0, None
+            headlines = []
+            if total:
+                headlines.append(("Risks above tolerance", f"{total.get('breach', 0)} of {total.get('risks', 0)}"))
+            if assurance:
+                headlines.append(("Operating controls effective or partially effective",
+                                  f"{int(assurance.get('effective', 0)) + int(assurance.get('partially_effective', 0))} "
+                                  f"of {assurance.get('operating', 0)}"))
+            if comp:
+                headlines.append(("Clauses assured by a working control", fmt_pct(comp.get("assured_pct"))))
+            if kri:
+                headlines.append(("KRIs at red", str(kri.get("red", 0))))
+            summary["headlines"] = headlines
+            summary["actions"] = []
+            notes["summary"] = [said + " The score's make-up and the open decisions are not kept in a snapshot."]
+        else:
+            notes["summary"] = [missing]
+    if "appetite" in pack:
+        total = one(sn.APPETITE_TOTAL)
+        if total:
+            cats = figures.get(sn.APPETITE_CATEGORY) or {}
+            rows = [{"label": v.get("label") or "Category", "appetite": v.get("appetite"), "tolerance": v.get("tolerance"),
+                     "risks": v.get("risks", 0), "within": v.get("within", 0), "elevated": v.get("elevated", 0),
+                     "breach": v.get("breach", 0)} for _d, v in sorted(cats.items(), key=lambda kv: (kv[0] == "default", -int(kv[1].get("breach") or 0)))]
+            if not rows:
+                rows = [{"label": "All categories (organisation appetite)", "appetite": total.get("appetite"),
+                         "tolerance": total.get("tolerance"), "risks": total.get("risks", 0),
+                         "within": total.get("within", 0), "elevated": total.get("elevated", 0), "breach": total.get("breach", 0)}]
+            pack["appetite"].update({"appetite": total.get("appetite"), "tolerance": total.get("tolerance"),
+                                     "total": total.get("risks", 0), "within": total.get("within", 0),
+                                     "elevated": total.get("elevated", 0), "breach": total.get("breach", 0), "rows": rows})
+            notes["appetite"] = [said] + ([total["basis"]] if total.get("basis") else [])
+        else:
+            notes["appetite"] = [missing]
+    if "top_risks" in pack:
+        top = one(sn.TOP_RISKS)
+        if top is not None:
+            pack["top_risks"] = {"rows": [
+                {**r, "trend_text": f"As at {when}", "trend": "unknown"} for r in top.get("rows", [])]}
+            notes["top_risks"] = [said]
+        else:
+            notes["top_risks"] = [missing]
+    if "assurance" in pack:
+        a = one(sn.ASSURANCE)
+        if a:
+            for k in ("total", "effective", "partially_effective", "ineffective", "not_assessed", "not_operating",
+                      "tests_overdue", "last_test_failed"):
+                if k in a:
+                    pack["assurance"][k] = a[k]
+            notes["assurance"] = [said + " Failed tests are those conducted in the period."]
+        else:
+            notes["assurance"] = [missing]
+    if "compliance" in pack:
+        overall = one(sn.COMPLIANCE_OVERALL)
+        if overall is not None:
+            pack["compliance"] = {"overall_assured_pct": overall.get("assured_pct"), "rows": [
+                {"name": v.get("name"), "applicable": v.get("applicable", 0), "assured": v.get("assured", 0),
+                 "assured_pct": v.get("assured_pct"), "unassessed": v.get("unassessed", 0),
+                 "failing": v.get("failing", 0), "unmapped": v.get("unmapped", 0), "gaps": v.get("gaps", 0),
+                 "compliant_pct": v.get("compliant_pct")}
+                for _d, v in sorted((figures.get(sn.COMPLIANCE_FRAMEWORK) or {}).items(), key=lambda kv: str(kv[1].get("name")))
+            ]}
+            notes["compliance"] = [said]
+        else:
+            notes["compliance"] = [missing]
+    if "kris" in pack:
+        status = one(sn.KRI_STATUS)
+        if status:
+            values = figures.get(sn.KRI_VALUE) or {}
+            listed = sorted(
+                ((d, v) for d, v in values.items() if v.get("status") in ("red", "amber")),
+                key=lambda kv: (0 if kv[1].get("status") == "red" else 1, kv[1].get("reference") or "", kv[1].get("name") or ""))
+            pack["kris"] = {**{k: status.get(k, 0) for k in ("green", "amber", "red", "no_data")}, "rows": [
+                {"id": d, "reference": v.get("reference") or "", "name": v.get("name") or "", "status": v.get("status"),
+                 "value": v.get("value"), "unit": v.get("unit") or "", "warning": None, "limit": None, "lower": None,
+                 "upper": None, "direction": "", "owner": "", "as_of": as_of}
+                for d, v in listed]}
+            notes["kris"] = [said + " Thresholds are not kept in a snapshot."]
+        else:
+            notes["kris"] = [missing]
+    if "issues" in pack:
+        issues = one(sn.ISSUES_OPEN)
+        if issues:
+            by = issues.get("by_severity") or {}
+            pack["issues"].update({
+                "open": issues.get("open", 0), "overdue": issues.get("overdue", 0), "date_moved": 0,
+                "by_severity": [{"severity": sev, "open": int(by.get(sev, 0) or 0), "overdue": 0, "date_moved": 0,
+                                 "moves": 0} for sev in SEVERITIES],
+                "overdue_rows": [],
+            })
+            notes["issues"] = [said + " The list of overdue issues and date moves are shown only for a pack as at today."]
+        else:
+            notes["issues"] = [missing]
+    if "third_parties" in pack:
+        notes["third_parties"] = [missing]
+
+
+async def add_appetite_charts(db, pack: dict, org: OrgContext, period_end: date, snapshot) -> None:
+    """The heat map (the snapshot's for a past period, else live) and the appetite trend
+    over the last four quarter ends before the period end."""
+    from sqlalchemy import select
+
+    from app.models.risk import RiskSetting
+    from app.services import snapshots
+    from app.services.risk_settings import scale_for
+
+    appetite = pack.get("appetite")
+    if appetite is None:
+        return
+    heat = None
+    if snapshot is not None:
+        heat = (snapshot[1].get(snapshots.HEATMAP) or {}).get("")
+    if heat is None:
+        heat = await snapshots.live_heatmap(db)
+    heat = dict(heat)
+    settings = await db.scalar(select(RiskSetting))
+    size = int(heat.get("size") or 5)
+    if settings is not None:
+        scale = scale_for(settings)
+        heat["bands"] = {f"{like},{imp}": _v(scale.for_cell(like, imp)) for like in range(1, size + 1)
+                         for imp in range(1, size + 1)}
+    else:
+        heat["bands"] = {f"{like},{imp}": fraction_band(like * imp, size * size)
+                         for like in range(1, size + 1) for imp in range(1, size + 1)}
+    appetite["heatmap"] = heat
+    ends = [e for e in snapshots.quarter_ends(period_end + timedelta(days=1), TREND_QUARTERS, org.fiscal_start_month)]
+    dates = await snapshots.available_dates(db, since=ends[0] - timedelta(days=snapshots.MAX_DISTANCE_DAYS))
+    points = snapshots.trend_points(dates, ends)
+    index = snapshots.index_rows(await snapshots.load_rows(db, [p.as_of for p in points]))
+    trend = snapshots.appetite_series(index, points)
+    if not trend or trend[-1]["date"] != period_end:
+        trend.append({"date": period_end, "as_of": period_end, "risks": appetite.get("total"),
+                      "within": appetite.get("within"), "elevated": appetite.get("elevated"),
+                      "breach": appetite.get("breach")})
+    appetite["trend"] = trend
+
+
+def fraction_band(score: int, max_score: int) -> str:
+    """Band for a cell when the organisation's bands aren't loaded. Pure."""
+    share = score / max_score if max_score else 0
+    return "critical" if share > 0.64 else "high" if share > 0.4 else "medium" if share > 0.16 else "low"
+
+
+async def add_kri_trend(db, pack: dict, period_end: date) -> None:
+    """Each listed KRI's recent readings up to the period end."""
+    from sqlalchemy import select
+
+    from app.models.operational_risk import KriMeasurement
+
+    kris = pack.get("kris")
+    if not kris:
+        return
+    ids = []
+    for r in kris.get("rows", []):
+        try:
+            ids.append(uuid.UUID(str(r.get("id"))))
+        except (TypeError, ValueError):
+            continue
+    trend: dict[str, list] = {}
+    if ids:
+        for kid, as_of, value in (await db.execute(
+            select(KriMeasurement.kri_id, KriMeasurement.as_of_date, KriMeasurement.value)
+            .where(KriMeasurement.kri_id.in_(ids), KriMeasurement.as_of_date <= period_end)
+            .order_by(KriMeasurement.kri_id, KriMeasurement.as_of_date.desc(), KriMeasurement.created_at.desc())
+        )).all():
+            bucket = trend.setdefault(str(kid), [])
+            if len(bucket) < KRI_TREND_READINGS and value is not None:
+                bucket.append({"as_of": as_of, "value": float(value)})
+    kris["trend"] = {k: list(reversed(v)) for k, v in trend.items()}
+
+
+# ------------------------------------------------------------- stored content ---
+def encode_content(value: Any) -> Any:
+    """The pack's figures as JSON: dates and datetimes tagged so they come back as such;
+    the timezone object is dropped (it is rebuilt from its name). Pure."""
+    from decimal import Decimal
+
+    if isinstance(value, dict):
+        return {str(k): encode_content(v) for k, v in value.items() if k != "tz"}
+    if isinstance(value, (list, tuple)):
+        return [encode_content(v) for v in value]
+    if isinstance(value, datetime):
+        return {"$dt": _aware(value).isoformat()}
+    if isinstance(value, date):
+        return {"$d": value.isoformat()}
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if hasattr(value, "value") and not isinstance(value, (str, int, float, bool)):
+        return value.value
+    return value
+
+
+def decode_content(value: Any) -> Any:
+    """:func:`encode_content` reversed; the cover's ``tz`` is rebuilt. Pure."""
+    def walk(v):
+        if isinstance(v, dict):
+            if set(v) == {"$dt"}:
+                return datetime.fromisoformat(v["$dt"])
+            if set(v) == {"$d"}:
+                return date.fromisoformat(v["$d"])
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        return v
+
+    out = walk(value or {})
+    cover = out.get("cover")
+    if isinstance(cover, dict):
+        from app.services import incident_clock
+
+        cover["tz"] = incident_clock.zone(cover.get("timezone"))
+    return out
+
+
+# ------------------------------------------------------------------ sign-off ---
+def lifecycle_refusal(*, action: str, review_state: str, status: str, actor_id: Any,
+                      contributor_ids: Iterable[Any], dual_control: bool) -> str | None:
+    """Why ``actor`` may not take ``action`` (commentary | review | return | release) on a
+    pack, or None. Pure.
+
+    * commentary — not on a released pack, nor a failed one;
+    * review — a ready draft; not by anyone who shaped the pack while four-eyes applies;
+    * return — a reviewed pack back to draft;
+    * release — a reviewed pack; not by anyone who shaped it while four-eyes applies."""
+    if status != READY:
+        return "This pack could not be generated; generate it again."
+    if action == "commentary":
+        return "A released pack is final; generate a new pack to change it." if review_state == RELEASED else None
+    makers = {str(c) for c in contributor_ids or () if c}
+    own = dual_control and actor_id is not None and str(actor_id) in makers
+    if action == "review":
+        if review_state != DRAFT:
+            return f"Only a draft can be marked reviewed; this pack is {review_state}."
+        if own:
+            return ("Segregation of duties: you generated this pack or wrote its commentary, so someone else "
+                    "must review it.")
+        return None
+    if action == "return":
+        return None if review_state == REVIEWED else "Only a reviewed pack can be returned to draft."
+    if action == "release":
+        if review_state != REVIEWED:
+            return "A pack must be reviewed before it is released." if review_state == DRAFT else "This pack is already released."
+        if own:
+            return ("Segregation of duties: you generated this pack or wrote its commentary, so someone else "
+                    "must release it.")
+        return None
+    return f"Unknown action: {action}"
+
+
+def clean_commentary(sections: Sequence[str], commentary: Mapping[str, Any]) -> dict[str, str]:
+    """Commentary keyed by the pack's own sections, trimmed; blank entries dropped.
+    Raises :class:`PackError` for a section the pack doesn't have or text too long. Pure."""
+    out: dict[str, str] = {}
+    for key, text in (commentary or {}).items():
+        if key not in sections:
+            raise PackError(f"This pack has no '{key}' section.")
+        value = str(text or "").strip()
+        if len(value) > COMMENTARY_MAX:
+            raise PackError(f"Commentary for {SECTION_TITLES.get(key, key)} is longer than {COMMENTARY_MAX} characters.")
+        if value:
+            out[key] = value
+    return out
+
+
+def distribution_list(members: Iterable[Any]) -> list[dict]:
+    """Who a released pack goes to: the committee's active member users, once each, in
+    name order. Members need user_id, full_name, email, is_active. Pure."""
+    seen: dict = {}
+    for m in members:
+        if not getattr(m, "is_active", True) or m.user_id in seen:
+            continue
+        seen[m.user_id] = {"user_id": str(m.user_id), "name": m.full_name or m.email or "", "email": m.email or "",
+                           "emailed": False}
+    return sorted(seen.values(), key=lambda d: d["name"].lower())
+
+
+async def render_stored(db, org: OrgContext, pack, *, uploader: str) -> None:
+    """Re-render the pack's files from its stored figures with its current commentary,
+    review state and branding; the old files are removed once the new ones are filed."""
+    from sqlalchemy import select
+
+    from app.models.collab import StoredFile
+    from app.services import storage
+
+    if not pack.content:
+        raise PackError("This pack predates stored figures; generate a new pack instead.")
+    data = decode_content(pack.content)
+    data["commentary"] = dict(pack.commentary or {})
+    data["review_state"] = pack.review_state
+    data["basis"] = decode_content(pack.basis or {}) if pack.basis else data.get("basis", {})
+    data.setdefault("cover", {})["branding"] = await load_branding(db)
+    pdf, xlsx = to_pdf(data), to_xlsx(data)
+    entity_type, entity_id = attach_target(pack.id, _ref(pack.committee_id),
+                                           _ref(pack.meeting_id))
+    stem = file_stem(pack.title, pack.period_end or org.today)
+    old_ids = [f for f in (pack.pdf_file_id, pack.xlsx_file_id) if f]
+    pdf_file = await store_file(db, org.tenant_id, data=pdf, filename=f"{stem}.pdf", content_type="application/pdf",
+                                entity_type=entity_type, entity_id=entity_id, title=f"{pack.title} (PDF)",
+                                uploaded_by=uploader)
+    xlsx_file = await store_file(db, org.tenant_id, data=xlsx, filename=f"{stem}.xlsx",
+                                 content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                 entity_type=entity_type, entity_id=entity_id, title=f"{pack.title} (XLSX)",
+                                 uploaded_by=uploader)
+    pack.pdf_file_id, pack.xlsx_file_id = pdf_file.id, xlsx_file.id
+    if old_ids:
+        for old in (await db.scalars(select(StoredFile).where(StoredFile.id.in_(old_ids)))).all():
+            storage.delete_object(old.storage_key)
+            await db.delete(old)
+    await db.flush()
+
+
+def _ref(entity_id):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=entity_id) if entity_id else None
+
+
+async def set_commentary(db, org: OrgContext, pack, actor, commentary: Mapping[str, Any]):
+    """Replace the pack's commentary and re-render it. A reviewed pack goes back to draft
+    (what was reviewed has changed); the writer becomes one of its makers."""
+    from app.services import audit
+
+    refusal = lifecycle_refusal(action="commentary", review_state=pack.review_state, status=pack.status,
+                                actor_id=actor.id, contributor_ids=pack.contributor_ids, dual_control=False)
+    if refusal:
+        raise PackError(refusal)
+    cleaned = clean_commentary(list(pack.sections or []), commentary)
+    before = dict(pack.commentary or {})
+    if cleaned == before:
+        return pack
+    back_to_draft = pack.review_state == REVIEWED
+    pack.commentary = cleaned
+    if str(actor.id) not in {str(c) for c in pack.contributor_ids or []}:
+        pack.contributor_ids = list(pack.contributor_ids or []) + [str(actor.id)]
+    if back_to_draft:
+        pack.review_state, pack.reviewed_by_id, pack.reviewed_at = DRAFT, None, None
+    await render_stored(db, org, pack, uploader=actor.email)
+    changed = sorted(k for k in set(before) | set(cleaned) if before.get(k) != cleaned.get(k))
+    await audit.record(
+        db, actor=actor, action="board_pack_commentary", entity_type="board_pack", entity_id=pack.id,
+        summary=(f"Updated commentary on board pack '{pack.title}': "
+                 + ", ".join(SECTION_TITLES.get(k, k) for k in changed)
+                 + ("; returned to draft for a fresh review" if back_to_draft else ""))[:500],
+        changes={"sections": changed, "returned_to_draft": back_to_draft},
+    )
+    return pack
+
+
+async def review_pack(db, pack, actor, note: str = ""):
+    from app.services import audit, dual_control
+
+    required, _rule = await dual_control.dual_control_required(db, DUAL_CONTROL_MODULE, DUAL_CONTROL_ACTION)
+    refusal = lifecycle_refusal(action="review", review_state=pack.review_state, status=pack.status,
+                                actor_id=actor.id, contributor_ids=pack.contributor_ids, dual_control=required)
+    if refusal:
+        raise PackError(refusal)
+    pack.review_state, pack.reviewed_by_id, pack.reviewed_at = REVIEWED, actor.id, datetime.now(timezone.utc)
+    await db.flush()
+    await audit.record(db, actor=actor, action="board_pack_review", entity_type="board_pack", entity_id=pack.id,
+                       summary=f"Reviewed board pack '{pack.title}'" + (f": {note}" if note else ""),
+                       changes={"review_state": f"{DRAFT} -> {REVIEWED}", **({"note": note} if note else {})})
+    return pack
+
+
+async def return_pack(db, pack, actor, note: str = ""):
+    from app.services import audit
+
+    refusal = lifecycle_refusal(action="return", review_state=pack.review_state, status=pack.status,
+                                actor_id=actor.id, contributor_ids=pack.contributor_ids, dual_control=False)
+    if refusal:
+        raise PackError(refusal)
+    pack.review_state, pack.reviewed_by_id, pack.reviewed_at = DRAFT, None, None
+    await db.flush()
+    await audit.record(db, actor=actor, action="board_pack_return", entity_type="board_pack", entity_id=pack.id,
+                       summary=f"Returned board pack '{pack.title}' to draft" + (f": {note}" if note else ""),
+                       changes={"review_state": f"{REVIEWED} -> {DRAFT}", **({"note": note} if note else {})})
+    return pack
+
+
+async def committee_recipients(db, committee_id) -> list[dict]:
+    from sqlalchemy import select
+
+    from app.models.governance import CommitteeMember
+    from app.models.identity import User
+
+    if committee_id is None:
+        return []
+    rows = (await db.execute(
+        select(CommitteeMember.user_id, User.full_name, User.email, User.is_active)
+        .join(User, User.id == CommitteeMember.user_id)
+        .where(CommitteeMember.committee_id == committee_id)
+    )).all()
+    return distribution_list(rows)
+
+
+async def release_pack(db, org: OrgContext, pack, actor):
+    """Release a reviewed pack: final files (no draft marking), then each committee member
+    user is notified in the app and e-mailed a link."""
+    from app.models.enums import NotificationCategory
+    from app.models.notification import EVENT_PREFIX, Notification
+    from app.services import audit, dual_control, email
+
+    required, _rule = await dual_control.dual_control_required(db, DUAL_CONTROL_MODULE, DUAL_CONTROL_ACTION)
+    refusal = lifecycle_refusal(action="release", review_state=pack.review_state, status=pack.status,
+                                actor_id=actor.id, contributor_ids=pack.contributor_ids, dual_control=required)
+    if refusal:
+        raise PackError(refusal)
+    pack.review_state, pack.released_by_id, pack.released_at = RELEASED, actor.id, datetime.now(timezone.utc)
+    if pack.content:
+        await render_stored(db, org, pack, uploader=actor.email)
+    recipients = await committee_recipients(db, pack.committee_id)
+    link = f"/board?pack={pack.id}"
+    period = period_text(pack.period_start, pack.period_end, org.date_format) if pack.period_start and pack.period_end else ""
+    for r in recipients:
+        db.add(Notification(
+            tenant_id=org.tenant_id, user_id=uuid.UUID(r["user_id"]), role_name="",
+            title=f"Board pack released: {pack.title}"[:255],
+            body=(f"The pack for {period} is ready to read." if period else "The pack is ready to read."),
+            category=NotificationCategory.info, entity_type="board_pack", entity_id=pack.id, link=link,
+            dedup_key=f"{EVENT_PREFIX}board-pack-released:{pack.id}:{r['user_id']}"[:255],
+        ))
+        if r["email"]:
+            url = email.absolute_url(link)
+            subject = f"{org.name}: board pack released — {pack.title}"[:200]
+            text = (f"Dear {r['name']},\n\nThe board pack '{pack.title}'" + (f" for {period}" if period else "")
+                    + f" has been released to you.\n\nRead it here: {url}\n\n{DEFAULT_CLASSIFICATION}.")
+            html = (f"<p>Dear {escape(r['name'])},</p><p>The board pack <b>{escape(pack.title)}</b>"
+                    + (f" for {escape(period)}" if period else "")
+                    + f" has been released to you.</p><p><a href=\"{escape(url)}\">Open the board pack</a></p>"
+                    f"<p style=\"color:#6b7280\">{DEFAULT_CLASSIFICATION}.</p>")
+            try:
+                r["emailed"] = bool(await email.send_email([r["email"]], subject, html, text))
+            except Exception:  # noqa: BLE001 - a mail failure never undoes a release
+                logger.exception("Board pack e-mail to %s failed", r["email"])
+    pack.distribution = recipients
+    await db.flush()
+    await audit.record(
+        db, actor=actor, action="board_pack_release", entity_type="board_pack", entity_id=pack.id,
+        summary=(f"Released board pack '{pack.title}' to {len(recipients)} committee member(s)")[:500],
+        changes={"review_state": f"{REVIEWED} -> {RELEASED}",
+                 "recipients": [r["email"] or r["name"] for r in recipients],
+                 "emailed": sum(1 for r in recipients if r["emailed"])},
+    )
+    return pack

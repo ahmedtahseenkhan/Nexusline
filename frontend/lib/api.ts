@@ -110,6 +110,9 @@ export type RiskExportScope = {
   status?: string;
   category?: string;
   search?: string;
+  /** Any other register list filter (needs_review, level, appetite, pending_validation…):
+   *  the PDF endpoint takes exactly the list's filters. */
+  [filter: string]: string | undefined;
 };
 
 /** Filesystem-safe fragment of a record's name, for download filenames. */
@@ -341,7 +344,6 @@ export interface Assessment extends AssessmentSummary {
   vendor_id: string | null;
   questionnaire_id: string;
   questionnaire: Questionnaire | null;
-  access_hash: string;
   submitted_at: string | null;
   review_notes: string;
   max_score: number;
@@ -1661,6 +1663,8 @@ export interface RiskMatrix {
   impact_levels: MatrixLevel[];
   /** Server-derived bands; colour from these so client and server never disagree. */
   bands: MatrixBand[];
+  /** The hierarchy level the map is aggregated to (null = every risk plotted). */
+  level?: number | null;
 }
 export interface CollabFile {
   id: string;
@@ -2349,7 +2353,10 @@ export const api = {
   riskAlerts: () => request<Risk[]>("/risk-alerts"),
   riskAggregate: () => request<RiskAggregate>("/risk-aggregate"),
   /** `board` plots only validated risks (out of Draft, not accepted or closed) — the dashboard's view. */
-  riskMatrix: (scope: "register" | "board" = "register") => request<RiskMatrix>(`/risk-matrix?scope=${scope}`),
+  /** `level` aggregates the map to one hierarchy level: each risk at that level is plotted
+   *  where the worst risk in its branch sits. */
+  riskMatrix: (scope: "register" | "board" = "register", level?: 1 | 2 | 3) =>
+    request<RiskMatrix>(`/risk-matrix?scope=${scope}${level ? `&level=${level}` : ""}`),
 
   // Risk methodology: matrix scale, scale wording and the residual-suggestion policy.
   riskMatrixConfig: () => request<RiskMatrixConfig>("/risk-matrix-config"),

@@ -235,6 +235,26 @@ class VendorTiering(BaseModel):
     questionnaire_id: uuid.UUID | None = None
 
 
+class VendorDueDiligence(BaseModel):
+    """Phase 4E: the latest reviewed due-diligence questionnaire of the vendor and what it
+    proposes (services/questionnaire_workflow.due_diligence_view)."""
+
+    assessment_id: uuid.UUID | None = None
+    title: str = ""
+    questionnaire: str = ""
+    reviewed_at: datetime | None = None
+    score_pct: float | None = None
+    band: str = ""
+    proposed_rating: str | None = None
+    overridden: bool = False
+    override_reason: str = ""
+    last_on: date | None = None
+    next_on: date | None = None
+    overdue: bool = False
+    open_findings: int = 0
+    in_progress: int = 0
+
+
 # ----------------------------------------------------------------------- vendor
 class VendorBase(BaseModel):
     name: str = Field(min_length=1, max_length=200)
@@ -317,6 +337,10 @@ class VendorUpdate(BaseModel):
     subcontractor_ids: list[uuid.UUID] | None = Field(default=None, description=_SUBS)
     data_residency_country_ids: list[uuid.UUID] | None = Field(default=None, description=_RESIDENCY)
     tier_override_reason: str | None = Field(default=None, description=_TIER_REASON)
+    risk_rating_override_reason: str | None = Field(
+        default=None,
+        description="Why the risk rating differs from the one proposed by the latest reviewed due-diligence questionnaire.",
+    )
 
     _ccy = field_validator("spend_currency")(_currency_or_blank)
 
@@ -357,6 +381,11 @@ class VendorRead(VendorBase):
     inherent_tier: str | None = None
     tier_override_reason: str = ""
     tiering: VendorTiering | None = None
+    # Phase 4E: due diligence driven by questionnaires.
+    risk_rating_override_reason: str = ""
+    last_due_diligence_on: date | None = None
+    next_due_diligence_on: date | None = None
+    due_diligence: VendorDueDiligence | None = None
     outsourcing: list[VendorOutsourcingFacts] = []
     concentration: VendorConcentration | None = None
 

@@ -7,7 +7,10 @@ import { Badge, Severity } from "@/components/badges";
 /* The register as a tree: enterprise (L1) → category (L2) → scenario (L3) risks. The board
    reads the top two levels; each node says how many risks sit below it and the worst
    exposure among them (residual when assessed, else inherent — as the dashboard ranks),
-   counted at every level even when the tree stops at categories. */
+   counted at every level even when the tree stops at categories. The figures (worst,
+   severity counts, above tolerance) take the board register only — scored, out of Draft,
+   not accepted or closed — so they match the dashboard; other risks stay in the tree,
+   marked "not in figures". */
 
 export type HierarchyNodeRef = {
   id: string;
@@ -18,6 +21,10 @@ export type HierarchyNodeRef = {
   severity: string | null;
   appetite_status: string | null;
   status: string;
+  /** Counted in the figures (on the board register). */
+  in_figures?: boolean;
+  /** False for a draft nobody has scored. */
+  scored?: boolean;
 };
 
 export type HierarchyNode = HierarchyNodeRef & {
@@ -26,6 +33,8 @@ export type HierarchyNode = HierarchyNodeRef & {
   worst: HierarchyNodeRef | null;
   by_severity: Record<string, number>;
   breaches: number;
+  /** Risks below left out of the figures. */
+  not_in_figures?: number;
   children: HierarchyNode[];
 };
 
@@ -91,11 +100,21 @@ export default function RiskHierarchyTree({ onOpen, onShowUnplaced, refreshKey =
           <button type="button" className="linklike" style={{ textDecoration: "none", textAlign: "left" }} onClick={() => onOpen(node.id)}>
             <span className="ref">{node.reference}</span> <span style={{ color: "var(--text-strong)" }}>{node.title}</span>
           </button>
-          <span><Severity value={node.severity} /> <span className="muted">({node.exposure ?? "—"})</span></span>
+          {node.scored === false
+            ? <span className="muted">Not scored</span>
+            : <span><Severity value={node.severity} /> <span className="muted">({node.exposure ?? "—"})</span></span>}
+          {node.in_figures === false && (
+            <span className="muted" style={{ fontSize: 12 }} title="Draft, never scored, accepted or closed: not counted in any figure">
+              not in figures
+            </span>
+          )}
           <span style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
             {node.descendants_count > 0 ? (
               <>
-                <span className="muted">{node.children_count} directly below · {node.descendants_count} in all</span>
+                <span className="muted">
+                  {node.children_count} directly below · {node.descendants_count} in all
+                  {(node.not_in_figures ?? 0) > 0 && <> · {node.not_in_figures} not in figures</>}
+                </span>
                 {high > 0 && <Badge tone="high">{high} high or critical</Badge>}
                 {node.breaches > 0 && <Badge tone="critical">{node.breaches} above tolerance</Badge>}
                 {node.worst && (

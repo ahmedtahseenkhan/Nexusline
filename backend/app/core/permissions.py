@@ -112,6 +112,11 @@ PERMISSION_CATALOG: dict[str, str] = {
     "riskquant:write": "Manage and simulate quantitative (FAIR) risk analyses",
     "ai:read": "View AI assist extractions",
     "ai:write": "Run AI assist / circular-intelligence extractions",
+    # --- Phase 4B: workspaces and board packs ---
+    "board:read": "View the board home: appetite, top risks, assurance, KRIs and committee decisions",
+    # Held apart from governance:write (which prepares packs and writes commentary): the
+    # person who signs a pack off for the committee is a separate decision.
+    "boardpack:release": "Review and release board packs to committee members",
 }
 
 ALL_PERMISSIONS = list(PERMISSION_CATALOG.keys())
@@ -178,6 +183,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "ccm:write",
             "ai:read",
             "ai:write",
+            "board:read",
         ],
     ),
     "Risk Approver": (
@@ -192,6 +198,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "workflow:read",
             "workflow:approve",
             "audit:read",
+            "board:read",
         ],
     ),
     "Compliance Manager": (
@@ -245,6 +252,8 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "dpo:write",
             "ai:read",
             "ai:write",
+            "board:read",
+            "boardpack:release",
         ],
     ),
     "Auditor": (
@@ -252,4 +261,10 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
         _READ_ONLY + ["internal_audit:write"],
     ),
     "Viewer": ("Read-only access", _READ_ONLY),
+    # Phase 4B: directors and committee members. The board home and the committee's
+    # released packs, nothing operational.
+    "Board Member": (
+        "Board and committee members: the board home, committee decisions and released board packs",
+        ["board:read", "governance:read"],
+    ),
 }

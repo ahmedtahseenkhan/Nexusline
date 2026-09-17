@@ -71,6 +71,7 @@ ENTITY_TYPES: dict[str, EntitySpec] = {
     "outsourcing_arrangement": _spec("Outsourcing arrangement", "outsourcing"),
     "assessment": _spec("Assessment", "assessment"),
     "questionnaire": _spec("Questionnaire", "assessment"),
+    "assessment_answer": _spec("Assessment answer", "assessment"),
     # --- assurance ---
     "audit_engagement": _spec("Audit engagement", "internal_audit"),
     "audit_finding": _spec("Audit finding", "internal_audit"),

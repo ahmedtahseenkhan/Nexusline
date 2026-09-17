@@ -98,7 +98,7 @@ def test_summary_and_filters():
     ])
     assert soa.summarize(rows) == {
         "total": 4, "applicable": 2, "excluded": 2, "no_control": 1, "missing_justification": 1,
-        "mapped": 1, "assured": 1,
+        "mapped": 1, "assured": 1, "via_crosswalk": 0,
     }
     assert [r.reference for r in soa.filter_rows(rows, "applicable")] == ["A.5.1", "A.5.2"]
     assert [r.reference for r in soa.filter_rows(rows, "excluded")] == ["A.5.23", "A.7.4"]

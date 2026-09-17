@@ -10,6 +10,10 @@ compliance, the posture shows what the mapping did achieve beside what it did no
 * **tested** — applicable clauses backed by a control whose test says it works
   (effective or partially effective: ``control_assurance`` "assured" coverage, the
   same rule the gap analysis and the dashboard use).
+* **via crosswalk** (phase 4C) — applicable clauses not tested directly (no control, or
+  an untested one) that an equivalent or containing clause of another framework covers
+  with a tested control (``services.crosswalks``). Shown beside the others, never added
+  to mapped or tested: it is a reason to adopt the mapping, not a mapping.
 
 "Applicable" is the gap analysis's and the dashboard's rule: every live clause whose
 status is not *not applicable*. Pure and duck-typed, so it is unit-tested without a
@@ -46,9 +50,12 @@ class Posture:
     #: Mapped, but no mapped control tested yet / every tested control failing.
     unassessed: int = 0
     failing: int = 0
+    #: Not tested directly, but covered by a tested control through a crosswalk.
+    via_crosswalk: int = 0
     compliant_pct: float = 0.0
     mapped_pct: float = 0.0
     assured_pct: float = 0.0
+    via_crosswalk_pct: float = 0.0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -66,8 +73,11 @@ def _coverage(requirement) -> str:
     return control_assurance.coverage_state(getattr(c, "effectiveness", None) for c in controls)
 
 
-def posture(requirements: Iterable) -> Posture:
-    """The posture of a set of clauses (archived ones are left out)."""
+def posture(requirements: Iterable, via_crosswalk=None) -> Posture:
+    """The posture of a set of clauses (archived ones are left out). ``via_crosswalk``
+    holds the ids of clauses covered via crosswalk (``crosswalks.via_crosswalk_for``);
+    a clause assured or failing on its own controls never counts there."""
+    via = via_crosswalk or ()
     out = Posture()
     for r in requirements:
         if getattr(r, "deleted", False):
@@ -87,9 +97,12 @@ def posture(requirements: Iterable) -> Posture:
             out.unassessed += 1
         elif cov == control_assurance.FAILING:
             out.failing += 1
+        if cov in (control_assurance.UNMAPPED, control_assurance.UNASSESSED) and getattr(r, "id", None) in via:
+            out.via_crosswalk += 1
     out.compliant_pct = pct(out.compliant, out.applicable)
     out.mapped_pct = pct(out.mapped, out.applicable)
     out.assured_pct = pct(out.assured, out.applicable)
+    out.via_crosswalk_pct = pct(out.via_crosswalk, out.applicable)
     return out
 
 
@@ -97,11 +110,12 @@ def combine(postures: Iterable[Posture]) -> Posture:
     """Several frameworks as one (the organisation-wide figure)."""
     out = Posture()
     for p in postures:
-        for name in ("total", "applicable", "compliant", "mapped", "assured", "unassessed", "failing"):
+        for name in ("total", "applicable", "compliant", "mapped", "assured", "unassessed", "failing", "via_crosswalk"):
             setattr(out, name, getattr(out, name) + getattr(p, name))
     out.compliant_pct = pct(out.compliant, out.applicable)
     out.mapped_pct = pct(out.mapped, out.applicable)
     out.assured_pct = pct(out.assured, out.applicable)
+    out.via_crosswalk_pct = pct(out.via_crosswalk, out.applicable)
     return out
 
 
@@ -114,4 +128,7 @@ def posture_line(p: Posture) -> str:
     a reader should weigh them. A framework with nothing applicable says so."""
     if not p.applicable:
         return "No applicable clauses"
-    return f"{_fmt(p.compliant_pct)} assessed compliant · {_fmt(p.mapped_pct)} mapped · {_fmt(p.assured_pct)} tested"
+    line = f"{_fmt(p.compliant_pct)} assessed compliant · {_fmt(p.mapped_pct)} mapped · {_fmt(p.assured_pct)} tested"
+    if p.via_crosswalk:
+        line += f" · {_fmt(p.via_crosswalk_pct)} covered via crosswalk"
+    return line

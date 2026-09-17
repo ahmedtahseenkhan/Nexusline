@@ -174,7 +174,8 @@ const SOURCE_TYPES = opts([
   "risk_assessment",
   "self_identified",
   "other",
-]);
+  "ccm",
+]).map((o) => (o.value === "ccm" ? { ...o, label: "Continuous monitoring" } : o));
 const ISSUE_STATUS = opts(["open", "in_progress", "remediated", "closed", "risk_accepted"]);
 /** What the edit form may set; closing goes through Validate and Close. */
 const OPEN_STATUS = opts(["open", "in_progress"]);
@@ -187,7 +188,7 @@ const ISSUE_FILTERS = {
   status: ["open", "in_progress", "remediated", "closed", "risk_accepted"],
   source_type: [
     "internal_audit", "compliance", "rcsa", "shariah", "assessment", "incident",
-    "external_inspection", "risk_assessment", "self_identified", "other",
+    "external_inspection", "risk_assessment", "self_identified", "other", "ccm",
   ],
   overdue: "boolean",
   regulator_related: "boolean",

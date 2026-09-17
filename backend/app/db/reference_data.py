@@ -176,10 +176,24 @@ async def ensure_reference_data(db: AsyncSession, tenant_id: UUID) -> int:
 
 async def ensure_tiering_questionnaire(db: AsyncSession, tenant_id: UUID) -> int:
     """Seed the "Inherent risk tiering" questionnaire (services/vendor_tiering.py) if the
-    tenant has none by that name. Insert-only: a tenant's edits to its questions or
-    scores are never overwritten. Returns rows added (the questionnaire counts as one)."""
-    from app.models.assessment import Question, QuestionOption, Questionnaire
+    tenant has no tiering questionnaire (by purpose) and none by that name. Insert-only:
+    a tenant's edits to its questions or scores are never overwritten. The seed is
+    published version 1 with ``purpose = vendor_tiering``, the tier bands and mandatory
+    questions in one section. Returns rows added (the questionnaire counts as one)."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from app.models.assessment import (
+        VERSION_PUBLISHED,
+        Question,
+        QuestionnaireSection,
+        QuestionOption,
+        Questionnaire,
+    )
+    from app.services import questionnaire_logic as ql
     from app.services.vendor_tiering import (
+        TIER_BANDS,
+        TIERING_PURPOSE,
         TIERING_QUESTIONNAIRE_DESCRIPTION,
         TIERING_QUESTIONNAIRE_NAME,
         TIERING_QUESTIONS,
@@ -191,14 +205,30 @@ async def ensure_tiering_questionnaire(db: AsyncSession, tenant_id: UUID) -> int
     }
     if TIERING_QUESTIONNAIRE_NAME.lower() in have:
         return 0
+    purposes = set((await db.scalars(select(Questionnaire.purpose))).all())
+    if TIERING_PURPOSE in purposes:
+        return 0
+    qid, sid = _uuid.uuid4(), _uuid.uuid4()
     q = Questionnaire(
-        tenant_id=tenant_id, name=TIERING_QUESTIONNAIRE_NAME, description=TIERING_QUESTIONNAIRE_DESCRIPTION
+        id=qid, family_id=qid, version=1, status=VERSION_PUBLISHED, purpose=TIERING_PURPOSE,
+        tenant_id=tenant_id, name=TIERING_QUESTIONNAIRE_NAME, description=TIERING_QUESTIONNAIRE_DESCRIPTION,
+        bands=[{"label": tier.capitalize(), "min_pct": minimum, "rating": tier} for minimum, tier in TIER_BANDS],
+        published_at=datetime.now(timezone.utc),
+        change_note="Seeded with the platform.",
     )
+    section = QuestionnaireSection(
+        id=sid, tenant_id=tenant_id, questionnaire_id=qid, key="tiering", title="Inherent risk",
+        description="Answer every question for the relationship as it stands, before the provider's own controls.",
+        order_index=0, conditions={},
+    )
+    q.sections = [section]
     q.questions = [
         Question(
-            tenant_id=tenant_id, text=text, guidance=guidance, order_index=i,
+            tenant_id=tenant_id, text=text, guidance=guidance, order_index=i, section_id=sid,
+            key=f"tier_{i + 1}_{ql.slug(text)[:24]}", qtype="single_choice", mandatory=True, weight=1.0,
+            conditions={}, config={},
             options=[
-                QuestionOption(tenant_id=tenant_id, label=label, score=score, order_index=j)
+                QuestionOption(tenant_id=tenant_id, label=label, score=score, order_index=j, value=f"s{int(score)}_{j}")
                 for j, (label, score) in enumerate(options)
             ],
         )

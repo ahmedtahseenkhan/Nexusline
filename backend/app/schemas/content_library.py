@@ -62,6 +62,8 @@ class InstallResult(BaseModel):
     #: An existing legacy or shallow copy was upgraded in place rather than a new one made.
     upgraded: bool = False
     previous_name: str | None = None
+    #: Shipped crosswalks recorded between this framework and the ones already installed.
+    crosswalks_added: int = 0
 
 
 class InstalledPack(BaseModel):
@@ -80,6 +82,24 @@ class PackControlRef(BaseModel):
     name: str = ""
 
 
+class PackCrosswalkMatch(BaseModel):
+    """An existing control a clause could reuse because the shipped crosswalk content
+    relates the clause to one that control already implements (common control set)."""
+
+    control: PackControlRef
+    #: The installed framework's clause the control is mapped to (``A.8.5``).
+    via_reference: str
+    via_framework: str
+    via_template: str
+    #: Read from the new clause: equivalent | subset | superset | intersects.
+    relationship: str
+    confidence: float
+    rationale: str = ""
+    source: str = ""
+    #: True for equivalent: reused unless a decision says create.
+    default_reuse: bool = False
+
+
 class PackPreviewRow(BaseModel):
     """One control-type clause of a pack and what installing it would do."""
 
@@ -88,13 +108,16 @@ class PackPreviewRow(BaseModel):
     #: The reference the control carries in the Control Catalogue (``CIS 6.3``).
     catalogue_reference: str
     title: str
-    #: create | match-by-reference | match-by-name | map-to-existing (a decision).
+    #: create | match-by-reference | match-by-name | reuse-via-crosswalk |
+    #: map-to-existing (a decision).
     action: str
     #: The existing control the clause lands on; None when a new one is created.
     control: PackControlRef | None = None
     #: The same-named existing control, when one exists — kept even when a decision
     #: chose "create", so the review can offer to reuse it again.
     name_match: PackControlRef | None = None
+    #: The best common-control candidate through a shipped crosswalk, whatever the action.
+    crosswalk_match: PackCrosswalkMatch | None = None
 
 
 class PackPreview(BaseModel):
@@ -108,6 +131,11 @@ class PackPreview(BaseModel):
     reuse: int = 0
     match_reference: int = 0
     match_name: int = 0
+    #: Rows reusing a control through an equivalent crosswalk (by default).
+    match_crosswalk: int = 0
+    #: Rows with a contained / containing / overlapping crosswalk candidate awaiting a
+    #: decision (created unless the decision says reuse).
+    crosswalk_to_decide: int = 0
     rows: list[PackPreviewRow] = Field(default_factory=list)
 
 

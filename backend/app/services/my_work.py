@@ -80,6 +80,24 @@ KINDS: tuple[tuple[str, str, str], ...] = (
     ("rcsa_action", "RCSA actions assigned to you", "Actions on open RCSAs where you are the action owner."),
     ("policy_ack", "Policies to acknowledge",
      "Published policies that apply to your roles and that you haven't acknowledged."),
+    # --- Phase 4B ---
+    ("assessment_review", "Vendor assessments to review",
+     "Third parties you manage have submitted their answers; review them."),
+    ("finding_follow_up", "Audit findings to validate",
+     "Findings on engagements you run whose agreed date has arrived: confirm the fix and close, or escalate."),
+    ("engagement_task", "Your audit engagements",
+     "Engagements you lead or work on with procedures still to perform."),
+    ("audit_remediation", "Audit findings you must fix", "Open audit findings naming you as the action owner."),
+    ("access_review", "Access reviews to certify", "Reviews where you are the reviewer, with accounts still to decide."),
+    ("assessment_chase", "Vendor assessments awaiting answers",
+     "Questionnaires sent to third parties you manage that are overdue or due soon."),
+    ("regulatory_change", "Regulatory changes and obligations",
+     "Circulars to assess and obligations to meet that you own."),
+    ("regulatory_return", "Regulatory returns due", "Returns you file with the regulator, overdue or due soon."),
+    ("incident_report", "Regulator notification deadlines",
+     "Pending regulator reports on incidents assigned to you."),
+    ("exception_expiry", "Exceptions expiring", "Approved exceptions you raised, approved or own that end within 30 days."),
+    ("declaration", "Declarations to submit", "Open declaration campaigns waiting for your submission."),
 )
 KIND_LABELS: dict[str, str] = {k: label for k, label, _hint in KINDS}
 
@@ -209,7 +227,7 @@ async def _module_off(db: AsyncSession) -> set[str]:
 
     choice = await db.scalar(select(TenantSettings.enabled_modules))
     off = set()
-    for key in ("operational_risk",):
+    for key in ("operational_risk", "internal_audit", "regulatory_change", "declarations"):
         if not modules.is_enabled(key) or (isinstance(choice, list) and key not in choice):
             off.add(key)
     return off
@@ -226,7 +244,7 @@ async def approvals_waiting(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     from app.models.approval import ApprovalAction, ApprovalRequest
     from app.models.enums import ApprovalStatus
     from app.services.notifications import (
-        APPROVE_PERMISSION, ROLE, USER, approval_recipients, approval_refusal,
+        APPROVE_PERMISSION, ROLE, USER, approval_recipients, approval_refusal, load_stage_gates,
     )
 
     if not ctx.holds(APPROVE_PERMISSION):
@@ -240,14 +258,19 @@ async def approvals_waiting(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
             .limit(ROW_CAP)
         )
     ).all()
+    # Phase 4: route stages assigned to a role go through the same eligibility rule as
+    # the Approvals page and the decide endpoint, so nothing listed here is refused there.
+    gates = await load_stage_gates(db, rows, ctx.directory) if rows else {}
     out = []
     for ap in rows:
+        gate = gates.get(ap.id)
         addressed = any(
             (kind == USER and value == ctx.user_id) or (kind == ROLE and value in ctx.role_names)
-            for kind, value in approval_recipients(ap, ctx.directory)
+            for kind, value in approval_recipients(ap, ctx.directory, gate)
         )
         if not addressed or approval_refusal(
             ap, user_id=ctx.user_id, email=ctx.email, permissions=ctx.permissions, voted_ids=(),
+            role_names=ctx.role_names, stage=gate,
         ) is not None:
             continue
         parts = []
@@ -693,14 +716,17 @@ async def my_attestations(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
                           link=_link("/vendors", vid), entity_type="vendor", entity_id=vid))
     # Assets by their own review date (record-page B4), for their approval owner (an
     # asset's owner is a business unit, not a person).
-    for aid, name, aclass, due in (
+    # Assets carry that owner as free text, so match it like the other text owners.
+    for aid, name, aclass, due, approver in (
         await db.execute(
-            select(Asset.id, Asset.name, Asset.asset_class, Asset.next_review_date)
-            .where(Asset.workflow_owner_id == ctx.user_id, Asset.deleted.is_(False),
+            select(Asset.id, Asset.name, Asset.asset_class, Asset.next_review_date, Asset.workflow_owner)
+            .where(Asset.workflow_owner != "", Asset.deleted.is_(False),
                    Asset.next_review_date.is_not(None), Asset.next_review_date <= ctx.horizon)
             .limit(ROW_CAP)
         )
     ).all():
+        if not names_me(ctx, approver):
+            continue
         it = getattr(aclass, "value", aclass) == "it_asset"
         out.append(ctx.mk("attestation", due=due, id=aid, title=name,
                           subtitle="IT asset review" if it else "Information asset review",
@@ -831,6 +857,345 @@ async def policies_to_acknowledge(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem
     ]
 
 
+# ============================================================ phase 4B kinds ===
+#: Exceptions show this many days before they expire.
+EXCEPTION_HORIZON_DAYS = 30
+#: Access-review, assessment and return look-ahead (they need more notice than a task).
+LONG_HORIZON_DAYS = 30
+
+
+def names_me(ctx: Ctx, *texts: str | None) -> bool:
+    """Whether any free-text person field names this user (an exact e-mail, or the one
+    active user with exactly that name). Lists (audit teams) are split on , ; and new
+    lines. Pure once the directory is loaded."""
+    if ctx.directory is None:
+        return False
+    import re
+
+    for text in texts:
+        for part in re.split(r"[,;\n]", text or ""):
+            if part.strip() and ctx.directory.person(part.strip()) == ctx.user_id:
+                return True
+    return False
+
+
+def _val(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+async def assessments_for_me(db: AsyncSession, ctx: Ctx) -> tuple[list[MyWorkItem], list[MyWorkItem]]:
+    """Submitted assessments to review, and sent ones still unanswered, for third parties
+    whose relationship owner is this user (or, with no owner set, for anyone who runs
+    assessments). Reads only ``status``, ``due_date``, ``vendor_id`` and ``title``."""
+    from app.models.assessment import Assessment
+    from app.models.vendor import Vendor
+
+    if not ctx.holds("assessment:read"):
+        return [], []
+    rows = (await db.execute(
+        select(Assessment.id, Assessment.title, Assessment.status, Assessment.due_date, Assessment.vendor_id,
+               Vendor.name.label("vendor"), Vendor.relationship_owner_id)
+        .outerjoin(Vendor, Vendor.id == Assessment.vendor_id)
+        .where(cast(Assessment.status, String).in_(("submitted", "sent", "in_progress")))
+        .limit(ROW_CAP)
+    )).all()
+    review, chase = [], []
+    long_horizon = ctx.today + timedelta(days=LONG_HORIZON_DAYS)
+    for r in rows:
+        mine = r.relationship_owner_id == ctx.user_id or (r.relationship_owner_id is None and ctx.holds("assessment:write"))
+        if not mine:
+            continue
+        status = _val(r.status)
+        if status == "submitted":
+            review.append(ctx.mk("assessment_review", due=r.due_date, id=r.id, title=r.title,
+                                 subtitle=f"{r.vendor or 'No third party'} · answers submitted",
+                                 link=_link("/assessments", r.id), entity_type="assessment", entity_id=r.id))
+        elif r.due_date is not None and r.due_date <= long_horizon:
+            chase.append(ctx.mk("assessment_chase", due=r.due_date, id=r.id, title=r.title,
+                                subtitle=f"{r.vendor or 'No third party'} · {status.replace('_', ' ')}",
+                                link=_link("/assessments", r.id), entity_type="assessment", entity_id=r.id))
+    return review, chase
+
+
+async def my_assessment_reviews(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    return (await assessments_for_me(db, ctx))[0]
+
+
+async def my_assessment_chases(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    return (await assessments_for_me(db, ctx))[1]
+
+
+async def _my_engagements(db: AsyncSession, ctx: Ctx) -> list:
+    from app.models.enums import AuditEngagementStatus
+    from app.models.internal_audit import AuditEngagement
+
+    if "internal_audit" in ctx.modules_off or not ctx.holds("internal_audit:read"):
+        return []
+    rows = (await db.execute(
+        select(AuditEngagement.id, AuditEngagement.reference, AuditEngagement.title, AuditEngagement.status,
+               AuditEngagement.lead_auditor, AuditEngagement.audit_team, AuditEngagement.planned_end)
+        .where(AuditEngagement.deleted.is_(False),
+               AuditEngagement.status.not_in((AuditEngagementStatus.cancelled,)))
+        .limit(ROW_CAP)
+    )).all()
+    return [r for r in rows if names_me(ctx, r.lead_auditor, r.audit_team)]
+
+
+async def my_engagement_tasks(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.enums import AuditProcedureResult
+    from app.models.internal_audit import AuditProcedure
+
+    mine = [r for r in await _my_engagements(db, ctx) if _val(r.status) != "closed"]
+    if not mine:
+        return []
+    pending = dict((await db.execute(
+        select(AuditProcedure.engagement_id, func_count())
+        .where(AuditProcedure.engagement_id.in_([r.id for r in mine]),
+               AuditProcedure.result == AuditProcedureResult.pending)
+        .group_by(AuditProcedure.engagement_id)
+    )).all())
+    out = []
+    for r in mine:
+        n = int(pending.get(r.id, 0) or 0)
+        status = _val(r.status)
+        if not n and status != "planned":
+            continue
+        out.append(ctx.mk(
+            "engagement_task", due=r.planned_end, id=r.id, title=r.title, reference=r.reference or "",
+            subtitle=(f"{status.capitalize()} · {n} procedure(s) still to perform" if n
+                      else "Planned · no procedures yet"),
+            link=_link("/internal-audit", r.id), entity_type="audit_engagement", entity_id=r.id,
+        ))
+    return out
+
+
+async def my_findings_to_validate(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.internal_audit import AuditFinding
+
+    mine = {r.id: r for r in await _my_engagements(db, ctx)}
+    if not mine:
+        return []
+    rows = (await db.execute(
+        select(AuditFinding.id, AuditFinding.reference, AuditFinding.title, AuditFinding.rating,
+               AuditFinding.action_owner, AuditFinding.due_date, AuditFinding.engagement_id)
+        .where(AuditFinding.engagement_id.in_(list(mine)), cast(AuditFinding.status, String).in_(("open", "in_progress")),
+               AuditFinding.due_date.is_not(None), AuditFinding.due_date <= ctx.horizon)
+        .limit(ROW_CAP)
+    )).all()
+    return [
+        ctx.mk("finding_follow_up", due=r.due_date, id=r.id, title=r.title, reference=r.reference or "",
+               subtitle=f"{_val(r.rating).capitalize()} · {mine[r.engagement_id].title}"
+                        + (f" · owner {r.action_owner}" if r.action_owner else ""),
+               link=_link("/internal-audit", r.engagement_id), entity_type="audit_engagement",
+               entity_id=r.engagement_id)
+        for r in rows
+    ]
+
+
+async def my_audit_remediation(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.internal_audit import AuditEngagement, AuditFinding
+
+    if "internal_audit" in ctx.modules_off:
+        return []
+    rows = (await db.execute(
+        select(AuditFinding.id, AuditFinding.reference, AuditFinding.title, AuditFinding.rating,
+               AuditFinding.action_owner, AuditFinding.due_date, AuditFinding.engagement_id,
+               AuditEngagement.title.label("engagement"))
+        .join(AuditEngagement, AuditEngagement.id == AuditFinding.engagement_id)
+        .where(AuditEngagement.deleted.is_(False), AuditFinding.action_owner != "",
+               cast(AuditFinding.status, String).in_(("open", "in_progress")))
+        .limit(ROW_CAP)
+    )).all()
+    link_ok = ctx.holds("internal_audit:read")
+    return [
+        ctx.mk("audit_remediation", due=r.due_date, id=r.id, title=r.title, reference=r.reference or "",
+               subtitle=f"{_val(r.rating).capitalize()} finding · {r.engagement}",
+               link=_link("/internal-audit", r.engagement_id) if link_ok else "",
+               entity_type="audit_engagement", entity_id=r.engagement_id)
+        for r in rows if names_me(ctx, r.action_owner)
+    ]
+
+
+async def my_access_reviews(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.access_review import AccessReview, AccessReviewItem
+    from app.models.enums import AccessDecision, AccessReviewStatus
+
+    if not ctx.holds("review:read"):
+        return []
+    rows = (await db.execute(
+        select(AccessReview.id, AccessReview.reference, AccessReview.name, AccessReview.reviewer,
+               AccessReview.system_name, AccessReview.due_date, AccessReview.status)
+        .where(AccessReview.deleted.is_(False), AccessReview.status != AccessReviewStatus.completed,
+               AccessReview.reviewer != "")
+        .limit(ROW_CAP)
+    )).all()
+    mine = [r for r in rows if names_me(ctx, r.reviewer)]
+    if not mine:
+        return []
+    pending = dict((await db.execute(
+        select(AccessReviewItem.review_id, func_count())
+        .where(AccessReviewItem.review_id.in_([r.id for r in mine]), AccessReviewItem.decision == AccessDecision.pending)
+        .group_by(AccessReviewItem.review_id)
+    )).all())
+    return [
+        ctx.mk("access_review", due=r.due_date, id=r.id, title=r.name, reference=r.reference or "",
+               subtitle=" · ".join(p for p in (r.system_name, f"{int(pending.get(r.id, 0) or 0)} account(s) to decide") if p),
+               link=_link("/access-reviews", r.id), entity_type="access_review", entity_id=r.id)
+        for r in mine
+    ]
+
+
+async def my_regulatory_changes(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.regulatory_change import Obligation, ObligationStatus, RegChangeStatus, RegulatoryChange
+
+    if "regulatory_change" in ctx.modules_off or not ctx.holds("regchange:read"):
+        return []
+    out = []
+    for r in (await db.execute(
+        select(RegulatoryChange.id, RegulatoryChange.reference, RegulatoryChange.title, RegulatoryChange.owner,
+               RegulatoryChange.status, RegulatoryChange.effective_date, RegulatoryChange.regulator,
+               RegulatoryChange.circular_ref)
+        .where(RegulatoryChange.deleted.is_(False), RegulatoryChange.owner != "",
+               RegulatoryChange.status.in_((RegChangeStatus.identified, RegChangeStatus.under_assessment,
+                                            RegChangeStatus.in_implementation)))
+        .limit(ROW_CAP)
+    )).all():
+        if not names_me(ctx, r.owner):
+            continue
+        status = _val(r.status)
+        out.append(ctx.mk(
+            "regulatory_change", due=r.effective_date, id=r.id, title=r.title, reference=r.reference or "",
+            subtitle=" · ".join(p for p in (r.regulator, r.circular_ref,
+                                            "assess the impact" if status != "in_implementation" else "implement it") if p),
+            link=_link("/regulatory-change", r.id), entity_type="regulatory_change", entity_id=r.id,
+        ))
+    for r in (await db.execute(
+        select(Obligation.id, Obligation.reference, Obligation.title, Obligation.owner, Obligation.due_date,
+               Obligation.regulatory_change_id)
+        .where(Obligation.owner != "", Obligation.status.in_((ObligationStatus.open, ObligationStatus.in_progress)),
+               or_(Obligation.due_date.is_(None), Obligation.due_date <= ctx.horizon))
+        .limit(ROW_CAP)
+    )).all():
+        if not names_me(ctx, r.owner):
+            continue
+        out.append(ctx.mk(
+            "regulatory_change", due=r.due_date, id=r.id, title=r.title, reference=r.reference or "",
+            subtitle="Obligation to meet",
+            link=_link("/regulatory-change", r.regulatory_change_id) if r.regulatory_change_id else "/regulatory-change",
+            entity_type="obligation", entity_id=r.id,
+        ))
+    return out
+
+
+async def my_regulatory_returns(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.regulatory_change import RegulatoryReturn
+
+    if "regulatory_change" in ctx.modules_off or not ctx.holds("regchange:read"):
+        return []
+    rows = (await db.execute(
+        select(RegulatoryReturn.id, RegulatoryReturn.reference, RegulatoryReturn.name, RegulatoryReturn.owner,
+               RegulatoryReturn.next_due_date, RegulatoryReturn.regulator, RegulatoryReturn.submission_channel)
+        .where(RegulatoryReturn.deleted.is_(False), RegulatoryReturn.owner != "",
+               RegulatoryReturn.next_due_date.is_not(None),
+               RegulatoryReturn.next_due_date <= ctx.today + timedelta(days=LONG_HORIZON_DAYS))
+        .limit(ROW_CAP)
+    )).all()
+    return [
+        ctx.mk("regulatory_return", due=r.next_due_date, id=r.id, title=r.name, reference=r.reference or "",
+               subtitle=" · ".join(p for p in (r.regulator, r.submission_channel) if p),
+               link=_link("/regulatory-change", r.id), entity_type="regulatory_return", entity_id=r.id)
+        for r in rows if names_me(ctx, r.owner)
+    ]
+
+
+async def my_incident_reports(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.enums import IncidentStatus, RegulatoryReportStatus
+    from app.models.incident import Incident, RegulatoryReport
+
+    rows = (await db.execute(
+        select(RegulatoryReport.id, RegulatoryReport.report_type, RegulatoryReport.deadline, RegulatoryReport.regulator,
+               Incident.id.label("incident_id"), Incident.reference, Incident.title)
+        .join(Incident, Incident.id == RegulatoryReport.incident_id)
+        .where(Incident.deleted.is_(False), RegulatoryReport.status == RegulatoryReportStatus.pending,
+               RegulatoryReport.deadline.is_not(None),
+               or_(Incident.assignee_id == ctx.user_id, RegulatoryReport.submitted_by_id == ctx.user_id),
+               Incident.status != IncidentStatus.closed)
+        .limit(ROW_CAP)
+    )).all()
+    out = []
+    for r in rows:
+        deadline = r.deadline if r.deadline.tzinfo else r.deadline.replace(tzinfo=timezone.utc)
+        out.append(ctx.mk(
+            "incident_report", due=deadline.date(), id=r.id, title=r.title, reference=r.reference or "",
+            subtitle=f"{_val(r.report_type).replace('_', ' ').capitalize()} to {r.regulator or 'the regulator'}"
+                     f" · deadline {deadline.strftime('%H:%M')} UTC",
+            link=_link("/incidents", r.incident_id), entity_type="incident", entity_id=r.incident_id,
+        ))
+    return out
+
+
+async def my_expiring_exceptions(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.enums import ExceptionStatus
+    from app.models.exception import ExceptionRecord
+
+    if not ctx.holds("exception:read"):
+        return []
+    rows = (await db.execute(
+        select(ExceptionRecord.id, ExceptionRecord.reference, ExceptionRecord.title, ExceptionRecord.expires_at,
+               ExceptionRecord.requested_by, ExceptionRecord.approver_id, ExceptionRecord.business_owner)
+        .where(ExceptionRecord.deleted.is_(False), ExceptionRecord.status == ExceptionStatus.approved,
+               ExceptionRecord.expires_at.is_not(None),
+               ExceptionRecord.expires_at <= ctx.today + timedelta(days=EXCEPTION_HORIZON_DAYS))
+        .limit(ROW_CAP)
+    )).all()
+    out = []
+    for r in rows:
+        if r.requested_by == ctx.user_id:
+            why = "you raised it"
+        elif r.approver_id == ctx.user_id:
+            why = "you approved it"
+        elif names_me(ctx, r.business_owner):
+            why = "you own it"
+        else:
+            continue
+        out.append(ctx.mk(
+            "exception_expiry", due=r.expires_at, id=r.id, title=r.title, reference=r.reference or "",
+            subtitle=f"Renew, close or let it lapse · {why}",
+            link=_link("/exceptions", r.id), entity_type="exception", entity_id=r.id,
+        ))
+    return out
+
+
+async def my_declarations(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    from app.models.declaration import CampaignStatus, Declaration, DeclarationCampaign, DeclarationStatus
+
+    if "declarations" in ctx.modules_off:
+        return []
+    rows = (await db.execute(
+        select(Declaration.id, Declaration.declarant_name, DeclarationCampaign.id.label("campaign_id"),
+               DeclarationCampaign.reference, DeclarationCampaign.title, DeclarationCampaign.due_date,
+               DeclarationCampaign.period)
+        .join(DeclarationCampaign, DeclarationCampaign.id == Declaration.campaign_id)
+        .where(DeclarationCampaign.deleted.is_(False), DeclarationCampaign.status == CampaignStatus.open,
+               Declaration.status == DeclarationStatus.pending, Declaration.declarant_name != "")
+        .limit(ROW_CAP)
+    )).all()
+    link_ok = ctx.holds("declaration:read")
+    return [
+        ctx.mk("declaration", due=r.due_date, id=r.id, title=r.title, reference=r.reference or "",
+               subtitle=(f"{r.period} · " if r.period else "") + "submit your declaration",
+               link=_link("/declarations", r.campaign_id) if link_ok else "",
+               entity_type="declaration_campaign", entity_id=r.campaign_id)
+        for r in rows if names_me(ctx, r.declarant_name)
+    ]
+
+
+def func_count():
+    from sqlalchemy import func
+
+    return func.count()
+
+
 #: kind -> builder, in :data:`KINDS` order.
 BUILDERS = {
     "approval": approvals_waiting,
@@ -849,6 +1214,18 @@ BUILDERS = {
     "kri_measurement": my_kri_readings,
     "rcsa_action": my_rcsa_actions,
     "policy_ack": policies_to_acknowledge,
+    # Phase 4B
+    "assessment_review": my_assessment_reviews,
+    "finding_follow_up": my_findings_to_validate,
+    "engagement_task": my_engagement_tasks,
+    "audit_remediation": my_audit_remediation,
+    "access_review": my_access_reviews,
+    "assessment_chase": my_assessment_chases,
+    "regulatory_change": my_regulatory_changes,
+    "regulatory_return": my_regulatory_returns,
+    "incident_report": my_incident_reports,
+    "exception_expiry": my_expiring_exceptions,
+    "declaration": my_declarations,
 }
 
 

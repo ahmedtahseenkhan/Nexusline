@@ -38,6 +38,13 @@ Rejecting a candidate built this way leaves its risks archived; accepting it pro
 it like any other. Restoring an archived risk puts it back in the register and, because
 the restore is a person's change in its trail, it is never moved again.
 
+Restoring a moved risk must not leave the same risk waiting in the queue as well
+(:func:`release_on_restore`, phase 4). When its candidate is still pending: if the
+migration created that candidate and every risk moved into it is live again, the
+candidate is withdrawn (rejected, "Source risk restored"); otherwise only the restored
+risk's assets leave it — those no still-archived source also carries — and a candidate
+left with no assets is withdrawn too. A decided candidate is left alone.
+
 The decisions are pure (:func:`recognise`, :func:`edit_reasons`, :func:`plan_migration`)
 and unit-tested without a database; :func:`load_plan` and :func:`apply` do the I/O.
 """
@@ -810,9 +817,166 @@ async def apply(db, user):
     )
 
 
+# ------------------------------------------------------------ restore (phase 4) ---
+RESTORED_NOTE = "Source risk restored"
+WITHDRAW, TRIM = "withdraw", "trim"
+
+
+@dataclass(frozen=True)
+class RestoreOutcome:
+    """What restoring one moved risk does to one pending candidate."""
+
+    action: str | None  # WITHDRAW, TRIM or None (nothing to do)
+    remove_assets: frozenset[uuid.UUID] = frozenset()
+
+
+def restore_outcome(
+    *,
+    restored_id: uuid.UUID,
+    created_by_migration: bool,
+    sources: Iterable[uuid.UUID],
+    live_sources: Iterable[uuid.UUID],
+    assets_by_source: Mapping[uuid.UUID, Iterable[uuid.UUID]],
+    candidate_assets: Iterable[uuid.UUID],
+) -> RestoreOutcome:
+    """Decide for one *pending* candidate. Pure.
+
+    ``sources`` are the risks the migration moved into the candidate, ``live_sources``
+    those live now (the restored one included). Withdraw when the migration made the
+    candidate and every source is back; else remove the restored risk's assets that no
+    still-archived source carries; withdraw when that leaves the candidate empty."""
+    sources = set(sources) | {restored_id}
+    archived = sources - set(live_sources) - {restored_id}
+    if created_by_migration and not archived:
+        return RestoreOutcome(WITHDRAW)
+    kept = {a for sid in archived for a in assets_by_source.get(sid, ())}
+    held = set(candidate_assets)
+    remove = (set(assets_by_source.get(restored_id, ())) & held) - kept
+    if held and not (held - remove):
+        return RestoreOutcome(WITHDRAW, frozenset(remove))
+    return RestoreOutcome(TRIM if remove else None, frozenset(remove))
+
+
+async def release_on_restore(db, user, risk) -> str:
+    """Withdraw or trim the pending candidates ``risk`` was moved into (see
+    :func:`restore_outcome`); audited on each candidate. Returns a sentence for the
+    restore's own audit entry and reply ("" when the risk was never moved)."""
+    from sqlalchemy import delete, or_, select
+
+    from app.models.audit import AuditLog
+    from app.models.risk import Risk, risk_assets
+    from app.models.risk_scenario import RiskProposal, risk_proposal_assets
+    from app.services import audit as audit_log
+
+    moved = (AuditLog.entity_type == "risk") & (AuditLog.action == "delete") & (
+        AuditLog.changes["via"].astext == MIGRATION_VIA
+    )
+    named = {
+        uuid.UUID(pid)
+        for pid in (
+            await db.scalars(
+                select(AuditLog.changes["proposal_id"].astext).where(moved, AuditLog.entity_id == risk.id)
+            )
+        ).all()
+        if pid
+    }
+    proposals = (
+        await db.scalars(
+            select(RiskProposal)
+            .where(
+                or_(RiskProposal.id.in_(named), RiskProposal.source_risk_id == risk.id) if named
+                else RiskProposal.source_risk_id == risk.id,
+                RiskProposal.status == PENDING,
+            )
+            .with_for_update()
+        )
+    ).all()
+    if not proposals:
+        return ""
+    now = datetime.now(timezone.utc)
+    notes: list[str] = []
+    for proposal in proposals:
+        pid = str(proposal.id)
+        sources = set(
+            (await db.scalars(select(AuditLog.entity_id).where(moved, AuditLog.changes["proposal_id"].astext == pid))).all()
+        ) - {None}
+        if proposal.source_risk_id is not None:
+            sources.add(proposal.source_risk_id)
+        sources.add(risk.id)
+        live = set((await db.scalars(select(Risk.id).where(Risk.id.in_(sources), Risk.deleted.is_(False)))).all())
+        live.add(risk.id)
+        created = await db.scalar(
+            select(AuditLog.id).where(
+                AuditLog.entity_type == "risk_proposal", AuditLog.entity_id == proposal.id,
+                AuditLog.action == "create", AuditLog.changes["via"].astext == MIGRATION_VIA,
+            ).limit(1)
+        )
+        by_source: dict[uuid.UUID, set[uuid.UUID]] = {}
+        for rid, aid in (
+            await db.execute(select(risk_assets.c.risk_id, risk_assets.c.asset_id).where(risk_assets.c.risk_id.in_(sources)))
+        ).all():
+            by_source.setdefault(rid, set()).add(aid)
+        held = set(
+            (await db.scalars(
+                select(risk_proposal_assets.c.asset_id).where(risk_proposal_assets.c.proposal_id == proposal.id)
+            )).all()
+        )
+        outcome = restore_outcome(
+            restored_id=risk.id, created_by_migration=created is not None, sources=sources,
+            live_sources=live, assets_by_source=by_source, candidate_assets=held,
+        )
+        if outcome.action is None:
+            continue
+        if outcome.remove_assets:
+            await db.execute(
+                delete(risk_proposal_assets).where(
+                    risk_proposal_assets.c.proposal_id == proposal.id,
+                    risk_proposal_assets.c.asset_id.in_(list(outcome.remove_assets)),
+                )
+            )
+        if outcome.action == WITHDRAW:
+            proposal.status = REJECTED
+            proposal.decided_by_id = user.id
+            proposal.decided_at = now
+            proposal.decision_note = RESTORED_NOTE
+            summary = (
+                f"Withdrew risk candidate “{proposal.title}”: its source risk {risk.reference} was restored "
+                "to the register"
+            )
+            notes.append(f"withdrew risk candidate “{proposal.title}”")
+        else:
+            archived = sorted(sources - live)
+            if proposal.source_risk_id == risk.id and archived:
+                proposal.source_risk_id = archived[0]
+            line = (
+                f"{risk.reference} was restored to the register on {now.date().isoformat()}; "
+                f"{len(outcome.remove_assets)} of its asset(s) left this candidate."
+            )
+            proposal.description = f"{proposal.description.rstrip()}\n\n{line}".strip()
+            summary = (
+                f"Removed {len(outcome.remove_assets)} asset(s) from risk candidate “{proposal.title}”: "
+                f"its source risk {risk.reference} was restored to the register"
+            )
+            notes.append(f"removed its asset(s) from risk candidate “{proposal.title}”")
+        await db.flush()
+        await audit_log.record(
+            db, actor=user, action="reject" if outcome.action == WITHDRAW else "update",
+            entity_type="risk_proposal", entity_id=proposal.id, summary=summary[:500],
+            changes={
+                "via": "restore", "restored_risk": risk.reference, "outcome": outcome.action,
+                "assets_removed": len(outcome.remove_assets),
+            },
+        )
+    return "; ".join(notes)
+
+
 __all__ = [
     "GENERATOR_LINKS",
     "MIGRATION_VIA",
+    "RESTORED_NOTE",
+    "RestoreOutcome",
+    "release_on_restore",
+    "restore_outcome",
     "Group",
     "LegacyRisk",
     "LinkedAsset",
