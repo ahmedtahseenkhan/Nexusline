@@ -24,6 +24,7 @@ import {
   hasAssurance,
   inherentBasis,
   isPast,
+  frequencyWord,
   isUnscored,
   isUntested,
   noteRequired,
@@ -57,6 +58,7 @@ import RecordPanels from "@/components/RecordPanels";
 import RiskAcceptancePanel, { type RiskAcceptancePanelHandle } from "@/components/RiskAcceptancePanel";
 import RiskTreatmentActions, { type RiskTreatmentActionsHandle } from "@/components/RiskTreatmentActions";
 import RiskMethodology from "@/components/RiskMethodology";
+import RiskReviewCadence from "@/components/RiskReviewCadence";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import AsyncSelect from "@/components/AsyncSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -190,9 +192,14 @@ type RiskRow = {
   treatment_cost: number | null;
 
   review_frequency: string;
+  /** F-22: the cycle the review clock runs on (the rating may require a shorter one), and why. */
+  effective_review_frequency?: string | null;
+  review_frequency_reason?: string;
   last_review_date: string | null;
   next_review_date: string | null;
   expired_reviews: number;
+  /** F-23: false for a draft nobody has scored — its 1×1 is a placeholder, not a rating. */
+  inherent_scored?: boolean;
   /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
 
@@ -310,12 +317,17 @@ function appetite(r: RiskRow, s: RiskSetting | null) {
   return { label: label[status], tone: tone[status], title: `${cap(label[status])}${thresholds}` };
 }
 
-// live rollup of the health of a record's mitigating controls
+/* Live rollup of the health of a record's mitigating controls, as the server judges it
+   (control_assurance.control_health_state) — the record page's reliance tile reads the
+   same rule: issues (a failed or overdue test, an open finding or issue) before not
+   tested (a rating no reviewed test stands behind) before OK. */
 function controlHealth(v: string | null | undefined): React.ReactNode {
-  if (v === "issues") return <Badge tone="high">Control issues</Badge>;
-  if (v === "ok") return <Badge tone="low">Controls OK</Badge>;
+  if (v === "issues") return <span title="A linked control failed its last reviewed test, is overdue, or has an open audit finding or issue"><Badge tone="high">Control issues</Badge></span>;
+  if (v === "untested") return <span title="At least one linked control is rated without a reviewed test"><Badge tone="medium">Not tested</Badge></span>;
+  if (v === "ok") return <span title="Every linked control is rated from reviewed tests, with nothing open"><Badge tone="low">Controls OK</Badge></span>;
   return <span className="muted">—</span>;
 }
+const CONTROL_HEALTH_TEXT: Record<string, string> = { issues: "Control issues", untested: "Not tested", ok: "Controls OK" };
 
 
 
@@ -339,6 +351,8 @@ const RISK_URL_FILTERS = {
   appetite: ["within", "elevated", "breach"],
   has_controls: ["true", "false"],
   treatment_overdue: ["true"],
+  // F-21: the dashboard's "N risks pending validation" opens the drafts its figures leave out.
+  pending_validation: ["true"],
   view: ["tree"],
 } as const satisfies FilterSpec;
 
@@ -367,6 +381,7 @@ const CONTROLS_FILTER: Option[] = [
   { value: "false", label: "No controls" },
 ];
 const TREATMENT_FILTER: Option[] = [{ value: "true", label: "Treatment overdue" }];
+const VALIDATION_FILTER: Option[] = [{ value: "true", label: "Pending validation (draft)" }];
 
 // --------------------------------------------------------------- form state
 type FormState = {
@@ -692,8 +707,9 @@ function RisksPage() {
       needs_review: scopeReview || undefined,
       level: u.level, parent_id: u.parent_id, roots_only: u.roots_only, review: u.review,
       appetite: u.appetite, has_controls: u.has_controls, treatment_overdue: u.treatment_overdue,
+      pending_validation: u.pending_validation,
     }),
-    [scopeFilters, scopeReview, u.level, u.parent_id, u.roots_only, u.review, u.appetite, u.has_controls, u.treatment_overdue],
+    [scopeFilters, scopeReview, u.level, u.parent_id, u.roots_only, u.review, u.appetite, u.has_controls, u.treatment_overdue, u.pending_validation],
   );
   // The parent a "risks below" link narrowed to, by reference.
   useEffect(() => {
@@ -705,11 +721,11 @@ function RisksPage() {
   const router = useRouter();
   const setUrlFilter = (key: keyof typeof RISK_URL_FILTERS & string, value: string) =>
     urlFilters.update({ [key]: value || undefined } as FilterValues<typeof RISK_URL_FILTERS>);
-  const urlFiltered = Boolean(u.level || u.parent_id || u.roots_only || u.review || u.appetite || u.has_controls || u.treatment_overdue);
+  const urlFiltered = Boolean(u.level || u.parent_id || u.roots_only || u.review || u.appetite || u.has_controls || u.treatment_overdue || u.pending_validation);
   const clearUrlFilters = () =>
     urlFilters.update({
       level: undefined, parent_id: undefined, roots_only: undefined, review: undefined,
-      appetite: undefined, has_controls: undefined, treatment_overdue: undefined,
+      appetite: undefined, has_controls: undefined, treatment_overdue: undefined, pending_validation: undefined,
     });
   /** Close the open record and list the risks directly below it — one URL change, so
    *  the record param and the filter cannot overwrite each other. */
@@ -961,6 +977,19 @@ function RisksPage() {
   }
 
   const personText = (u: UserRef | null | undefined, fallback?: string) => (u ? u.full_name || u.email : fallback || "");
+  /* F-22: the cycle the stored rating requires, for the form (residual where assessed,
+     otherwise inherent; nothing for a draft nobody has scored). A shorter choice stands;
+     a longer one is overridden, and the form says so as it is chosen. The server applies
+     the same rule (risk_scoring.effective_review_frequency). */
+  const cadenceHint = useMemo(() => {
+    if (!editing || isUnscored(editing) || !settings?.review_cadence) return null;
+    const severity = (editing.residual_severity ?? editing.inherent_severity) as keyof NonNullable<RiskSetting["review_cadence"]> | null;
+    const required = severity ? settings.review_cadence[severity] : null;
+    if (!severity || !required) return null;
+    const order = ["daily", "weekly", "fortnightly", "monthly", "quarterly", "semiannual", "annual", "none"];
+    if (order.indexOf(f.review_frequency) <= order.indexOf(required)) return null;
+    return { word: frequencyWord(required), why: `required for ${sentenceCase(severity)} risks` };
+  }, [editing, settings, f.review_frequency]);
   // computed previews
   const inhScore = f.inherent_likelihood === "" || f.inherent_impact === "" ? null : Number(f.inherent_likelihood) * Number(f.inherent_impact);
   const resScore = f.residual_likelihood === "" || f.residual_impact === "" ? null : Number(f.residual_likelihood) * Number(f.residual_impact);
@@ -1438,9 +1467,14 @@ function RisksPage() {
 
   const reviewTab = (
     <>
-      <Field label="Review Frequency" help="How often this risk should be re-assessed. The next review date is scheduled automatically.">
+      <Field label="Review Frequency" help="How often this risk should be re-assessed. The next review date is scheduled automatically; its rating can require a shorter cycle.">
         <Select value={f.review_frequency} onChange={(v) => set("review_frequency", v)} options={FREQ} />
       </Field>
+      {cadenceHint && (
+        <p className="muted" style={{ fontSize: 13, marginTop: -4 }}>
+          <b>{cadenceHint.word}</b> — {cadenceHint.why}. The review is scheduled on this cycle, whatever is chosen above.
+        </p>
+      )}
       {editing && (
         <div className="field-row">
           <Field label="Last Review">
@@ -1489,6 +1523,9 @@ function RisksPage() {
   const scoreCell = (sev: string | null, score: number | null) => (
     <><Severity value={sev} /> <span className="muted">({score ?? "—"})</span></>
   );
+  /* F-23: a draft nobody has scored stores 1×1 as a placeholder. The column says so,
+     exactly as the record's Inherent tile does, instead of banding the placeholder. */
+  const notScored = <span className="muted" title="Draft saved without scores">Not scored</span>;
 
   /* The full catalogue. What is shown by default is the working set a risk manager
      scans; everything else is one click away in the column chooser, and the layout
@@ -1510,17 +1547,17 @@ function RisksPage() {
     { key: "threats", header: "Threats", hidden: true, render: (r) => linkChips(r.threats, "/threat-library"), text: (r) => names(r.threats) },
     { key: "vulnerabilities", header: "Vulnerabilities", hidden: true, render: (r) => linkChips(r.vulnerabilities, "/threat-library"), text: (r) => names(r.vulnerabilities) },
     { key: "incidents", header: "Incidents", hidden: true, render: (r) => linkChips(r.incidents, "/incidents"), text: (r) => names(r.incidents) },
-    { key: "inherent_classification", header: "Inherent classification", hidden: true, render: (r) => classification(r.inherent_likelihood, r.inherent_impact), text: (r) => `L${r.inherent_likelihood} I${r.inherent_impact}` },
-    { key: "inherent_score", header: "Inherent", sortable: true, render: (r) => scoreCell(r.inherent_severity, r.inherent_score), text: (r) => `${r.inherent_score ?? ""} ${r.inherent_severity ?? ""}`.trim() },
+    { key: "inherent_classification", header: "Inherent classification", hidden: true, render: (r) => (isUnscored(r) ? notScored : classification(r.inherent_likelihood, r.inherent_impact)), text: (r) => (isUnscored(r) ? "Not scored" : `L${r.inherent_likelihood} I${r.inherent_impact}`) },
+    { key: "inherent_score", header: "Inherent", sortable: true, render: (r) => (isUnscored(r) ? notScored : scoreCell(r.inherent_severity, r.inherent_score)), text: (r) => (isUnscored(r) ? "Not scored" : `${r.inherent_score ?? ""} ${r.inherent_severity ?? ""}`.trim()) },
     { key: "residual_classification", header: "Residual classification", hidden: true, render: (r) => classification(r.residual_likelihood, r.residual_impact), text: (r) => r.residual_likelihood ? `L${r.residual_likelihood} I${r.residual_impact}` : "" },
     { key: "residual_score", header: "Residual", sortable: true, render: (r) => scoreCell(r.residual_severity, r.residual_score), text: (r) => `${r.residual_score ?? ""} ${r.residual_severity ?? ""}`.trim() },
     { key: "target_score", header: "Target", hidden: true, sortable: true, render: (r) => (r.target_score ? scoreCell(r.target_severity ?? null, r.target_score) : <span className="muted">—</span>), text: (r) => (r.target_score ? `${r.target_score} ${r.target_severity ?? ""}`.trim() : "") },
-    { key: "appetite", header: "Appetite", render: (r) => { const a = appetite(r, settings); return a ? <span title={a.title}><Badge tone={a.tone}>{a.label}</Badge></span> : <span className="muted">—</span>; }, text: (r) => appetite(r, settings)?.label ?? "" },
+    { key: "appetite", header: "Appetite", render: (r) => { const a = isUnscored(r) ? null : appetite(r, settings); return a ? <span title={a.title}><Badge tone={a.tone}>{a.label}</Badge></span> : <span className="muted" title={isUnscored(r) ? "Not scored, so not measured" : undefined}>—</span>; }, text: (r) => (isUnscored(r) ? "" : appetite(r, settings)?.label ?? "") },
     { key: "risk_type", header: "Type", hidden: true, sortable: true, render: (r) => <span className="muted">{r.risk_type ? cap(r.risk_type) : "—"}</span>, text: (r) => (r.risk_type ? cap(r.risk_type) : "") },
     { key: "velocity", header: "Velocity", hidden: true, render: (r) => <span className="muted">{velocityLabel(r.velocity) || "—"}</span>, text: (r) => velocityLabel(r.velocity) },
     { key: "source", header: "Source", hidden: true, sortable: true, render: (r) => <span className="muted">{sourceLabel(r.source) || "—"}</span>, text: (r) => sourceLabel(r.source) },
     { key: "treatment_progress", header: "Treatment actions", hidden: true, render: (r) => (r.treatment_progress?.total ? <span className="muted">{r.treatment_progress.done}/{r.treatment_progress.total}{r.treatment_progress.overdue ? <span style={{ color: "var(--red)" }}> · {r.treatment_progress.overdue} overdue</span> : null}</span> : <span className="muted">—</span>), text: (r) => (r.treatment_progress?.total ? `${r.treatment_progress.done}/${r.treatment_progress.total}` : "") },
-    { key: "control_health", header: "Control health", render: (r) => controlHealth(r.control_health), text: (r) => r.control_health ?? "" },
+    { key: "control_health", header: "Control health", render: (r) => controlHealth(r.control_health), text: (r) => CONTROL_HEALTH_TEXT[r.control_health ?? ""] ?? "" },
     { key: "needs_review", header: "Review flag", render: (r) => (r.needs_review ? <span title={reviewReasons(r).join("\n")}><Badge tone="high">Needs review</Badge></span> : <span className="muted">—</span>), text: (r) => (r.needs_review ? `Needs review: ${reviewReasons(r).join("; ")}` : "") },
     { key: "treatment_strategy", header: "Treatment", hidden: true, render: (r) => <span className="muted">{r.treatment_strategy ? cap(r.treatment_strategy) : "—"}</span>, text: (r) => r.treatment_strategy ? cap(r.treatment_strategy) : "" },
     { key: "treatment_owner", header: "Treatment owner", hidden: true, render: (r) => <span className="muted"><UserName user={r.treatment_owner_ref} fallback={r.treatment_owner} /></span>, text: (r) => personText(r.treatment_owner_ref, r.treatment_owner) },
@@ -1646,7 +1683,9 @@ function RisksPage() {
           {
             key: "review",
             label: "Next review",
-            hint: "Attesting the risk records the review and moves this date.",
+            hint: detail.review_frequency_reason
+              ? `Attesting the risk records the review and moves this date. ${detail.review_frequency_reason}.`
+              : "Attesting the risk records the review and moves this date.",
             value: detail.next_review_date ? (
               isPast(detail.next_review_date, ctx.now)
                 ? <Badge tone="high" asIs>Overdue since {formatDate(detail.next_review_date)}</Badge>
@@ -1654,7 +1693,10 @@ function RisksPage() {
             ) : (
               <span className="muted">Not scheduled</span>
             ),
-            sub: detail.next_review_date && detail.review_frequency !== "none" ? sentenceCase(detail.review_frequency) : undefined,
+            // The cycle the clock runs on: the rating's when it requires a shorter one (F-22).
+            sub: detail.next_review_date && (detail.effective_review_frequency ?? detail.review_frequency) !== "none"
+              ? frequencyWord(detail.effective_review_frequency ?? detail.review_frequency)
+              : undefined,
           },
         ] satisfies MetaItem[],
       }
@@ -2276,6 +2318,9 @@ function RisksPage() {
             <div style={{ width: 165 }}>
               <Select value={u.treatment_overdue ?? ""} onChange={(v) => setUrlFilter("treatment_overdue", v)} options={TREATMENT_FILTER} placeholder="Any treatment" />
             </div>
+            <div style={{ width: 190 }}>
+              <Select value={u.pending_validation ?? ""} onChange={(v) => setUrlFilter("pending_validation", v)} options={VALIDATION_FILTER} placeholder="Any validation" />
+            </div>
             {u.parent_id && (
               <span className="chip">
                 Directly below {parentFilterLabel || "…"}
@@ -2353,6 +2398,15 @@ function RisksPage() {
           </div>
           <button className="btn">Save thresholds</button>
         </form>
+        <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+          <RiskReviewCadence
+            settings={settings}
+            onSaved={(s) => {
+              setSettings(s);
+              reload();
+            }}
+          />
+        </div>
         <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
           <RiskMethodology
             onSaved={() => {

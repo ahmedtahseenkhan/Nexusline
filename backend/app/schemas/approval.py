@@ -59,3 +59,14 @@ class ApprovalRead(BaseModel):
     is_overdue: bool
     created_at: datetime
     actions: list[ApprovalActionRead] = []
+    #: A route stage assigned to a role: the role, and how many active users other than
+    #: the maker hold it. ``approver_role_gap`` says what to do when nobody can decide it
+    #: as a holder ("No one holds the Risk Approver role — assign it in Users").
+    approver_role: str | None = None
+    approver_role_holders: int | None = None
+    approver_role_gap: str | None = None
+    #: For the user who asked: may they cancel it (maker or administrator), may they
+    #: decide it, and if not, why.
+    can_cancel: bool = False
+    can_decide: bool = False
+    decide_blocked_reason: str | None = None

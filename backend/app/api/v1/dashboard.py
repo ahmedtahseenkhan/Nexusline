@@ -14,7 +14,8 @@ from app.models.enums import AcceptanceStatus
 from app.models.risk import Risk, RiskAcceptance
 from app.core.deps import CurrentUser
 from app.schemas.dashboard import DashboardStats
-from app.services.risk_scoring import effective_score
+from app.services.risk_query import board_register_clause, on_board_register
+from app.services.risk_scoring import effective_score, is_scored
 from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -50,6 +51,8 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
 
     # Severity/appetite bands keep the scoring functions as the single source of truth,
     # so fetch just the two score columns (lightweight tuples, not full ORM objects).
+    # Board figures are taken over the board register (F-21): a draft nobody validated,
+    # or a risk already accepted or closed, is not a breach the board is shown.
     by_inherent: Counter[str] = Counter()
     by_residual: Counter[str] = Counter()
     appetite_counts: Counter[str] = Counter()
@@ -59,7 +62,7 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
                 Risk.inherent_likelihood, Risk.inherent_impact, Risk.inherent_score,
                 Risk.residual_likelihood, Risk.residual_impact, Risk.residual_score,
                 Risk.category_id,
-            ).where(live)
+            ).where(board_register_clause())
         )
     ).all():
         inh = scale.for_cell(r.inherent_likelihood, r.inherent_impact)
@@ -151,7 +154,7 @@ from app.schemas.dashboard import (  # noqa: E402
 )
 from app.models.lookup import Lookup  # noqa: E402
 from app.models.risk import RiskTreatmentAction  # noqa: E402
-from app.schemas.dashboard import CategoryPosture  # noqa: E402
+from app.schemas.dashboard import CategoryPosture, DataCompleteness  # noqa: E402
 from app.services import control_assurance, governance_health  # noqa: E402
 from app.services import drill_through as dt  # noqa: E402
 
@@ -224,11 +227,17 @@ async def get_overview(
                 Risk.owner_id, Risk.status, Risk.treatment_strategy, Risk.next_review_date,
                 Risk.treatment_deadline, Risk.needs_review, Risk.review_reason,
                 Risk.category_id, Risk.inherent_likelihood, Risk.inherent_impact,
-                Risk.residual_likelihood, Risk.residual_impact,
+                Risk.residual_likelihood, Risk.residual_impact, Risk.last_assessed_at,
+                Risk.workflow_status,
             ).where(live)
         )
     ).all()
-    total_risks = len(rows)
+    # The board register (F-21): every figure below that a board reads — appetite and
+    # tolerance, severities, top risks, segments, the tolerance health measure — is taken
+    # over risks that are scored, out of Draft and not yet accepted or closed. Drafts are
+    # reported as "pending validation" beside the figures, never silently inside them.
+    board_rows = [r for r in rows if on_board_register(r.status, r.last_assessed_at)]
+    total_risks = len(board_rows)
     by_inherent: Counter[str] = Counter()
     by_residual: Counter[str] = Counter()
     appetite_counts: Counter[str] = Counter()
@@ -236,7 +245,7 @@ async def get_overview(
     # Per-category posture: one bucket per level-1 category with its own appetite, and
     # one (None) for everything on the organisation's default.
     by_category: dict = {}
-    for r in rows:
+    for r in board_rows:
         inh = scale.for_cell(r.inherent_likelihood, r.inherent_impact)
         res = scale.for_cell(r.residual_likelihood, r.residual_impact)
         if inh:
@@ -507,6 +516,27 @@ async def get_overview(
         ))
     segments.sort(key=lambda s: (-s.breach, -s.risks, s.name))
 
+    # ----------------------------------------------------------- completeness
+    live_ids = {r.id for r in rows}
+    tagged_ids = {rid for info in seg.values() for rid in info["risks"]} & live_ids
+    pending = [r for r in rows if r.status == RiskStatus.draft]
+    completeness = DataCompleteness(
+        live_risks=len(rows),
+        board_risks=total_risks,
+        pending_validation=len(pending),
+        unscored=sum(1 for r in pending if not is_scored(r.status, r.last_assessed_at)),
+        settled=sum(1 for r in rows if r.status in _SETTLED_RISK),
+        pending_href=dt.PENDING_VALIDATION_LINK,
+        owned=(owned := sum(1 for r in rows if r.owner_id)),
+        owned_pct=governance_health.pct(owned, len(rows)),
+        tagged=len(tagged_ids),
+        tagged_pct=governance_health.pct(len(tagged_ids), len(rows)),
+        approved=(approved := sum(
+            1 for r in rows if getattr(r.workflow_status, "value", r.workflow_status) == "approved"
+        )),
+        approved_pct=governance_health.pct(approved, len(rows)),
+    )
+
     # --------------------------------------------------------------- movement
     movement = Movement(
         period_days=days,
@@ -557,4 +587,5 @@ async def get_overview(
         ),
         assurance=assurance, compliance=compliance, actions=actions, incidents=incidents,
         kris=kris, third_parties=third_parties, segments=segments, movement=movement,
+        completeness=completeness,
     )

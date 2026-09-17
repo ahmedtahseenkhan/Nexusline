@@ -22,7 +22,10 @@ from app.schemas.compliance import (
     BulkAcceptResult,
     BulkSuggestBody,
     ControlSuggestionsRead,
+    PendingSuggestionsRead,
     RequirementSuggestionRead,
+    SuggestionFrameworkCount,
+    SuggestionReviewPage,
 )
 from app.services import audit
 from app.services import clause_suggestions as engine
@@ -138,3 +141,64 @@ async def bulk_accept(body: BulkAcceptBody, db: DbSession, user: CurrentUser) ->
     for control, requirements in by_control.values():
         await _record(db, user, control, requirements)
     return BulkAcceptResult(linked=len(written), controls=len(by_control))
+
+
+# ------------------------------------------------ register-wide review (F-19)
+async def _check_framework(db, framework_id: uuid.UUID | None) -> None:
+    if framework_id is None:
+        return
+    from app.models.compliance import Framework
+
+    found = await db.scalar(
+        select(Framework.id).where(Framework.id == framework_id, Framework.deleted.is_(False))
+    )
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Framework not found")
+
+
+@router.get(
+    "/controls/suggest-requirements/review",
+    response_model=SuggestionReviewPage,
+    dependencies=[_READ],
+    summary="Review suggested clauses across the whole control register, a page at a time",
+)
+async def review_all_suggestions(
+    db: DbSession,
+    scope: Annotated[str, Query(pattern="^(unmapped|all)$")] = engine.SCOPE_UNMAPPED,
+    framework_id: uuid.UUID | None = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=500)] = 100,
+    min_score: Annotated[float, Query(ge=0, le=1)] = 0.5,
+    limit: Annotated[int, Query(ge=1, le=25)] = 5,
+) -> SuggestionReviewPage:
+    """Every control in scope — those with no clause mapped (of ``framework_id`` when
+    given) or all of them — in reference order, ``page_size`` at a time. Only controls
+    with a suggestion are listed; ``next_offset`` is null on the last page. Nothing is
+    linked until the pairs are accepted (``/controls/suggest-requirements/bulk/accept``)."""
+    await _check_framework(db, framework_id)
+    page = await engine.review_page(
+        db, scope=scope, framework_id=framework_id, offset=offset, page_size=page_size,
+        min_score=min_score, limit=limit,
+    )
+    return SuggestionReviewPage(
+        **{k: v for k, v in page.items() if k not in ("groups", "frameworks")},
+        groups=[
+            ControlSuggestionsRead(
+                control_id=c.id, reference=c.reference or "", name=c.name,
+                suggestions=[_read(s) for s in kept],
+            )
+            for c, kept in page["groups"]
+        ],
+        frameworks=[SuggestionFrameworkCount(**row) for row in page["frameworks"]],
+    )
+
+
+@router.get(
+    "/controls/suggest-requirements/pending",
+    response_model=PendingSuggestionsRead,
+    dependencies=[_READ],
+    summary="How many unmapped controls have strong clause suggestions waiting",
+)
+async def pending_suggestions(db: DbSession, framework_id: uuid.UUID | None = None) -> PendingSuggestionsRead:
+    await _check_framework(db, framework_id)
+    return PendingSuggestionsRead(**await engine.pending_strong(db, framework_id=framework_id))

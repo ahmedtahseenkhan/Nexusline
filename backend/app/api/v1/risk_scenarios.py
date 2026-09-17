@@ -49,15 +49,19 @@ from app.schemas.risk import RiskCreate
 from app.schemas.risk_scenario import (
     AcceptRequest,
     AcceptResult,
+    AssetKindRead,
     CommitError,
     CommitRequest,
     CommitResult,
     CommitSkip,
     GenerateRequest,
     GenerateResponse,
+    LegacyMigrationPlan,
+    LegacyMigrationResult,
     LibraryInstallResult,
     MergeRequest,
     MergeResult,
+    NotFittingScenario,
     ProposalAssetRef,
     ProposalControlRef,
     ProposalError,
@@ -69,12 +73,14 @@ from app.schemas.risk_scenario import (
     ScenarioCreate,
     ScenarioRead,
     ScenarioUpdate,
+    SourceRiskRef,
 )
 from app.services import audit as audit_log
 from app.services import control_mapping, master_data, ref_fields, risk_hierarchy
 from app.services.refs import next_reference
 from app.services.risk_scenarios import (
     ACCEPTED,
+    ASSET_KINDS,
     CATALOGUE,
     MERGED,
     PENDING,
@@ -86,19 +92,24 @@ from app.services.risk_scenarios import (
     Placement,
     ProposalFacts,
     ScenarioSpec,
-    applies_to_asset,
+    FITS,
+    WRONG_KIND,
     candidate_title,
+    classify_asset,
     dedupe_key,
     group_subject,
     group_title,
     impact_for,
     key_owners,
+    kind_labels,
     likelihood_for,
     match_generated_title,
     merge_candidates,
     merge_refs,
+    parse_kinds,
     place_asset,
     plan_commit,
+    scenario_fit,
     scope_label,
     split_refs,
     title_for,
@@ -111,6 +122,8 @@ router = APIRouter(tags=["risk scenarios"])
 
 _READ = Depends(require("risk:read"))
 _WRITE = Depends(require("risk:write"))
+#: Moving register risks into the queue archives them: it needs delete as well as write.
+_ARCHIVE = Depends(require("risk:delete"))
 
 _CRIT_RANK = {
     Criticality.low: 1, Criticality.medium: 2, Criticality.high: 3, Criticality.critical: 4,
@@ -129,6 +142,24 @@ def _facts(asset: Asset) -> AssetFacts:
         confidentiality=asset.confidentiality,
         integrity=asset.integrity,
         availability=asset.availability,
+        kinds=asset_kinds_of(asset),
+    )
+
+
+def asset_kinds_of(asset) -> frozenset[str]:
+    """``services.risk_scenarios.classify_asset`` for a loaded ``Asset`` row (its media
+    type and tags are eager-loaded relationships)."""
+    media = getattr(asset, "media_type", None)
+    return classify_asset(
+        asset_class=_enum_value(asset.asset_class),
+        name=asset.name or "",
+        media_type=(media.name if media is not None else "") or "",
+        tags=[t.name or "" for t in (getattr(asset, "tags", None) or [])],
+        hostname=getattr(asset, "hostname", "") or "",
+        os_version=getattr(asset, "os_version", "") or "",
+        manufacturer=getattr(asset, "manufacturer", "") or "",
+        model_number=getattr(asset, "model_number", "") or "",
+        data_categories=getattr(asset, "data_categories", "") or "",
     )
 
 
@@ -141,6 +172,7 @@ def _spec(row: RiskScenarioTemplate) -> ScenarioSpec:
         description=row.description,
         category=row.category,
         asset_classes=classes,
+        asset_kinds=parse_kinds(getattr(row, "asset_kinds", "") or "")[0],
         threat=row.threat,
         vulnerability=row.vulnerability,
         likelihood=row.likelihood,
@@ -196,6 +228,15 @@ async def list_scenarios(
     return Page(
         items=[ScenarioRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset
     )
+
+
+@router.get("/risk-scenarios/asset-kinds", response_model=list[AssetKindRead], dependencies=[_READ])
+async def list_asset_kinds() -> list[AssetKindRead]:
+    """The fixed vocabulary a scenario's ``asset_kinds`` uses, in display order."""
+    return [
+        AssetKindRead(value=k.value, label=k.label, description=k.description, group=k.group)
+        for k in ASSET_KINDS
+    ]
 
 
 @router.post("/risk-scenarios", response_model=ScenarioRead, status_code=201, dependencies=[_WRITE])
@@ -294,6 +335,7 @@ async def install_library(db: DbSession, user: CurrentUser) -> LibraryInstallRes
                 description=spec.description,
                 category=spec.category,
                 asset_classes=",".join(spec.asset_classes),
+                asset_kinds=",".join(sorted(spec.asset_kinds)),
                 threat=spec.threat,
                 vulnerability=spec.vulnerability,
                 likelihood=spec.likelihood,
@@ -308,11 +350,20 @@ async def install_library(db: DbSession, user: CurrentUser) -> LibraryInstallRes
 
     await _seed_catalog_entries(db, user)
     await db.flush()
+    # Rows installed before asset kinds existed take the library's kinds when they are
+    # still the library scenario (the start-up repair does the same on every boot).
+    from app.db.data_repairs import backfill_scenario_kinds  # local: data_repairs is start-up code
+
+    kinds_added = await backfill_scenario_kinds(db, user.tenant_id)
     await audit_log.record(
         db, actor=user, action="create", entity_type="risk_scenario", entity_id=None,
         summary=f"Installed {installed} risk scenario(s) from the built-in library"
-        + (f"; control mapping added to {backfilled} existing" if backfilled else ""),
-        changes={"installed": installed, "backfilled": backfilled, "total": len(CATALOGUE)},
+        + (f"; control mapping added to {backfilled} existing" if backfilled else "")
+        + (f"; asset kinds added to {kinds_added} existing" if kinds_added else ""),
+        changes={
+            "installed": installed, "backfilled": backfilled, "kinds_added": kinds_added,
+            "total": len(CATALOGUE),
+        },
     )
     return LibraryInstallResult(
         installed=installed, skipped=len(CATALOGUE) - installed, total=len(CATALOGUE)
@@ -485,6 +536,11 @@ async def _legacy_keys(
     its scenario and asset (``title_for``). A title that matches a scenario's pattern
     *and* names an asset the risk links gives that asset's key. Returns key -> the
     covering risk's reference, for the keys asked about.
+
+    Counted once: a risk gives at most one key (its first scenario naming a linked
+    asset), and a risk that came from the queue — placed in the hierarchy, or promoted
+    from a candidate — is not pre-queue at all: its key is the candidate's, which
+    ``_key_owners`` already reports.
     """
     if not keys:
         return {}
@@ -502,6 +558,17 @@ async def _legacy_keys(
             matched[rid] = (ref, hits)
     if not matched:
         return {}
+    promoted = select(ProposalRow.promoted_risk_id).where(ProposalRow.promoted_risk_id.is_not(None))
+    for rid in (
+        await db.scalars(
+            select(Risk.id).where(
+                Risk.id.in_(list(matched)), or_(Risk.level.is_not(None), Risk.id.in_(promoted))
+            )
+        )
+    ).all():
+        matched.pop(rid, None)
+    if not matched:
+        return {}
     linked: dict[uuid.UUID, dict[str, uuid.UUID]] = {}
     for rid, aid, name in (
         await db.execute(
@@ -515,17 +582,27 @@ async def _legacy_keys(
     out: dict[str, str] = {}
     for rid, (ref, hits) in matched.items():
         names = linked.get(rid, {})
-        for scenario_ref, candidates in hits:
-            for name in candidates:
-                aid = names.get(name.strip().lower())
-                if aid is None or aid not in placements:
-                    continue
-                where = placements[aid]
-                key = dedupe_key(scenario_ref, where.process_id, where.business_unit_id, where.asset_class)
-                if key in keys:
-                    out.setdefault(key, ref or "a live risk")
-                break
+        key = _legacy_key_of(hits, names, placements)
+        if key is not None and key in keys:
+            out.setdefault(key, ref or "a live risk")
     return out
+
+
+def _legacy_key_of(
+    hits: Sequence[tuple[str, list[str]]],
+    names: dict[str, uuid.UUID],
+    placements: dict[uuid.UUID, Placement],
+) -> str | None:
+    """The one key a pre-queue risk covers: its first scenario reading that names a
+    linked, placed asset."""
+    for scenario_ref, candidates in hits:
+        for name in candidates:
+            aid = names.get(name.strip().lower())
+            if aid is None or aid not in placements:
+                continue
+            where = placements[aid]
+            return dedupe_key(scenario_ref, where.process_id, where.business_unit_id, where.asset_class)
+    return None
 
 
 async def _category_ids(db, texts: Iterable[str]) -> dict[str, uuid.UUID]:
@@ -624,16 +701,23 @@ async def generate(body: GenerateRequest, db: DbSession, user: CurrentUser) -> G
     matrix_size = await get_matrix_size(db, user.tenant_id)
     placements = await _placements(db, [a.id for a in assets])
 
-    # Every applicable pair with its candidate key, before anything is skipped.
+    # Every applicable pair with its candidate key, before anything is skipped. Pairs of
+    # the right class but the wrong kind (fraud against a firewall) are counted, by
+    # scenario, so the preview can say what it left out and why.
     pairs: list[tuple[Asset, RiskScenarioTemplate, ScenarioSpec, AssetFacts, Placement, str]] = []
+    not_fitting: dict[str, list] = {}
+    specs = [(row, _spec(row)) for row in scenarios]
     for asset in assets:
         facts = _facts(asset)
         where = placements.get(asset.id) or Placement(asset_class=asset.asset_class.value)
-        for row in scenarios:
-            spec = _spec(row)
-            if applies_to_asset(spec, facts):
-                key = dedupe_key(row.reference, where.process_id, where.business_unit_id, where.asset_class)
-                pairs.append((asset, row, spec, facts, where, key))
+        for row, spec in specs:
+            fit = scenario_fit(spec, facts)
+            if fit == WRONG_KIND:
+                not_fitting.setdefault(row.reference, [row, spec, 0])[2] += 1
+            if fit != FITS:
+                continue
+            key = dedupe_key(row.reference, where.process_id, where.business_unit_id, where.asset_class)
+            pairs.append((asset, row, spec, facts, where, key))
 
     # Already in the register: the pair's own title (a hand-made or pre-queue risk),
     # an accepted candidate with the key whose risk is live, or a pre-queue generated
@@ -701,6 +785,7 @@ async def generate(body: GenerateRequest, db: DbSession, user: CurrentUser) -> G
                 queued_title=queued.title if queued else "",
                 rejected_note=rejected.note if rejected else "",
                 rejected_at=rejected.decided_at if rejected else None,
+                asset_kinds=kind_labels(facts.kinds),
             )
         )
 
@@ -714,6 +799,14 @@ async def generate(body: GenerateRequest, db: DbSession, user: CurrentUser) -> G
         truncated=truncated,
         candidates=len({p.dedupe_key for p in proposals}),
         queued=sum(1 for p in proposals if p.queued_proposal_id),
+        not_fitting=sum(n for _row, _spec_, n in not_fitting.values()),
+        not_fitting_scenarios=[
+            NotFittingScenario(
+                reference=row.reference, title=(row.title or "").replace("{asset}", "…"), pairs=n,
+                fits=kind_labels(spec.asset_kinds),
+            )
+            for row, spec, n in sorted(not_fitting.values(), key=lambda v: (-v[2], v[0].reference))
+        ],
     )
 
 
@@ -1117,6 +1210,7 @@ async def _proposal_reads(db, user: CurrentUser, rows: Sequence[ProposalRow]) ->
             await db.execute(select(Risk.id, Risk.reference, Risk.title, Risk.deleted).where(Risk.id.in_(promoted_ids)))
         ).all():
             promoted[rid] = (GraphRef(id=rid, reference=ref or "", title=title or ""), bool(deleted))
+    sources = await _source_risks(db, [r for r in rows if getattr(r, "source_risk_id", None)])
     survivor_ids = {r.merged_into_id for r in rows if r.merged_into_id}
     survivors: dict[uuid.UUID, GraphRef] = {}
     if survivor_ids:
@@ -1145,9 +1239,46 @@ async def _proposal_reads(db, user: CurrentUser, rows: Sequence[ProposalRow]) ->
         if row.promoted_risk_id in promoted:
             read.promoted_risk, read.promoted_risk_archived = promoted[row.promoted_risk_id]
         read.merged_into = survivors.get(row.merged_into_id) if row.merged_into_id else None
+        read.source_risks = sources.get(row.id, [])
         reads.append(read)
     await ref_fields.fill_refs(db, list(zip(rows, reads)), PROPOSAL_REFS)
     return reads
+
+
+async def _source_risks(db, rows: Sequence[ProposalRow]) -> dict[uuid.UUID, list[SourceRiskRef]]:
+    """The pre-queue register risks each candidate was rebuilt from. ``source_risk_id``
+    names the first; every one moved in carries the candidate's id on its archive entry
+    in the activity trail (``services.legacy_risk_migration``). Two queries."""
+    if not rows:
+        return {}
+    from app.models.audit import AuditLog
+    from app.services.legacy_risk_migration import MIGRATION_VIA
+
+    wanted = {str(r.id): r.id for r in rows}
+    by_proposal: dict[uuid.UUID, list[uuid.UUID]] = {r.id: [r.source_risk_id] for r in rows}
+    for risk_id, proposal_id in (
+        await db.execute(
+            select(AuditLog.entity_id, AuditLog.changes["proposal_id"].astext).where(
+                AuditLog.entity_type == "risk",
+                AuditLog.changes["via"].astext == MIGRATION_VIA,
+                AuditLog.changes["proposal_id"].astext.in_(sorted(wanted)),
+            )
+        )
+    ).all():
+        pid = wanted.get(proposal_id or "")
+        if pid is not None and risk_id is not None and risk_id not in by_proposal[pid]:
+            by_proposal[pid].append(risk_id)
+    risk_ids = {rid for ids in by_proposal.values() for rid in ids}
+    found = {
+        rid: SourceRiskRef(id=rid, reference=ref or "", title=title or "", archived=bool(deleted))
+        for rid, ref, title, deleted in (
+            await db.execute(select(Risk.id, Risk.reference, Risk.title, Risk.deleted).where(Risk.id.in_(risk_ids)))
+        ).all()
+    }
+    return {
+        pid: sorted((found[rid] for rid in ids if rid in found), key=lambda r: r.reference)
+        for pid, ids in by_proposal.items()
+    }
 
 
 async def _lock_proposals(db, ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, ProposalRow]:
@@ -1442,6 +1573,42 @@ async def merge_proposals(body: MergeRequest, db: DbSession, user: CurrentUser) 
         },
     )
     return MergeResult(merged=len(others), survivor=(await _proposal_reads(db, user, [survivor]))[0])
+
+
+# ---------------------------------------------------------------------------
+# Generated risks made before the queue (re-check F-24)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/risk-proposals/legacy-migration",
+    response_model=LegacyMigrationPlan,
+    dependencies=[_READ],
+    summary="What moving generated risks made before the candidate queue into it would do — writes nothing",
+)
+async def legacy_migration_plan(db: DbSession) -> LegacyMigrationPlan:
+    """Register risks the old one-risk-per-asset generator wrote, and what would happen
+    to each: moved into a new or waiting candidate, dropped (archived without a
+    candidate), or kept in the register with the reason. Rules:
+    ``services.legacy_risk_migration``."""
+    from app.services import legacy_risk_migration
+
+    plan, _ctx = await legacy_risk_migration.load_plan(db)
+    return legacy_risk_migration.plan_read(plan)
+
+
+@router.post(
+    "/risk-proposals/legacy-migration",
+    response_model=LegacyMigrationResult,
+    dependencies=[_WRITE, _ARCHIVE],
+    summary="Move generated risks made before the candidate queue into it",
+)
+async def apply_legacy_migration(db: DbSession, user: CurrentUser) -> LegacyMigrationResult:
+    """Carry out the plan as it stands now: moved and dropped risks are archived (each
+    restorable, each with an activity-trail entry saying where it went), candidates are
+    created or added to, and one summary entry is written. Needs ``risk:write`` and
+    ``risk:delete``. Running it again only picks up what is new."""
+    from app.services import legacy_risk_migration
+
+    return await legacy_risk_migration.apply(db, user)
 
 
 async def _survivor_title(db, row: ProposalRow, asset_ids: Sequence[uuid.UUID]) -> str:

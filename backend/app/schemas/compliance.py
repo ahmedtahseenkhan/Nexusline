@@ -93,6 +93,28 @@ class FrameworkUpdate(BaseModel):
         return v
 
 
+class FrameworkPostureRead(BaseModel):
+    """Three numbers side by side, so mapping visibly counts without faking compliance
+    (``services/compliance_posture.py``). Percentages are of the applicable clauses."""
+
+    model_config = ConfigDict(from_attributes=True)
+    total: int = 0
+    applicable: int = 0
+    #: Assessed as compliant (``Requirement.status``). Mapping never moves this.
+    compliant: int = 0
+    #: At least one control mapped.
+    mapped: int = 0
+    #: Backed by a control whose test says it works (effective / partially effective).
+    assured: int = 0
+    unassessed: int = 0
+    failing: int = 0
+    compliant_pct: float = 0.0
+    mapped_pct: float = 0.0
+    assured_pct: float = 0.0
+    #: "0% assessed compliant · 62% mapped · 8% tested".
+    line: str = ""
+
+
 class FrameworkRead(FrameworkBase):
     # Read-only here: moved by the lifecycle service (services/record_workflow.py).
     workflow_status: WorkflowState
@@ -100,6 +122,7 @@ class FrameworkRead(FrameworkBase):
     id: uuid.UUID
     requirement_count: int
     compliant_count: int = 0
+    posture: FrameworkPostureRead | None = None
     created_at: datetime
 
 
@@ -248,6 +271,8 @@ class GapAnalysis(BaseModel):
     kind: str = "compliance"
     #: Requirements with a status other than not assessed (self-assessment progress).
     assessed: int = 0
+    #: Assessed compliant / mapped / tested, of the applicable clauses (F-19).
+    posture: FrameworkPostureRead | None = None
 
 
 class FrameworkSummary(BaseModel):
@@ -258,6 +283,7 @@ class FrameworkSummary(BaseModel):
     compliant: int
     compliant_pct: float
     assessed: int = 0
+    posture: FrameworkPostureRead | None = None
 
 
 class ComplianceSummary(BaseModel):
@@ -266,6 +292,10 @@ class ComplianceSummary(BaseModel):
     #: Across compliance-kind frameworks only: a maturity self-assessment (ISO 31000)
     #: is not an obligation and does not move the compliance percentage.
     overall_compliant_pct: float
+    #: Same scope as ``overall_compliant_pct``: applicable clauses with a control mapped,
+    #: and backed by a tested, working control.
+    overall_mapped_pct: float = 0.0
+    overall_assured_pct: float = 0.0
     frameworks: list[FrameworkSummary]
 
 
@@ -307,6 +337,10 @@ class SoaSummary(BaseModel):
     no_control: int = 0
     #: Exclusions recorded before the rule existed, with no justification.
     missing_justification: int = 0
+    #: Applicable clauses with a control (the complement of ``no_control``), and those
+    #: whose control is tested and working — the framework page's "mapped" / "tested".
+    mapped: int = 0
+    assured: int = 0
 
 
 class StatementOfApplicabilityRead(BaseModel):
@@ -377,3 +411,46 @@ class BulkAcceptResult(BaseModel):
     linked: int
     #: Controls that gained at least one link.
     controls: int
+
+
+# ------------------------------------------------ Review all suggestions (F-19)
+class SuggestionFrameworkCount(BaseModel):
+    framework_id: uuid.UUID | None = None
+    framework: str
+    #: Suggestions for this framework in the scanned controls, and how many are strong.
+    suggestions: int = 0
+    strong: int = 0
+
+
+class SuggestionReviewPage(BaseModel):
+    """One page of the register-wide review: controls in reference order, scored in
+    pages so a large catalogue never hits a request limit. Keep calling with
+    ``offset = next_offset`` until it is null."""
+
+    #: unmapped (controls with no clause linked yet) | all.
+    scope: str
+    framework_id: uuid.UUID | None = None
+    #: Controls in scope across the whole register, and where this page sits.
+    total_controls: int
+    offset: int
+    page_size: int
+    scanned: int
+    next_offset: int | None = None
+    #: Only controls with at least one suggestion are listed.
+    groups: list[ControlSuggestionsRead] = []
+    suggestion_count: int = 0
+    strong_count: int = 0
+    frameworks: list[SuggestionFrameworkCount] = []
+
+
+class PendingSuggestionsRead(BaseModel):
+    """The hint on the controls register and the compliance page: controls with no clause
+    mapped that have strong suggestions waiting."""
+
+    framework_id: uuid.UUID | None = None
+    unmapped_controls: int = 0
+    #: How many of the unmapped controls were scored (capped on very large registers).
+    scanned: int = 0
+    capped: bool = False
+    controls_with_strong: int = 0
+    strong_suggestions: int = 0

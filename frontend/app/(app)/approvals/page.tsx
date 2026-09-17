@@ -93,6 +93,12 @@ export default function ApprovalsPage() {
     setReason(a.id, "");
   }
 
+  async function cancel(a: ApprovalRequest) {
+    const route = a.approver_role ? " This also cancels the rest of its approval route and returns the record to draft." : "";
+    if (!(await confirmDialog({ title: `Cancel ${a.reference}?`, message: `The request is withdrawn without a decision.${route}`, danger: true, confirmLabel: "Cancel request" }))) return;
+    await act(api.cancelApproval(a.id), "Request cancelled");
+  }
+
   // -------------------------------------------------------- pending columns
   const pendingColumns: Column<ApprovalRequest>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (a) => <span className="ref">{a.reference}</span> },
@@ -107,6 +113,20 @@ export default function ApprovalsPage() {
       ),
     },
     { key: "maker", header: "Maker", render: (a) => <span className="muted">{a.requested_by_email}</span> },
+    {
+      key: "approver",
+      header: "Decided by",
+      render: (a) => (
+        <div style={{ fontSize: 12.5 }}>
+          <span className="muted">{a.approver_role || a.approver || "Any approver"}</span>
+          {a.approver_role_gap && (
+            <div role="note" style={{ color: "var(--amber)", marginTop: 4, maxWidth: 260 }}>
+              {a.approver_role_gap} <Link href="/organization" style={{ fontWeight: 600 }}>Users</Link>
+            </div>
+          )}
+        </div>
+      ),
+    },
     {
       key: "approvals",
       header: "Approvals",
@@ -136,6 +156,10 @@ export default function ApprovalsPage() {
             <span className="muted" aria-disabled="true" style={{ fontSize: 12.5 }}>
               You submitted this — an independent checker must decide
             </span>
+          ) : a.can_decide === false && a.decide_blocked_reason ? (
+            <span className="muted" aria-disabled="true" style={{ fontSize: 12.5, maxWidth: 280 }}>
+              {a.decide_blocked_reason}
+            </span>
           ) : (
             <>
               <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true), "Decision recorded")} title="An independent checker approves">
@@ -151,7 +175,15 @@ export default function ApprovalsPage() {
               <button className="btn secondary sm" onClick={() => reject(a)}>Reject</button>
             </>
           )}
-          <button className="btn secondary sm" onClick={() => act(api.cancelApproval(a.id), "Request cancelled")}>Cancel</button>
+          {a.can_cancel && (
+            <button
+              className="btn secondary sm"
+              onClick={() => cancel(a)}
+              title={raisedBy(a, me) ? "Withdraw your request" : "Cancel as an administrator"}
+            >
+              Cancel
+            </button>
+          )}
         </div>
       ),
     },

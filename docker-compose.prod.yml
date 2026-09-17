@@ -96,9 +96,14 @@ services:
       # --- identity / governance controls (banking baseline) ---
       LDAP_ENABLED: ${LDAP_ENABLED:-false}
       MFA_REQUIRED: ${MFA_REQUIRED:-false}
-      # Approve / Reject links in e-mail skip two-factor authentication; set false where
-      # policy requires 2FA for every approval.
-      EMAIL_ACTIONS_ENABLED: ${EMAIL_ACTIONS_ENABLED:-true}
+      # Default roles that must use MFA until an organisation sets its own list under
+      # Settings -> Organisation -> Security. Admin and anyone who can approve always must.
+      MFA_REQUIRED_ROLES: ${MFA_REQUIRED_ROLES:-admin}
+      MFA_GRACE_DAYS: ${MFA_GRACE_DAYS:-7}
+      # Approve / Reject links in e-mail skip two-factor authentication (the link is the
+      # credential), so they are off by default: checkers sign in, with MFA, to decide.
+      # Only set true where the bank's policy accepts deciding approvals from e-mail.
+      EMAIL_ACTIONS_ENABLED: ${EMAIL_ACTIONS_ENABLED:-false}
       ENFORCE_SEGREGATION_OF_DUTIES: ${ENFORCE_SEGREGATION_OF_DUTIES:-true}
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
       # --- first-run seeding ---

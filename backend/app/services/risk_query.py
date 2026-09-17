@@ -17,6 +17,10 @@ exactly as the dashboard counts it:
 * ``appetite`` — ``within`` / ``elevated`` / ``breach``: the effective score (residual
   when assessed, else inherent) against the appetite and tolerance of the risk's own
   level-1 category, else the organisation's (``AppetiteBook``, as on the dashboard).
+  Only risks on the **board register** (:func:`board_register_clause`) are judged — a
+  draft, or an accepted or closed risk, is never "above tolerance" on a board figure.
+* ``pending_validation`` — drafts: the risks the dashboard leaves out of its figures
+  until they are scored, owned and moved on (F-21).
 * ``has_controls`` — at least one live control linked (or none, when false).
 * ``treatment_overdue`` — a risk that is not accepted or closed and has an open or
   in-progress treatment action past its due date, or — having no actions at all — a
@@ -52,6 +56,43 @@ APPETITE_FILTERS: dict[str, str] = {
 }
 #: ``level=0`` asks for risks not yet placed in the hierarchy.
 UNPLACED = 0
+
+
+# ------------------------------------------------------------ the board register (F-21)
+def scored_clause():
+    """``risk_scoring.is_scored`` in SQL: past draft, or stamped by a score change."""
+    return or_(Risk.status != RiskStatus.draft, Risk.last_assessed_at.is_not(None))
+
+
+def board_register_clause():
+    """The risks a board figure is taken over: live, scored, out of Draft and not yet
+    settled (accepted or closed). Appetite and tolerance breaches, top risks, the heat
+    map, the breach alert and the governance-health tolerance measure all count these,
+    and ``?appetite=`` filters to them, so a tile and the list it opens agree."""
+    return and_(
+        Risk.deleted.is_(False),
+        scored_clause(),
+        Risk.status != RiskStatus.draft,
+        Risk.status.not_in(SETTLED_STATUSES),
+    )
+
+
+def pending_validation_clause():
+    """Live drafts — scored or not — which no board figure includes yet."""
+    return and_(Risk.deleted.is_(False), Risk.status == RiskStatus.draft)
+
+
+def on_board_register(status, last_assessed_at, deleted: bool = False) -> bool:
+    """:func:`board_register_clause` for one row. Pure."""
+    from app.services.risk_scoring import is_scored
+
+    value = getattr(status, "value", status)
+    return (
+        not deleted
+        and is_scored(status, last_assessed_at)
+        and value != RiskStatus.draft.value
+        and value not in {s.value for s in SETTLED_STATUSES}
+    )
 
 
 def effective_score_expr():
@@ -146,6 +187,7 @@ def build_risk_query(
     appetite_book: AppetiteBook | None = None,
     has_controls: bool | None = None,
     treatment_overdue: bool | None = None,
+    pending_validation: bool | None = None,
     today: date | None = None,
 ) -> Select:
     """Live risks matching the given filters. See the module docstring.
@@ -216,12 +258,15 @@ def build_risk_query(
     if appetite:
         if appetite_book is None:
             raise ValueError("The appetite filter needs the organisation's appetite book")
-        stmt = stmt.where(appetite_clause(appetite, appetite_book))
+        stmt = stmt.where(board_register_clause(), appetite_clause(appetite, appetite_book))
     if has_controls is not None:
         stmt = stmt.where(has_controls_clause() if has_controls else not_(has_controls_clause()))
     if treatment_overdue is not None:
         clause = treatment_overdue_clause(today)
         stmt = stmt.where(clause if treatment_overdue else not_(clause))
+    if pending_validation is not None:
+        clause = pending_validation_clause()
+        stmt = stmt.where(clause if pending_validation else not_(clause))
     return stmt
 
 
@@ -231,9 +276,13 @@ __all__ = [
     "UNPLACED",
     "appetite_clause",
     "appetite_thresholds",
+    "board_register_clause",
     "build_risk_query",
     "effective_score_expr",
     "has_controls_clause",
+    "on_board_register",
+    "pending_validation_clause",
     "roots_clause",
+    "scored_clause",
     "treatment_overdue_clause",
 ]

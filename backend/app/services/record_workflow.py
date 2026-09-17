@@ -376,6 +376,17 @@ async def apply(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="A reason is required to send a record back to draft.",
         )
+    if entity_type == "risk" and current == DRAFT:
+        # F-21: a risk goes to its approvers — and so towards the board figures — only
+        # with someone accountable for it and the business unit it sits in.
+        from app.services.risk_integrity import draft_exit_refusal
+
+        refusal = draft_exit_refusal(
+            has_owner=getattr(record, "owner_id", None) is not None,
+            has_business_unit=bool(getattr(record, "business_units", None)),
+        )
+        if refusal:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=refusal)
 
     if action in DECISIONS:
         instance = await workflow_engine.instance_for(db, entity_type, record.id)

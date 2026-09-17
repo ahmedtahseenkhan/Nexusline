@@ -53,6 +53,8 @@ type Range = "30d" | "quarter" | "ytd";
    link here against the parameters its list endpoint declares. */
 const DRILL = {
   breach: "/risks?appetite=breach",
+  // F-21: the drafts every risk figure below leaves out until they are validated.
+  pendingValidation: "/risks?pending_validation=true",
   assured: "/controls?assurance=assured",
   effective: "/controls?assurance=effective",
   partial: "/controls?assurance=partially_effective",
@@ -162,6 +164,60 @@ function SevChip({ value }: { value: string | null }) {
   return <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 600, color: c }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: c }} />{cap(value)}</span>;
 }
 
+/** F-21: what the risk figures are taken over, and how complete the register behind
+ *  them is. A draft is not a board number until someone has scored it, owns it and has
+ *  placed it in a business unit — so the page says how many are left out, and opens them. */
+function Completeness({ c }: { c: NonNullable<DashboardOverview["completeness"]> }) {
+  const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v)}%`);
+  const tone = (v: number | null) => (v === null ? SLATE : v >= 90 ? "#15803d" : v >= 60 ? AMBER : RED);
+  const measures = [
+    { label: "Owned", value: c.owned_pct, count: c.owned, title: "Live risks with a named risk owner" },
+    { label: "Business unit tagged", value: c.tagged_pct, count: c.tagged, title: "Live risks placed in at least one business unit" },
+    { label: "Approved", value: c.approved_pct, count: c.approved, title: "Live risks approved through Submit / Approve" },
+  ];
+  return (
+    <div style={{ ...CARD, padding: "12px 18px", display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap", borderColor: c.pending_validation ? "#f5d9a8" : "#e6e9ef", background: c.pending_validation ? "#fffbf3" : "#fff" }}>
+      <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+        {c.pending_validation > 0 ? (
+          <>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#92400e" }}>
+              {c.pending_validation} {c.pending_validation === 1 ? "risk is" : "risks are"} pending validation and not in these figures
+            </div>
+            <div style={{ ...SUB, marginTop: 2 }}>
+              Risk figures count {c.board_risks} of {c.live_risks} live risks: those scored, out of Draft, and not accepted or closed.
+              {c.unscored > 0 && <> {c.unscored} of the drafts have never been scored.</>}
+              {" "}A draft needs scores, a rationale, an owner and a business unit to move on.
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>Every live risk is validated</div>
+            <div style={{ ...SUB, marginTop: 2 }}>
+              Risk figures count {c.board_risks} of {c.live_risks} live risks{c.settled > 0 ? `; ${c.settled} accepted or closed are left out of breach and top-risk figures` : ""}.
+            </div>
+          </>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }} aria-label="Register completeness">
+        {measures.map((m) => (
+          <div key={m.label} title={`${m.title}: ${m.count} of ${c.live_risks}`} style={{ minWidth: 92 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "#64748b" }}>{m.label}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 700, color: tone(m.value), lineHeight: 1.2 }}>{pct(m.value)}</div>
+            <div style={{ height: 3, borderRadius: 2, background: "#eef1f5", marginTop: 3 }}>
+              {m.value !== null && <div style={{ width: `${m.value}%`, height: "100%", borderRadius: 2, background: tone(m.value) }} />}
+            </div>
+          </div>
+        ))}
+      </div>
+      {c.pending_validation > 0 && (
+        <Link href={DRILL.pendingValidation} className="btn" style={{ whiteSpace: "nowrap" }}>
+          Review {c.pending_validation === 1 ? "it" : "them"} →
+        </Link>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------- page */
 export default function DashboardPage() {
   const { formatDate, formatDateTime } = useFormat();
@@ -179,7 +235,8 @@ export default function DashboardPage() {
     api.dashboardOverview(days).then(setO).catch((e) => setError(e instanceof Error ? e.message : "Could not load the dashboard"));
   }, [days]);
   useEffect(() => {
-    api.riskMatrix().then(setMatrix).catch(() => {});
+    // The board view: the same validated risks the posture figures count.
+    api.riskMatrix("board").then(setMatrix).catch(() => {});
     api.audit(30).then((r) => setActivity(r.items)).catch(() => {});
   }, []);
 
@@ -256,6 +313,8 @@ export default function DashboardPage() {
       </div>
 
       {error && <div className="error">{error}</div>}
+
+      {o?.completeness && <Completeness c={o.completeness} />}
 
       {/* --------------------------------------- hero: health + the decision queue */}
       <div style={{ background: "linear-gradient(135deg,#0b1220 0%,#111c33 100%)", borderRadius: 18, padding: 22, display: "grid", gridTemplateColumns: "300px 1fr", gap: 22, color: "#e2e8f0" }}>
@@ -407,7 +466,7 @@ export default function DashboardPage() {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <div>
               <h2 style={H2}>Top risks</h2>
-              <div style={SUB}>Highest current exposure — residual where assessed, otherwise inherent</div>
+              <div style={SUB}>Highest current exposure among validated risks — residual where assessed, otherwise inherent</div>
             </div>
             <Link href="/risks" style={{ fontSize: 12.5 }}>Register →</Link>
           </div>

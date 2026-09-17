@@ -1318,6 +1318,9 @@ _register(ResourceIO(
         text("exit_plan"),
         boolean("exit_plan_tested"),
         text("concentration_note"),
+        text("substitutability", help="easy / moderate / difficult / none. Required with the materiality "
+             "assessment and exit plan before a material arrangement can be active"),
+        text("concentration_level", help="low / medium / high"),
         enum_col("status", OutsourcingStatus),
         text("owner"),
         enum_col("workflow_status", WorkflowState),

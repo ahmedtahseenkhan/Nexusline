@@ -361,6 +361,18 @@ function GenerateModal({
                       {result.duplicates_skipped} already in the register — skipped
                     </span>
                   )}
+                  {(result.not_fitting ?? 0) > 0 && (
+                    <span
+                      className="muted"
+                      style={{ fontSize: 12.5 }}
+                      title={(result.not_fitting_scenarios ?? []).slice(0, 12)
+                        .map((s) => `${s.reference} ${s.title}: ${s.pairs} left out — fits ${s.fits.join(", ") || "other kinds"}`)
+                        .join("\n")}
+                    >
+                      {result.not_fitting} pair{result.not_fitting !== 1 ? "s" : ""} left out because the scenario
+                      doesn&apos;t fit the kind of asset (for example fraud against a firewall)
+                    </span>
+                  )}
                   {result.truncated && (
                     <Badge tone="medium">Capped — narrow the filter and run again for the rest</Badge>
                   )}
@@ -443,7 +455,7 @@ function GenerateModal({
                             <td>
                               <div className="chips">
                                 {group.pairs.slice(0, 6).map((p) => (
-                                  <span key={p.asset_id} className="chip" title={p.title}>{p.asset_name}</span>
+                                  <span key={p.asset_id} className="chip" title={p.asset_kinds?.length ? `${p.title} · ${p.asset_kinds.join(", ")}` : p.title}>{p.asset_name}</span>
                                 ))}
                                 {group.pairs.length > 6 && <span className="chip">+{group.pairs.length - 6}</span>}
                               </div>

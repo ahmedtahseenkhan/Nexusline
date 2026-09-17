@@ -270,6 +270,69 @@ def reliance_note(control: Any, tests: Iterable[Any], today: date | None = None)
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Control health: what a record's linked controls add up to
+# ---------------------------------------------------------------------------
+# The register's "Control health" column and the record page's reliance tile must say
+# the same thing. A control is judged three ways, worst first:
+#
+# * ``issues`` — it cannot be relied on today (``reliance_note``: its latest counting
+#   test failed, its test is overdue or an audit finding is open), or an issue raised
+#   against it is still open;
+# * ``untested`` — its rating rests on no reviewed test: set by hand, by override, or
+#   there is no rating and no counting test at all (:func:`rests_on_untested_rating`);
+# * ``ok`` — rated from reviewed tests, with nothing open against it.
+#
+# A record takes the worst of its controls (``none`` when it has none). "Untested" is
+# never shown as OK: a promise is not assurance.
+HEALTH_NONE, HEALTH_OK, HEALTH_UNTESTED, HEALTH_ISSUES = "none", "ok", "untested", "issues"
+_HEALTH_RANK = {HEALTH_OK: 0, HEALTH_UNTESTED: 1, HEALTH_ISSUES: 2}
+#: Bases of a rating no reviewed test stands behind.
+UNTESTED_BASES: tuple[str, ...] = (BASIS_MANUAL, BASIS_OVERRIDE, BASIS_NONE)
+
+
+def rests_on_untested_rating(basis: str | None, reviewed_tests: int | None) -> bool:
+    """A rating set by hand or by override, or with no reviewed test on file (B6)."""
+    return basis in UNTESTED_BASES or not reviewed_tests
+
+
+def control_health_state(
+    *, reliance: str = "", basis: str | None, reviewed_tests: int | None, open_issues: int | None = 0
+) -> str:
+    """One control's health: ``issues`` > ``untested`` > ``ok``. Pure."""
+    if reliance or (open_issues or 0) > 0:
+        return HEALTH_ISSUES
+    if rests_on_untested_rating(basis, reviewed_tests):
+        return HEALTH_UNTESTED
+    return HEALTH_OK
+
+
+def rollup_health(states: Iterable[str]) -> str:
+    """The worst of the controls' states; ``none`` when there are no controls."""
+    worst = HEALTH_NONE
+    for state in states:
+        if worst == HEALTH_NONE or _HEALTH_RANK.get(state, 0) > _HEALTH_RANK.get(worst, 0):
+            worst = state
+    return worst
+
+
+def health_of_control(control: Any, tests: Iterable[Any] | None = None, open_issues: int | None = 0,
+                      today: date | None = None) -> str:
+    """:func:`control_health_state` for a control row. ``tests`` default to the control's
+    own loaded ``audits``; ``open_issues`` is the count of open issues raised against it
+    (the control row does not carry them)."""
+    tests = list(tests if tests is not None else (getattr(control, "audits", None) or ()))
+    return control_health_state(
+        reliance=reliance_note(control, tests, today),
+        basis=effectiveness_basis(
+            tests, getattr(control, "effectiveness_override_reason", "") or "",
+            getattr(control, "effectiveness", None) or E.not_assessed,
+        ),
+        reviewed_tests=sum(1 for t in tests if counts_towards_rating(t)),
+        open_issues=open_issues,
+    )
+
+
 def combine(*ratings: ControlEffectiveness | None) -> ControlEffectiveness:
     """The worst of the ratings that have been assessed; not assessed when none has."""
     assessed = [r for r in ratings if r is not None and r != E.not_assessed]

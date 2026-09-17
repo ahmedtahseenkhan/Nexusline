@@ -44,6 +44,13 @@ from app.services import notifications as ns
 from app.services import scheduler
 from app.services.notifications import Directory, DirectoryUser
 
+
+@pytest.fixture(autouse=True)
+def _email_actions_switched_on(monkeypatch):
+    """E-mail approval links are off by default (they bypass MFA); these tests describe
+    an installation that has opted in. The off case sets it back to False itself."""
+    monkeypatch.setattr(settings, "email_actions_enabled", True, raising=False)
+
 NOW = datetime(2026, 9, 12, 9, 0, tzinfo=timezone.utc)
 TENANT = uuid.uuid4()
 ME, OTHER, MAKER, IDLE = (uuid.uuid4() for _ in range(4))

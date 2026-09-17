@@ -219,20 +219,45 @@ async def get_dual_control_rule(rid: uuid.UUID, db: DbSession) -> DualControlRul
 
 
 @router.patch("/dual-control-rules/{rid}", response_model=DualControlRuleRead, dependencies=[_WRITE])
-async def update_dual_control_rule(rid: uuid.UUID, body: DualControlRuleUpdate, db: DbSession) -> DualControlRuleRead:
+async def update_dual_control_rule(
+    rid: uuid.UUID, body: DualControlRuleUpdate, db: DbSession, user: CurrentUser
+) -> DualControlRuleRead:
     obj = await _get(db, DualControlRule, rid, "Dual-control rule")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    changes = {k: {"from": _plain(getattr(obj, k)), "to": _plain(v)}
+               for k, v in data.items() if getattr(obj, k) != v}
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if changes:
+        # Loosening four-eyes is exactly what an examiner looks for: every change to a
+        # rule is on the trail with its before and after values.
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="dual_control_rule", entity_id=obj.id,
+            summary=f"Changed maker-checker rule {obj.reference}: {obj.module}/{obj.action} "
+            + ", ".join(f"{k.replace('_', ' ')} {c['from']} → {c['to']}" for k, c in changes.items()),
+            changes=changes,
+        )
     return DualControlRuleRead.model_validate(obj)
 
 
+def _plain(value):
+    """A JSON-safe value for the audit trail (enums by value, numbers as floats)."""
+    value = getattr(value, "value", value)
+    return float(value) if hasattr(value, "is_finite") else value
+
+
 @router.delete("/dual-control-rules/{rid}", status_code=204, dependencies=[_WRITE])
-async def delete_dual_control_rule(rid: uuid.UUID, db: DbSession) -> None:
+async def delete_dual_control_rule(rid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _get(db, DualControlRule, rid, "Dual-control rule")
     obj.deleted = True
     obj.deleted_date = date.today()
     await db.flush()
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="dual_control_rule", entity_id=obj.id,
+        summary=f"Deleted maker-checker rule {obj.reference}: {obj.module}/{obj.action} "
+        "(the global segregation-of-duties switch now decides this action)",
+    )
 
 
 # ================================================================== summary ===

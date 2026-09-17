@@ -1,11 +1,14 @@
 "use client";
 
 /* Settings → Organisation: the locale every page formats with (currency, timezone, date
-   format, fiscal year, phone country) and how long archived records are kept.
+   format, fiscal year, phone country), how long archived records are kept, and — for
+   administrators — Security: MFA by role and segregation-of-duties readiness.
    Anyone signed in can read these; changing them needs `settings:manage` (Admin). */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import MfaPolicySettings from "@/components/MfaPolicySettings";
+import SegregationOfDutiesSettings from "@/components/SegregationOfDutiesSettings";
 import { Field, NumberInput, Select } from "@/components/fields";
 import { toast } from "@/lib/feedback";
 import {
@@ -260,6 +263,19 @@ export default function OrganisationSettingsPage() {
           </div>
         )}
       </form>
+
+      {canEdit && (
+        <section id="security" style={{ marginTop: 28 }}>
+          <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>Security</h2>
+          <p className="muted" style={{ fontSize: 13.5, margin: "0 0 12px" }}>
+            Who must use two-factor authentication, and whether maker-checker can work with the people you have.
+          </p>
+          <div style={{ display: "grid", gap: 16 }}>
+            <MfaPolicySettings canEdit={canEdit} />
+            <SegregationOfDutiesSettings />
+          </div>
+        </section>
+      )}
     </div>
   );
 }

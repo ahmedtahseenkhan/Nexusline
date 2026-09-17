@@ -32,10 +32,40 @@ export type VendorTieringFacts = {
   stale: boolean;
   problem: string;
 };
-export type VendorOutsourcingFacts = { reference: string; title: string; materiality: string; exit_plan: string; exit_plan_tested: boolean };
+export type VendorOutsourcingFacts = {
+  reference: string;
+  title: string;
+  materiality: string;
+  exit_plan: string;
+  exit_plan_tested: boolean;
+  /** Why it is (or is not) material. Absent from an older API. */
+  materiality_assessment?: string;
+  /** easy | moderate | difficult | none | "" (not assessed). */
+  substitutability?: string;
+  /** low | medium | high | "" (not assessed). */
+  concentration_level?: string;
+  concentration_note?: string;
+  status?: string;
+};
+/** Derived on the server (api/v1/vendors.concentration_view). */
+export type VendorConcentrationFacts = {
+  material_arrangements: number;
+  arrangements: number;
+  critical_processes: number;
+  processes: number;
+  recorded_level: string;
+  /** low | medium | high */
+  level: string;
+  flagged: boolean;
+  reasons: string[];
+  /** Critical third party (or one supporting a critical process) with no arrangement on file. */
+  arrangement_expected: boolean;
+};
 
 /** The fields of `GET /vendors/{id}` the rules read. */
 export type VendorFacts = {
+  /** The vendor id, for links out (e.g. recording an outsourcing arrangement). */
+  id?: string;
   criticality: string;
   status: string;
   risk_rating: string | null;
@@ -56,6 +86,7 @@ export type VendorFacts = {
   tier_override_reason?: string;
   tiering?: VendorTieringFacts | null;
   outsourcing?: VendorOutsourcingFacts[];
+  concentration?: VendorConcentrationFacts | null;
 };
 
 export type VendorInput = { vendor: VendorFacts };
@@ -127,6 +158,58 @@ export function vendorContractsSub(v: Pick<VendorFacts, "contracts" | "contract_
     .map(([c, n]) => fmt.money(n, c || null))
     .join(" + ");
   return totals ? `Active value ${totals}` : `${st.inForce} in force`;
+}
+
+/** Substitutability as the record says it. */
+export const VENDOR_SUBSTITUTABILITY: Record<string, string> = {
+  easy: "Easy to substitute",
+  moderate: "Moderately hard to substitute",
+  difficult: "Difficult to substitute",
+  none: "No realistic alternative",
+};
+const HARD_TO_SUBSTITUTE = new Set(["difficult", "none"]);
+const exitPlanTested = (o: VendorOutsourcingFacts) => !!o.exit_plan?.trim() && o.exit_plan_tested;
+
+/** The Due diligence section's outsourcing lines: materiality with its rationale,
+ *  substitutability, and what the concentration level rests on (the level itself is
+ *  `concentration.level`, shown as a badge). Pure. */
+export function vendorOutsourcingDiligence(v: Pick<VendorFacts, "outsourcing" | "concentration">): {
+  materiality: string | null;
+  rationale: string | null;
+  substitutability: string | null;
+  concentration: string | null;
+} {
+  const live = (v.outsourcing ?? []).filter((o) => o.status !== "terminated");
+  const c = v.concentration ?? null;
+  if (!live.length) {
+    return {
+      materiality: null, rationale: null, substitutability: null,
+      concentration: c && c.critical_processes ? `${plural(c.critical_processes, "high or critical process", "high or critical processes")} depend on this provider` : null,
+    };
+  }
+  const material = live.filter((o) => o.materiality === "material");
+  const materiality = material.length
+    ? `Material outsourcing (${joinList(material.map((o) => o.reference || o.title))})`
+    : `Non-material outsourcing (${joinList(live.map((o) => o.reference || o.title))})`;
+  const rationales = live.filter((o) => o.materiality_assessment?.trim());
+  const rationale = rationales.length
+    ? rationales.map((o) => `${live.length > 1 ? `${o.reference || o.title}: ` : ""}${o.materiality_assessment!.trim()}`).join(" · ")
+    : null;
+  const subs = live.filter((o) => o.substitutability);
+  const substitutability = subs.length
+    ? subs.map((o) => `${live.length > 1 ? `${o.reference || o.title}: ` : ""}${VENDOR_SUBSTITUTABILITY[o.substitutability!] ?? o.substitutability}`).join(" · ")
+    : null;
+  let concentration: string | null = null;
+  if (c) {
+    const parts = [
+      plural(c.material_arrangements, "material arrangement"),
+      plural(c.critical_processes, "high or critical process", "high or critical processes"),
+    ];
+    const recorded = c.recorded_level ? `; recorded ${c.recorded_level}` : "";
+    const notes = live.map((o) => o.concentration_note?.trim()).filter(Boolean);
+    concentration = `${parts.join(", ")}${recorded}${notes.length ? `. ${notes.join(" · ")}` : ""}`;
+  }
+  return { materiality, rationale, substitutability, concentration };
 }
 
 /** "tiering proposes high": the header's amber note when the criticality was overridden. */
@@ -340,12 +423,41 @@ export function vendorOpenPoints({ vendor: v }: VendorInput, ctx: Ctx): OpenPoin
         : { kind: "attest", target: "attest", label: "Attest…" },
     });
   }
-  const untested = (v.outsourcing ?? []).filter((o) => o.materiality === "material" && (!o.exit_plan?.trim() || !o.exit_plan_tested));
+  const liveOutsourcing = (v.outsourcing ?? []).filter((o) => o.status !== "terminated");
+  // Most urgent first: a material service the bank cannot easily replace, with no tested
+  // way out.
+  const cornered = liveOutsourcing.filter((o) => o.materiality === "material" && HARD_TO_SUBSTITUTE.has(o.substitutability ?? "") && !exitPlanTested(o));
+  if (cornered.length) {
+    const o = cornered[0];
+    gaps.unshift({
+      id: "vendor.hard_to_substitute_untested", level: "gap",
+      text: [
+        `Material outsourcing ${o.reference || o.title} ${o.substitutability === "none" ? "has no realistic alternative" : "is difficult to substitute"} and ${o.exit_plan?.trim() ? "its exit plan is untested" : "has no exit plan"}${cornered.length > 1 ? ` (+${cornered.length - 1} more)` : ""}.`,
+      ],
+      action: { kind: "section", target: "outsourcing", label: "See outsourcing" },
+    });
+  }
+  const untested = liveOutsourcing.filter((o) => o.materiality === "material" && !exitPlanTested(o) && !cornered.includes(o));
   if (untested.length) {
     gaps.push({
       id: "vendor.exit_plan_untested", level: "gap",
       text: [`Material outsourcing ${untested[0].reference || untested[0].title} has no tested exit plan${untested.length > 1 ? ` (+${untested.length - 1} more)` : ""}.`],
       action: { kind: "section", target: "outsourcing", label: "See outsourcing" },
+    });
+  }
+  const conc = v.concentration ?? null;
+  if (conc?.flagged && v.status !== "offboarded") {
+    gaps.push({
+      id: "vendor.high_concentration", level: "gap",
+      text: [`High concentration: ${conc.reasons[0] ? conc.reasons[0].replace(/\.$/, "").replace(/^./, (ch) => ch.toLowerCase()) : "much of the bank relies on this provider"}${conc.reasons.length > 1 ? ` (+${conc.reasons.length - 1} more)` : ""}.`],
+      action: { kind: "section", target: "diligence", label: "See due diligence" },
+    });
+  }
+  if (conc?.arrangement_expected && v.status !== "offboarded" && v.id) {
+    gaps.push({
+      id: "vendor.outsourcing_undecided", level: "gap",
+      text: ["No outsourcing arrangement recorded — decide whether this is material outsourcing."],
+      action: { kind: "href", target: `/outsourcing?new=1&vendor_id=${encodeURIComponent(v.id)}`, label: "Record arrangement" },
     });
   }
   const ws = gov.workflowState;

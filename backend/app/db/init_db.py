@@ -25,6 +25,7 @@ from app.db.schema_patches import (
     phase1_ddl_statements,
     phase2_ddl_statements,
     phase3_ddl_statements,
+    recheck_ddl_statements,
     scenario_control_references_ddl_statements,
     tat_ddl_statements,
 )
@@ -104,6 +105,7 @@ async def init_models() -> None:
             *phase1_ddl_statements(),
             *phase2_ddl_statements(),
             *phase3_ddl_statements(),
+            *recheck_ddl_statements(),
         ):
             await conn.execute(text(statement))
         await apply_rls_policies(conn)

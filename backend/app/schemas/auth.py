@@ -54,6 +54,9 @@ class MeRead(UserRead):
     mfa_enrolment_due: datetime | None = None
     #: Whether the MFA policy applies to this user (so they may not switch MFA off).
     mfa_required_for_user: bool = False
+    #: The user's last sign-in went through the organisation's single sign-on: their
+    #: identity provider enforces the second factor, not this policy.
+    mfa_via_identity_provider: bool = False
 
 
 class MfaVerifyRequest(BaseModel):

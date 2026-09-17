@@ -35,3 +35,5 @@ class TenantSettings(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     # every licensed module (organisations that predate the choice keep everything).
     enabled_modules: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Role names that must use MFA here. NULL = the deployment default (MFA_REQUIRED_ROLES).
+    mfa_required_roles: Mapped[list | None] = mapped_column(JSONB, nullable=True)

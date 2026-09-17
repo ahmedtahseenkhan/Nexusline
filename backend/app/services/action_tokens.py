@@ -99,7 +99,7 @@ def enabled() -> bool:
     """Whether Approve / Reject links may be issued and redeemed (``EMAIL_ACTIONS_ENABLED``)."""
     from app.core.config import settings
 
-    return bool(getattr(settings, "email_actions_enabled", True))
+    return bool(getattr(settings, "email_actions_enabled", False))
 
 
 async def issue_token(

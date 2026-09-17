@@ -342,13 +342,17 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
         test overdue) makes this ``issues`` on the very next read, so the risk register
         reacts automatically. A test awaiting review changes nothing until it is decided.
 
-        ``none`` = unmitigated · ``ok`` = controls exist and are healthy · ``issues``.
+        ``none`` = unmitigated · ``ok`` = every control rated from reviewed tests and
+        healthy · ``untested`` = at least one rating rests on no reviewed test ·
+        ``issues`` (worst). The rule is ``control_assurance.control_health_state``.
+        Open issues against a control are not loaded on the row: the API adds them
+        (``api.v1.risks._control_health``), so a read's value can only be worse.
         """
-        if not self.controls:
-            return "none"
-        # The residual engine's reliance rule (``control_assurance.reliance_note``): the
-        # latest reviewed test failed, the test is overdue, or an audit finding is open.
-        return "issues" if any(c.reliance_note for c in self.controls) else "ok"
+        from app.services import control_assurance
+
+        return control_assurance.rollup_health(
+            control_assurance.health_of_control(c) for c in self.controls
+        )
 
 
 class RiskAcceptance(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
@@ -382,6 +386,9 @@ class RiskSetting(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     severity_bands: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     matrix_cells: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     impact_mode: Mapped[str] = mapped_column(String(16), default="max", nullable=False)
+    # Severity → longest review frequency allowed, e.g. {"critical": "monthly"}. Empty
+    # keys fall back to the product default in ``risk_scoring``.
+    review_cadence: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_risk_settings_tenant"),)
 
     appetite_score: Mapped[int] = mapped_column(Integer, default=6, nullable=False)

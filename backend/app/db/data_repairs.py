@@ -81,6 +81,11 @@ class RepairReport:
     control_natures_set: int = 0
     classification_values_retired: int = 0
     approvals_backfilled: int = 0
+    scenario_kinds_set: int = 0
+    title_asset_flags_set: int = 0
+    title_asset_flags_cleared: int = 0
+    governance_defaults_added: int = 0
+    requirement_sort_keys_filled: int = 0
     indexes_skipped: list[str] = field(default_factory=list)
     repairs_failed: list[str] = field(default_factory=list)
 
@@ -92,6 +97,8 @@ class RepairReport:
             or self.lookups_created or self.operating_effectiveness_carried
             or self.control_classifications_cleared or self.control_natures_set
             or self.classification_values_retired or self.approvals_backfilled
+            or self.scenario_kinds_set or self.title_asset_flags_set or self.title_asset_flags_cleared
+            or self.governance_defaults_added
             or self.indexes_skipped or self.repairs_failed
         )
 
@@ -619,6 +626,60 @@ async def backfill_imported_approvals(db, tenant_id) -> int:
     return written
 
 
+# ------------------------------------ re-check F-04: scenario kinds, title vs asset ---
+#: ``changes`` key on the audit row written when a template takes the library's kinds.
+SCENARIO_KINDS_CHANGE = "asset_kinds"
+
+
+async def backfill_scenario_kinds(db, tenant_id) -> int:
+    """Installed library scenarios that predate asset kinds take the library's kinds
+    (``risk_scenarios.library_kinds_for``: only rows still *being* the library scenario).
+    Once per template: a row this repair already filled and a person has since cleared
+    ("every kind") is theirs and stays cleared. One ``system`` audit row per template.
+    Returns templates changed."""
+    from app.models.audit import AuditLog
+    from app.models.risk_scenario import RiskScenarioTemplate
+    from app.services.risk_scenarios import CATALOGUE, library_kinds_for
+
+    specs = {s.reference: s for s in CATALOGUE}
+    rows = (
+        await db.scalars(
+            select(RiskScenarioTemplate).where(
+                RiskScenarioTemplate.reference.in_(sorted(specs)),
+                or_(RiskScenarioTemplate.asset_kinds.is_(None), RiskScenarioTemplate.asset_kinds == ""),
+            )
+        )
+    ).all()
+    todo = [(row, kinds) for row in rows if (kinds := library_kinds_for(row, specs[row.reference]))]
+    if not todo:
+        return 0
+    filled_before = set(
+        (
+            await db.scalars(
+                select(AuditLog.entity_id).where(
+                    AuditLog.entity_type == "risk_scenario",
+                    AuditLog.entity_id.in_([row.id for row, _ in todo]),
+                    AuditLog.actor_id.is_(None),
+                    AuditLog.changes["via"].astext == REPAIR_VIA,
+                    AuditLog.changes.has_key(SCENARIO_KINDS_CHANGE),
+                )
+            )
+        ).all()
+    )
+    changed = 0
+    for row, kinds in todo:
+        if row.id in filled_before:
+            continue
+        row.asset_kinds = kinds
+        system_audit(
+            db, tenant_id, action="update", entity_type="risk_scenario", entity_id=row.id,
+            summary=f"Risk scenario {row.reference} now fits only these asset kinds: {kinds} (data repair)",
+            changes={SCENARIO_KINDS_CHANGE: {"from": "", "to": kinds}, "via": REPAIR_VIA},
+        )
+        changed += 1
+    return changed
+
+
 async def _guarded(db, report: RepairReport, name: str, step):
     """Run one repair in a savepoint; on failure roll it back, log it and carry on, so
     one bad row never stops the start-up (the repair retries on the next start)."""
@@ -629,6 +690,48 @@ async def _guarded(db, report: RepairReport, name: str, step):
         logger.exception("Data repair %s failed; it will retry on the next start", name)
         report.repairs_failed.append(name)
         return None
+
+
+async def fill_requirement_sort_keys(db) -> int:
+    """F-16: every requirement carries the natural-order key of its reference
+    (``services.reference_sort``). Rows written before the column existed, or by a
+    path that bypassed the model, are filled; a correct key is left alone."""
+    from app.models.compliance import Requirement
+    from app.services.reference_sort import reference_sort_key
+
+    rows = (await db.execute(
+        select(Requirement.id, Requirement.reference, Requirement.reference_sort_key)
+    )).all()
+    fixed = 0
+    for rid, reference, stored in rows:
+        key = reference_sort_key(reference)
+        if key != (stored or ""):
+            await db.execute(
+                update(Requirement).where(Requirement.id == rid)
+                # A derived key is not an edit: keep the clause's last-updated time.
+                .values(reference_sort_key=key, updated_at=Requirement.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+            fixed += 1
+    return fixed
+
+
+async def seed_default_governance(db, tenant_id) -> int:
+    """Default approval routes and dual-control rules for an organisation that predates
+    them (``services/default_governance.py``). Runs once per organisation; returns the
+    number of routes and rules added or upgraded."""
+    from app.services import default_governance
+
+    if await default_governance.already_seeded(db):
+        return 0
+    result = await default_governance.ensure_default_governance(db, tenant_id)
+    return len(result.routes_added) + len(result.routes_upgraded) + result.rules_added
+
+
+async def _reconcile_title_flags(db) -> tuple[int, int]:
+    from app.services.risk_integrity import reconcile_generated_title_flags
+
+    return await reconcile_generated_title_flags(db)
 
 
 async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
@@ -644,6 +747,7 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
     report.classification_values_regraded += await regrade_default_cia_axes(db)
     report.operating_effectiveness_carried += await carry_effectiveness_to_operating(db)
     await backfill_source_links(db)  # issues raised from a record get the typed link (2.3)
+    report.requirement_sort_keys_filled += await fill_requirement_sort_keys(db)  # F-16
     if tenant_id is not None:
         # B10: before the foreign-key backfill, which would otherwise re-link a
         # framework name typed into a control's classification on this very start.
@@ -659,10 +763,26 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
         report.approvals_backfilled += await _guarded(
             db, report, "imported_approvals", lambda: backfill_imported_approvals(db, tenant_id),
         ) or 0
+        # Re-check F-04: scenarios fit asset kinds; a generated title naming an asset
+        # the risk does not link is flagged for review (and the flag cleared once fixed).
+        report.scenario_kinds_set += await _guarded(
+            db, report, "scenario_kinds", lambda: backfill_scenario_kinds(db, tenant_id),
+        ) or 0
+        title_flags = await _guarded(
+            db, report, "generated_title_asset", lambda: _reconcile_title_flags(db),
+        )
+        if title_flags:
+            report.title_asset_flags_set += title_flags[0]
+            report.title_asset_flags_cleared += title_flags[1]
         # Lookup seeding (reference data) runs before this, so defined values match first.
         fk = await backfill_foreign_keys(db, tenant_id)
         report.foreign_keys_matched += fk.matched
         report.lookups_created += fk.lookups_created
+        # F-06 re-check: default approval routes and dual-control rules, once per
+        # organisation (marked in the activity log). Never overwrites.
+        report.governance_defaults_added += await _guarded(
+            db, report, "default_governance", lambda: seed_default_governance(db, tenant_id),
+        ) or 0
     await db.flush()
 
 

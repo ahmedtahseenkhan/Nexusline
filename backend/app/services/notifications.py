@@ -80,6 +80,7 @@ from app.models.project import Project
 from app.models.risk import Risk, RiskAcceptance, RiskTreatmentAction
 from app.models.vendor import CERT_EXPIRY_WARNING_DAYS, Vendor, VendorCertification, certification_expiry_state
 from app.services.risk_acceptance import EXPIRY_WARNING_DAYS
+from app.services.risk_query import board_register_clause, on_board_register
 from app.services.risk_scoring import effective_score
 from app.services.risk_settings import get_or_create_settings, load_appetite_book
 
@@ -958,6 +959,110 @@ async def _tat_context(db: AsyncSession, directory: Directory, records: Sequence
     return out
 
 
+# ================================================================ risk alerts ===
+#: What the risk alerts read — columns, not ORM rows, so the computed scores are the
+#: database's (a row just flushed would otherwise have them expired).
+_RISK_ALERT_COLUMNS = (
+    Risk.id, Risk.reference, Risk.title, Risk.owner_id, Risk.status, Risk.last_assessed_at,
+    Risk.deleted, Risk.category_id, Risk.next_review_date, Risk.inherent_score, Risk.residual_score,
+)
+#: The alert families one risk's own rows raise (the treatment and acceptance alerts
+#: belong to their action and acceptance).
+RISK_ALERT_FAMILIES: tuple[str, ...] = ("risk-review", "risk-breach")
+
+
+def risk_alert_conditions(risk: Any, book: Any, today: date) -> list[tuple[str, str, str, Any]]:
+    """``(dedup key, title, body, category)`` for each alert one risk raises now. Pure.
+
+    * ``risk-review`` — its next review date has passed.
+    * ``risk-breach`` — its effective score (residual when assessed, else inherent) is
+      above the tolerance that applies to it, and it is on the board register: scored,
+      out of Draft, not accepted or closed (``risk_query.on_board_register``).
+    """
+    out: list[tuple[str, str, str, Any]] = []
+    if getattr(risk, "deleted", False):
+        return out
+    due = getattr(risk, "next_review_date", None)
+    if due and due < today:
+        out.append((f"risk-review:{risk.id}", f"Risk review overdue: {risk.reference}",
+                    f"{risk.title} — review was due {due}", _W))
+    if on_board_register(getattr(risk, "status", None), getattr(risk, "last_assessed_at", None)):
+        eff = effective_score(risk.inherent_score, risk.residual_score)
+        tolerance = book.tolerance_for(getattr(risk, "category_id", None))
+        if eff is not None and eff > tolerance:
+            out.append((f"risk-breach:{risk.id}", f"Risk above tolerance: {risk.reference}",
+                        f"{risk.title} — score {eff} exceeds tolerance {tolerance}", _C))
+    return out
+
+
+def risk_refresh_plan(
+    existing: Mapping[str, Any], alerts: Sequence[Mapping[str, Any]], grouped_keys: Iterable[str] = ()
+) -> ReconcilePlan:
+    """:func:`reconcile_plan` for one risk's own alerts, with one rule more. Pure.
+
+    ``existing`` holds only this risk's rows. A review alert is housekeeping and may be
+    folded into a recipient's grouped row (``group:risk-review@…``, in ``grouped_keys``);
+    a new individual row for that recipient would show the risk twice, so it is left
+    for the next full scan to place. A breach is never grouped and is always written.
+    """
+    grouped = set(grouped_keys)
+    plan = reconcile_plan(existing, alerts, keep_prefix=EVENT_PREFIX)
+    plan.creates = [
+        (a, carried) for a, carried in plan.creates
+        if not (
+            family_of(a["dedup_key"]) == "risk-review"
+            and f"{GROUP_PREFIX}risk-review{_recipient_of(a)}" in grouped
+        )
+    ]
+    return plan
+
+
+async def refresh_risk_alerts(db: AsyncSession, tenant_id, risk_id) -> None:
+    """Reconcile one risk's breach and review alerts now (F-22): saving a score that ends
+    a breach resolves the alert at once, one that starts one raises it, instead of both
+    waiting for the next scan. Everything else is left to :func:`refresh`."""
+    row = (await db.execute(select(*_RISK_ALERT_COLUMNS).where(Risk.id == risk_id))).first()
+    alerts: list[dict] = []
+    if row is not None:
+        directory = await load_directory(db)
+        book = await load_appetite_book(db, tenant_id, await get_or_create_settings(db, tenant_id))
+        for key, title, body, category in risk_alert_conditions(row, book, date.today()):
+            alerts.append({
+                "dedup_key": key, "title": title, "body": body, "category": category,
+                "entity_type": "risk", "entity_id": row.id, "link": with_id("/risks", row.id),
+                "to": directory.first_active(row.owner_id),
+            })
+        alerts = address_alerts(alerts, directory)
+    bases = [f"{family}:{risk_id}" for family in RISK_ALERT_FAMILIES]
+    existing: dict[str, Notification] = {}
+    for n in (await db.scalars(
+        select(Notification).where(or_(*(
+            or_(Notification.dedup_key == b, Notification.dedup_key.like(f"{b}{RECIPIENT_SEPARATOR}%"))
+            for b in bases
+        )))
+    )).all():
+        existing.setdefault(n.dedup_key, n)
+    grouped = (await db.scalars(
+        select(Notification.dedup_key).where(Notification.dedup_key.like(f"{GROUP_PREFIX}risk-review%"))
+    )).all()
+    plan = risk_refresh_plan(existing, alerts, grouped)
+    for stored, changes in plan.updates:
+        for field_name, value in changes.items():
+            setattr(stored, field_name, value)
+    for a, carried in plan.creates:
+        n = Notification(
+            tenant_id=tenant_id, user_id=a.get("user_id"), role_name=a.get("role_name") or "",
+            title=a["title"][:255], body=a["body"], category=a["category"], entity_type=a["entity_type"],
+            entity_id=a["entity_id"], link=(a["link"] or "")[:255], dedup_key=a["dedup_key"][:255],
+        )
+        if carried is not None:
+            n.created_at = carried
+        db.add(n)
+    for key in plan.deletes:
+        await db.delete(existing[key])
+    await db.flush()
+
+
 async def scan_alerts(db: AsyncSession, tenant_id, directory: Directory | None = None) -> list[dict]:
     """Every alert that holds now, each with its recipients in ``to`` (see
     :func:`address_alerts`). ``directory`` is loaded when not given."""
@@ -996,22 +1101,16 @@ async def scan_alerts(db: AsyncSession, tenant_id, directory: Directory | None =
     # Tolerance is the risk's top-level category's where one is set (RiskAppetite), else
     # the organisation's; the SQL pre-filter uses the lowest tolerance anywhere.
     book = await load_appetite_book(db, tenant_id, settings)
+    # A breach is judged only on the board register (F-21): a draft nobody validated, or
+    # a risk already accepted or closed, raises no "above tolerance" alert.
     _eff = func.coalesce(Risk.residual_score, Risk.inherent_score)
-    _risk_stmt = select(Risk).where(
+    _risk_stmt = select(*_RISK_ALERT_COLUMNS).where(
         Risk.deleted.is_(False),
-        or_(Risk.next_review_date < today, _eff > book.min_tolerance),
+        or_(Risk.next_review_date < today, and_(board_register_clause(), _eff > book.min_tolerance)),
     )
-    for r in (await db.scalars(_risk_stmt)).all():
-        owner = directory.first_active(r.owner_id)
-        link = record_link(r, "/risks")
-        if r.next_review_date and r.next_review_date < today:
-            add(f"risk-review:{r.id}", f"Risk review overdue: {r.reference}",
-                f"{r.title} — review was due {r.next_review_date}", _W, "risk", r.id, link, owner)
-        eff = effective_score(r.inherent_score, r.residual_score)
-        tolerance = book.tolerance_for(r.category_id)
-        if eff is not None and eff > tolerance:
-            add(f"risk-breach:{r.id}", f"Risk above tolerance: {r.reference}",
-                f"{r.title} — score {eff} exceeds tolerance {tolerance}", _C, "risk", r.id, link, owner)
+    for r in (await db.execute(_risk_stmt)).all():
+        for key, title, body, category in risk_alert_conditions(r, book, today):
+            add(key, title, body, category, "risk", r.id, with_id("/risks", r.id), directory.first_active(r.owner_id))
 
     # Risk treatment is tracked per action: each open action past its due date raises
     # its own alert (grouped with the rest of the housekeeping when there are many), to

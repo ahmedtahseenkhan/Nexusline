@@ -53,6 +53,13 @@ With the global switch on and no rule configured, each of these refuses when the
 and the checker are the same person. Single-operator installs (demos, evaluations)
 should either add a second user or set ``ENFORCE_SEGREGATION_OF_DUTIES=false``.
 
+Every organisation now starts with a rule for each of these keys
+(``services/default_governance.py``: on provisioning, at the end of onboarding, and once
+for older organisations at start-up). They are created enabled when the global switch is
+on — which refuses exactly what the switch alone refused — and disabled when it is off,
+so the switch keeps deciding until an administrator turns an individual rule on. A key
+whose rule is deleted falls back to the switch again; the defaults never re-create it.
+
 Who the maker of an existing record is — :func:`maker_of`, first answer wins:
 
 1. The actor of the record's earliest ``create`` entry in the audit trail.

@@ -58,6 +58,16 @@ WRITE_SCHEMAS = {
     "goal": (goal_s.GoalCreate, goal_s.GoalUpdate, {"owner_id", "workflow_owner_id"}),
 }
 
+async def _no_review_policy(db, user):
+    from app.services.risk_scoring import SeverityScale
+
+    return SeverityScale(), {}
+
+
+async def _no_alert_refresh(db, user, risk):
+    return None
+
+
 READ_SCHEMAS = {
     "risk": (risk_s.RiskRead, {"owner_ref", "treatment_owner_ref", "category_ref", "workflow_owner_ref"}),
     "control": (control_s.ControlRead,
@@ -316,6 +326,11 @@ def risk_io(monkeypatch):
     monkeypatch.setattr(risks_api, "_load_risk", load)
     monkeypatch.setattr(risks_api, "_read", read)
     monkeypatch.setattr(risks_api, "get_matrix_size", size)
+    # F-22: the review clock and the alert refresh need the tenant's settings and the
+    # notifications table; neither is under test here.
+    monkeypatch.setattr(risks_api, "_review_policy", _no_review_policy)
+    monkeypatch.setattr(risks_api, "_refresh_alerts", _no_alert_refresh)
+    monkeypatch.setattr(risks_api, "_reconcile_title_flag", _no_alert_refresh)
     return state
 
 

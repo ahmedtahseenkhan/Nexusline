@@ -356,6 +356,10 @@ export interface RiskSetting {
   matrix_size: number;
   /** How impact-dimension scores combine: the highest, or the average rounded up. */
   impact_mode?: "max" | "average";
+  /** Severity → the longest review cycle a risk of that rating may have (organisation's
+   *  value, else the product default). */
+  review_cadence?: Record<"critical" | "high" | "medium" | "low", string>;
+  review_cadence_defaults?: Record<"critical" | "high" | "medium" | "low", string>;
 }
 /** Configured band thresholds: the highest score that is low, medium and high. */
 export interface SeverityBands {
@@ -476,6 +480,8 @@ export interface RiskScenario {
   description: string;
   category: string;
   asset_classes: string;
+  /** Comma-separated asset kinds the scenario fits (see AssetKind); empty = every kind. */
+  asset_kinds: string;
   threat: string;
   vulnerability: string;
   likelihood: number;
@@ -484,6 +490,13 @@ export interface RiskScenario {
   fixed_impact: number;
   treatment_hint: string;
   enabled: boolean;
+}
+/** One entry of the fixed asset-kind vocabulary scenarios are matched on. */
+export interface AssetKind {
+  value: string;
+  label: string;
+  description: string;
+  group: string;
 }
 export interface ScenarioInstallResult {
   installed: number;
@@ -529,6 +542,8 @@ export interface RiskProposal {
   /** The key's last candidate was rejected, and why. */
   rejected_note: string;
   rejected_at: string | null;
+  /** The asset's kinds as people read them ("Server or host", "Core banking"). */
+  asset_kinds?: string[];
 }
 export interface GenerateRisksResponse {
   proposals: RiskProposal[];
@@ -540,6 +555,9 @@ export interface GenerateRisksResponse {
   candidates: number;
   /** Proposals that would join a candidate already in the queue. */
   queued: number;
+  /** Pairs of the right class left out because the asset is not a kind the scenario fits. */
+  not_fitting?: number;
+  not_fitting_scenarios?: { reference: string; title: string; pairs: number; fits: string[] }[];
 }
 export interface GeneratedRiskCommitItem {
   asset_id: string;
@@ -599,12 +617,59 @@ export interface RiskCandidate {
   promoted_risk_id: string | null;
   promoted_risk: { id: string; reference?: string; title?: string } | null;
   promoted_risk_archived: boolean;
+  /** Register risks made before the queue that this candidate was rebuilt from. */
+  source_risk_id?: string | null;
+  source_risks?: { id: string; reference: string; title: string; archived: boolean }[];
   created_by_ref: { id: string; full_name: string; email: string } | null;
   decided_by_ref: { id: string; full_name: string; email: string } | null;
   decided_at: string | null;
   decision_note: string;
   created_at: string;
   updated_at: string;
+}
+/** One generated risk made before the queue, in the move-to-queue plan. */
+export interface LegacyRiskRef {
+  id: string;
+  reference: string;
+  title: string;
+  scenario_reference: string;
+  asset_id: string | null;
+  asset_name: string;
+  inherent_likelihood: number | null;
+  inherent_impact: number | null;
+  reason: string;
+}
+export interface LegacyMigrationPlan {
+  recognised: number;
+  moving: number;
+  dropped: number;
+  kept: number;
+  new_candidates: number;
+  joined_candidates: number;
+  groups: {
+    dedupe_key: string;
+    scenario_reference: string;
+    scenario_title: string;
+    title: string;
+    scope_label: string;
+    inherent_likelihood: number | null;
+    inherent_impact: number | null;
+    control_references: string[];
+    joins_proposal_id: string | null;
+    joins_title: string;
+    risks: LegacyRiskRef[];
+  }[];
+  dropped_items: LegacyRiskRef[];
+  kept_items: LegacyRiskRef[];
+}
+export interface LegacyMigrationResult {
+  archived: number;
+  moved: number;
+  dropped: number;
+  kept: number;
+  created: number;
+  joined: number;
+  proposals: string[];
 }
 export interface RiskCandidatePage {
   items: RiskCandidate[];
@@ -786,6 +851,24 @@ export interface DashboardOverview {
   third_parties: { total: number; by_rating: Record<string, number>; assessments_overdue: number; critical: number };
   segments: { id: string; name: string; risks: number; breach: number; elevated: number; critical: number }[];
   movement: { period_days: number; risks_created: number; risks_closed: number; acceptances_lapsed: number; tests_recorded: number; incidents_opened: number; issues_closed: number };
+  /** F-21: what the board figures are taken over, what they leave out, how complete the register is. */
+  completeness?: DataCompleteness | null;
+}
+
+export interface DataCompleteness {
+  /** Every live risk. */
+  live_risks: number;
+  /** Scored, out of Draft, not accepted or closed: what every risk figure counts. */
+  board_risks: number;
+  /** Drafts, scored or not, left out of the figures until validated. */
+  pending_validation: number;
+  unscored: number;
+  /** Accepted or closed: settled, out of breach and top-risk figures by design. */
+  settled: number;
+  pending_href: string;
+  owned: number; owned_pct: number | null;
+  tagged: number; tagged_pct: number | null;
+  approved: number; approved_pct: number | null;
 }
 
 export interface Dashboard {
@@ -1015,6 +1098,8 @@ export interface Me {
   mfa_enrolment_due?: string | null;
   /** The MFA policy applies to this user (they cannot switch MFA off). */
   mfa_required_for_user?: boolean;
+  /** Signs in through the organisation's SSO: the identity provider enforces MFA. */
+  mfa_via_identity_provider?: boolean;
   /** Every permission code the user's roles grant (e.g. "org:write"). */
   permission_codes?: string[];
 }
@@ -1111,6 +1196,15 @@ export interface ApprovalRequest {
   is_overdue: boolean;
   created_at: string;
   actions: ApprovalAction[];
+  /** A route stage assigned to a role: the role, and active holders other than the maker. */
+  approver_role?: string | null;
+  approver_role_holders?: number | null;
+  /** Set when nobody but the maker holds the stage role ("No one holds the … role — assign it in Users"). */
+  approver_role_gap?: string | null;
+  /** For the signed-in user: may they cancel (maker or administrator) or decide, and if not, why. */
+  can_cancel?: boolean;
+  can_decide?: boolean;
+  decide_blocked_reason?: string | null;
 }
 
 export interface CustomField {
@@ -2249,9 +2343,13 @@ export const api = {
   riskSettings: () => request<RiskSetting>("/risk-settings"),
   updateRiskSettings: (payload: { appetite_score: number; tolerance_score: number }) =>
     request<RiskSetting>("/risk-settings", { method: "PUT", body: JSON.stringify(payload) }),
+  /** Change only what is sent: appetite, tolerance or the rating-driven review cadence. */
+  patchRiskSettings: (payload: { appetite_score?: number; tolerance_score?: number; review_cadence?: Record<string, string> }) =>
+    request<RiskSetting>("/risk-settings", { method: "PATCH", body: JSON.stringify(payload) }),
   riskAlerts: () => request<Risk[]>("/risk-alerts"),
   riskAggregate: () => request<RiskAggregate>("/risk-aggregate"),
-  riskMatrix: () => request<RiskMatrix>("/risk-matrix"),
+  /** `board` plots only validated risks (out of Draft, not accepted or closed) — the dashboard's view. */
+  riskMatrix: (scope: "register" | "board" = "register") => request<RiskMatrix>(`/risk-matrix?scope=${scope}`),
 
   // Risk methodology: matrix scale, scale wording and the residual-suggestion policy.
   riskMatrixConfig: () => request<RiskMatrixConfig>("/risk-matrix-config"),
@@ -2291,6 +2389,7 @@ export const api = {
 
   // Risk-scenario library and asset-driven generation.
   riskScenarios: (qs = "limit=500") => request<Page<RiskScenario>>(`/risk-scenarios?${qs}`),
+  assetKinds: () => request<AssetKind[]>("/risk-scenarios/asset-kinds"),
   createRiskScenario: (payload: Record<string, unknown>) =>
     request<RiskScenario>("/risk-scenarios", { method: "POST", body: JSON.stringify(payload) }),
   deleteRiskScenario: (id: string) =>

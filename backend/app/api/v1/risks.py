@@ -73,7 +73,14 @@ from app.services import ref_fields
 from app.services import risk_hierarchy
 from app.services import risk_integrity
 from app.services.residual_engine import ControlInput, suggest_residual
-from app.services.risk_scoring import next_review_date
+from app.services import notifications
+from app.services.risk_scoring import (
+    SeverityScale,
+    current_severity,
+    effective_review_frequency,
+    next_review_date,
+    rescheduled_review,
+)
 from app.services.risk_settings import (
     get_matrix_size,
     get_max_score,  # noqa: F401 - kept for callers that import it from here
@@ -348,8 +355,28 @@ def control_assurance_ref(
 
 
 def rests_on_untested_rating(ref: ControlAssuranceRef) -> bool:
-    """A rating set by hand or by override, or with no reviewed test on file (B6)."""
-    return ref.effectiveness_basis in HAND_RATED_BASES or not ref.audit_count
+    """A rating set by hand or by override, or with no reviewed test on file (B6). The
+    rule is ``control_assurance.rests_on_untested_rating``, which control health reads too."""
+    return control_assurance.rests_on_untested_rating(ref.effectiveness_basis, ref.audit_count)
+
+
+async def _control_health(db, risks: Sequence[Risk]) -> dict[uuid.UUID, str]:
+    """Each risk's control health with open issues counted (``Risk.control_health``
+    cannot see them): ``issues`` > ``untested`` > ``ok``, ``none`` without controls. Two
+    queries for every control on the page (``_assurance_inputs``)."""
+    controls = {c.id: c for r in risks for c in (getattr(r, "controls", None) or [])}
+    if not controls:
+        return {r.id: control_assurance.HEALTH_NONE for r in risks}
+    tests, issues = await _assurance_inputs(db, list(controls), issues=True)
+    today = date.today()
+    state = {
+        cid: control_assurance.health_of_control(c, tests.get(cid, ()), issues.get(cid, 0), today)
+        for cid, c in controls.items()
+    }
+    return {
+        r.id: control_assurance.rollup_health(state[c.id] for c in (getattr(r, "controls", None) or []))
+        for r in risks
+    }
 
 
 async def _assurance_inputs(db, control_ids, *, issues: bool = True) -> tuple[dict, dict]:
@@ -470,6 +497,8 @@ async def list_risks(
     appetite: Annotated[str | None, Query(pattern="^(within|within_appetite|elevated|breach)$")] = None,
     has_controls: bool | None = None,
     treatment_overdue: bool | None = None,
+    # F-21: drafts the dashboard's figures leave out ("N risks pending validation").
+    pending_validation: bool | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -495,6 +524,7 @@ async def list_risks(
         appetite_book=context["appetite"],
         has_controls=has_controls,
         treatment_overdue=treatment_overdue,
+        pending_validation=pending_validation,
     )
     if needs_review is not None:
         stmt = stmt.where(Risk.needs_review.is_(needs_review))
@@ -515,10 +545,12 @@ async def list_risks(
     await _fill_hierarchy(db, list(zip(rows, items)))
     today = date.today()
     actions = await _actions_by_risk(db, [r.id for r in rows])
+    health = await _control_health(db, rows)
     for row, item in zip(rows, items):
         item.treatment_progress = TreatmentProgress(
             **risk_integrity.treatment_progress(actions.get(row.id, []), today)
         )
+        item.control_health = health.get(row.id, item.control_health)
     return Page(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -573,6 +605,8 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
         status_before=None,
         status_after=_status_value(data.get("status") or RiskStatus.draft),
         previously_assessed=False,
+        has_owner=data.get("owner_id") is not None,
+        has_business_unit=bool(body.business_unit_ids),
     )
     data["inherent_likelihood"], data["inherent_impact"] = inherent
     data["assessment_rationale"] = decision.rationale or ""
@@ -603,7 +637,9 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
     risk.vulnerabilities = await _resolve(db, Vulnerability, body.vulnerability_ids)
     risk.policies = await _resolve(db, Policy, body.policy_ids)
     risk.incidents = await _resolve(db, Incident, body.incident_ids)
-    risk.next_review_date = next_review_date(risk.review_frequency)
+    # The review clock runs on the effective cycle: the rating may require a shorter one.
+    policy = await _review_policy(db, user)
+    risk.next_review_date = next_review_date(_effective_frequency(risk, policy))
 
     db.add(risk)
     await db.flush()
@@ -611,6 +647,8 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
         db.add(row)
     if dimension_rows:
         await db.flush()
+    # A generated-style title that names an asset the risk doesn't link needs a look.
+    await _reconcile_title_flag(db, user, risk)
     await audit.record(
         db,
         actor=user,
@@ -624,6 +662,7 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
             **({"impact_dimensions": len(dimension_rows)} if dimension_rows else {}),
         },
     )
+    await _refresh_alerts(db, user, risk)
     return await _read(db, risk.id, user)
 
 
@@ -1014,6 +1053,12 @@ async def update_risk(
     })
     stored_scores = {name: getattr(risk, name) for name in risk_integrity.SCORE_FIELDS}
     changed = risk_integrity.changed_scores(stored_scores, data)
+    # Owner and business units as the write would leave them (F-21: both are needed to
+    # leave Draft).
+    units_after = (
+        data["business_unit_ids"] if data.get("business_unit_ids") is not None
+        else getattr(risk, "business_units", None) or []
+    )
     decision = risk_integrity.assessment_decision(
         creating=False,
         changed=bool(changed),
@@ -1023,6 +1068,8 @@ async def update_risk(
         status_before=_status_value(getattr(risk, "status", None)),
         status_after=_status_value(data.get("status", getattr(risk, "status", None))),
         previously_assessed=getattr(risk, "last_assessed_at", None) is not None,
+        has_owner=data.get("owner_id", getattr(risk, "owner_id", None)) is not None,
+        has_business_unit=bool(units_after),
     )
     if "treatment_deadline" in data and data["treatment_deadline"] != getattr(risk, "treatment_deadline", None):
         if await _action_count(db, risk.id):
@@ -1039,6 +1086,14 @@ async def update_risk(
     await _place_on_update(db, risk, data)
 
     await ref_fields.apply_refs(db, Risk, data, RISK_REFS, record=risk)
+    policy = await _review_policy(db, user)
+    effective_before = _effective_frequency(risk, policy)
+    frequency_changed = "review_frequency" in data and _status_value(data["review_frequency"]) != _status_value(
+        getattr(risk, "review_frequency", None)
+    )
+    status_before = _status_value(getattr(risk, "status", None))
+    # What a breach alert reads besides the scores: the status and the tolerance's category.
+    category_before = getattr(risk, "category_id", None)
 
     business_unit_ids = data.pop("business_unit_ids", None)
     process_ids = data.pop("process_ids", None)
@@ -1080,14 +1135,18 @@ async def update_risk(
         for row in _dimension_rows(risk, dimension_rows, user.tenant_id):
             db.add(row)
 
-    if "review_frequency" in data:
-        risk.next_review_date = next_review_date(
-            risk.review_frequency, risk.last_review_date
-        )
+    # F-22: the review date moves only when the cycle does — the owner changed it, or a
+    # re-score tightened the cycle the rating requires. Re-saving the form never moves it.
+    review_before = getattr(risk, "next_review_date", None)
+    _reschedule(risk, effective_before, policy, frequency_changed=frequency_changed)
     cleared = risk_integrity.clear_residual_flag(risk, RESIDUAL_REVIEW_REASON)
 
     await db.flush()
+    if asset_ids is not None or "title" in data:
+        await _reconcile_title_flag(db, user, risk)
     changes = {k: str(v) for k, v in data.items()}
+    if getattr(risk, "next_review_date", None) != review_before:
+        changes["next_review_date"] = f"{review_before} -> {risk.next_review_date}"
     if decision.rationale:
         changes["assessment_rationale"] = decision.rationale
     if decision.stamp:
@@ -1107,6 +1166,12 @@ async def update_risk(
         summary=f"Updated risk {risk.reference}",
         changes=changes,
     )
+    if (
+        changed
+        or status_before != _status_value(getattr(risk, "status", None))
+        or category_before != getattr(risk, "category_id", None)
+    ):
+        await _refresh_alerts(db, user, risk)
     return await _read(db, risk.id, user)
 
 
@@ -1155,6 +1220,8 @@ async def assess_risk(
     risk = await _load_risk(db, risk_id)
     incoming = body.model_dump(exclude_none=True)
     await _check_scale(db, user, incoming)
+    policy = await _review_policy(db, user)
+    effective_before = _effective_frequency(risk, policy)
     if "residual_override_reason" in incoming:
         incoming["residual_override_reason"] = incoming["residual_override_reason"].strip()
     reason = incoming.get("residual_override_reason", risk.residual_override_reason)
@@ -1183,6 +1250,7 @@ async def assess_risk(
     _record_assessment(risk, decision, user)
     if advance:
         risk.status = RiskStatus.assessed
+    _reschedule(risk, effective_before, policy, frequency_changed=False)
     cleared = risk_integrity.clear_residual_flag(risk, RESIDUAL_REVIEW_REASON)
     await db.flush()
     await audit.record(
@@ -1200,6 +1268,7 @@ async def assess_risk(
             **({"assessment_rationale": decision.rationale} if decision.rationale else {}),
         },
     )
+    await _refresh_alerts(db, user, risk)
     return await _read(db, risk.id, user)
 
 
@@ -1223,8 +1292,15 @@ def _residual_assessment(
         previously_assessed=getattr(risk, "last_assessed_at", None) is not None,
     )
     if getattr(risk, "status", None) == RiskStatus.draft:
+        # A draft advances only when it could leave Draft by an edit too: scores and a
+        # rationale, an owner and a business unit (F-21). Otherwise it stays a draft.
+        common_leaving = dict(
+            common,
+            has_owner=getattr(risk, "owner_id", None) is not None,
+            has_business_unit=bool(getattr(risk, "business_units", None)),
+        )
         try:
-            return risk_integrity.assessment_decision(status_after="assessed", **common), True
+            return risk_integrity.assessment_decision(status_after="assessed", **common_leaving), True
         except HTTPException:
             return risk_integrity.assessment_decision(status_after="draft", **common), False
     return risk_integrity.assessment_decision(
@@ -1250,7 +1326,7 @@ async def review_risk(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> R
     risk = await _load_risk(db, risk_id)
     today = date.today()
     risk.last_review_date = today
-    risk.next_review_date = next_review_date(risk.review_frequency, today)
+    risk.next_review_date = next_review_date(_effective_frequency(risk, await _review_policy(db, user)), today)
     await db.flush()
     await audit.record(
         db,
@@ -1379,6 +1455,8 @@ async def accept_residual(
         _control_inputs(risk),
         policy_spec(policy),
     )
+    review_policy = await _review_policy(db, user)
+    effective_before = _effective_frequency(risk, review_policy)
 
     likelihood = body.likelihood if body.likelihood is not None else suggestion.likelihood
     impact = body.impact if body.impact is not None else suggestion.impact
@@ -1443,6 +1521,7 @@ async def accept_residual(
     _record_assessment(risk, decision, user)
     if advance:
         risk.status = RiskStatus.assessed
+    _reschedule(risk, effective_before, review_policy, frequency_changed=False)
     cleared = risk_integrity.clear_residual_flag(risk, RESIDUAL_REVIEW_REASON)
 
     await db.flush()
@@ -1466,6 +1545,7 @@ async def accept_residual(
             **({"review_reason": "residual corrected; review flag cleared"} if cleared else {}),
         },
     )
+    await _refresh_alerts(db, user, risk)
     return await _read(db, risk.id, user)
 
 
@@ -1589,7 +1669,50 @@ async def _read_context(db, user: CurrentUser) -> dict:
         "max_score": scale.max_score,
         "scale": scale,
         "appetite": await load_appetite_book(db, user.tenant_id, settings),
+        "cadence": dict(getattr(settings, "review_cadence", None) or {}),
     }
+
+
+# ------------------------------------------------------------- review cadence (F-22)
+ReviewPolicy = tuple[SeverityScale, dict]
+
+
+async def _review_policy(db, user: CurrentUser) -> ReviewPolicy:
+    """The tenant's banding and rating-driven review cadence, for the review clock."""
+    settings = await get_or_create_settings(db, user.tenant_id)
+    return scale_for(settings), dict(getattr(settings, "review_cadence", None) or {})
+
+
+def _effective_frequency(risk, policy: ReviewPolicy):
+    """The cycle the risk's review clock runs on: the stricter of its chosen cycle and
+    the longest its current rating allows (``risk_scoring.effective_review_frequency``)."""
+    scale, cadence = policy
+    return effective_review_frequency(
+        getattr(risk, "review_frequency", None), current_severity(risk, scale), cadence
+    )[0]
+
+
+def _reschedule(risk, effective_before, policy: ReviewPolicy, *, frequency_changed: bool) -> None:
+    """Move ``next_review_date`` as ``risk_scoring.rescheduled_review`` says, in place."""
+    risk.next_review_date = rescheduled_review(
+        current=getattr(risk, "next_review_date", None),
+        last_review=getattr(risk, "last_review_date", None),
+        effective_before=effective_before,
+        effective_after=_effective_frequency(risk, policy),
+        frequency_changed=frequency_changed,
+    )
+
+
+async def _refresh_alerts(db, user: CurrentUser, risk) -> None:
+    """Bring this risk's breach and review alerts up to date now, rather than at the
+    next scan: a re-score that ends a breach resolves its alert on save (F-22)."""
+    await db.flush()
+    await notifications.refresh_risk_alerts(db, user.tenant_id, risk.id)
+
+
+async def _reconcile_title_flag(db, user: CurrentUser, risk) -> None:
+    """Flag (or clear) a generated-style title that names an asset this risk doesn't link."""
+    await risk_integrity.reconcile_generated_title_flags(db, [risk.id])
 
 
 async def _actions_by_risk(db, risk_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, list[RiskTreatmentAction]]:
@@ -1646,6 +1769,7 @@ async def _read(db, risk_id: uuid.UUID, user: CurrentUser) -> RiskRead:
     await _fill_hierarchy(db, [(risk, read)])
     # Each control's rating, basis and test record (B2): two queries for all of them.
     read.controls = await _assured_controls(db, risk.controls, user)
+    read.control_health = (await _control_health(db, [risk]))[risk.id]
     actions = (await _actions_by_risk(db, [risk.id]))[risk.id]
     read.treatment_actions = await _action_reads(db, actions)
     read.treatment_progress = TreatmentProgress(

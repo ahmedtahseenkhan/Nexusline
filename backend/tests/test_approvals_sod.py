@@ -108,16 +108,21 @@ def test_demo_maker_role_exists_and_cannot_approve():
     assert "workflow:approve" not in codes
 
 
-def test_default_workflows_cover_policy_and_risk_with_three_stages():
+def test_default_workflows_route_risk_policy_and_exception_to_seeded_roles():
+    # The old demo routes named CISO / CRO, roles no organisation has, so a stage could
+    # never be decided by a holder. Every default stage must name a real seeded role.
+    from app.core.permissions import DEFAULT_ROLES
     from app.db.seed import DEFAULT_WORKFLOWS
     from app.models.workflow import ApproverMode
 
     by_type = {entity_type: stages for entity_type, _, _, stages in DEFAULT_WORKFLOWS}
-    assert set(by_type) == {"policy", "risk"}
+    assert set(by_type) == {"policy", "risk", "exception"}
     for stages in by_type.values():
-        assert len(stages) == 3
-        for _, mode, _ in stages:
-            ApproverMode(mode)  # every mode is a real enum value
+        assert stages
+        for _, mode, ref in stages:
+            assert ApproverMode(mode) == ApproverMode.role
+            assert ref in DEFAULT_ROLES
+            assert "workflow:approve" in DEFAULT_ROLES[ref][1]
 
 
 def test_default_widgets_titles_come_from_metric_catalogue():

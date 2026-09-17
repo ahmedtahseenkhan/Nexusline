@@ -81,6 +81,32 @@ def require_maker_identity(requested_by: uuid.UUID | None, requested_by_email: s
         )
 
 
+#: Holders of this permission design approval routes, so they may also withdraw any
+#: pending request — the administrator's escape hatch for a request raised in error.
+CANCEL_ANY_PERMISSION = "automation:manage"
+
+_CANCEL_DETAIL = (
+    "Only the person who submitted this request, or an administrator who manages approval "
+    "routes, can cancel it."
+)
+
+
+def may_cancel(
+    obj: ApprovalRequest,
+    user_id: uuid.UUID | None,
+    user_email: str | None,
+    permission_codes,
+) -> bool:
+    """Whether this user may cancel (or delete) the request: its maker, or an administrator.
+
+    A checker who could cancel a request would have a quiet way to make a decision without
+    recording one, so everyone else is refused.
+    """
+    if CANCEL_ANY_PERMISSION in set(permission_codes or ()):
+        return True
+    return is_maker(obj.requested_by, obj.requested_by_email, user_id, user_email)
+
+
 def enforce_sod(obj: ApprovalRequest, user_id: uuid.UUID | None, user_email: str | None) -> None:
     """403 when segregation of duties is on and the would-be checker is the maker."""
     if settings.enforce_segregation_of_duties and is_maker(
@@ -89,9 +115,68 @@ def enforce_sod(obj: ApprovalRequest, user_id: uuid.UUID | None, user_email: str
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_SOD_DETAIL)
 
 
+async def _annotate(db, rows, user) -> list[ApprovalRead]:
+    """``ApprovalRead`` for each request, with what this user may do and — for a route
+    stage assigned to a role — whether anyone other than the maker holds that role."""
+    from app.services import default_governance as governance
+
+    roles = await governance.stage_roles(db, [r.id for r in rows])
+    holders = await governance.role_holders(db) if roles else {}
+    codes = set(user.permission_codes) if user is not None else set()
+    out = []
+    for r in rows:
+        read = ApprovalRead.model_validate(r)
+        role = roles.get(r.id)
+        extra: dict = {}
+        if role:
+            eligible = governance.eligible_holder_count(holders, role, r.requested_by)
+            extra["approver_role"] = role
+            extra["approver_role_holders"] = eligible
+            if eligible == 0 and r.status == ApprovalStatus.pending:
+                only_maker = governance.eligible_holder_count(holders, role, None) > 0
+                extra["approver_role_gap"] = governance.role_gap_message(role, only_maker=only_maker)
+        if user is not None:
+            mine = is_maker(r.requested_by, r.requested_by_email, user.id, user.email)
+            extra["can_cancel"] = r.status == ApprovalStatus.pending and may_cancel(
+                r, user.id, user.email, codes
+            )
+            blocked = None
+            if r.status == ApprovalStatus.pending:
+                if "workflow:approve" not in codes:
+                    blocked = "You don't have permission to decide approval requests."
+                elif mine and settings.enforce_segregation_of_duties:
+                    blocked = "You submitted this — an independent checker must decide."
+                elif any(a.actor_id == user.id for a in r.actions):
+                    blocked = "You have already recorded a decision on this request."
+                elif role:
+                    blocked = governance.stage_decision_refusal(
+                        role, user.role_names, extra.get("approver_role_holders", 0)
+                    )
+            extra["can_decide"] = r.status == ApprovalStatus.pending and blocked is None
+            extra["decide_blocked_reason"] = blocked
+        out.append(read.model_copy(update=extra))
+    return out
+
+
+async def enforce_stage_role(db, obj: ApprovalRequest, user) -> None:
+    """403 when the request is a route stage assigned to a role this user does not hold
+    and someone other than the maker does. With no such holder the stage falls back to
+    anyone who can approve, and the Approvals page says so."""
+    from app.services import default_governance as governance
+
+    role = (await governance.stage_roles(db, [obj.id])).get(obj.id)
+    if not role:
+        return
+    eligible = governance.eligible_holder_count(await governance.role_holders(db), role, obj.requested_by)
+    refusal = governance.stage_decision_refusal(role, user.role_names, eligible)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+
+
 @router.get("", response_model=Page[ApprovalRead], dependencies=[Depends(require("workflow:read"))])
 async def list_approvals(
     db: DbSession,
+    user: CurrentUser,
     search: str | None = None,
     status_filter: Annotated[ApprovalStatus | None, Query(alias="status")] = None,
     sort_by: Annotated[str | None, Query()] = None,
@@ -118,7 +203,7 @@ async def list_approvals(
             .offset(offset)
         )
     ).all()
-    return Page(items=[ApprovalRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    return Page(items=await _annotate(db, rows, user), total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=ApprovalRead, status_code=201, dependencies=[Depends(require("workflow:write"))])
@@ -141,8 +226,8 @@ async def submit_approval(body: ApprovalCreate, db: DbSession, user: CurrentUser
 
 
 @router.get("/{approval_id}", response_model=ApprovalRead, dependencies=[Depends(require("workflow:read"))])
-async def get_approval(approval_id: uuid.UUID, db: DbSession) -> ApprovalRead:
-    return ApprovalRead.model_validate(await _load(db, approval_id))
+async def get_approval(approval_id: uuid.UUID, db: DbSession, user: CurrentUser) -> ApprovalRead:
+    return (await _annotate(db, [await _load(db, approval_id)], user))[0]
 
 
 @router.post(
@@ -163,6 +248,9 @@ async def decide_approval(
     # Segregation of Duties: the maker (submitter) can never be a checker (approver) —
     # matched on the maker's id, or on their e-mail when the request carries only that.
     enforce_sod(obj, user.id, user.email)
+    # A route stage assigned to a role is decided by a holder of that role (when anyone
+    # other than the maker holds it — otherwise it would dead-end).
+    await enforce_stage_role(db, obj, user)
     # One decision per checker (prevents a single user counting twice toward N-eyes).
     if any(a.actor_id == user.id for a in obj.actions):
         raise HTTPException(
@@ -281,19 +369,48 @@ async def decide_approval(
     response_model=ApprovalRead,
     dependencies=[Depends(require("workflow:write"))],
 )
-async def cancel_approval(approval_id: uuid.UUID, db: DbSession) -> ApprovalRead:
+async def cancel_approval(approval_id: uuid.UUID, db: DbSession, user: CurrentUser) -> ApprovalRead:
+    """Withdraw a pending request. Only its maker, or an administrator who manages
+    approval routes (``automation:manage``), may. A request that is a stage of an approval
+    route cancels the whole route, and the record goes back to draft."""
+    from app.models.workflow import WorkflowInstance, WorkflowInstanceStage, WorkflowInstanceStatus
+    from app.services import workflow_engine
+
     obj = await _load(db, approval_id)
     if obj.status != ApprovalStatus.pending:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only pending can be cancelled")
+    if not may_cancel(obj, user.id, user.email, user.permission_codes):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_CANCEL_DETAIL)
+    instance = await db.scalar(
+        select(WorkflowInstance)
+        .join(WorkflowInstanceStage, WorkflowInstanceStage.instance_id == WorkflowInstance.id)
+        .where(
+            WorkflowInstanceStage.approval_request_id == obj.id,
+            WorkflowInstance.status == WorkflowInstanceStatus.in_progress,
+        )
+    )
+    if instance is not None:
+        await workflow_engine.cancel(db, instance, actor=user)
     obj.status = ApprovalStatus.cancelled
     await db.flush()
-    await db.refresh(obj)
-    return ApprovalRead.model_validate(obj)
+    await audit.record(
+        db, actor=user, action="cancel", entity_type="approval", entity_id=obj.id,
+        summary=f"Cancelled approval {obj.reference}"
+        + (" and its approval route" if instance is not None else ""),
+    )
+    return (await _annotate(db, [await _load(db, obj.id)], user))[0]
 
 
 @router.delete("/{approval_id}", status_code=204, dependencies=[Depends(require("workflow:write"))])
-async def delete_approval(approval_id: uuid.UUID, db: DbSession) -> None:
-    await db.delete(await _load(db, approval_id))
+async def delete_approval(approval_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _load(db, approval_id)
+    if not may_cancel(obj, user.id, user.email, user.permission_codes):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_CANCEL_DETAIL)
+    await db.delete(obj)
+    await audit.record(
+        db, actor=user, action="delete", entity_type="approval", entity_id=obj.id,
+        summary=f"Deleted approval {obj.reference}",
+    )
 
 
 # ========================================================== decide from an e-mail ===

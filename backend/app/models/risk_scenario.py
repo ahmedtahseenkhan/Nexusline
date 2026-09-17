@@ -51,6 +51,9 @@ class RiskScenarioTemplate(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Bas
 
     #: Comma-separated ``AssetClass`` values this scenario applies to. Empty = every asset.
     asset_classes: Mapped[str] = mapped_column(String(120), default="")
+    #: Comma-separated asset kinds (network device, payment system…) the scenario fits.
+    #: Empty = every asset of ``asset_classes``.
+    asset_kinds: Mapped[str] = mapped_column(String(255), default="", nullable=False)
 
     #: Threat and vulnerability by name. Resolved to (or created in) the Threat Library
     #: at commit time, so a generated risk carries the same graph links a hand-made one does.
@@ -121,3 +124,8 @@ class RiskProposal(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decision_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: Set when the candidate was rebuilt from a generated risk made before the queue
+    #: existed; that risk is archived and restorable.
+    source_risk_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("risks.id", ondelete="SET NULL"), nullable=True, index=True
+    )

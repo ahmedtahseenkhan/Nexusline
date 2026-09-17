@@ -91,7 +91,11 @@ async def compute(db: AsyncSession, key: str, tenant_id) -> dict:
         settings: RiskSetting = await get_or_create_settings(db, tenant_id)
         # Each risk against its own category's tolerance (organisation default otherwise).
         book = await load_appetite_book(db, tenant_id, settings)
-        risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
+        # The dashboard's board register (F-21): validated risks only, so this widget and
+        # the "Above tolerance" tile agree.
+        from app.services.risk_query import board_register_clause
+
+        risks = (await db.scalars(select(Risk).where(board_register_clause()))).all()
         n = sum(
             1
             for r in risks
@@ -106,10 +110,11 @@ async def compute(db: AsyncSession, key: str, tenant_id) -> dict:
         # same colours the heat map shows. Previously always the 5x5 default.
         scale = scale_for(await get_or_create_settings(db, tenant_id))
         buckets: dict[str, int] = {}
+        from app.services.risk_scoring import current_severity
+
         for r in risks:
-            sev = scale.for_risk(
-                r.inherent_likelihood, r.inherent_impact, r.residual_likelihood, r.residual_impact
-            )
+            # A draft nobody has scored is "unscored", not a low risk (F-23).
+            sev = current_severity(r, scale)
             name = sev.value if sev else "unscored"
             buckets[name] = buckets.get(name, 0) + 1
         order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unscored": 4}

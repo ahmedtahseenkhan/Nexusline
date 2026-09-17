@@ -28,7 +28,19 @@ from datetime import datetime
 from app.models.enums import AssetClass, Criticality
 
 __all__ = [
+    "ASSET_KINDS",
+    "ASSET_KIND_LABELS",
+    "ASSET_KIND_VALUES",
+    "AssetKind",
     "CATALOGUE",
+    "FITS",
+    "WRONG_CLASS",
+    "WRONG_KIND",
+    "classify_asset",
+    "kind_labels",
+    "library_kinds_for",
+    "parse_kinds",
+    "scenario_fit",
     "IMPACT_RULES",
     "ScenarioSpec",
     "applies_to_asset",
@@ -105,11 +117,334 @@ class ScenarioSpec:
     #: ``services.control_mapping``. Resolved against the organisation's own catalogue
     #: at generation time; unresolved ones are reported, never invented.
     control_references: tuple[str, ...] = ()
+    #: The asset kinds (:data:`ASSET_KINDS`) the scenario fits, on top of
+    #: ``asset_classes``. Empty = every kind.
+    asset_kinds: tuple[str, ...] = ()
 
 
 _INFO = (AssetClass.information_asset.value,)
 _IT = (AssetClass.it_asset.value,)
 _BOTH: tuple[str, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Asset kinds (re-check of 17 Sep 2026, F-04).
+#
+# The asset class (information / IT) is too coarse to pick scenarios: "internal fraud
+# committed through Firewall" and "ransomware encrypts Firewall" were proposed because
+# a firewall is an IT asset like any other. An asset is also given a small, fixed set of
+# *kinds* — what it is, and for systems and data what business it serves — derived from
+# fields the register already has (media type, tags, name and technical identifiers,
+# data categories). A scenario names the kinds it fits.
+# ---------------------------------------------------------------------------
+KIND_NETWORK = "network_device"
+KIND_SERVER = "server"
+KIND_END_USER = "end_user_device"
+KIND_APPLICATION = "application"
+KIND_DATABASE = "database"
+KIND_CLOUD = "cloud_service"
+KIND_FACILITY = "facility"
+KIND_PEOPLE = "people"
+KIND_IT_OTHER = "it_other"
+KIND_INFORMATION = "information"
+KIND_CORE_BANKING = "core_banking"
+KIND_PAYMENT = "payment_system"
+KIND_CHANNEL = "customer_channel"
+KIND_CUSTOMER_DATA = "customer_data"
+
+#: What the asset *is*.
+KIND_GROUP_WHAT = "What the asset is"
+#: What business the system or data *serves* — the kinds financial-crime scenarios need.
+KIND_GROUP_SERVES = "What it serves"
+
+
+@dataclass(frozen=True)
+class AssetKind:
+    value: str
+    label: str
+    description: str
+    group: str
+
+
+ASSET_KINDS: tuple[AssetKind, ...] = (
+    AssetKind(KIND_NETWORK, "Network device",
+              "Firewalls, routers, switches, load balancers, VPN and wireless equipment", KIND_GROUP_WHAT),
+    AssetKind(KIND_SERVER, "Server or host",
+              "Physical and virtual servers, mainframes, storage and HSMs", KIND_GROUP_WHAT),
+    AssetKind(KIND_END_USER, "End-user device",
+              "Laptops, desktops, phones, tablets, printers, ATMs and kiosks", KIND_GROUP_WHAT),
+    AssetKind(KIND_APPLICATION, "Application",
+              "Business applications, portals, middleware and APIs", KIND_GROUP_WHAT),
+    AssetKind(KIND_DATABASE, "Database or data store",
+              "Databases, data warehouses and data lakes", KIND_GROUP_WHAT),
+    AssetKind(KIND_CLOUD, "Cloud or IT service",
+              "SaaS, cloud hosting and managed IT services", KIND_GROUP_WHAT),
+    AssetKind(KIND_FACILITY, "Facility",
+              "Data centres, DR sites, branches and offices", KIND_GROUP_WHAT),
+    AssetKind(KIND_PEOPLE, "People", "Staff, contractors and roles", KIND_GROUP_WHAT),
+    AssetKind(KIND_IT_OTHER, "Other IT asset",
+              "An IT asset whose type the register does not say", KIND_GROUP_WHAT),
+    AssetKind(KIND_INFORMATION, "Information or records",
+              "Any information asset: records, datasets, documents", KIND_GROUP_WHAT),
+    AssetKind(KIND_CORE_BANKING, "Core banking",
+              "The core banking system and the assets that run it", KIND_GROUP_SERVES),
+    AssetKind(KIND_PAYMENT, "Payment system",
+              "SWIFT, RAAST, RTGS, card switches, payment gateways and POS", KIND_GROUP_SERVES),
+    AssetKind(KIND_CHANNEL, "Customer channel",
+              "Internet and mobile banking, ATMs, wallets, website and contact centre", KIND_GROUP_SERVES),
+    AssetKind(KIND_CUSTOMER_DATA, "Customer or financial data",
+              "Customer, account, card, transaction and other financial data", KIND_GROUP_SERVES),
+)
+ASSET_KIND_VALUES: frozenset[str] = frozenset(k.value for k in ASSET_KINDS)
+ASSET_KIND_LABELS: dict[str, str] = {k.value: k.label for k in ASSET_KINDS}
+
+_PRIMARY_IT = frozenset({
+    KIND_NETWORK, KIND_SERVER, KIND_END_USER, KIND_APPLICATION, KIND_DATABASE, KIND_CLOUD,
+    KIND_FACILITY, KIND_PEOPLE,
+})
+#: Kinds that never carry a business function: a "Payments Firewall" is still a firewall,
+#: and fraud is not committed through it.
+_NO_FUNCTION = frozenset({KIND_NETWORK, KIND_FACILITY, KIND_PEOPLE})
+
+
+def _rx(*alternatives: str) -> re.Pattern:
+    return re.compile("|".join(alternatives), re.IGNORECASE)
+
+
+#: Keyword recognisers per kind, matched on whole words. Deliberately conservative:
+#: a wrong kind hides a scenario, so an unrecognised IT asset falls back to "other IT
+#: asset", which most technical scenarios include.
+_KIND_WORDS: dict[str, re.Pattern] = {
+    KIND_NETWORK: _rx(
+        r"\bfire[\s-]?walls?\b", r"\brouters?\b", r"(?<!card )(?<!payment )\bswitch(?:es)?\b",
+        r"\bload[\s-]?balancers?\b", r"\bvpn\b", r"\bwan\b", r"\bsd[\s-]?wan\b", r"\blan\b", r"\bmpls\b",
+        r"\bwi[\s-]?fi\b", r"\bwireless\b", r"\baccess[\s-]+points?\b", r"\bids\b", r"\bips\b",
+        r"\bproxy\b", r"\bwaf\b", r"\bdmz\b", r"\bnetwork\b", r"\bfortigate\b", r"\bfortinet\b",
+        r"\bpalo[\s-]?alto\b", r"\bcheck[\s-]?point\b", r"\bjuniper\b", r"\bcisco\b", r"\bsophos\b",
+        r"\bmikrotik\b", r"\baruba\b", r"\bf5\b", r"\bpan-os\b", r"\bfortios\b", r"\bjunos\b",
+        r"\bnx-os\b", r"\bios[\s-]?xe\b",
+    ),
+    KIND_SERVER: _rx(
+        r"\bservers?\b", r"\bhosts?\b", r"\bvms?\b", r"\bvirtual[\s-]+machines?\b", r"\bhypervisors?\b",
+        r"\besxi?\b", r"\bvmware\b", r"\bhyper-v\b", r"\bmainframes?\b", r"\bas/?400\b", r"\biseries\b",
+        r"\bstorage\b", r"\bsan\b", r"\bnas\b", r"\bhsms?\b", r"\bdomain[\s-]+controllers?\b",
+        r"\bpoweredge\b", r"\bproliant\b", r"\bucs\b", r"\blinux\b", r"\bunix\b", r"\baix\b",
+        r"\bsolaris\b", r"\brhel\b", r"\bred[\s-]?hat\b", r"\bubuntu\b", r"\bcentos\b",
+    ),
+    KIND_END_USER: _rx(
+        r"\blaptops?\b", r"\bdesktops?\b", r"\bworkstations?\b", r"\bnotebooks?\b", r"\bpcs?\b",
+        r"\bendpoints?\b", r"\bmobile[\s-]+(?:phones?|devices?|handsets?)\b", r"\bsmart[\s-]?phones?\b",
+        r"\btablets?\b", r"\bipads?\b", r"\biphones?\b", r"\bprinters?\b", r"\bthin[\s-]+clients?\b",
+        r"\batms?\b", r"\bkiosks?\b", r"\bcdms?\b", r"\bwindows[\s-]+(?:7|8|10|11)\b", r"\bmacos\b",
+        r"\bandroid\b",
+    ),
+    KIND_DATABASE: _rx(
+        r"\bdatabases?\b", r"\bdbs?\b", r"\bsql\b", r"\bmssql\b", r"\bmysql\b", r"\bpostgres(?:ql)?\b",
+        r"\bmongo(?:db)?\b", r"\boracle[\s-]+(?:db|database|rac)\b", r"\bdb2\b", r"\bdata[\s-]?warehouses?\b",
+        r"\bdwh\b", r"\bdata[\s-]?lakes?\b", r"\bdata[\s-]?stores?\b", r"\bdata[\s-]?marts?\b",
+    ),
+    KIND_APPLICATION: _rx(
+        r"\bapplications?\b", r"\bapps?\b", r"\bsoftware\b", r"\bsystems?\b", r"\bportals?\b", r"\berp\b",
+        r"\bcrm\b", r"\bsap\b", r"\bplatforms?\b", r"\bsuite\b", r"\bmiddleware\b", r"\bapis?\b",
+        r"\bgateways?\b", r"\bweb[\s-]?sites?\b",
+    ),
+    KIND_CLOUD: _rx(
+        r"\bcloud\b", r"\bsaas\b", r"\biaas\b", r"\bpaas\b", r"\baws\b", r"\bazure\b", r"\bgcp\b",
+        r"\bgoogle[\s-]+workspace\b", r"\b(?:office|microsoft)[\s-]?365\b", r"\bo365\b", r"\bsalesforce\b",
+        r"\bhosting\b", r"\bhosted\b", r"\bmanaged[\s-]+services?\b",
+    ),
+    KIND_FACILITY: _rx(
+        r"\bdata[\s-]?cent(?:er|re)s?\b", r"\bdr[\s-]+sites?\b", r"\bdisaster[\s-]+recovery[\s-]+sites?\b",
+        r"\bbranch(?:es)?\b", r"\boffices?\b", r"\bbuildings?\b", r"\bpremises\b", r"\bvaults?\b",
+        r"\bserver[\s-]+rooms?\b", r"\bcampus\b", r"(?<!data )\bwarehouses?\b",
+    ),
+    KIND_PEOPLE: _rx(r"\bstaff\b", r"\bpersonnel\b", r"\bemployees?\b", r"\bcontractors?\b", r"\bworkforce\b"),
+    KIND_CORE_BANKING: _rx(
+        r"\bcore[\s-]*banking\b", r"\bcbs\b", r"\bt24\b", r"\btemenos\b", r"\bfinacle\b", r"\bflex\s?cube\b",
+        r"\bbancs\b", r"\bsymbols\b", r"\bimal\b",
+    ),
+    KIND_PAYMENT: _rx(
+        r"\bpayments?\b", r"\bswift\b", r"\braast\b", r"\brtgs\b", r"\bprism\b", r"\b1[\s-]?link\b",
+        r"\bone[\s-]?link\b", r"\bcard[\s-]+(?:switch|management|issuing|acquiring|processing)\b",
+        r"\bpostilion\b", r"\bbase\s?24\b", r"\beuronet\b", r"\bpaypak\b", r"\bpos\b", r"\bremittances?\b",
+        r"\bclearing\b", r"\bnift\b", r"\bibft\b", r"\b(?:funds?|wire)[\s-]+transfers?\b", r"\bvisa\b",
+        r"\bmastercard\b", r"\bunionpay\b",
+    ),
+    KIND_CHANNEL: _rx(
+        r"\b(?:internet|online|mobile|digital|phone|sms|whatsapp|branchless)[\s-]?banking\b",
+        r"\be-?banking\b", r"\bnet[\s-]?banking\b", r"\batms?\b", r"\bcdms?\b", r"\bkiosks?\b", r"\bivr\b",
+        r"\b(?:call|contact)[\s-]+cent(?:er|re)s?\b", r"\bweb[\s-]?sites?\b", r"\b(?:web|customer)[\s-]+portal\b",
+        r"\bwallets?\b", r"\b(?:mobile|banking)[\s-]+apps?\b",
+    ),
+    KIND_CUSTOMER_DATA: _rx(
+        r"\bcustomers?\b", r"\bclients?\b", r"\bcardholders?\b", r"\bcard[\s-]+data\b", r"\bpan\b",
+        r"\bpii\b", r"\bpersonal[\s-]+data\b", r"\bkyc\b", r"\bcif\b", r"\baccounts?\b",
+        r"\btransactions?\b", r"\bfinancial\b", r"\bbalances?\b", r"\bloans?\b", r"\bdeposits?\b",
+        r"\bpayroll\b", r"\bsalar(?:y|ies)\b", r"\bledgers?\b",
+    ),
+}
+
+#: eramba's built-in media types (``reference_data.BUILTIN_MEDIA_TYPES``), normalised.
+#: ``None`` means the type is refined by keywords (hardware, software).
+_MEDIA_KINDS: dict[str, frozenset[str] | None] = {
+    "network": frozenset({KIND_NETWORK}),
+    "hardware": None,
+    "software": None,
+    "it service": frozenset({KIND_CLOUD}),
+    "it services": frozenset({KIND_CLOUD}),
+    "facilities": frozenset({KIND_FACILITY}),
+    "facility": frozenset({KIND_FACILITY}),
+    "people": frozenset({KIND_PEOPLE}),
+    "data asset": frozenset({KIND_INFORMATION}),
+    "financial": frozenset({KIND_INFORMATION, KIND_CUSTOMER_DATA}),
+}
+
+
+def _words(kind: str, *texts: str) -> bool:
+    pattern = _KIND_WORDS[kind]
+    return any(pattern.search(t) for t in texts if t)
+
+
+def classify_asset(
+    *,
+    asset_class: str,
+    name: str = "",
+    media_type: str = "",
+    tags: Iterable[str] = (),
+    hostname: str = "",
+    os_version: str = "",
+    manufacturer: str = "",
+    model_number: str = "",
+    data_categories: str = "",
+) -> frozenset[str]:
+    """The kinds of one asset. Pure; every asset gets at least one kind.
+
+    1. **What it is.** An information asset is *information*. An IT asset takes its kind
+       from the media type — Network, IT Service, Facilities, People directly; Hardware
+       is a network device, end-user device or (by default) a server, and Software a
+       database or (by default) an application, by keywords in its name, tags, hostname,
+       OS, manufacturer and model. A custom or missing media type falls back to those
+       keywords (facility and people from the name only, so a ``DC-Karachi`` tag does
+       not make a server a building). An IT asset still unrecognised is *other IT asset*.
+    2. **What it serves** — core banking, payment system, customer channel — from
+       keywords in the name, tags and media type, never the description or hostname
+       (a firewall "protecting the core banking server" is not core banking). Network
+       devices, facilities and people never serve a function.
+    3. **Customer or financial data** — from the data categories, the Financial media
+       type, or the name of an information asset or database.
+    """
+    info = asset_class == AssetClass.information_asset.value
+    media = " ".join((media_type or "").lower().split())
+    tag_text = " ".join(t for t in tags if t)
+    technical = (name, tag_text, hostname, os_version, manufacturer, model_number)
+    functional = (name, tag_text, media_type)
+
+    kinds: set[str] = set()
+    from_media = _MEDIA_KINDS.get(media, ()) if media else ()
+    if info:
+        kinds.add(KIND_INFORMATION)
+        kinds |= set(from_media or ()) & {KIND_CUSTOMER_DATA}
+    elif media == "hardware":
+        found = {k for k in (KIND_NETWORK, KIND_END_USER, KIND_SERVER) if _words(k, *technical)}
+        kinds |= found or {KIND_SERVER}
+    elif media == "software":
+        kinds.add(KIND_DATABASE if _words(KIND_DATABASE, *technical) else KIND_APPLICATION)
+        if _words(KIND_CLOUD, *technical):
+            kinds.add(KIND_CLOUD)
+    elif from_media:
+        kinds |= set(from_media)
+    else:
+        text = (*technical, media_type)
+        for kind in (KIND_NETWORK, KIND_SERVER, KIND_END_USER, KIND_DATABASE, KIND_APPLICATION, KIND_CLOUD):
+            if _words(kind, *text):
+                kinds.add(kind)
+        for kind in (KIND_FACILITY, KIND_PEOPLE):
+            if _words(kind, name, media_type):
+                kinds.add(kind)
+    if not info and not (kinds & _PRIMARY_IT):
+        kinds.add(KIND_IT_OTHER)
+
+    what = kinds - {KIND_CUSTOMER_DATA}
+    if not what <= _NO_FUNCTION:
+        for kind in (KIND_CORE_BANKING, KIND_PAYMENT, KIND_CHANNEL):
+            if _words(kind, *functional):
+                kinds.add(kind)
+        if _words(KIND_CUSTOMER_DATA, data_categories) or (
+            (info or KIND_DATABASE in kinds) and _words(KIND_CUSTOMER_DATA, name, tag_text)
+        ):
+            kinds.add(KIND_CUSTOMER_DATA)
+    return frozenset(kinds)
+
+
+def parse_kinds(value: str | Iterable[str] | None) -> tuple[tuple[str, ...], list[str]]:
+    """``"payment_system, Core_Banking"`` -> ``(("core_banking", "payment_system"), [])``:
+    known kinds (sorted, no repeats) and the unknown spellings, in order."""
+    parts = value.split(",") if isinstance(value, str) else list(value or ())
+    known: set[str] = set()
+    unknown: list[str] = []
+    for part in parts:
+        kind = (part or "").strip().lower()
+        if not kind:
+            continue
+        if kind in ASSET_KIND_VALUES:
+            known.add(kind)
+        elif kind not in unknown:
+            unknown.append(kind)
+    return tuple(sorted(known)), unknown
+
+
+def kind_labels(kinds: Iterable[str]) -> list[str]:
+    """Kinds as people read them, in vocabulary order."""
+    wanted = set(kinds)
+    return [k.label for k in ASSET_KINDS if k.value in wanted]
+
+
+# Which scenarios fit which kinds. Named sets so the catalogue reads as a decision.
+_IT_ALL = (
+    KIND_NETWORK, KIND_SERVER, KIND_END_USER, KIND_APPLICATION, KIND_DATABASE, KIND_CLOUD,
+    KIND_CORE_BANKING, KIND_PAYMENT, KIND_CHANNEL, KIND_IT_OTHER,
+)
+_DATA = (KIND_INFORMATION, KIND_CUSTOMER_DATA)
+
+
+def _all_but(*excluded: str, extra: tuple[str, ...] = ()) -> tuple[str, ...]:
+    return tuple(k for k in _IT_ALL if k not in excluded) + extra
+
+
+#: Systems and data alike.
+_K_ANY = _IT_ALL + _DATA
+#: Anything someone administers or depends on — not individual end-user devices.
+_K_MANAGED = _all_but(KIND_END_USER, extra=_DATA)
+#: Where data is stored and can be encrypted or read — not network devices.
+_K_HOLDS_DATA = _all_but(KIND_NETWORK, extra=_DATA)
+#: Physical media that is decommissioned.
+_K_MEDIA = (KIND_SERVER, KIND_END_USER, KIND_NETWORK, KIND_DATABASE, KIND_IT_OTHER) + _DATA
+#: Where malicious code runs — not network devices or provider-run services.
+_K_RUNS_CODE = _all_but(KIND_NETWORK, KIND_CLOUD)
+#: Reachable services that can be flooded.
+_K_REACHABLE = (
+    KIND_NETWORK, KIND_SERVER, KIND_APPLICATION, KIND_CLOUD, KIND_CORE_BANKING, KIND_PAYMENT,
+    KIND_CHANNEL, KIND_IT_OTHER,
+)
+#: Application-layer interfaces.
+_K_APPLICATIONS = (KIND_APPLICATION, KIND_CLOUD, KIND_CORE_BANKING, KIND_PAYMENT, KIND_CHANNEL)
+#: Hosted infrastructure with capacity, DR and suppliers.
+_K_HOSTED = _all_but(KIND_END_USER)
+#: Where records are processed and duties segregated.
+_K_PROCESSING = (
+    KIND_APPLICATION, KIND_DATABASE, KIND_CLOUD, KIND_CORE_BANKING, KIND_PAYMENT, KIND_CHANNEL,
+    KIND_IT_OTHER,
+) + _DATA
+#: Things in a building the bank runs.
+_K_ON_PREMISES = _all_but(KIND_END_USER, KIND_CLOUD, extra=(KIND_FACILITY,))
+#: Portable equipment — only devices recognised as such: "theft of SWIFT Alliance" is
+#: not a risk anyone would write.
+_K_PORTABLE = (KIND_END_USER,)
+#: Equipment in a room, and the room.
+_K_PHYSICAL = (KIND_SERVER, KIND_NETWORK, KIND_IT_OTHER, KIND_FACILITY)
+#: Financial crime: only where money moves or customer and financial data lives.
+_K_FRAUD_INTERNAL = (KIND_CORE_BANKING, KIND_PAYMENT, KIND_CHANNEL, KIND_CUSTOMER_DATA)
+_K_FRAUD_EXTERNAL = (KIND_CORE_BANKING, KIND_PAYMENT, KIND_CHANNEL)
 
 
 def _s(*args, **kwargs) -> ScenarioSpec:
@@ -127,228 +462,270 @@ CATALOGUE: tuple[ScenarioSpec, ...] = (
        "restricted, reviewed or revoked in line with least privilege.",
        "Access Control", _BOTH, "Unauthorised access", "Excessive or unreviewed access rights",
        3, RULE_PROPERTY, impact_property="confidentiality",
-       treatment_hint="Enforce role-based access, quarterly recertification and joiner/mover/leaver automation."),
+       treatment_hint="Enforce role-based access, quarterly recertification and joiner/mover/leaver automation.",
+       asset_kinds=_K_ANY),
     _s("RS-002", "Privileged account misuse on {asset}",
        "A privileged or administrative account is used beyond its authorised purpose, with no independent "
        "review of privileged activity.",
        "Access Control", _BOTH, "Privilege abuse", "Unmonitored privileged accounts",
        3, RULE_CRITICALITY,
-       treatment_hint="Vault privileged credentials, enforce session recording and four-eyes on admin actions."),
+       treatment_hint="Vault privileged credentials, enforce session recording and four-eyes on admin actions.",
+       asset_kinds=_K_MANAGED),
     _s("RS-003", "Credential compromise affecting {asset}",
        "User credentials are phished, guessed or reused from a breached third party, granting an attacker "
        "legitimate-looking access.",
        "Access Control", _BOTH, "Credential theft", "Weak or single-factor authentication",
        4, RULE_PROPERTY, impact_property="confidentiality",
-       treatment_hint="Enforce MFA for all remote and privileged access; monitor for credential stuffing."),
+       treatment_hint="Enforce MFA for all remote and privileged access; monitor for credential stuffing.",
+       asset_kinds=_K_ANY),
     _s("RS-004", "Shared or generic accounts obscure accountability on {asset}",
        "Activity cannot be attributed to an individual because accounts are shared between staff.",
        "Access Control", _BOTH, "Loss of accountability", "Shared or generic accounts",
        3, RULE_PROPERTY, impact_property="integrity",
-       treatment_hint="Eliminate shared accounts; where unavoidable, vault and check out per use."),
+       treatment_hint="Eliminate shared accounts; where unavoidable, vault and check out per use.",
+       asset_kinds=_K_MANAGED),
     # --- Data confidentiality ----------------------------------------------
     _s("RS-005", "Data leakage from {asset}",
        "Customer or confidential data leaves the institution through email, removable media, cloud storage "
        "or an unmanaged endpoint.",
        "Data Protection", _INFO, "Data exfiltration", "No data loss prevention on egress channels",
        3, RULE_BUSINESS_VALUE,
-       treatment_hint="Deploy DLP on mail, web and endpoints; block unapproved removable media."),
+       treatment_hint="Deploy DLP on mail, web and endpoints; block unapproved removable media.",
+       asset_kinds=_DATA),
     _s("RS-006", "Unauthorised disclosure of {asset} to third parties",
        "Data is shared with an outsourcing partner, vendor or regulator without an approved basis, agreement "
        "or protection requirement.",
        "Data Protection", _INFO, "Improper disclosure", "No data-sharing agreement or classification handling rules",
        2, RULE_BUSINESS_VALUE,
-       treatment_hint="Require a data-sharing agreement and classification-based handling rules before release."),
+       treatment_hint="Require a data-sharing agreement and classification-based handling rules before release.",
+       asset_kinds=_DATA),
     _s("RS-007", "Data at rest in {asset} is not encrypted",
        "Stored data is readable to anyone who obtains the underlying media, backup or database file.",
        "Data Protection", _BOTH, "Theft of storage media", "Missing encryption at rest",
        2, RULE_PROPERTY, impact_property="confidentiality",
-       treatment_hint="Encrypt at rest with managed keys; separate key custody from data custody."),
+       treatment_hint="Encrypt at rest with managed keys; separate key custody from data custody.",
+       asset_kinds=_K_HOLDS_DATA),
     _s("RS-008", "Data in transit to or from {asset} is intercepted",
        "Traffic is captured or modified because it traverses the network without adequate transport security.",
        "Data Protection", _BOTH, "Interception of communications", "Weak or absent transport encryption",
        2, RULE_PROPERTY, impact_property="confidentiality",
-       treatment_hint="Enforce TLS 1.2+ with certificate pinning on sensitive channels; retire legacy protocols."),
+       treatment_hint="Enforce TLS 1.2+ with certificate pinning on sensitive channels; retire legacy protocols.",
+       asset_kinds=_K_ANY),
     _s("RS-009", "Retention of {asset} beyond its lawful or business need",
        "Data is kept after its retention period, increasing breach exposure and regulatory liability.",
        "Data Protection", _INFO, "Regulatory non-compliance", "No enforced retention or disposal schedule",
        3, RULE_BUSINESS_VALUE,
-       treatment_hint="Define retention per data category and automate secure disposal at expiry."),
+       treatment_hint="Define retention per data category and automate secure disposal at expiry.",
+       asset_kinds=_DATA),
     _s("RS-010", "Insecure disposal of {asset}",
        "Media or records are decommissioned without secure erasure, leaving recoverable data.",
        "Data Protection", _BOTH, "Recovery of discarded data", "No secure disposal procedure",
        2, RULE_PROPERTY, impact_property="confidentiality",
-       treatment_hint="Certified media sanitisation with destruction certificates retained as evidence."),
+       treatment_hint="Certified media sanitisation with destruction certificates retained as evidence.",
+       asset_kinds=_K_MEDIA),
     # --- Malware, cyber attack ---------------------------------------------
     _s("RS-011", "Ransomware encrypts {asset}",
        "Malware encrypts the asset and its reachable backups, halting the service until recovery or payment.",
        "Cyber Security", _BOTH, "Ransomware", "Insufficient segmentation and immutable backup",
        3, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Immutable offline backups, tested restore, network segmentation and EDR containment."),
+       treatment_hint="Immutable offline backups, tested restore, network segmentation and EDR containment.",
+       asset_kinds=_K_HOLDS_DATA),
     _s("RS-012", "Malware infection of {asset}",
        "Malicious code executes on the asset through email, removable media or a compromised update.",
        "Cyber Security", _IT, "Malicious code", "Inadequate endpoint protection or patching",
        3, RULE_CRITICALITY,
-       treatment_hint="EDR with behavioural detection, application allow-listing and controlled update channels."),
+       treatment_hint="EDR with behavioural detection, application allow-listing and controlled update channels.",
+       asset_kinds=_K_RUNS_CODE),
     _s("RS-013", "Exploitation of an unpatched vulnerability in {asset}",
        "A known vulnerability remains unpatched past its remediation window and is exploited.",
        "Cyber Security", _IT, "Exploitation of known vulnerability", "Missing or delayed patching",
        3, RULE_CRITICALITY,
-       treatment_hint="Risk-based patch SLAs by severity, with exception approval and compensating controls."),
+       treatment_hint="Risk-based patch SLAs by severity, with exception approval and compensating controls.",
+       asset_kinds=_IT_ALL),
     _s("RS-014", "Denial of service against {asset}",
        "The service is made unavailable to customers by volumetric or application-layer attack.",
        "Cyber Security", _BOTH, "Denial of service", "No upstream scrubbing or rate limiting",
        2, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Upstream DDoS scrubbing, rate limiting and a tested traffic-diversion runbook."),
+       treatment_hint="Upstream DDoS scrubbing, rate limiting and a tested traffic-diversion runbook.",
+       asset_kinds=_K_REACHABLE),
     _s("RS-015", "Web application attack against {asset}",
        "Injection, broken authentication or insecure direct object reference is exploited against an "
        "internet-facing interface.",
        "Cyber Security", _IT, "Application-layer attack", "Insecure application code or configuration",
        3, RULE_CRITICALITY,
-       treatment_hint="Secure SDLC with SAST/DAST gates, WAF in blocking mode and annual penetration testing."),
+       treatment_hint="Secure SDLC with SAST/DAST gates, WAF in blocking mode and annual penetration testing.",
+       asset_kinds=_K_APPLICATIONS),
     _s("RS-016", "Insecure configuration of {asset}",
        "The asset is deployed with default credentials, unnecessary services or a permissive baseline.",
        "Cyber Security", _IT, "Misconfiguration", "No hardened build standard",
        3, RULE_CRITICALITY,
-       treatment_hint="Hardened baselines per platform with automated drift detection."),
+       treatment_hint="Hardened baselines per platform with automated drift detection.",
+       asset_kinds=_IT_ALL),
     _s("RS-017", "Compromise of {asset} through a supply-chain update",
        "A trusted software update or library introduces malicious code.",
        "Cyber Security", _IT, "Supply-chain compromise", "Unverified software provenance",
        2, RULE_CRITICALITY,
-       treatment_hint="Verify signatures, maintain an SBOM and stage updates before production release."),
+       treatment_hint="Verify signatures, maintain an SBOM and stage updates before production release.",
+       asset_kinds=_IT_ALL),
     # --- Availability & continuity ------------------------------------------
     _s("RS-018", "Prolonged outage of {asset}",
        "Hardware failure, capacity exhaustion or a failed change makes the asset unavailable beyond its "
        "recovery time objective.",
        "Business Continuity", _BOTH, "Service interruption", "Single point of failure",
        3, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Remove single points of failure; test failover against the stated RTO."),
+       treatment_hint="Remove single points of failure; test failover against the stated RTO.",
+       asset_kinds=_K_MANAGED),
     _s("RS-019", "Backup of {asset} cannot be restored",
        "Backups exist but have never been successfully restored, or do not cover the required recovery point.",
        "Business Continuity", _BOTH, "Data loss", "Untested backup and recovery",
        2, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Schedule restore tests, record results as evidence and measure against the RPO."),
+       treatment_hint="Schedule restore tests, record results as evidence and measure against the RPO.",
+       asset_kinds=_K_MANAGED),
     _s("RS-020", "Disaster-recovery failover for {asset} does not work when invoked",
        "The DR environment is out of date, under-capacity or has never been exercised end to end.",
        "Business Continuity", _IT, "Failure of recovery arrangements", "Untested or stale DR environment",
        2, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Annual full failover exercise with business sign-off on the achieved RTO/RPO."),
+       treatment_hint="Annual full failover exercise with business sign-off on the achieved RTO/RPO.",
+       asset_kinds=_K_HOSTED),
     _s("RS-021", "Loss of key personnel supporting {asset}",
        "Knowledge of the asset is concentrated in one person, with no documented procedures or trained backup.",
        "Business Continuity", _BOTH, "Loss of key personnel", "Key-person dependency",
        3, RULE_CRITICALITY,
-       treatment_hint="Document run-books, cross-train a named deputy and enforce mandatory leave."),
+       treatment_hint="Document run-books, cross-train a named deputy and enforce mandatory leave.",
+       asset_kinds=_K_MANAGED + (KIND_PEOPLE,)),
     _s("RS-022", "Utility or facility failure affecting {asset}",
        "Power, cooling or physical access to the hosting facility fails for a sustained period.",
        "Business Continuity", _IT, "Environmental failure", "Inadequate facility resilience",
        2, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Redundant power and cooling with tested generator run-ups."),
+       treatment_hint="Redundant power and cooling with tested generator run-ups.",
+       asset_kinds=_K_ON_PREMISES),
     # --- Change, integrity, operations --------------------------------------
     _s("RS-023", "Unauthorised change to {asset}",
        "A change is applied without approval, testing or the ability to roll back.",
        "Change Management", _BOTH, "Unauthorised change", "Inadequate change control",
        3, RULE_PROPERTY, impact_property="integrity",
-       treatment_hint="Enforce CAB approval, segregated deployment rights and automated rollback."),
+       treatment_hint="Enforce CAB approval, segregated deployment rights and automated rollback.",
+       asset_kinds=_K_MANAGED),
     _s("RS-024", "Data integrity failure in {asset}",
        "Records are corrupted or silently altered by faulty processing, migration or reconciliation gaps.",
        "Operations", _BOTH, "Data corruption", "No integrity or reconciliation controls",
        2, RULE_PROPERTY, impact_property="integrity",
-       treatment_hint="Automated reconciliation with break reporting and independent review."),
+       treatment_hint="Automated reconciliation with break reporting and independent review.",
+       asset_kinds=_K_PROCESSING),
     _s("RS-025", "Processing error in {asset} goes undetected",
        "A manual or batch processing error is not detected before it affects customers or reporting.",
        "Operations", _BOTH, "Processing error", "Insufficient validation and exception reporting",
        3, RULE_PROPERTY, impact_property="integrity",
-       treatment_hint="Input validation, exception queues with owners, and daily control totals."),
+       treatment_hint="Input validation, exception queues with owners, and daily control totals.",
+       asset_kinds=_K_PROCESSING),
     _s("RS-026", "Segregation of duties conflict around {asset}",
        "One individual can initiate and approve the same sensitive action.",
        "Operations", _BOTH, "Internal fraud", "Segregation of duties conflict",
        2, RULE_CRITICALITY,
-       treatment_hint="Enforce maker-checker in the system; review SoD conflicts quarterly."),
+       treatment_hint="Enforce maker-checker in the system; review SoD conflicts quarterly.",
+       asset_kinds=_K_PROCESSING),
     _s("RS-027", "Insufficient logging and monitoring of {asset}",
        "Security-relevant events are not logged, retained or reviewed, so an incident goes unnoticed.",
        "Operations", _BOTH, "Undetected compromise", "Inadequate logging and monitoring",
        3, RULE_CRITICALITY,
-       treatment_hint="Forward logs to the SIEM with use-cases, alerting thresholds and retention."),
+       treatment_hint="Forward logs to the SIEM with use-cases, alerting thresholds and retention.",
+       asset_kinds=_K_ANY),
     _s("RS-028", "Capacity of {asset} is exceeded",
        "Growth in volume outstrips capacity, degrading service before anyone notices.",
        "Operations", _IT, "Capacity exhaustion", "No capacity monitoring or forecasting",
        2, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Capacity thresholds with trend-based forecasting and a documented upgrade path."),
+       treatment_hint="Capacity thresholds with trend-based forecasting and a documented upgrade path.",
+       asset_kinds=_K_HOSTED),
     _s("RS-029", "{asset} runs on unsupported or end-of-life technology",
        "The platform no longer receives security fixes from its vendor.",
        "Operations", _IT, "Unsupported technology", "End-of-life software or hardware",
        3, RULE_CRITICALITY,
-       treatment_hint="Maintain a lifecycle register with funded upgrade plans ahead of end-of-support."),
+       treatment_hint="Maintain a lifecycle register with funded upgrade plans ahead of end-of-support.",
+       asset_kinds=_all_but(KIND_CLOUD)),
     # --- Third party & outsourcing ------------------------------------------
     _s("RS-030", "Third-party failure disrupts {asset}",
        "An outsourced provider or cloud service supporting the asset fails, and the contract provides no "
        "enforceable recovery commitment.",
        "Third Party", _BOTH, "Third-party service failure", "Inadequate contractual or exit arrangements",
        2, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Contractual RTOs with penalties, a tested exit plan and a named alternative provider."),
+       treatment_hint="Contractual RTOs with penalties, a tested exit plan and a named alternative provider.",
+       asset_kinds=_K_MANAGED),
     _s("RS-031", "Third-party staff access {asset} without adequate control",
        "Vendor or contractor personnel hold standing access without supervision, screening or revocation.",
        "Third Party", _BOTH, "Third-party misuse", "Uncontrolled vendor access",
        3, RULE_PROPERTY, impact_property="confidentiality",
-       treatment_hint="Time-bound, supervised and recorded vendor access, revoked at contract close."),
+       treatment_hint="Time-bound, supervised and recorded vendor access, revoked at contract close.",
+       asset_kinds=_K_MANAGED),
     _s("RS-032", "Concentration risk on the provider supporting {asset}",
        "A single provider supports several critical services, so one failure has systemic impact.",
        "Third Party", _BOTH, "Provider concentration", "No alternative provider or exit capability",
        2, RULE_CRITICALITY,
-       treatment_hint="Assess concentration at portfolio level and maintain a viable substitution path."),
+       treatment_hint="Assess concentration at portfolio level and maintain a viable substitution path.",
+       asset_kinds=_K_MANAGED),
     # --- Physical -----------------------------------------------------------
     _s("RS-033", "Theft or loss of {asset}",
        "The asset — or the device holding it — is stolen or lost outside the premises.",
        "Physical Security", _IT, "Theft", "Inadequate physical protection or device encryption",
        2, RULE_CRITICALITY,
-       treatment_hint="Full-disk encryption, asset tagging, remote wipe and a loss-reporting procedure."),
+       treatment_hint="Full-disk encryption, asset tagging, remote wipe and a loss-reporting procedure.",
+       asset_kinds=_K_PORTABLE),
     _s("RS-034", "Unauthorised physical access to {asset}",
        "Someone reaches the asset's location without an authorised, logged entry.",
        "Physical Security", _IT, "Unauthorised physical access", "Weak physical access control",
        2, RULE_CRITICALITY,
-       treatment_hint="Badge control with anti-passback, visitor escort and periodic access reviews."),
+       treatment_hint="Badge control with anti-passback, visitor escort and periodic access reviews.",
+       asset_kinds=_K_PHYSICAL),
     _s("RS-035", "Fire, flood or natural hazard affecting {asset}",
        "An environmental event damages the asset or its hosting location.",
        "Physical Security", _IT, "Natural hazard", "Insufficient environmental protection",
        1, RULE_PROPERTY, impact_property="availability",
-       treatment_hint="Detection and suppression systems, geographically separated DR, tested evacuation."),
+       treatment_hint="Detection and suppression systems, geographically separated DR, tested evacuation.",
+       asset_kinds=_K_PHYSICAL),
     # --- Compliance & regulatory ---------------------------------------------
     _s("RS-036", "Regulatory non-compliance involving {asset}",
        "The asset is handled in a way that breaches a regulatory obligation, attracting censure or penalty.",
        "Compliance", _BOTH, "Regulatory breach", "Obligations not mapped to controls",
        2, RULE_BUSINESS_VALUE,
-       treatment_hint="Map obligations to controls with named owners and evidence of operation."),
+       treatment_hint="Map obligations to controls with named owners and evidence of operation.",
+       asset_kinds=_K_MANAGED),
     _s("RS-037", "Cross-border transfer of {asset} without a lawful basis",
        "Data leaves the jurisdiction — often via a cloud service — without the approvals data-sovereignty "
        "rules require.",
        "Compliance", _INFO, "Unlawful data transfer", "No data-residency control",
        2, RULE_BUSINESS_VALUE,
-       treatment_hint="Pin data residency contractually and technically; obtain approval before any transfer."),
+       treatment_hint="Pin data residency contractually and technically; obtain approval before any transfer.",
+       asset_kinds=_DATA),
     _s("RS-038", "Customer data in {asset} is processed without a lawful basis or consent",
        "Personal data is used for a purpose the customer never agreed to.",
        "Compliance", _INFO, "Privacy breach", "No consent or purpose-limitation control",
        2, RULE_BUSINESS_VALUE,
-       treatment_hint="Record purpose and lawful basis in the RoPA; enforce purpose limitation in systems."),
+       treatment_hint="Record purpose and lawful basis in the RoPA; enforce purpose limitation in systems.",
+       asset_kinds=(KIND_CUSTOMER_DATA,)),
     _s("RS-039", "Records supporting {asset} cannot be produced for an audit or inspection",
        "Evidence of control operation is missing, incomplete or not retrievable within the time allowed.",
        "Compliance", _BOTH, "Inability to evidence compliance", "No evidence retention",
        2, RULE_CRITICALITY,
-       treatment_hint="Attach evidence to controls as they operate rather than reconstructing at audit time."),
+       treatment_hint="Attach evidence to controls as they operate rather than reconstructing at audit time.",
+       asset_kinds=_K_MANAGED),
     # --- Fraud ---------------------------------------------------------------
     _s("RS-040", "Internal fraud committed through {asset}",
        "An employee manipulates the asset for personal gain, exploiting weak monitoring or SoD.",
        "Financial Crime", _BOTH, "Internal fraud", "Insufficient monitoring of sensitive transactions",
        2, RULE_CRITICALITY,
-       treatment_hint="Behavioural analytics on sensitive transactions with independent investigation."),
+       treatment_hint="Behavioural analytics on sensitive transactions with independent investigation.",
+       asset_kinds=_K_FRAUD_INTERNAL),
     _s("RS-041", "External fraud against customers via {asset}",
        "Attackers use the channel to defraud customers through social engineering or account takeover.",
        "Financial Crime", _BOTH, "External fraud", "Weak transaction authentication or anomaly detection",
        3, RULE_CRITICALITY,
-       treatment_hint="Step-up authentication on risk signals plus real-time anomaly scoring."),
+       treatment_hint="Step-up authentication on risk signals plus real-time anomaly scoring.",
+       asset_kinds=_K_FRAUD_EXTERNAL),
     _s("RS-042", "{asset} is used to move funds linked to money laundering",
        "The channel processes transactions that should have been detected and reported.",
        "Financial Crime", _BOTH, "Money laundering", "Inadequate transaction monitoring rules",
        2, RULE_CRITICALITY,
-       treatment_hint="Tune monitoring scenarios, test coverage annually and escalate to the FMU on time."),
+       treatment_hint="Tune monitoring scenarios, test coverage annually and escalate to the FMU on time.",
+       asset_kinds=_K_FRAUD_EXTERNAL),
 )
 
 
@@ -389,16 +766,63 @@ class AssetFacts:
     confidentiality: Criticality
     integrity: Criticality
     availability: Criticality
+    #: The asset's kinds (:func:`classify_asset`). Empty = not classified: only the class
+    #: decides, as before kinds existed.
+    kinds: frozenset[str] = frozenset()
+
+
+#: Why a scenario is not proposed for an asset (:func:`scenario_fit`).
+FITS, WRONG_CLASS, WRONG_KIND = "fits", "class", "kind"
+
+
+def scenario_fit(spec: ScenarioSpec, facts: AssetFacts) -> str:
+    """:data:`FITS`, or why not: :data:`WRONG_CLASS` (information vs IT) or
+    :data:`WRONG_KIND` (the scenario names kinds and the asset is none of them).
+
+    The preview counts kind mismatches separately, so "no fraud scenario for the
+    firewall" reads as a decision rather than a gap.
+    """
+    if spec.asset_classes and facts.asset_class not in spec.asset_classes:
+        return WRONG_CLASS
+    if spec.asset_kinds and facts.kinds and not (facts.kinds & set(spec.asset_kinds)):
+        return WRONG_KIND
+    return FITS
 
 
 def applies_to_asset(spec: ScenarioSpec, facts: AssetFacts) -> bool:
-    """True when the scenario is relevant to this kind of asset.
+    """True when the scenario is relevant to this asset.
 
-    An empty ``asset_classes`` means "any asset" — most scenarios are class-specific
-    (a DR failover scenario is meaningless against a data record), and proposing an
-    irrelevant risk is the fastest way to make a generated register untrustworthy.
+    An empty ``asset_classes`` means "any class" and empty ``asset_kinds`` "any kind" —
+    most scenarios are narrower (a DR failover scenario is meaningless against a data
+    record, internal fraud against a firewall), and proposing an irrelevant risk is the
+    fastest way to make a generated register untrustworthy.
     """
-    return not spec.asset_classes or facts.asset_class in spec.asset_classes
+    return scenario_fit(spec, facts) == FITS
+
+
+def library_kinds_for(row, spec: ScenarioSpec) -> str | None:
+    """The ``asset_kinds`` to write on a tenant's installed template, or None to leave it.
+
+    Only a row that has no kinds yet and still *is* the library scenario — same title,
+    category, asset classes, threat and vulnerability — takes the library's kinds.
+    Retuned likelihood, description, treatment or control references do not change what
+    the scenario is about, so they do not block it; a retitled or re-scoped row is the
+    tenant's own and is left alone.
+    """
+    if (getattr(row, "asset_kinds", "") or "").strip() or not spec.asset_kinds:
+        return None
+
+    def same(a, b) -> bool:
+        return " ".join((a or "").split()).lower() == " ".join((b or "").split()).lower()
+
+    classes = ",".join(sorted(c.strip() for c in (row.asset_classes or "").split(",") if c.strip()))
+    if not (
+        same(row.title, spec.title) and same(row.category, spec.category)
+        and classes == ",".join(sorted(spec.asset_classes))
+        and same(row.threat, spec.threat) and same(row.vulnerability, spec.vulnerability)
+    ):
+        return None
+    return ",".join(sorted(spec.asset_kinds))
 
 
 def impact_for(spec: ScenarioSpec, facts: AssetFacts, matrix_size: int) -> int:

@@ -176,6 +176,37 @@ class VendorOutsourcingFacts(BaseModel):
     contract_end: date | None = None
     exit_plan: str = ""
     exit_plan_tested: bool = False
+    #: Why it is (or is not) material.
+    materiality_assessment: str = ""
+    #: easy | moderate | difficult | none | "" (not assessed).
+    substitutability: str = ""
+    #: low | medium | high | "" (not assessed).
+    concentration_level: str = ""
+    concentration_note: str = ""
+
+
+class VendorConcentration(BaseModel):
+    """How much of the bank depends on this third party, derived from what is on file
+    (see ``api/v1/vendors.concentration_view``). ``level`` is high when an arrangement
+    records high concentration, two or more live material arrangements rely on the
+    provider, or three or more high / critical processes do."""
+
+    #: Live (not terminated) material arrangements with this vendor.
+    material_arrangements: int = 0
+    #: Live arrangements of any materiality.
+    arrangements: int = 0
+    #: Supported processes rated high or critical, and all supported processes.
+    critical_processes: int = 0
+    processes: int = 0
+    #: The highest concentration level recorded on a live arrangement ("" if none).
+    recorded_level: str = ""
+    #: low | medium | high.
+    level: str = "low"
+    flagged: bool = False
+    reasons: list[str] = []
+    #: The vendor's criticality or tier is high / critical, or it supports a high /
+    #: critical process — but no outsourcing arrangement is recorded.
+    arrangement_expected: bool = False
 
 
 class VendorTiering(BaseModel):
@@ -327,6 +358,7 @@ class VendorRead(VendorBase):
     tier_override_reason: str = ""
     tiering: VendorTiering | None = None
     outsourcing: list[VendorOutsourcingFacts] = []
+    concentration: VendorConcentration | None = None
 
     @field_validator("spend_currency", mode="before")
     @classmethod

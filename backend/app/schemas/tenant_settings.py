@@ -150,6 +150,9 @@ class TenantSettingsRead(BaseModel):
     # Phase 3: first-run setup and the organisation's module choice (None = all licensed).
     onboarding_completed_at: datetime | None = None
     enabled_modules: list[str] | None = None
+    # Roles that must use MFA here; None = the deployment default. Changed only through
+    # PUT /settings/organisation/security/mfa-roles, which validates the role names.
+    mfa_required_roles: list[str] | None = None
 
 
 class TenantSettingsUpdate(BaseModel):

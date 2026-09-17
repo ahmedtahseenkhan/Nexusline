@@ -21,9 +21,11 @@ The vocabulary a link may carry (query parameters on the list endpoints):
 ``GET /policies``    ``review=overdue`` — approved or published, next review in the past.
 ``GET /vendors``     ``review=overdue`` — next review in the past; ``criticality``.
 ``GET /risks``       ``appetite=breach``, ``review=overdue``, ``treatment_overdue=true``,
-                     ``business_unit_id`` — the risk register's own filters
-                     (``services.risk_query``); the dashboard counts treatment with the
-                     register's predicate (:func:`risk_treatment_overdue` delegates).
+                     ``pending_validation=true``, ``business_unit_id`` — the risk
+                     register's own filters (``services.risk_query``); the dashboard
+                     counts treatment with the register's predicate
+                     (:func:`risk_treatment_overdue` delegates), and every appetite
+                     figure over the board register (:func:`risk_board_register`).
 """
 from __future__ import annotations
 
@@ -177,6 +179,22 @@ def risk_review_overdue(today: date):
     return Risk.next_review_date < today
 
 
+def risk_board_register():
+    """The risks board figures are taken over — scored, out of Draft, not accepted or
+    closed (``risk_query.board_register_clause``). ``GET /risks?appetite=`` filters to
+    the same set, so "3 above tolerance" opens three risks."""
+    from app.services.risk_query import board_register_clause
+
+    return board_register_clause()
+
+
+def risk_pending_validation():
+    """``GET /risks?pending_validation=true``: live drafts, left out of board figures."""
+    from app.services.risk_query import pending_validation_clause
+
+    return pending_validation_clause()
+
+
 def risk_treatment_overdue(today: date):
     """``GET /risks?treatment_overdue=true``: an unsettled risk with an open treatment
     action past due, or — with no actions yet — a treatment deadline in the past. The
@@ -215,3 +233,7 @@ ACTION_LINKS: dict[str, str] = {
     "acceptances_pending": "/approvals",
     "not_assessed": href("/controls", assurance="not_assessed"),
 }
+
+#: Where the dashboard's "N risks pending validation" banner opens: the drafts its
+#: figures leave out (not a queue line — nothing is overdue, the data is incomplete).
+PENDING_VALIDATION_LINK: str = href("/risks", pending_validation=True)

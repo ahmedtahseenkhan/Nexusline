@@ -13,6 +13,7 @@ import { FeedbackHost } from "@/lib/feedback";
 import { TenantSettingsProvider } from "@/lib/tenantSettings";
 import { useFormat } from "@/lib/format";
 import { landingPath, markLanded, needsLanding, rememberNext, safeNext, takeNext } from "@/lib/landing";
+import { loadGovernanceStatus, type GovernanceStatus } from "@/components/SegregationOfDutiesSettings";
 
 function ModuleLocked({ module: mod }: { module?: ModuleState }) {
   return (
@@ -76,6 +77,43 @@ function MfaDueBanner({ due }: { due: string }) {
       <button type="button" className="btn secondary sm" onClick={dismiss} aria-label="Dismiss two-factor reminder">
         Dismiss
       </button>
+    </div>
+  );
+}
+
+/** Administrators only, persistent: maker-checker cannot work with one active user, and a
+ *  route stage whose role nobody holds falls back to any approver. Both are open points
+ *  until fixed, so they are not dismissible. */
+function GovernanceBanner() {
+  const [status, setStatus] = useState<GovernanceStatus | null>(null);
+  const [checked, setChecked] = useState(false);
+  const pathname = usePathname();
+  const open = !!status && (status.needs_second_user || status.role_gaps.length > 0);
+  useEffect(() => {
+    // Check once; while something is open, re-check on navigation so the banner clears
+    // as soon as a user is invited or a role assigned.
+    if (checked && !open) return;
+    setChecked(true);
+    loadGovernanceStatus().then(setStatus).catch(() => setStatus(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+  if (!open || !status) return null;
+  const style = { background: "var(--amber-bg)", color: "var(--amber)", borderBottom: "1px solid #f0d9ae", padding: "6px 16px", fontSize: 13, textAlign: "center" as const };
+  return (
+    <div role="status" style={style}>
+      {status.needs_second_user ? (
+        <>
+          Segregation of duties needs at least two users — nothing you submit can be approved yet.{" "}
+          <Link href="/organization" style={{ fontWeight: 600 }}>Invite a user</Link>
+        </>
+      ) : (
+        <>
+          {status.role_gaps.length === 1
+            ? `No one holds the ${status.role_gaps[0].role} role that approval routes use — assign it in Users.`
+            : `No one holds the ${status.role_gaps.map((g) => g.role).join(" or ")} roles that approval routes use — assign them in Users.`}{" "}
+          <Link href="/organisation-settings#segregation-of-duties" style={{ fontWeight: 600 }}>Details</Link>
+        </>
+      )}
     </div>
   );
 }
@@ -160,6 +198,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           <Topbar user={user} />
           {status?.evaluation_build && <EvaluationBanner />}
           {user?.mfa_enrolment_due && !user.mfa_enabled && <MfaDueBanner due={user.mfa_enrolment_due} />}
+          {user?.permission_codes?.includes("settings:manage") && <GovernanceBanner />}
           <main className="content">
             {locked ? <ModuleLocked module={moduleForRoute(pathname, modules)} /> : children}
           </main>

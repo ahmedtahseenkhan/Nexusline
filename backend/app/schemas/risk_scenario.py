@@ -9,10 +9,23 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.common import GraphRef, LookupRef, UnitRef, UserRef
-from app.services.risk_scenarios import IMPACT_RULES
+from app.services.risk_scenarios import ASSET_KINDS, IMPACT_RULES, parse_kinds
 from app.services.risk_scoring import MAX_MATRIX_SIZE
 
 _RULE_PATTERN = "^(" + "|".join(IMPACT_RULES) + ")$"
+
+
+def _clean_kinds(value: str | None) -> str | None:
+    """``asset_kinds`` stored as known kinds, comma-separated, sorted; unknown ones are a
+    422 naming them and the vocabulary."""
+    if value is None:
+        return None
+    known, unknown = parse_kinds(value)
+    if unknown:
+        raise ValueError(
+            f"Unknown asset kind(s): {', '.join(unknown)}. Use: {', '.join(k.value for k in ASSET_KINDS)}"
+        )
+    return ",".join(known)
 
 
 # ------------------------------------------------------------ the library ---
@@ -21,6 +34,8 @@ class ScenarioBase(BaseModel):
     description: str = ""
     category: str = Field(default="", max_length=100)
     asset_classes: str = Field(default="", max_length=120)
+    #: Comma-separated asset kinds (``GET /risk-scenarios/asset-kinds``); empty = every kind.
+    asset_kinds: str = Field(default="", max_length=255)
     threat: str = Field(default="", max_length=200)
     vulnerability: str = Field(default="", max_length=200)
     likelihood: int = Field(default=3, ge=1, le=5)
@@ -30,6 +45,11 @@ class ScenarioBase(BaseModel):
     treatment_hint: str = ""
     control_references: str = ""
     enabled: bool = True
+
+    @field_validator("asset_kinds")
+    @classmethod
+    def _kinds(cls, value: str) -> str:
+        return _clean_kinds(value) or ""
 
 
 class ScenarioCreate(ScenarioBase):
@@ -41,6 +61,7 @@ class ScenarioUpdate(BaseModel):
     description: str | None = None
     category: str | None = Field(default=None, max_length=100)
     asset_classes: str | None = Field(default=None, max_length=120)
+    asset_kinds: str | None = Field(default=None, max_length=255)
     threat: str | None = Field(default=None, max_length=200)
     vulnerability: str | None = Field(default=None, max_length=200)
     likelihood: int | None = Field(default=None, ge=1, le=5)
@@ -51,12 +72,31 @@ class ScenarioUpdate(BaseModel):
     treatment_hint: str | None = None
     enabled: bool | None = None
 
+    @field_validator("asset_kinds")
+    @classmethod
+    def _kinds(cls, value: str | None) -> str | None:
+        return _clean_kinds(value)
+
 
 class ScenarioRead(ScenarioBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
     created_at: datetime
+
+    @field_validator("asset_kinds", mode="before")
+    @classmethod
+    def _kinds(cls, value) -> str:
+        # Stored rows are read as they are: a kind retired from the vocabulary must not
+        # make the whole library unreadable.
+        return value or ""
+
+
+class AssetKindRead(BaseModel):
+    value: str
+    label: str
+    description: str
+    group: str
 
 
 class LibraryInstallResult(BaseModel):
@@ -119,6 +159,19 @@ class RiskProposal(BaseModel):
     #: The key's last candidate was rejected, and why — the preview leaves it unticked.
     rejected_note: str = ""
     rejected_at: datetime | None = None
+    #: The asset's kinds as people read them ("Server or host", "Core banking").
+    asset_kinds: list[str] = []
+
+
+class NotFittingScenario(BaseModel):
+    """A scenario left out for some selected assets because they are not a kind it fits."""
+
+    reference: str
+    title: str
+    #: Pairs left out.
+    pairs: int
+    #: The kinds the scenario fits, as people read them.
+    fits: list[str] = []
 
 
 class GenerateResponse(BaseModel):
@@ -133,6 +186,10 @@ class GenerateResponse(BaseModel):
     candidates: int = 0
     #: Proposals that would join a candidate already waiting in the queue.
     queued: int = 0
+    #: Asset × scenario pairs of the right class left out because the asset is not a kind
+    #: the scenario fits (fraud against a firewall), and which scenarios they were.
+    not_fitting: int = 0
+    not_fitting_scenarios: list[NotFittingScenario] = []
 
 
 class CommitItem(BaseModel):
@@ -211,6 +268,15 @@ class ProposalControlRef(BaseModel):
     name: str = ""
 
 
+class SourceRiskRef(BaseModel):
+    """A register risk made before the queue that was moved into this candidate."""
+
+    id: uuid.UUID
+    reference: str = ""
+    title: str = ""
+    archived: bool = True
+
+
 class ProposalRead(BaseModel):
     """A risk candidate as the queue shows it."""
 
@@ -249,6 +315,10 @@ class ProposalRead(BaseModel):
     promoted_risk_id: uuid.UUID | None = None
     promoted_risk: GraphRef | None = None
     promoted_risk_archived: bool = False
+    #: Set when the candidate was rebuilt from generated register risks made before the
+    #: queue existed (``source_risks`` lists every one; they are archived and restorable).
+    source_risk_id: uuid.UUID | None = None
+    source_risks: list[SourceRiskRef] = []
     created_by_id: uuid.UUID | None = None
     created_by_ref: UserRef | None = None
     decided_by_id: uuid.UUID | None = None
@@ -334,3 +404,67 @@ class MergeRequest(BaseModel):
 class MergeResult(BaseModel):
     merged: int
     survivor: ProposalRead
+
+
+# ------------------------------------------------ legacy generated risks (F-24) ---
+class LegacyRiskRef(BaseModel):
+    """One pre-queue generated risk in the migration plan."""
+
+    id: uuid.UUID
+    reference: str = ""
+    title: str = ""
+    scenario_reference: str = ""
+    asset_id: uuid.UUID | None = None
+    asset_name: str = ""
+    inherent_likelihood: int | None = None
+    inherent_impact: int | None = None
+    #: Why it is dropped or kept; empty for a risk that moves.
+    reason: str = ""
+
+
+class LegacyGroupRead(BaseModel):
+    """The candidate a set of legacy risks becomes: a new one, or one already waiting."""
+
+    dedupe_key: str
+    scenario_reference: str
+    scenario_title: str = ""
+    title: str
+    scope_label: str = ""
+    inherent_likelihood: int | None = None
+    inherent_impact: int | None = None
+    control_references: list[str] = []
+    #: A pending candidate with the same key: the risks join it.
+    joins_proposal_id: uuid.UUID | None = None
+    joins_title: str = ""
+    risks: list[LegacyRiskRef] = []
+
+
+class LegacyMigrationPlan(BaseModel):
+    """What moving the pre-queue generated risks into the candidate queue would do.
+
+    ``recognised`` = ``moving + dropped + kept``. Moving and dropped risks are archived
+    (restorable); moving ones become candidates, dropped ones do not (their asset was
+    deleted, the scenario does not fit the asset's kind, or the scope's candidate was
+    rejected). Kept risks stay in the register, each with the reason.
+    """
+
+    recognised: int = 0
+    moving: int = 0
+    dropped: int = 0
+    kept: int = 0
+    new_candidates: int = 0
+    joined_candidates: int = 0
+    groups: list[LegacyGroupRead] = []
+    dropped_items: list[LegacyRiskRef] = []
+    kept_items: list[LegacyRiskRef] = []
+
+
+class LegacyMigrationResult(BaseModel):
+    archived: int
+    moved: int
+    dropped: int
+    kept: int
+    created: int
+    joined: int
+    #: Candidates created or added to.
+    proposals: list[uuid.UUID] = []

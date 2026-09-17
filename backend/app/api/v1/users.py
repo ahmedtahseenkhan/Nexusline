@@ -108,6 +108,22 @@ def _role_read(role: Role) -> RoleRead:
     )
 
 
+async def _with_mfa_status(db: DbSession, users) -> list[UserRead]:
+    """``UserRead`` plus where each user stands against the organisation's MFA policy
+    (``services/mfa_policy.py``): enabled, required (with the grace deadline), overdue,
+    handled by the identity provider, or not required."""
+    from app.core.config import settings
+    from app.services import mfa_policy
+
+    statuses = await mfa_policy.statuses_for(db, users, settings)
+    return [
+        UserRead.model_validate(u).model_copy(
+            update={"mfa_status": statuses[u.id][0], "mfa_due": statuses[u.id][1]}
+        )
+        for u in users
+    ]
+
+
 # ----------------------------------------------------------------------- permissions
 permissions_router = APIRouter(prefix="/permissions", tags=["permissions"])
 
@@ -290,7 +306,7 @@ async def list_users(
         )
     ).all()
     return Page(
-        items=[UserRead.model_validate(u) for u in rows],
+        items=await _with_mfa_status(db, rows),
         total=total,
         limit=limit,
         offset=offset,
@@ -332,7 +348,7 @@ async def create_user(body: UserCreate, db: DbSession, actor: CurrentUser) -> Us
     "/{user_id}", response_model=UserRead, dependencies=[Depends(require("user:read"))]
 )
 async def get_user(user_id: uuid.UUID, db: DbSession) -> UserRead:
-    return UserRead.model_validate(await _load_user(db, user_id))
+    return (await _with_mfa_status(db, [await _load_user(db, user_id)]))[0]
 
 
 @router.patch(

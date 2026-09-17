@@ -10,7 +10,10 @@ The components follow what risk and compliance functions are actually judged on:
 
 * **Within tolerance** — the share of risks whose effective score is at or under the
   tolerance that applies to them: their top-level category's where one is set, else the
-  organisation's. The board question: are we inside the boundary we set?
+  organisation's. The board question: are we inside the boundary we set? Taken over the
+  *board register* (``risk_query.board_register_clause``): scored, out of Draft, not
+  accepted or closed. An unowned draft nobody validated is not a board number (F-21);
+  the dashboard reports those as "pending validation" beside the score instead.
 * **Control assurance** — the share of controls that are effective or partially
   effective. Mapped-but-untested does not count; a promise is not assurance.
 * **Compliance assured** — the share of applicable clauses backed by a working
@@ -80,11 +83,12 @@ def components(
         Component(
             "tolerance", "Within tolerance",
             pct(risks_within_tolerance, risks_total),
-            0.35, f"{risks_within_tolerance} of {risks_total} risks at or under tolerance",
+            0.35, f"{risks_within_tolerance} of {risks_total} validated risks at or under tolerance",
             population=max(risks_total, 0),
             formula="Risks whose current score (residual if assessed, otherwise inherent) is at "
                     "or under their tolerance — the top-level risk category's where one is set, "
-                    "otherwise the organisation's — as a share of all live risks.",
+                    "otherwise the organisation's — as a share of validated risks: scored, out "
+                    "of Draft, and not accepted or closed. Drafts are left out until validated.",
         ),
         Component(
             "assurance", "Control assurance",

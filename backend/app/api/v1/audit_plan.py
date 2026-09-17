@@ -513,7 +513,7 @@ async def program_from_framework(
     )
     if body.domain:
         stmt = stmt.where(Requirement.domain == body.domain)
-    requirements = (await db.scalars(stmt.order_by(Requirement.reference))).all()
+    requirements = (await db.scalars(stmt.order_by(Requirement.reference_sort_key, Requirement.reference))).all()
     if not requirements:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

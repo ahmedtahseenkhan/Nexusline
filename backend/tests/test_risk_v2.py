@@ -52,6 +52,16 @@ from app.services.risk_scoring import (
     validate_cells,
 )
 
+async def _no_review_policy(db, user):
+    from app.services.risk_scoring import SeverityScale
+
+    return SeverityScale(), {}
+
+
+async def _no_alert_refresh(db, user, risk):
+    return None
+
+
 WRITER = ["risk:read", "risk:write"]
 ACCEPTER = ["risk:read", "risk:write", "risk:accept"]
 
@@ -391,6 +401,11 @@ def io(monkeypatch):
     monkeypatch.setattr(risks_api, "_load_risk", load)
     monkeypatch.setattr(risks_api, "_read", read)
     monkeypatch.setattr(risks_api, "get_matrix_size", size)
+    # F-22: the review clock and the alert refresh need the tenant's settings and the
+    # notifications table; neither is under test here.
+    monkeypatch.setattr(risks_api, "_review_policy", _no_review_policy)
+    monkeypatch.setattr(risks_api, "_refresh_alerts", _no_alert_refresh)
+    monkeypatch.setattr(risks_api, "_reconcile_title_flag", _no_alert_refresh)
     monkeypatch.setattr(risks_api, "_next_reference", ref)
     monkeypatch.setattr(risks_api, "_action_count", action_count)
     monkeypatch.setattr(risks_api, "get_or_create_settings", settings)
@@ -450,10 +465,19 @@ async def test_creating_an_assessed_risk_needs_scores_and_rationale(io, audit_lo
             RiskCreate(title="x", status=RiskStatus.assessed, assessment_rationale="why"), FakeDB(), _user()
         )
     assert exc.value.detail == ri.LEAVE_DRAFT_DETAIL
+    # F-21: leaving Draft also needs an owner and a business unit.
+    with pytest.raises(HTTPException) as exc:
+        await risks_api.create_risk(
+            RiskCreate(title="x", status=RiskStatus.assessed, inherent_likelihood=2, inherent_impact=3,
+                       assessment_rationale="RCSA workshop"), FakeDB(), _user(),
+        )
+    assert exc.value.detail == ri.LEAVE_DRAFT_NEEDS_OWNER_AND_UNIT
+    # A draft needs neither, and keeps the rationale it was given (the owner-and-unit
+    # rule itself is covered in tests/test_recheck_risk_numbers.py).
     db = FakeDB()
     await risks_api.create_risk(
-        RiskCreate(title="x", status=RiskStatus.assessed, inherent_likelihood=2, inherent_impact=3,
-                   assessment_rationale="RCSA workshop"), db, _user(),
+        RiskCreate(title="x", inherent_likelihood=2, inherent_impact=3, assessment_rationale="RCSA workshop"),
+        db, _user(),
     )
     assert _created(db).assessment_rationale == "RCSA workshop"
 
@@ -576,7 +600,9 @@ async def test_assess_keeps_an_incomplete_draft_as_draft(io, audit_log):
 
 
 async def test_assess_moves_an_assessed_draft_on_with_a_rationale(io, audit_log):
-    io["risk"] = _stored(status=RiskStatus.draft, last_assessed_at=datetime.now(timezone.utc))
+    # F-21: owned and tagged to a business unit, or it could not leave Draft at all.
+    io["risk"] = _stored(status=RiskStatus.draft, last_assessed_at=datetime.now(timezone.utc),
+                         owner_id=uuid.uuid4(), business_units=[SimpleNamespace(id=uuid.uuid4())])
     await risks_api.assess_risk(
         io["risk"].id,
         RiskAssessment(residual_likelihood=2, residual_impact=2, assessment_rationale="Two controls tested"),

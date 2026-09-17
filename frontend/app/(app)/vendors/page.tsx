@@ -38,7 +38,8 @@ import { sentenceCase, uniqueLabels } from "@/lib/record/text";
 import { safeLinkUrl } from "@/lib/sanitize";
 import {
   VENDOR_CLEAR_TEXT, vendorContractsSub, vendorDataTone, vendorHeadline, vendorOpenPoints, vendorOverrideNote, vendorOverrideText,
-  vendorReviewOverdue, vendorSevTone, vendorTiles, type VendorInput,
+  vendorOutsourcingDiligence, vendorReviewOverdue, vendorSevTone, vendorTiles, VENDOR_SUBSTITUTABILITY,
+  type VendorConcentrationFacts, type VendorInput,
 } from "@/lib/record/vendor";
 import type { PointAction } from "@/lib/record/types";
 
@@ -67,6 +68,7 @@ type OutsourcingFact = {
   id: string; reference: string; title: string; status: string; materiality: string; is_cloud: boolean;
   data_offshored: boolean; country: string; sbp_approval_status: string; contract_end: string | null;
   exit_plan: string; exit_plan_tested: boolean;
+  materiality_assessment?: string; substitutability?: string; concentration_level?: string; concentration_note?: string;
 };
 type Vendor = {
   id: string; name: string; description: string; type_id: string | null;
@@ -95,6 +97,7 @@ type Vendor = {
   /** Derived from the "Inherent risk tiering" questionnaire; never typed. */
   inherent_tier?: string | null; tier_override_reason?: string; tiering?: Tiering | null;
   outsourcing?: OutsourcingFact[];
+  concentration?: VendorConcentrationFacts | null;
 };
 
 /* ------------------------------------------------------------------ enum options */
@@ -601,6 +604,7 @@ function VendorsInner() {
     else if (a.kind === "edit") openEdit(detail, a.target);
     else if (a.kind === "focus") document.getElementById(a.target)?.focus();
     else if (a.kind === "attest") gov.openAttest();
+    else if (a.kind === "href") router.push(a.target);
     else if (a.kind === "open" && a.target === "raise-issue") openIssueForm();
   }
   const reviewOverdue = !!detail && vendorReviewOverdue(detail, ctx.now);
@@ -637,6 +641,52 @@ function VendorsInner() {
       hint: "Attesting the third party records the review and moves this date.",
     },
   ] : [];
+  /** SBP outsourcing facts in Due diligence (F-11): materiality and its rationale,
+   *  substitutability and concentration — edited under Outsourcing, so a missing one
+   *  links there rather than to this form. */
+  function outsourcingFacts(v: Vendor) {
+    const d = vendorOutsourcingDiligence(v);
+    const live = (v.outsourcing ?? []).filter((o) => o.status !== "terminated");
+    const conc = v.concentration ?? null;
+    const edit = (label: string) => live.length === 1
+      ? <Link href={`/outsourcing?id=${live[0].id}`}>{label}</Link>
+      : <Link href="/outsourcing">{label}</Link>;
+    const items = [];
+    if (!live.length) {
+      if (conc?.arrangement_expected) {
+        items.push({
+          key: "outsourcing", label: "Outsourcing",
+          value: <span>None recorded. <Link href={`/outsourcing?new=1&vendor_id=${encodeURIComponent(v.id)}`}>Decide whether this is material outsourcing</Link></span>,
+          hint: "A critical third party, or one supporting a critical process, usually needs an SBP outsourcing arrangement on file.",
+        });
+      }
+    } else {
+      items.push({ key: "outsourcing", label: "Outsourcing", value: d.materiality });
+      items.push({ key: "materiality_rationale", label: "Materiality rationale", wide: true, value: d.rationale ?? edit("Not recorded — add it under Outsourcing") });
+      const hard = live.some((o) => o.materiality === "material" && (o.substitutability === "difficult" || o.substitutability === "none"));
+      items.push({
+        key: "substitutability", label: "Substitutability",
+        hint: "How hard it would be to move the service to another provider. SBP expects a tested exit plan where it is difficult or impossible.",
+        value: d.substitutability
+          ? (hard ? <span style={{ color: "var(--orange)" }}>{d.substitutability}</span> : d.substitutability)
+          : edit("Not assessed — assess it under Outsourcing"),
+      });
+    }
+    if (conc && (live.length || conc.critical_processes)) {
+      items.push({
+        key: "concentration", label: "Concentration", wide: true,
+        hint: "Derived: high when an arrangement records high concentration, two or more material arrangements rely on this provider, or three or more high or critical processes do.",
+        value: (
+          <span>
+            <Badge tone={conc.level === "high" ? "high" : conc.level === "medium" ? "medium" : "neutral"} asIs>{sentenceCase(conc.level)}</Badge>{" "}
+            <span className="muted">{d.concentration}</span>
+            {conc.reasons.length > 0 && <span style={{ display: "block", fontSize: 12, color: "var(--orange)" }}>{conc.reasons.join(" ")}</span>}
+          </span>
+        ),
+      });
+    }
+    return items;
+  }
   const linkGroups: RelatedGroup[] = detail ? [
     { key: "risks", label: "Risks", items: detail.risks, href: "/risks" },
     { key: "assets", label: "Assets", items: detail.assets, href: "/information-assets" },
@@ -814,6 +864,7 @@ function VendorsInner() {
                   { key: "classification", label: "Data classification", value: detail.data_classification_ref?.label || null, tab: "diligence" },
                   { key: "residency", label: "Data residency", value: (detail.data_residency_countries ?? []).map((c) => c.label).join(", ") || null, tab: "diligence" },
                   { key: "spend", label: "Annual spend", value: detail.annual_spend != null ? money(detail.annual_spend, detail.spend_currency) : null, tab: "diligence" },
+                  ...outsourcingFacts(detail),
                   {
                     key: "contact", label: "Contact", tab: "general",
                     // Name, email and phone each stay whole (a phone number never breaks mid-number).
@@ -924,6 +975,14 @@ function VendorsInner() {
                           SBP: {sentenceCase(o.sbp_approval_status).toLowerCase()}
                         </Badge>
                         <Badge tone={o.exit_plan_tested ? "low" : "medium"} asIs>Exit plan {o.exit_plan ? (o.exit_plan_tested ? "tested" : "untested") : "missing"}</Badge>
+                        {o.substitutability
+                          ? <Badge tone={o.substitutability === "difficult" || o.substitutability === "none" ? "high" : "neutral"} asIs>{VENDOR_SUBSTITUTABILITY[o.substitutability] ?? o.substitutability}</Badge>
+                          : o.materiality === "material" ? <Badge tone="medium" asIs>Substitutability not assessed</Badge> : null}
+                        {o.concentration_level && (
+                          <Badge tone={o.concentration_level === "high" ? "high" : o.concentration_level === "medium" ? "medium" : "neutral"} asIs>
+                            {sentenceCase(o.concentration_level)} concentration
+                          </Badge>
+                        )}
                       </div>
                       {o.exit_plan && <p className="muted" style={{ margin: 0, fontSize: 12, whiteSpace: "pre-wrap" }}>{o.exit_plan}</p>}
                     </div>

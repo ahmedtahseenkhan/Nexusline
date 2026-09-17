@@ -23,6 +23,8 @@ from app.services.risk_scoring import (
     MAX_MATRIX_SIZE,
     MIN_MATRIX_SIZE,
     SeverityScale,
+    effective_review_frequency,
+    is_scored,
     severity_for_score,  # noqa: F401 - re-exported for callers
 )
 
@@ -402,8 +404,17 @@ class RiskRead(BaseModel):
     # Live issues raised against this risk (issue_risks).
     issues: list[GraphRef] = []
 
-    # Live rollup: health of the mitigating controls (none | ok | issues).
+    # Live rollup: health of the mitigating controls (none | ok | untested | issues).
     control_health: str = "none"
+
+    # False for a draft nobody has scored (``risk_scoring.is_scored``): its stored 1x1 is
+    # a placeholder, so the severities and ``appetite_status`` come back null.
+    inherent_scored: bool = True
+    # The cycle the review clock runs on: the stricter of ``review_frequency`` and the
+    # longest interval the current rating allows (``RiskSetting.review_cadence``), and
+    # why when the rating decides it ("Monthly — required for Critical risks").
+    effective_review_frequency: ReviewFrequency | None = None
+    review_frequency_reason: str = ""
 
     # Phase 3 hierarchy: where the risk sits, the live risk above it and how many live
     # risks sit directly below it (``GET /risks/{id}/rollup`` lists them).
@@ -451,14 +462,21 @@ class RiskRead(BaseModel):
         """
         ctx = info.context or {}
         scale = ctx.get("scale") or SeverityScale(max_score=ctx.get("max_score", DEFAULT_MAX_SCORE))
-        if self.inherent_severity is None:
-            self.inherent_severity = scale.for_cell(self.inherent_likelihood, self.inherent_impact)
-        if self.residual_severity is None:
-            self.residual_severity = scale.for_cell(self.residual_likelihood, self.residual_impact)
+        # An unscored draft is never banded or judged against appetite, on either pass:
+        # the stored 1x1 would otherwise read as a "low, within appetite" assessment.
+        self.inherent_scored = is_scored(self.status, self.last_assessed_at)
+        if not self.inherent_scored:
+            self.inherent_severity = self.residual_severity = self.target_severity = None
+            self.appetite_status = None
+        else:
+            if self.inherent_severity is None:
+                self.inherent_severity = scale.for_cell(self.inherent_likelihood, self.inherent_impact)
+            if self.residual_severity is None:
+                self.residual_severity = scale.for_cell(self.residual_likelihood, self.residual_impact)
         if self.target_likelihood and self.target_impact:
             if self.target_score is None:
                 self.target_score = self.target_likelihood * self.target_impact
-            if self.target_severity is None:
+            if self.target_severity is None and self.inherent_scored:
                 self.target_severity = scale.for_cell(self.target_likelihood, self.target_impact)
         book = ctx.get("appetite")
         if book is not None and self.tolerance_score is None:
@@ -467,6 +485,11 @@ class RiskRead(BaseModel):
             self.appetite_status = book.status(
                 self.residual_score if self.residual_score is not None else self.inherent_score,
                 self.category_id,
+            ) if self.inherent_scored else None
+        if self.effective_review_frequency is None:
+            severity = self.residual_severity or self.inherent_severity
+            self.effective_review_frequency, self.review_frequency_reason = effective_review_frequency(
+                self.review_frequency, severity, ctx.get("cadence")
             )
         return self
 
@@ -534,6 +557,19 @@ class RiskSettingRead(BaseModel):
     tolerance_score: int
     matrix_size: int = 5
     impact_mode: str = "max"
+    # Severity -> the longest review cycle a risk of that rating may have: the
+    # organisation's value where set, else the product default (critical monthly, high
+    # quarterly, medium twice a year, low annual).
+    review_cadence: dict[str, str] = Field(default_factory=dict)
+    review_cadence_defaults: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _fill_cadence(self) -> "RiskSettingRead":
+        from app.services.risk_scoring import DEFAULT_REVIEW_CADENCE, review_cadence
+
+        self.review_cadence = {k: v.value for k, v in review_cadence(self.review_cadence).items()}
+        self.review_cadence_defaults = {k: v.value for k, v in DEFAULT_REVIEW_CADENCE.items()}
+        return self
 
 
 class RiskSettingUpdate(BaseModel):
@@ -542,6 +578,17 @@ class RiskSettingUpdate(BaseModel):
     # is known.
     appetite_score: int = Field(ge=1, le=MAX_MATRIX_SIZE * MAX_MATRIX_SIZE)
     tolerance_score: int = Field(ge=1, le=MAX_MATRIX_SIZE * MAX_MATRIX_SIZE)
+    # Optional on the PUT so an older client that sends only the thresholds keeps working.
+    review_cadence: dict[str, str] | None = None
+
+
+class RiskSettingPatch(BaseModel):
+    """``PATCH /risk-settings``: change only what is sent. ``review_cadence`` replaces
+    the stored map; a severity left out takes the product default."""
+
+    appetite_score: int | None = Field(default=None, ge=1, le=MAX_MATRIX_SIZE * MAX_MATRIX_SIZE)
+    tolerance_score: int | None = Field(default=None, ge=1, le=MAX_MATRIX_SIZE * MAX_MATRIX_SIZE)
+    review_cadence: dict[str, str] | None = None
 
 
 # ----------------------------------------------------------- matrix config ---

@@ -20,7 +20,7 @@ const STEPS: { key: Step; title: string; hint: string }[] = [
   { key: "locale", title: "Locale", hint: "Currency, timezone and date format" },
   { key: "frameworks", title: "Frameworks", hint: "The standards you're assessed against" },
   { key: "modules", title: "Modules", hint: "What your teams will use first" },
-  { key: "team", title: "Team", hint: "Invite the people who own records" },
+  { key: "team", title: "Team", hint: "Invite a second user — an approver" },
   { key: "finish", title: "Finish", hint: "Go to the dashboard" },
 ];
 
@@ -52,6 +52,11 @@ type OnboardingStatus = {
   users: number;
   modules_chosen: boolean;
   locale_set: boolean;
+  /** Segregation of duties (F-06): on, but only one active user — nothing can be approved. */
+  sod_enforced?: boolean;
+  needs_second_user?: boolean;
+  approval_routes_enabled?: number;
+  role_gaps?: string[];
 };
 
 /** What a Pakistani bank is examined against first; ISO 27001 is the certification most
@@ -150,7 +155,7 @@ export default function OnboardingPage() {
           {step === "locale" && <LocaleStep settings={settings} onSaved={async () => { await reload(); await loadStatus(); next(); }} />}
           {step === "frameworks" && <FrameworksStep onChanged={loadStatus} />}
           {step === "modules" && <ModulesStep onSaved={async () => { await loadStatus(); next(); }} />}
-          {step === "team" && <TeamStep users={status?.users ?? 0} />}
+          {step === "team" && <TeamStep status={status} onInvited={loadStatus} />}
           {step === "finish" && (
             <div className="card-pad">
               <h3 style={{ marginTop: 0 }}>You're ready</h3>
@@ -159,7 +164,20 @@ export default function OnboardingPage() {
                 <li>Frameworks installed: {status?.frameworks_installed ?? 0}</li>
                 <li>Modules: {status?.modules_chosen ? "chosen" : "all licensed modules"}</li>
                 <li>Active users: {status?.users ?? 0}</li>
+                <li>Approval routes on: {status?.approval_routes_enabled ?? 0} (risks, policies and exceptions go to an approver)</li>
               </ul>
+              {status?.needs_second_user && (
+                <div className="card card-pad" role="note" style={{ marginBottom: 12, fontSize: 13, background: "var(--amber-bg)", color: "var(--amber)" }}>
+                  Segregation of duties needs at least two users. Until you{" "}
+                  <button type="button" className="btn secondary sm" onClick={() => setStep("team")}>invite a second user</button>{" "}
+                  nothing you submit can be approved, and a reminder stays at the top of every page.
+                </div>
+              )}
+              {(status?.role_gaps ?? []).map((gap) => (
+                <div key={gap} className="card card-pad" role="note" style={{ marginBottom: 12, fontSize: 13, background: "var(--primary-weak-2)" }}>
+                  {gap}
+                </div>
+              ))}
               <button className="btn" onClick={finish} disabled={busy}>{busy ? "Finishing…" : "Finish and open the dashboard"}</button>
             </div>
           )}
@@ -427,15 +445,86 @@ function ModulesStep({ onSaved }: { onSaved: () => Promise<void> }) {
   );
 }
 
-function TeamStep({ users }: { users: number }) {
+type RoleOption = { id: string; name: string; description: string };
+
+/** Maker-checker needs a second person: invite one here (or several under Users). The
+ *  default role is Risk Approver, which decides the default risk and exception routes. */
+function TeamStep({ status, onInvited }: { status: OnboardingStatus | null; onInvited: () => Promise<void> }) {
+  const users = status?.users ?? 0;
+  const [roles, setRoles] = useState<RoleOption[]>([]);
+  const [form, setForm] = useState({ full_name: "", email: "", role: "Risk Approver", password: "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiCall<RoleOption[]>("GET", "/users/roles").then(setRoles).catch(() => setRoles([]));
+  }, []);
+
+  async function invite(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      await apiCall("POST", "/users", {
+        email: form.email.trim(),
+        full_name: form.full_name.trim(),
+        password: form.password,
+        is_active: true,
+        role_names: [form.role],
+      });
+      toast(`Added ${form.email.trim()} as ${form.role}`);
+      setForm({ full_name: "", email: "", role: form.role, password: "" });
+      await onInvited();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add the user");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const roleOptions = (roles.length ? roles.map((r) => r.name) : ["Risk Approver", "Compliance Manager", "Risk Manager"])
+    .map((name) => ({ value: name, label: name }));
+
   return (
     <div className="card-pad">
-      <h3 style={{ marginTop: 0 }}>Your team</h3>
+      <h3 style={{ marginTop: 0 }}>Invite a second user</h3>
       <p className="muted">
         Records are owned by people, so owners, testers and approvers need accounts. {users} active {users === 1 ? "user" : "users"} so far.
-        Segregation of duties means someone other than you must approve what you submit, so invite at least one colleague.
       </p>
-      <Link className="btn" href="/organization">Invite users and assign roles</Link>
+      {status?.needs_second_user ? (
+        <div className="card card-pad" role="note" style={{ marginBottom: 14, fontSize: 13, background: "var(--amber-bg)", color: "var(--amber)" }}>
+          Segregation of duties needs at least two users. The person who submits a risk, policy or exception can never
+          approve it, so with only you nothing can be approved. Add at least one approver now.
+        </div>
+      ) : (
+        <p className="muted" style={{ fontSize: 13 }}>
+          You have enough people for maker-checker. Risk and exception approvals go to the Risk Approver role; policy
+          approvals go to the Compliance Manager role.
+        </p>
+      )}
+      <form onSubmit={invite}>
+        <div className="field-row">
+          <Field label="Full name">
+            <input className="input" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} placeholder="Sana Qureshi" />
+          </Field>
+          <Field label="Work e-mail" required>
+            <input className="input" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="sana.qureshi@bank.com.pk" />
+          </Field>
+        </div>
+        <div className="field-row">
+          <Field label="Role" help="Risk Approver decides risk and exception approvals; Compliance Manager decides policy approvals.">
+            <Select value={form.role} onChange={(v) => v && setForm({ ...form, role: v })} options={roleOptions} />
+          </Field>
+          <Field label="Initial password" required help="At least 12 characters with upper and lower case, a digit and a symbol. Share it securely; they must set up two-factor authentication.">
+            <input className="input" type="password" required value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} autoComplete="new-password" />
+          </Field>
+        </div>
+        {error && <div className="error" style={{ marginBottom: 10 }}>{error}</div>}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn" disabled={saving || !form.email.trim() || !form.password}>{saving ? "Adding…" : "Add user"}</button>
+          <Link className="btn secondary" href="/organization">Manage all users and roles</Link>
+        </div>
+      </form>
       <p className="muted" style={{ fontSize: 12.5, marginTop: 12 }}>
         If your bank signs in with Active Directory or single sign-on, set that up under Settings → SSO / LDAP instead.
       </p>

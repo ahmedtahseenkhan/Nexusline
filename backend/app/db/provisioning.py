@@ -156,4 +156,12 @@ async def create_organization(
     from app.db.reference_data import ensure_reference_data
 
     await ensure_reference_data(db, tenant.id)
+
+    # Segregation of duties from day one: enabled approval routes for risks, policies
+    # and exceptions, and a dual-control rule for every maker-checker action the code
+    # enforces (services/default_governance.py). Never overwrites; marks the org so the
+    # start-up repair does not run it again.
+    from app.services.default_governance import ensure_default_governance
+
+    await ensure_default_governance(db, tenant.id)
     return tenant, admin

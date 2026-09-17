@@ -188,6 +188,27 @@ def acceptance_refusal(status, last_assessed_at, rationale: str | None) -> str |
     return None
 
 
+#: F-21: an unowned, untagged risk is not a board number. Leaving Draft — by a status
+#: change or by submitting it for approval — needs someone accountable and the part of
+#: the bank it sits in.
+LEAVE_DRAFT_NEEDS_OWNER_AND_UNIT = (
+    "Before this risk leaves Draft, give it a risk owner and at least one business unit."
+)
+LEAVE_DRAFT_NEEDS_OWNER = "Before this risk leaves Draft, give it a risk owner."
+LEAVE_DRAFT_NEEDS_UNIT = "Before this risk leaves Draft, tag at least one business unit."
+
+
+def draft_exit_refusal(*, has_owner: bool, has_business_unit: bool) -> str | None:
+    """Why a risk may not leave Draft for want of an owner or a business unit, or None."""
+    if not has_owner and not has_business_unit:
+        return LEAVE_DRAFT_NEEDS_OWNER_AND_UNIT
+    if not has_owner:
+        return LEAVE_DRAFT_NEEDS_OWNER
+    if not has_business_unit:
+        return LEAVE_DRAFT_NEEDS_UNIT
+    return None
+
+
 @dataclass(frozen=True)
 class Assessment:
     """What a write does to the assessment trail."""
@@ -226,8 +247,14 @@ def assessment_decision(
     status_before: str | None,
     status_after: str | None,
     previously_assessed: bool,
+    has_owner: bool | None = None,
+    has_business_unit: bool | None = None,
 ) -> Assessment:
     """Apply the assessment-trail rule; raise 422 when the write breaks it.
+
+    ``has_owner`` / ``has_business_unit`` describe the risk *after* the write; given, a
+    risk leaving Draft without either is refused (422 :func:`draft_exit_refusal`), after
+    the scores-and-rationale rule. None skips the check (callers that don't know).
 
     * ``changed`` — an inherent or residual score moves. Unless the risk is a draft
       after the write, that needs a *new* rationale (the old one described the old
@@ -251,6 +278,12 @@ def assessment_decision(
         has_reason = bool(text) or (bool(stored) and not changed)
         if not (chosen and has_reason):
             raise HTTPException(status_code=422, detail=LEAVE_DRAFT_DETAIL)
+        if has_owner is not None or has_business_unit is not None:
+            refusal = draft_exit_refusal(
+                has_owner=has_owner is not False, has_business_unit=has_business_unit is not False
+            )
+            if refusal:
+                raise HTTPException(status_code=422, detail=refusal)
     if changed and not draft_after and not fresh:
         raise HTTPException(status_code=422, detail=RATIONALE_REQUIRED_DETAIL)
 
@@ -792,3 +825,139 @@ __all__ = [
     "review_reasons",
     "scan_orphans",
 ]
+
+
+# ------------------------------------------ generated title names an unlinked asset
+# Re-check of 17 Sep 2026 (F-04): R-116 "Ransomware encrypts Firewall" was linked to Core
+# Banking Server. A title written from a scenario template names its asset; when that
+# asset exists in the register but is not among the risk's linked assets, the title or
+# the link is wrong, and the risk is flagged for review until one of them is fixed.
+TITLE_ASSET_REASON = (
+    "The title names the asset “{name}”, which is not linked to this risk. "
+    "Link that asset, or correct the title."
+)
+_TITLE_ASSET_PREFIX = TITLE_ASSET_REASON.split("{name}", 1)[0]
+
+
+def is_title_asset_reason(line: str) -> bool:
+    return line.startswith(_TITLE_ASSET_PREFIX)
+
+
+def generated_title_mismatch(
+    title: str | None,
+    patterns: Sequence,
+    linked_names: Iterable[str],
+    register_names: Mapping[str, str],
+) -> str | None:
+    """The asset a generated-style title names but the risk does not link, or None. Pure.
+
+    ``patterns`` come from ``risk_scenarios.title_patterns``; ``linked_names`` are the
+    names of every asset the risk links (archived ones too — an archived asset has its
+    own review reason); ``register_names`` maps lower-cased names of every asset in the
+    register to their spelling. A risk is flagged only when it links at least one
+    asset, no reading of its title names a linked asset, and some reading names an
+    asset that exists — so a hand-written "Unauthorised access to SWIFT" with no asset
+    called SWIFT is not an error. The longest existing name wins.
+    """
+    from app.services.risk_scenarios import match_generated_title
+
+    linked = {(n or "").strip().lower() for n in linked_names if (n or "").strip()}
+    if not linked:
+        return None
+    hits = match_generated_title(title or "", patterns)
+    if not hits:
+        return None
+    readings = [name.strip() for _ref, names in hits for name in names if name.strip()]
+    if any(name.lower() in linked for name in readings):
+        return None
+    existing = [register_names[name.lower()] for name in readings if name.lower() in register_names]
+    return max(existing, key=len) if existing else None
+
+
+def apply_title_asset_reason(risk, named: str | None) -> tuple[bool, bool]:
+    """Set the risk's title-vs-asset review line to match ``named`` (None clears it).
+    Other reasons are untouched; ``needs_review`` goes off only when none remain.
+    Returns ``(flagged, cleared)``."""
+    wanted = TITLE_ASSET_REASON.format(name=named) if named else None
+    lines = review_reasons(risk.review_reason)
+    stale = [line for line in lines if is_title_asset_reason(line) and line != wanted]
+    flagged = wanted is not None and wanted not in lines
+    if not stale and not flagged:
+        return False, False
+    lines = [line for line in lines if line not in stale]
+    if flagged:
+        lines.append(wanted)
+    risk.review_reason = "\n".join(lines)
+    if flagged:
+        risk.needs_review = True
+    elif not lines:
+        risk.needs_review = False
+    return flagged, bool(stale) and not flagged
+
+
+async def reconcile_generated_title_flags(db, risk_ids: Iterable[uuid.UUID] | None = None) -> tuple[int, int]:
+    """Flag live risks whose generated-style title names an asset they do not link, and
+    clear the flag from those fixed since (:func:`generated_title_mismatch`). All risks,
+    or only ``risk_ids`` — call it after a risk's asset links or title change. Returns
+    ``(flagged, cleared)``. A handful of queries whatever the register's size."""
+    from app.models.asset import Asset
+    from app.models.risk import Risk, risk_assets
+    from app.models.risk_scenario import RiskScenarioTemplate
+    from app.services.risk_scenarios import match_generated_title, title_patterns
+
+    wanted = None if risk_ids is None else list(dict.fromkeys(risk_ids))
+    if wanted == []:
+        return 0, 0
+    patterns = title_patterns(
+        (ref, title) for ref, title in (
+            await db.execute(select(RiskScenarioTemplate.reference, RiskScenarioTemplate.title))
+        ).all()
+    )
+    stmt = select(Risk.id, Risk.title, Risk.review_reason).where(Risk.deleted.is_(False))
+    if wanted is not None:
+        stmt = stmt.where(Risk.id.in_(wanted))
+    matched: dict[uuid.UUID, str] = {}
+    reasons: dict[uuid.UUID, str] = {}
+    readings: set[str] = set()
+    for rid, title, reason in (await db.execute(stmt)).all():
+        reasons[rid] = reason or ""
+        hits = match_generated_title(title or "", patterns) if patterns else []
+        if hits:
+            matched[rid] = title or ""
+            readings |= {n.strip().lower() for _ref, names in hits for n in names if n.strip()}
+    decisions: dict[uuid.UUID, str | None] = {
+        rid: None for rid, reason in reasons.items()
+        if rid not in matched and any(is_title_asset_reason(line) for line in review_reasons(reason))
+    }
+    if matched:
+        linked: dict[uuid.UUID, list[str]] = {}
+        for rid, name in (
+            await db.execute(
+                select(risk_assets.c.risk_id, Asset.name)
+                .join(Asset, Asset.id == risk_assets.c.asset_id)
+                .where(risk_assets.c.risk_id.in_(list(matched)))
+            )
+        ).all():
+            linked.setdefault(rid, []).append(name or "")
+        register: dict[str, str] = {}
+        if readings:
+            for (name,) in (
+                await db.execute(select(Asset.name).where(func.lower(func.trim(Asset.name)).in_(sorted(readings))))
+            ).all():
+                register.setdefault((name or "").strip().lower(), (name or "").strip())
+        for rid, title in matched.items():
+            decisions[rid] = generated_title_mismatch(title, patterns, linked.get(rid, []), register)
+    # Load only the risks whose review lines actually change.
+    changing = [
+        rid for rid, named in decisions.items()
+        if [line for line in review_reasons(reasons.get(rid)) if is_title_asset_reason(line)]
+        != ([TITLE_ASSET_REASON.format(name=named)] if named else [])
+    ]
+    if not changing:
+        return 0, 0
+    flagged = cleared = 0
+    for risk in (await db.scalars(select(Risk).where(Risk.id.in_(changing)))).all():
+        did_flag, did_clear = apply_title_asset_reason(risk, decisions.get(risk.id))
+        flagged += int(did_flag)
+        cleared += int(did_clear)
+    return flagged, cleared

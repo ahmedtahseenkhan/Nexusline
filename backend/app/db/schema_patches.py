@@ -534,6 +534,49 @@ def phase3_ddl_statements() -> list[str]:
     return statements
 
 
+# --- product review re-check (17 Sep): finish the last findings ---------------------------
+RECHECK_COLUMNS: list[tuple[str, str, str]] = [
+    # Natural sort for clause references (A.5.2 before A.5.10), filled on write + boot.
+    ("requirements", "reference_sort_key", "VARCHAR(255) DEFAULT '' NOT NULL"),
+    # Comma-separated asset kinds a scenario applies to (network device, payment system…).
+    # Empty = every asset of the scenario's classes.
+    ("risk_scenario_templates", "asset_kinds", "VARCHAR(255) DEFAULT '' NOT NULL"),
+    # Severity → longest allowed review frequency, e.g. {"critical": "monthly"}.
+    ("risk_settings", "review_cadence", "JSONB DEFAULT '{}'::jsonb NOT NULL"),
+    # Roles that must use MFA in this organisation. NULL = the deployment default.
+    ("tenant_settings", "mfa_required_roles", "JSONB"),
+    ("outsourcing_arrangements", "substitutability", "VARCHAR(16) DEFAULT '' NOT NULL"),
+    ("outsourcing_arrangements", "concentration_level", "VARCHAR(16) DEFAULT '' NOT NULL"),
+]
+
+RECHECK_FK_COLUMNS: list[tuple[str, str, str, str]] = [
+    # A candidate made from a pre-queue generated risk remembers the archived original.
+    ("risk_proposals", "source_risk_id", "risks", "SET NULL"),
+]
+
+
+def recheck_ddl_statements() -> list[str]:
+    """Idempotent DDL for the 17 September re-check fixes."""
+    statements: list[str] = []
+    for table, col, ddl in RECHECK_COLUMNS:
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}")
+    for table, col, target, on_delete in RECHECK_FK_COLUMNS:
+        name = f"fk_{table}_{col}"[:63]
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} UUID")
+        statements.append(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{name}') THEN ALTER TABLE {table} ADD CONSTRAINT {name} "
+            f"FOREIGN KEY ({col}) REFERENCES {target}(id) ON DELETE {on_delete} NOT VALID; "
+            "END IF; END $$;"
+        )
+        statements.append(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table} ({col})")
+    statements.append(
+        "CREATE INDEX IF NOT EXISTS ix_requirements_reference_sort_key "
+        "ON requirements (framework_id, reference_sort_key)"
+    )
+    return statements
+
+
 def asset_split_ddl_statements() -> list[str]:
     """Idempotent DDL: create the enum types, then add the new asset columns.
 

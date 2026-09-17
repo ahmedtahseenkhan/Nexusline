@@ -269,6 +269,10 @@
         "level": "gap"
       },
       {
+        "id": "risk.business_unit",
+        "level": "gap"
+      },
+      {
         "id": "risk.assessed_without_assessment",
         "level": "gap"
       },

@@ -18,7 +18,6 @@ and return bytes, as ``pdf_report`` and ``report_export`` do.
 from __future__ import annotations
 
 import io
-import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from xml.sax.saxutils import escape
@@ -85,11 +84,8 @@ def justification_after(applicable: bool, was_applicable: bool, current: str, gi
     return current or ""
 
 
-def natural_key(reference: str) -> tuple:
-    return tuple(
-        (0, int(p)) if p.isdigit() else (1, p.lower())
-        for p in re.findall(r"\d+|[A-Za-z]+", reference or "")
-    )
+# The shared natural order (F-16), re-exported for existing callers.
+from app.services.reference_sort import natural_key  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +179,22 @@ def summarize(rows: list[SoaRow]) -> dict[str, int]:
         "excluded": sum(1 for r in rows if not r.applicable),
         "no_control": sum(1 for r in rows if r.applicable and not r.controls),
         "missing_justification": sum(1 for r in rows if not r.applicable and not r.justification.strip()),
+        "mapped": sum(1 for r in rows if r.applicable and r.controls),
+        "assured": sum(1 for r in rows if r.applicable and r.coverage == "assured"),
     }
+
+
+def coverage_text(counts: dict) -> str:
+    """"40 of 93 applicable clauses mapped to a control; 6 backed by a tested control" —
+    mapped is not tested, and the export says both (F-19)."""
+    applicable = counts.get("applicable", 0)
+    if not applicable:
+        return "No applicable clauses"
+    mapped = counts.get("mapped", applicable - counts.get("no_control", 0))
+    return (
+        f"{mapped} of {applicable} applicable clauses mapped to a control; "
+        f"{counts.get('assured', 0)} backed by a tested control"
+    )
 
 
 def filter_rows(rows: list[SoaRow], view: str | None) -> list[SoaRow]:
@@ -271,6 +282,7 @@ def to_xlsx(doc: SoaDocument) -> bytes:
         ("Generated", doc.generated),
         ("Clauses", f"{counts['total']} — {counts['applicable']} applicable, "
                     f"{counts['excluded']} excluded, {counts['no_control']} applicable without a control"),
+        ("Coverage", coverage_text(counts)),
     ]
     if doc.view_label:
         header.append(("Showing", doc.view_label))
@@ -323,6 +335,7 @@ def to_pdf(doc: SoaDocument) -> bytes:
             ("Applicable", str(counts["applicable"])),
             ("Excluded", str(counts["excluded"])),
             ("Applicable, no control", str(counts["no_control"])),
+            ("Applicable, tested control", str(counts.get("assured", 0))),
         ]),
         Spacer(1, 10),
     ]

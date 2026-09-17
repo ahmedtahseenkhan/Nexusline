@@ -6,9 +6,11 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import and_, select, update
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.lookup import Lookup
@@ -27,6 +29,7 @@ from app.schemas.risk import (
     RiskMatrixConfig,
     RiskMatrixConfigUpdate,
     RiskRead,
+    RiskSettingPatch,
     RiskSettingRead,
     RiskSettingUpdate,
     SeverityBands,
@@ -36,11 +39,18 @@ from app.services import master_data
 from app.services.risk_scoring import (
     SeverityScale,
     cell_key,
+    current_severity,
+    effective_review_frequency,
     effective_score,
+    frequency_word,
     max_score_for,
+    rescheduled_review,
+    review_cadence,
+    validate_review_cadence,
     validate_bands,
     validate_cells,
 )
+from app.services.risk_query import board_register_clause, scored_clause
 from app.services.risk_settings import (
     default_label,
     get_levels,
@@ -151,23 +161,99 @@ async def get_risk_settings(db: DbSession, user: CurrentUser) -> RiskSettingRead
 async def update_risk_settings(
     body: RiskSettingUpdate, db: DbSession, user: CurrentUser
 ) -> RiskSettingRead:
-    settings = await get_or_create_settings(db, user.tenant_id)
-    ceiling = max_score_for(settings.matrix_size)
-    _check_threshold_pair(body.appetite_score, body.tolerance_score, ceiling, settings.matrix_size)
-    before = (settings.appetite_score, settings.tolerance_score)
-    settings.appetite_score = body.appetite_score
-    settings.tolerance_score = body.tolerance_score
-    await db.flush()
-    await audit_log.record(
-        db, actor=user, action="update", entity_type="risk_settings", entity_id=settings.id,
-        summary=(
-            f"Organisation risk appetite set to {body.appetite_score}, tolerance "
-            f"{body.tolerance_score}"
-        ),
-        changes={"appetite_score": f"{before[0]} -> {body.appetite_score}",
-                 "tolerance_score": f"{before[1]} -> {body.tolerance_score}"},
+    return await _save_risk_settings(
+        db, user, appetite=body.appetite_score, tolerance=body.tolerance_score, cadence=body.review_cadence
     )
+
+
+@router.patch(
+    "/risk-settings", response_model=RiskSettingRead, dependencies=[Depends(require("risk:write"))],
+    summary="Change the appetite, the tolerance or the rating-driven review cadence",
+)
+async def patch_risk_settings(
+    body: RiskSettingPatch, db: DbSession, user: CurrentUser
+) -> RiskSettingRead:
+    """Only what is sent changes. ``review_cadence`` maps a severity to the longest review
+    cycle a risk of that rating may have (``monthly`` … ``annual``); a severity left out
+    takes the product default. Tightening it brings in the next review of every live risk
+    it now covers (never pushes one out)."""
+    return await _save_risk_settings(
+        db, user, appetite=body.appetite_score, tolerance=body.tolerance_score, cadence=body.review_cadence
+    )
+
+
+async def _save_risk_settings(
+    db, user, *, appetite: int | None, tolerance: int | None, cadence: dict | None
+) -> RiskSettingRead:
+    settings = await get_or_create_settings(db, user.tenant_id)
+    changes: dict[str, str] = {}
+    summary: list[str] = []
+    if appetite is not None or tolerance is not None:
+        new_appetite = appetite if appetite is not None else settings.appetite_score
+        new_tolerance = tolerance if tolerance is not None else settings.tolerance_score
+        ceiling = max_score_for(settings.matrix_size)
+        _check_threshold_pair(new_appetite, new_tolerance, ceiling, settings.matrix_size)
+        before = (settings.appetite_score, settings.tolerance_score)
+        settings.appetite_score, settings.tolerance_score = new_appetite, new_tolerance
+        changes.update(appetite_score=f"{before[0]} -> {new_appetite}",
+                       tolerance_score=f"{before[1]} -> {new_tolerance}")
+        summary.append(f"Organisation risk appetite set to {new_appetite}, tolerance {new_tolerance}")
+    if cadence is not None:
+        try:
+            stored = validate_review_cadence(cadence)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        before_cadence = dict(settings.review_cadence or {})
+        if stored != before_cadence:
+            settings.review_cadence = stored
+            moved = await _reschedule_for_cadence(db, settings, before_cadence, stored)
+            effective = review_cadence(stored)
+            changes["review_cadence"] = ", ".join(f"{k} {v.value}" for k, v in effective.items())
+            if moved:
+                changes["reviews_brought_in"] = str(moved)
+            summary.append(
+                "Review cadence set to " + ", ".join(f"{k} {frequency_word(v).lower()}" for k, v in effective.items())
+                + (f"; {moved} risk review(s) brought in" if moved else "")
+            )
+    await db.flush()
+    if summary:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="risk_settings", entity_id=settings.id,
+            summary="; ".join(summary)[:500], changes=changes,
+        )
     return RiskSettingRead.model_validate(settings)
+
+
+async def _reschedule_for_cadence(db, settings, before: dict, after: dict) -> int:
+    """Bring in the next review of each live risk whose effective cycle the new cadence
+    tightens (``risk_scoring.rescheduled_review``). Returns how many moved."""
+    scale = scale_for(settings)
+    rows = (
+        await db.execute(
+            select(
+                Risk.id, Risk.status, Risk.last_assessed_at, Risk.review_frequency,
+                Risk.inherent_likelihood, Risk.inherent_impact, Risk.residual_likelihood,
+                Risk.residual_impact, Risk.next_review_date, Risk.last_review_date,
+            ).where(Risk.deleted.is_(False))
+        )
+    ).all()
+    moved = 0
+    for r in rows:
+        severity = current_severity(r, scale)
+        if severity is None:
+            continue
+        old, _ = effective_review_frequency(r.review_frequency, severity, before)
+        new, _ = effective_review_frequency(r.review_frequency, severity, after)
+        if new == old:
+            continue
+        target = rescheduled_review(
+            current=r.next_review_date, last_review=r.last_review_date,
+            effective_before=old, effective_after=new, frequency_changed=False,
+        )
+        if target != r.next_review_date:
+            await db.execute(update(Risk).where(Risk.id == r.id).values(next_review_date=target))
+            moved += 1
+    return moved
 
 
 # ---------------------------------------------------------------------------
@@ -385,9 +471,17 @@ async def risk_alerts(db: DbSession, user: CurrentUser) -> list[RiskRead]:
     dependencies=[Depends(require("risk:read"))],
     summary="5x5 likelihood-by-impact heatmap counts (inherent & residual)",
 )
-async def risk_matrix(db: DbSession, user: CurrentUser) -> RiskMatrix:
+async def risk_matrix(
+    db: DbSession,
+    user: CurrentUser,
+    scope: Annotated[Literal["register", "board"], Query()] = "register",
+) -> RiskMatrix:
+    """``scope=register`` plots every scored live risk; ``scope=board`` (the dashboard)
+    only the board register — out of Draft, not accepted or closed (F-21). A draft never
+    scored is never plotted: its stored 1x1 is a placeholder, not a cell."""
     settings = await get_or_create_settings(db, user.tenant_id)
-    risks = (await db.scalars(select(Risk).where(Risk.deleted.is_(False)))).all()
+    where = board_register_clause() if scope == "board" else and_(Risk.deleted.is_(False), scored_clause())
+    risks = (await db.scalars(select(Risk).where(where))).all()
 
     inherent: dict[tuple[int, int], list[str]] = defaultdict(list)
     residual: dict[tuple[int, int], list[str]] = defaultdict(list)

@@ -7,6 +7,7 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
 import { confirmDeleteWithImpact } from "@/lib/records";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
@@ -60,6 +61,12 @@ interface OutsourcingArrangement {
   exit_plan: string;
   exit_plan_tested: boolean;
   concentration_note: string;
+  /** easy | moderate | difficult | none; "" = not assessed. */
+  substitutability: string;
+  /** low | medium | high; "" = not assessed. */
+  concentration_level: string;
+  /** What a material arrangement still needs before it can be active. */
+  missing_for_activation?: string[];
   status: string;
   /** Legacy text (the picked user's name once `owner_id` is set). */
   owner: string;
@@ -81,6 +88,11 @@ interface OutsourcingSummary {
   sbp_approvals_pending: number;
   contracts_expiring_90d: number;
   exit_plans_untested: number;
+  hard_to_substitute?: number;
+  hard_to_substitute_untested?: number;
+  substitutability_unassessed?: number;
+  high_concentration?: number;
+  live_missing_facts?: number;
 }
 interface VendorOption {
   id: string;
@@ -109,6 +121,31 @@ const CLOUD_MODEL = opts(["iaas", "paas", "saas", "not_applicable"]);
 const SBP_STATUS = opts(["not_required", "pending", "approved", "rejected"]);
 const STATUS = opts(["proposed", "active", "under_review", "terminated"]);
 const REVIEW_STATUS = opts(["planned", "completed"]);
+/** How hard the service is to move elsewhere (server: models/outsourcing.SUBSTITUTABILITY). */
+const SUBSTITUTABILITY: Option[] = [
+  { value: "easy", label: "Easy — alternatives readily available" },
+  { value: "moderate", label: "Moderate — possible with planning" },
+  { value: "difficult", label: "Difficult — few alternatives, long migration" },
+  { value: "none", label: "None — no realistic alternative" },
+];
+const SUBSTITUTABILITY_SHORT: Record<string, string> = { easy: "Easy", moderate: "Moderate", difficult: "Difficult", none: "None" };
+const CONCENTRATION: Option[] = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
+const HARD_TO_SUBSTITUTE = new Set(["difficult", "none"]);
+const LIVE_STATUSES = new Set(["active", "under_review"]);
+/** The server's rule (api/v1/outsourcing.activation_error), for the form's early warning. */
+function missingForActivation(f: Pick<ArrForm, "materiality" | "materiality_assessment" | "exit_plan" | "substitutability">): string[] {
+  if (f.materiality !== "material") return [];
+  const out: string[] = [];
+  if (!f.materiality_assessment.trim()) out.push("materiality rationale");
+  if (!f.exit_plan.trim()) out.push("exit plan");
+  if (!f.substitutability) out.push("substitutability");
+  return out;
+}
+const listText = (items: string[]) => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`);
 
 // ------------------------------------------------------------------ tones
 const MATERIALITY_TONE: Record<string, Tone> = {
@@ -157,6 +194,8 @@ type ArrForm = {
   exit_plan: string;
   exit_plan_tested: boolean;
   concentration_note: string;
+  substitutability: string;
+  concentration_level: string;
   status: string;
   owner_id: string | null;
 };
@@ -180,6 +219,8 @@ const BLANK_ARR: ArrForm = {
   exit_plan: "",
   exit_plan_tested: false,
   concentration_note: "",
+  substitutability: "",
+  concentration_level: "",
   status: "proposed",
   owner_id: null,
 };
@@ -204,6 +245,8 @@ function fromArr(a: OutsourcingArrangement): ArrForm {
     exit_plan: a.exit_plan || "",
     exit_plan_tested: !!a.exit_plan_tested,
     concentration_note: a.concentration_note || "",
+    substitutability: a.substitutability || "",
+    concentration_level: a.concentration_level || "",
     status: a.status || "proposed",
     owner_id: a.owner_id ?? null,
   };
@@ -229,6 +272,8 @@ function arrPayload(f: ArrForm): Record<string, unknown> {
     exit_plan: f.exit_plan,
     exit_plan_tested: f.exit_plan_tested,
     concentration_note: f.concentration_note,
+    substitutability: f.substitutability,
+    concentration_level: f.concentration_level,
     status: f.status,
     // Picked, not typed: the server writes the person's / country's name into the
     // legacy `owner` / `country` text, which older rows keep until someone picks.
@@ -308,16 +353,38 @@ function OutsourcingInner() {
     loadSummary();
     apiCall<PagedList<VendorOption>>("GET", "/vendors?limit=200")
       .then((r) => setVendors(r.items))
-      .catch(() => setVendors([]));
+      .catch(() => setVendors([]))
+      .finally(() => setVendorsLoaded(true));
   }, [loadSummary, refreshKey]);
 
   // ------------------------------------------------------------- arrangement CRUD
-  function openNewArr() {
+  function openNewArr(prefill?: Partial<ArrForm>) {
     setEditingArr(null);
-    setAf(BLANK_ARR);
+    setAf({ ...BLANK_ARR, ...prefill });
     setError(null);
     setShowArrForm(true);
   }
+  // `/outsourcing?new=1&vendor_id=…` (the third-party record's "record an arrangement"
+  // open point) opens the form linked to that vendor; the params are then dropped.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const newParam = searchParams.get("new");
+  const vendorParam = searchParams.get("vendor_id");
+  const [vendorsLoaded, setVendorsLoaded] = useState(false);
+  useEffect(() => {
+    if (newParam !== "1") return;
+    if (vendorParam && !vendorsLoaded) return; // wait for the vendor list to name the provider
+    const vendorId = vendorParam || "";
+    const name = vendors.find((v) => v.id === vendorId)?.name ?? "";
+    openNewArr({ vendor_id: vendorId, service_provider: name, title: name });
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("new");
+    next.delete("vendor_id");
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newParam, vendorParam, vendorsLoaded]);
   function openEditArr(a: OutsourcingArrangement) {
     setEditingArr(a);
     setAf(fromArr(a));
@@ -393,8 +460,16 @@ function OutsourcingInner() {
   const vendorOpts: Option[] = useMemo(() => vendors.map((v) => ({ value: v.id, label: v.name })), [vendors]);
 
   // ------------------------------------------------------------- form tabs
+  const formMissing = missingForActivation(af);
+  const activationWarning = LIVE_STATUSES.has(af.status) && formMissing.length > 0 ? (
+    <div className="error" role="alert" style={{ marginBottom: 12 }}>
+      A material arrangement can&apos;t be {cap(af.status).toLowerCase()} until its {listText(formMissing)}{" "}
+      {formMissing.length === 1 ? "is" : "are"} recorded. Fill {formMissing.length === 1 ? "it" : "them"} in on the Materiality and Exit Plan tabs, or keep it proposed.
+    </div>
+  ) : null;
   const arrangementTab = (
     <>
+      {activationWarning}
       <Field label="Title" required help="For example: Core banking hosting — data centre.">
         <TextInput value={af.title} onChange={(v) => setA("title", v)} placeholder="Arrangement title" required />
       </Field>
@@ -413,7 +488,7 @@ function OutsourcingInner() {
         <Field label="Category">
           <Select value={af.category} onChange={(v) => setA("category", v)} options={CATEGORY} />
         </Field>
-        <Field label="Status">
+        <Field label="Status" help="A material arrangement can't be active or under review until its materiality rationale, exit plan and substitutability are recorded.">
           <Select value={af.status} onChange={(v) => setA("status", v)} options={STATUS} />
         </Field>
       </div>
@@ -432,8 +507,19 @@ function OutsourcingInner() {
       <Field label="Materiality" help="SBP materiality determination — material arrangements carry heavier obligations.">
         <Select value={af.materiality} onChange={(v) => setA("materiality", v)} options={MATERIALITY} />
       </Field>
-      <Field label="Materiality assessment" help="Rationale for the materiality determination.">
-        <TextArea value={af.materiality_assessment} onChange={(v) => setA("materiality_assessment", v)} rows={3} placeholder="Why the arrangement is (non-)material: criticality, data sensitivity, substitutability…" />
+      <Field
+        label="Materiality rationale"
+        required={af.materiality === "material"}
+        help="Why the arrangement is (or is not) material: what would happen to customers, operations and compliance if the service failed. SBP expects the reasoning on file, not just the label; a material arrangement needs it before it goes active."
+      >
+        <TextArea value={af.materiality_assessment} onChange={(v) => setA("materiality_assessment", v)} rows={3} placeholder="Why the arrangement is (non-)material: criticality, data sensitivity, customer impact…" />
+      </Field>
+      <Field
+        label="Substitutability"
+        required={af.materiality === "material"}
+        help="How hard it would be to move this service to another provider or back in-house. SBP cares because a service the bank cannot replace quickly needs a tested exit plan and closer monitoring. Difficult or none without a tested exit plan is flagged as the most urgent gap."
+      >
+        <Select value={af.substitutability} onChange={(v) => setA("substitutability", v)} options={SUBSTITUTABILITY} placeholder="Not assessed" />
       </Field>
       <div className="field-row">
         <Field label="Cloud" help="Whether the service is delivered on cloud infrastructure.">
@@ -484,11 +570,22 @@ function OutsourcingInner() {
   );
   const exitTab = (
     <>
-      <Field label="Exit plan" help="Documented exit / termination strategy (SBP expectation for material arrangements).">
+      <Field label="Exit plan" required={af.materiality === "material"} help="Documented exit / termination strategy (SBP expectation for material arrangements). A material arrangement needs one before it goes active.">
         <TextArea value={af.exit_plan} onChange={(v) => setA("exit_plan", v)} rows={4} placeholder="How the bank would exit or bring the service back in-house, alternate providers, data return / destruction…" />
       </Field>
       <Field label="Exit plan tested" help="Whether the exit plan has been tested / rehearsed.">
         <Toggle checked={af.exit_plan_tested} onChange={(v) => setA("exit_plan_tested", v)} label="Exit plan tested" />
+      </Field>
+      {af.materiality === "material" && HARD_TO_SUBSTITUTE.has(af.substitutability) && !af.exit_plan_tested && (
+        <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+          Substitutability is {SUBSTITUTABILITY_SHORT[af.substitutability].toLowerCase()}: test this exit plan, or the arrangement stays flagged.
+        </p>
+      )}
+      <Field
+        label="Concentration level"
+        help="How much of the bank relies on this provider across its services. SBP asks banks to watch reliance on a single provider (and on a few large cloud providers): high concentration means one failure hits many services at once. The third-party record also derives concentration from the material arrangements and critical processes that depend on the provider."
+      >
+        <Select value={af.concentration_level} onChange={(v) => setA("concentration_level", v)} options={CONCENTRATION} placeholder="Not assessed" />
       </Field>
       <Field label="Concentration note" help="Concentration-risk considerations (provider / geography / technology).">
         <TextArea value={af.concentration_note} onChange={(v) => setA("concentration_note", v)} rows={3} placeholder="Reliance on a single provider, sub-outsourcing chains, sector-wide concentration…" />
@@ -574,7 +671,7 @@ function OutsourcingInner() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <ImportExport resource="outsourcing-arrangements" label="Arrangements" onDone={() => setRefreshKey((k) => k + 1)} />
-          <button className="btn" onClick={openNewArr}>
+          <button className="btn" onClick={() => openNewArr()}>
             <IconPlus width={16} height={16} /> New arrangement
           </button>
         </div>
@@ -600,9 +697,28 @@ function OutsourcingInner() {
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
-      {summary && summary.exit_plans_untested > 0 && (
-        <div className="card card-pad" style={{ marginBottom: 16 }}>
-          <span className="muted">{summary.exit_plans_untested} material exit plan(s) untested.</span>
+      {summary && (summary.exit_plans_untested > 0 || !!summary.hard_to_substitute_untested || !!summary.live_missing_facts
+        || !!summary.high_concentration || !!summary.substitutability_unassessed) && (
+        <div className="card card-pad" style={{ marginBottom: 16, display: "grid", gap: 4, fontSize: 13 }}>
+          {!!summary.hard_to_substitute_untested && (
+            <span style={{ color: "var(--red)" }}>
+              <b>{summary.hard_to_substitute_untested}</b> material arrangement{summary.hard_to_substitute_untested === 1 ? "" : "s"} that can&apos;t easily be replaced {summary.hard_to_substitute_untested === 1 ? "has" : "have"} no tested exit plan.
+            </span>
+          )}
+          {!!summary.live_missing_facts && (
+            <span style={{ color: "var(--orange)" }}>
+              <b>{summary.live_missing_facts}</b> live material arrangement{summary.live_missing_facts === 1 ? " is" : "s are"} missing the materiality rationale, exit plan or substitutability.
+            </span>
+          )}
+          {summary.exit_plans_untested > 0 && (
+            <span className="muted">{summary.exit_plans_untested} material exit plan{summary.exit_plans_untested === 1 ? "" : "s"} untested.</span>
+          )}
+          {!!summary.substitutability_unassessed && (
+            <span className="muted">{summary.substitutability_unassessed} material arrangement{summary.substitutability_unassessed === 1 ? " has" : "s have"} no substitutability assessed.</span>
+          )}
+          {!!summary.high_concentration && (
+            <span className="muted">{summary.high_concentration} arrangement{summary.high_concentration === 1 ? " records" : "s record"} high concentration on its provider.</span>
+          )}
         </div>
       )}
 
@@ -644,8 +760,30 @@ function OutsourcingInner() {
               {detail.data_offshored && <Badge tone="high">Data offshored{countryName(detail) ? " · " + countryName(detail) : ""}</Badge>}
               {!detail.data_offshored && countryName(detail) && <Badge tone="neutral">{countryName(detail)}</Badge>}
               <Badge tone={detail.exit_plan_tested ? "low" : "medium"}>Exit plan {detail.exit_plan_tested ? "tested" : "untested"}</Badge>
+              {detail.substitutability
+                ? <Badge tone={HARD_TO_SUBSTITUTE.has(detail.substitutability) ? "high" : "neutral"}>Substitutability: {SUBSTITUTABILITY_SHORT[detail.substitutability]?.toLowerCase() ?? detail.substitutability}</Badge>
+                : detail.materiality === "material" ? <Badge tone="medium">Substitutability not assessed</Badge> : null}
+              {detail.concentration_level && (
+                <Badge tone={detail.concentration_level === "high" ? "high" : detail.concentration_level === "medium" ? "medium" : "neutral"}>
+                  Concentration: {detail.concentration_level}
+                </Badge>
+              )}
               {detail.is_contract_expiring && <Badge tone="high">Contract expiring ≤90d</Badge>}
             </div>
+
+            {detail.materiality === "material" && HARD_TO_SUBSTITUTE.has(detail.substitutability) && (!detail.exit_plan.trim() || !detail.exit_plan_tested) && (
+              <div className="error" role="status" style={{ marginBottom: 12 }}>
+                Material and {detail.substitutability === "none" ? "with no realistic alternative provider" : "difficult to substitute"}, but the exit plan is {detail.exit_plan.trim() ? "untested" : "missing"}. Test the exit plan so the bank can leave this provider if it fails.
+              </div>
+            )}
+            {(detail.missing_for_activation ?? []).length > 0 && (
+              <div className="card card-pad" style={{ marginBottom: 12, fontSize: 13, borderColor: "var(--amber)" }}>
+                {LIVE_STATUSES.has(detail.status)
+                  ? <>Recorded as {cap(detail.status).toLowerCase()} without its {listText(detail.missing_for_activation ?? [])}. SBP expects these on file for every material arrangement.</>
+                  : <>Before this material arrangement can be active, record its {listText(detail.missing_for_activation ?? [])}.</>}{" "}
+                <button type="button" className="linklike" onClick={() => openEditArr(detail)}>Fill in</button>
+              </div>
+            )}
 
             <div className="field-row" style={{ marginBottom: 12 }}>
               <div style={{ flex: 1 }}>
@@ -662,9 +800,16 @@ function OutsourcingInner() {
               </div>
             </div>
             <div style={{ marginBottom: 16 }}>
-              <div className="label">Concentration note</div>
+              <div className="label">Substitutability and concentration</div>
+              <p className="muted" style={{ margin: "4px 0", fontSize: 13 }}>
+                {detail.substitutability
+                  ? SUBSTITUTABILITY.find((o) => o.value === detail.substitutability)?.label ?? detail.substitutability
+                  : "Substitutability not assessed"}
+                {" · "}
+                {detail.concentration_level ? `${cap(detail.concentration_level)} concentration` : "Concentration not assessed"}
+              </p>
               <p className="muted" style={{ margin: "4px 0", fontSize: 13, whiteSpace: "pre-wrap" }}>
-                {detail.concentration_note || "—"}
+                {detail.concentration_note || "No concentration note."}
               </p>
               <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
                 {detail.sbp_approval_ref ? `NOC ref ${detail.sbp_approval_ref} · ` : ""}

@@ -28,6 +28,16 @@ from app.models.risk import Risk
 from app.schemas.risk import OrphanPurgeRequest, ResidualAcceptance, RiskAssessment, RiskCreate, RiskUpdate
 from app.services import risk_integrity as ri
 
+async def _no_review_policy(db, user):
+    from app.services.risk_scoring import SeverityScale
+
+    return SeverityScale(), {}
+
+
+async def _no_alert_refresh(db, user, risk):
+    return None
+
+
 WRITER = ["risk:read", "risk:write"]
 ACCEPTER = ["risk:read", "risk:write", "risk:accept"]
 
@@ -261,6 +271,11 @@ def stub_io(monkeypatch):
     monkeypatch.setattr(risks_api, "_load_risk", load)
     monkeypatch.setattr(risks_api, "_read", read)
     monkeypatch.setattr(risks_api, "get_matrix_size", size)
+    # F-22: the review clock and the alert refresh need the tenant's settings and the
+    # notifications table; neither is under test here.
+    monkeypatch.setattr(risks_api, "_review_policy", _no_review_policy)
+    monkeypatch.setattr(risks_api, "_refresh_alerts", _no_alert_refresh)
+    monkeypatch.setattr(risks_api, "_reconcile_title_flag", _no_alert_refresh)
     return state
 
 

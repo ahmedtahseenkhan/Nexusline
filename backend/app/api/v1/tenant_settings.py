@@ -10,9 +10,18 @@
   change is written to the activity log with before/after values.
 * ``GET  /settings/organisation/options`` — any signed-in user. The currencies, date
   formats and timezones the form offers.
+* ``GET  /settings/organisation/security`` — ``settings:manage``. The MFA policy: which
+  roles must use MFA and why (listed, administrator, approves, everyone), the grace
+  period, SSO and e-mail approval links, and the users required but not yet enrolled.
+* ``PUT  /settings/organisation/security/mfa-roles`` — ``settings:manage``. The roles
+  that must use MFA (validated against the organisation's roles; the administrator
+  role is always kept; ``null`` = the deployment default). Audited.
+* ``GET  /settings/organisation/governance`` — ``settings:manage``. Segregation-of-duties
+  readiness: active users, approval routes and who holds their roles, rules in force.
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -119,6 +128,7 @@ from datetime import datetime, timezone  # noqa: E402
 from fastapi import HTTPException, status  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
+from app.services import default_governance  # noqa: E402
 from app.services import modules as module_service  # noqa: E402
 
 
@@ -134,6 +144,12 @@ class OnboardingStatus(BaseModel):
     users: int
     modules_chosen: bool
     locale_set: bool
+    # F-06: maker-checker needs a second person. ``needs_second_user`` is true while
+    # segregation of duties is on and only one user is active.
+    sod_enforced: bool = True
+    needs_second_user: bool = False
+    approval_routes_enabled: int = 0
+    role_gaps: list[str] = []
 
 
 def module_choice_problem(requested: list[str] | None, available: set[str]) -> str | None:
@@ -201,12 +217,17 @@ async def onboarding_status(db: DbSession, user: CurrentUser) -> OnboardingStatu
     ) or 0
     defaults = {k: v for k, v in DEFAULTS.items()}
     locale_set = any(getattr(row, k) != v for k, v in defaults.items() if k != "retention_days")
+    governance = await default_governance.governance_status(db)
     return OnboardingStatus(
         completed_at=row.onboarding_completed_at,
         frameworks_installed=frameworks,
         users=users,
         modules_chosen=row.enabled_modules is not None,
         locale_set=locale_set,
+        sod_enforced=governance["sod_enforced"],
+        needs_second_user=governance["needs_second_user"],
+        approval_routes_enabled=sum(1 for r in governance["routes"] if r["enabled"]),
+        role_gaps=[g["message"] for g in governance["role_gaps"]],
     )
 
 
@@ -218,6 +239,9 @@ async def onboarding_status(db: DbSession, user: CurrentUser) -> OnboardingStatu
 async def complete_onboarding(db: DbSession, user: CurrentUser) -> OnboardingStatus:
     """Mark first-run setup done (administrators stop being sent to /onboarding)."""
     row = await get_or_create_settings(db, user.tenant_id)
+    # Leave set-up with the segregation-of-duties baseline even if routes or rules were
+    # removed along the way (only what is missing is added; nothing is overwritten).
+    await default_governance.ensure_default_governance(db, user.tenant_id, actor=user)
     if row.onboarding_completed_at is None:
         row.onboarding_completed_at = datetime.now(timezone.utc)
         await db.flush()
@@ -226,3 +250,198 @@ async def complete_onboarding(db: DbSession, user: CurrentUser) -> OnboardingSta
             summary="Completed organisation onboarding",
         )
     return await onboarding_status(db, user)
+
+
+# ---------------------------------------------- security: MFA by role, SoD readiness (F-06)
+from app.core.config import settings as app_settings  # noqa: E402
+from app.services import mfa_policy  # noqa: E402
+
+
+class MfaRoleRow(BaseModel):
+    name: str
+    is_system: bool
+    #: ``everyone`` / ``protected`` / ``listed`` / ``approves`` / ``not_required``
+    #: (see ``mfa_policy.role_requirement``).
+    requirement: str
+    #: Required and switched on in the organisation's list (the toggle's state).
+    listed: bool
+    #: The toggle cannot be switched off: the administrator role, or MFA for everyone.
+    locked: bool
+    approve_permissions: list[str]
+    active_users: int
+    not_enrolled: int
+
+
+class MfaPendingUser(BaseModel):
+    id: uuid.UUID
+    email: str
+    full_name: str
+    roles: list[str]
+    #: ``required`` (grace running, or starts at next sign-in) or ``overdue``.
+    status: str
+    due: datetime | None
+
+
+class SecurityPolicyRead(BaseModel):
+    mfa_required_for_everyone: bool
+    grace_days: int
+    deployment_roles: list[str]
+    #: The organisation's own list; ``None`` = the deployment default applies.
+    organisation_roles: list[str] | None
+    effective_roles: list[str]
+    protected_roles: list[str]
+    sso_enabled: bool
+    email_actions_enabled: bool
+    roles: list[MfaRoleRow]
+    pending_users: list[MfaPendingUser]
+    enrolled_users: int
+    required_users: int
+
+
+class MfaRolesUpdate(BaseModel):
+    """The roles that must use MFA. ``None`` = go back to the deployment default."""
+
+    required_roles: list[str] | None
+
+
+class GovernanceStage(BaseModel):
+    name: str
+    role: str | None
+    holders: int | None
+
+
+class GovernanceRoute(BaseModel):
+    id: uuid.UUID
+    entity_type: str
+    name: str
+    enabled: bool
+    stages: list[GovernanceStage]
+
+
+class GovernanceRoleGap(BaseModel):
+    role: str
+    routes: list[str]
+    message: str
+
+
+class GovernanceStatus(BaseModel):
+    sod_enforced: bool
+    active_users: int
+    needs_second_user: bool
+    second_user_message: str | None
+    routes: list[GovernanceRoute]
+    rules_total: int
+    rules_enabled: int
+    role_gaps: list[GovernanceRoleGap]
+
+
+async def _security_policy(db) -> SecurityPolicyRead:
+    from sqlalchemy.orm import selectinload
+
+    from app.models.identity import Role, User
+
+    row_roles = await mfa_policy.tenant_required_roles(db)
+    effective = mfa_policy.effective_required_roles(row_roles, app_settings.mfa_required_roles)
+    everyone = bool(app_settings.mfa_required)
+    roles = (await db.scalars(select(Role).order_by(Role.name))).all()
+    users = (await db.scalars(
+        select(User).where(User.is_active.is_(True))
+        .options(selectinload(User.roles).selectinload(Role.permissions))
+        .order_by(User.email)
+    )).all()
+    statuses = await mfa_policy.statuses_for(db, users, app_settings)
+    effective_keys = {r.strip().lower() for r in effective}
+    role_rows = []
+    for role in roles:
+        codes = sorted(p.code for p in role.permissions)
+        holders = [u for u in users if any(r.id == role.id for r in u.roles)]
+        role_rows.append(MfaRoleRow(
+            name=role.name,
+            is_system=role.is_system,
+            requirement=mfa_policy.role_requirement(
+                role_name=role.name, permission_codes=codes,
+                required_roles=effective, global_required=everyone,
+            ),
+            listed=role.name.strip().lower() in effective_keys,
+            locked=everyone or mfa_policy.is_protected_role(role.name),
+            approve_permissions=[c for c in codes if c.endswith(mfa_policy.PRIVILEGED_PERMISSION_SUFFIX)],
+            active_users=len(holders),
+            not_enrolled=sum(1 for u in holders if statuses[u.id][0] in ("required", "overdue")),
+        ))
+    pending = [
+        MfaPendingUser(
+            id=u.id, email=u.email, full_name=u.full_name or "", roles=u.role_names,
+            status=statuses[u.id][0], due=statuses[u.id][1],
+        )
+        for u in users if statuses[u.id][0] in ("required", "overdue")
+    ]
+    pending.sort(key=lambda p: (p.status != "overdue", p.due is None, p.due or datetime.max.replace(tzinfo=timezone.utc)))
+    return SecurityPolicyRead(
+        mfa_required_for_everyone=everyone,
+        grace_days=app_settings.mfa_grace_days,
+        deployment_roles=list(app_settings.mfa_required_roles),
+        organisation_roles=row_roles,
+        effective_roles=effective,
+        protected_roles=[r.name for r in roles if mfa_policy.is_protected_role(r.name)],
+        sso_enabled=await mfa_policy.sso_enabled(db),
+        email_actions_enabled=bool(app_settings.email_actions_enabled),
+        roles=role_rows,
+        pending_users=pending,
+        enrolled_users=sum(1 for u in users if u.mfa_enabled),
+        required_users=sum(
+            1 for u in users if mfa_policy.user_requires_mfa(u, app_settings, row_roles)
+        ),
+    )
+
+
+@router.get(
+    "/organisation/security",
+    response_model=SecurityPolicyRead,
+    dependencies=[Depends(require("settings:manage"))],
+)
+async def organisation_security(db: DbSession, user: CurrentUser) -> SecurityPolicyRead:
+    """Who must use two-factor authentication here, why, and who has not enrolled yet."""
+    return await _security_policy(db)
+
+
+@router.put(
+    "/organisation/security/mfa-roles",
+    response_model=SecurityPolicyRead,
+    dependencies=[Depends(require("settings:manage"))],
+)
+async def update_mfa_roles(body: MfaRolesUpdate, db: DbSession, user: CurrentUser) -> SecurityPolicyRead:
+    """Choose the roles that must use MFA. Names must be roles of this organisation; the
+    administrator role is always kept. ``null`` returns to the deployment default.
+    Requires ``settings:manage``; audited."""
+    from app.models.identity import Role
+
+    row = await get_or_create_settings(db, user.tenant_id)
+    before = row.mfa_required_roles
+    if body.required_roles is None:
+        after = None
+    else:
+        names = (await db.scalars(select(Role.name))).all()
+        after, problem = mfa_policy.validate_required_roles(body.required_roles, names)
+        if problem:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=problem)
+    if after != before:
+        row.mfa_required_roles = after
+        await db.flush()
+        shown = lambda v: ", ".join(v) if v is not None else "deployment default"  # noqa: E731
+        await audit.record(
+            db, actor=user, action="update", entity_type="tenant_settings", entity_id=row.id,
+            summary=f"Changed the roles that must use MFA: {shown(before)} → {shown(after)}",
+            changes={"mfa_required_roles": {"from": before, "to": after}},
+        )
+    return await _security_policy(db)
+
+
+@router.get(
+    "/organisation/governance",
+    response_model=GovernanceStatus,
+    dependencies=[Depends(require("settings:manage"))],
+)
+async def organisation_governance(db: DbSession, user: CurrentUser) -> GovernanceStatus:
+    """Segregation-of-duties readiness: active users, approval routes and whether anyone
+    holds the roles they are assigned to, and the dual-control rules in force."""
+    return GovernanceStatus.model_validate(await default_governance.governance_status(db))

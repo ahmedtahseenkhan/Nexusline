@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiCall, type RiskCandidate, type RiskCandidatePage } from "@/lib/api";
+import {
+  apiCall,
+  type LegacyMigrationPlan,
+  type LegacyMigrationResult,
+  type LegacyRiskRef,
+  type RiskCandidate,
+  type RiskCandidatePage,
+} from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { toast } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
@@ -83,8 +90,17 @@ function RiskCandidatesPage() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [scenarios, setScenarios] = useState<Option[]>([]);
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [legacy, setLegacy] = useState<LegacyMigrationPlan | null>(null);
+  const [legacyOpen, setLegacyOpen] = useState(false);
   const gen = useRef<GenerateRisksHandle>(null);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  // Generated risks written to the register before this queue existed (one per asset):
+  // offered for moving here, never moved without a person confirming.
+  useEffect(() => {
+    apiCall<LegacyMigrationPlan>("GET", "/risk-proposals/legacy-migration").then(setLegacy).catch(() => setLegacy(null));
+  }, [refreshKey]);
+  const legacyActionable = legacy ? legacy.moving + legacy.dropped : 0;
 
   useEffect(() => {
     apiCall<PagedList<{ reference: string; title: string }>>("GET", "/risk-scenarios?limit=500")
@@ -132,6 +148,19 @@ function RiskCandidatesPage() {
             {[r.process_ref?.name, r.business_unit_ref?.name].filter(Boolean).join(" · ") || "No process or unit"}
             {r.category_ref ? ` · ${r.category_ref.label}` : r.scenario_category ? ` · ${r.scenario_category}` : ""}
           </div>
+          {(r.source_risks?.length ?? 0) > 0 && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 2 }} onClick={(e) => e.stopPropagation()}>
+              From register {r.source_risks!.length === 1 ? "risk" : "risks"}{" "}
+              {r.source_risks!.slice(0, 4).map((src, i) => (
+                <span key={src.id}>
+                  {i > 0 && ", "}
+                  <Link href={`/risks?id=${src.id}`} title={src.title}>{src.reference}</Link>
+                  {src.archived ? " (archived)" : " (restored)"}
+                </span>
+              ))}
+              {r.source_risks!.length > 4 && ` +${r.source_risks!.length - 4}`}
+            </div>
+          )}
         </div>
       ),
       text: (r) => r.title,
@@ -232,6 +261,28 @@ function RiskCandidatesPage() {
         </div>
       </div>
       <GenerateRisks ref={gen} label="the asset inventory" onDone={reload} hideButton />
+
+      {legacy && legacyActionable > 0 && (
+        <div
+          role="status"
+          className="card card-pad"
+          style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", marginBottom: 12, background: "var(--amber-bg)", borderColor: "var(--amber)" }}
+        >
+          <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>
+            <b>{plural(legacyActionable, "generated risk")} from before the candidate queue {legacyActionable === 1 ? "is" : "are"} still in the register</b>
+            {" "}— one per asset, as the old generator wrote them. Review them and move them here.
+            {legacy.kept > 0 && <span className="muted"> {legacy.kept} more {legacy.kept === 1 ? "has" : "have"} been worked on and will stay.</span>}
+          </div>
+          <button className="btn sm" onClick={() => setLegacyOpen(true)}>Review and move…</button>
+        </div>
+      )}
+      {legacyOpen && legacy && (
+        <LegacyMigrationDialog
+          plan={legacy}
+          onClose={() => setLegacyOpen(false)}
+          onDone={() => { setLegacyOpen(false); reload(); }}
+        />
+      )}
 
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
         <div className="seg" role="tablist" aria-label="Candidate status">
@@ -457,6 +508,156 @@ function MergeDialog({ rows, onClose, onDone }: { rows: Row[]; onClose: () => vo
           </>
         ),
       }]}
+    />
+  );
+}
+
+function LegacyRows({ items, showReason }: { items: LegacyRiskRef[]; showReason: boolean }) {
+  return (
+    <div className="table-wrap" style={{ maxHeight: 360, overflowY: "auto" }}>
+      <table>
+        <thead>
+          <tr>
+            <th style={{ width: 90 }}>Risk</th>
+            <th>Title</th>
+            <th style={{ width: 170 }}>Asset</th>
+            {showReason && <th style={{ width: 280 }}>Why</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((r) => (
+            <tr key={r.id}>
+              <td><Link className="ref" href={`/risks?id=${r.id}`}>{r.reference}</Link></td>
+              <td style={{ fontSize: 13 }}>{r.title}</td>
+              <td className="muted" style={{ fontSize: 12.5 }}>{r.asset_name || "—"}</td>
+              {showReason && <td className="muted" style={{ fontSize: 12.5 }}>{r.reason}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* Moves generated risks made before the queue into it. The preview is the server's plan:
+   which candidates they become (new, or joining one already waiting), which are archived
+   without a candidate and why, and which stay because someone has worked on them. The
+   move re-reads the plan, so a stale preview cannot move a risk that was edited since. */
+function LegacyMigrationDialog({ plan, onClose, onDone }: { plan: LegacyMigrationPlan; onClose: () => void; onDone: () => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const archiving = plan.moving + plan.dropped;
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await apiCall<LegacyMigrationResult>("POST", "/risk-proposals/legacy-migration");
+      toast(
+        `Moved ${plural(res.moved, "risk")} into ${plural(res.created, "new candidate")}` +
+          (res.joined ? ` and ${plural(res.joined, "waiting candidate")}` : "") +
+          (res.dropped ? `; archived ${res.dropped} that did not fit` : "") +
+          ". Archived risks can be restored from the register's archive.",
+      );
+      onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not move the risks");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const tabs = [
+    {
+      id: "moving", label: `Become candidates (${plan.moving})`, content: (
+        <>
+          <p className="muted" style={{ fontSize: 13, lineHeight: 1.6, marginTop: 0 }}>
+            {plural(archiving, "risk")} will be archived from the register. {plural(plan.moving, "risk")} become{plan.moving === 1 ? "s" : ""}{" "}
+            {plural(plan.new_candidates, "new candidate")}
+            {plan.joined_candidates ? ` and join ${plural(plan.joined_candidates, "candidate")} already waiting` : ""}, one per scenario,
+            process and business unit, carrying every asset, the worst of their scores and their control references.
+            Each archived risk&apos;s activity trail says where it went, and it can be restored. Rejecting a candidate
+            leaves its risks archived; accepting it creates a draft risk as usual.
+          </p>
+          {plan.groups.length === 0 ? <p className="muted">None.</p> : (
+            <div className="table-wrap" style={{ maxHeight: 360, overflowY: "auto" }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Candidate</th>
+                    <th style={{ width: 120 }}>Inherent</th>
+                    <th style={{ width: 260 }}>From register risks</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {plan.groups.map((g) => (
+                    <tr key={g.dedupe_key}>
+                      <td>
+                        <div className="cell-title">{g.title}</div>
+                        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                          <span className="ref">{g.scenario_reference}</span> · {g.scope_label}
+                        </div>
+                        {g.joins_proposal_id && (
+                          <div style={{ fontSize: 11.5, marginTop: 3 }}><Badge tone="info">Joins a candidate already waiting</Badge></div>
+                        )}
+                      </td>
+                      <td className="muted" style={{ fontSize: 12.5 }}>
+                        {g.inherent_likelihood && g.inherent_impact
+                          ? `${g.inherent_likelihood}×${g.inherent_impact} = ${g.inherent_likelihood * g.inherent_impact}`
+                          : "—"}
+                      </td>
+                      <td style={{ fontSize: 12.5 }}>
+                        {g.risks.map((r, i) => (
+                          <span key={r.id}>
+                            {i > 0 && ", "}
+                            <span title={r.title}>{r.reference}</span>
+                            <span className="muted"> ({r.asset_name})</span>
+                          </span>
+                        ))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      ),
+    },
+    {
+      id: "dropped", label: `Archived only (${plan.dropped})`, content: (
+        <>
+          <p className="muted" style={{ fontSize: 13, lineHeight: 1.6, marginTop: 0 }}>
+            These are archived without becoming candidates: their asset was deleted, the scenario does not fit that
+            kind of asset, or the candidate for their scope was already rejected. They can be restored.
+          </p>
+          {plan.dropped_items.length ? <LegacyRows items={plan.dropped_items} showReason /> : <p className="muted">None.</p>}
+        </>
+      ),
+    },
+    {
+      id: "kept", label: `Staying in the register (${plan.kept})`, content: (
+        <>
+          <p className="muted" style={{ fontSize: 13, lineHeight: 1.6, marginTop: 0 }}>
+            These look generated but someone has worked on them, so they are not touched. Open one to decide what to
+            do with it.
+          </p>
+          {plan.kept_items.length ? <LegacyRows items={plan.kept_items} showReason /> : <p className="muted">None.</p>}
+        </>
+      ),
+    },
+  ];
+
+  return (
+    <FormModal
+      title="Move generated risks into the candidate queue"
+      saveLabel={`Archive ${archiving} and move ${plan.moving}`}
+      saving={saving}
+      error={error}
+      onClose={onClose}
+      onSave={save}
+      wide
+      tabs={tabs}
     />
   );
 }

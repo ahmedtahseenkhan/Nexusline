@@ -23,6 +23,9 @@ import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
 import StatementOfApplicability from "@/components/StatementOfApplicability";
 import FrameworkCrosswalk from "@/components/FrameworkCrosswalk";
+import { BulkSuggestMappings, PendingSuggestionsHint } from "@/components/SuggestedClauses";
+import { useHasPermission } from "@/lib/tenantSettings";
+import type { FrameworkPosture } from "@/lib/compliance";
 
 /* ------------------------------------------------------------------ types */
 type Framework = {
@@ -38,6 +41,8 @@ type Framework = {
   workflow_status: string;
   requirement_count: number;
   compliant_count: number;
+  /** Assessed compliant / mapped / tested (F-19); absent from an older API. */
+  posture?: FrameworkPosture | null;
   created_at: string;
 };
 
@@ -134,6 +139,7 @@ type GapAnalysis = {
   kind: string;
   /** Clauses with a status other than not assessed (self-assessment progress). */
   assessed: number;
+  posture?: FrameworkPosture | null;
 };
 
 /* ------------------------------------------------------------------ helpers */
@@ -146,6 +152,21 @@ const FRAMEWORK_KIND: Option[] = [
   { value: "guidance", label: "Guidance" },
 ];
 const isSelfAssessed = (kind: string | undefined) => !!kind && kind !== "compliance";
+const pctText = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(1)}%`;
+
+/** The three numbers side by side, so mapping visibly counts without faking compliance:
+ *  only an assessment makes a clause compliant; a mapped control shows coverage; a tested,
+ *  working control shows assurance. */
+function PostureLine({ p, style }: { p: FrameworkPosture; style?: React.CSSProperties }) {
+  if (!p.applicable) return <span className="muted" style={style}>No applicable clauses</span>;
+  return (
+    <span className="muted" style={style} title={`Of ${p.applicable} applicable clauses: ${p.compliant} assessed compliant, ${p.mapped} mapped to a control, ${p.assured} backed by a tested, working control.`}>
+      <b style={{ color: "var(--text-strong)" }}>{pctText(p.compliant_pct)}</b> assessed compliant ·{" "}
+      <b style={{ color: "var(--text-strong)" }}>{pctText(p.mapped_pct)}</b> mapped ·{" "}
+      <b style={{ color: "var(--text-strong)" }}>{pctText(p.assured_pct)}</b> tested
+    </span>
+  );
+}
 
 const COMPLIANCE_STATUS = opts([
   "not_assessed",
@@ -367,6 +388,9 @@ function ComplianceInner() {
   const setFi = <K extends keyof FindingState>(k: K, v: FindingState[K]) => setFd((p) => ({ ...p, [k]: v }));
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  // "Review all suggestions" for the selected framework (F-19): maps controls to its clauses.
+  const canMapControls = useHasPermission("control:write");
+  const [reviewSuggestions, setReviewSuggestions] = useState(false);
 
   /* ---------------------------------------------------------------- loaders */
   const loadFrameworks = useCallback(async (selectId?: string) => {
@@ -432,6 +456,11 @@ function ComplianceInner() {
     // The URL param only steers the first load; later selection is the user's.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadFrameworks]);
+
+  // A mapping, test or assessment moves the framework cards' posture: refresh them.
+  useEffect(() => {
+    if (refreshKey) loadFrameworks().catch(() => {});
+  }, [refreshKey, loadFrameworks]);
 
   // gap analysis stat cards for the selected framework (server-computed)
   useEffect(() => {
@@ -853,6 +882,11 @@ function ComplianceInner() {
           <button className="btn secondary" onClick={openNewFw}>
             <IconPlus width={16} height={16} /> Framework
           </button>
+          {selectedFw && !isSelfAssessed(selectedFw.kind) && canMapControls && (
+            <button className="btn secondary" onClick={() => setReviewSuggestions(true)} title="Suggested controls for this framework's clauses, reviewed and accepted in one place">
+              Review suggested mappings
+            </button>
+          )}
           {selected && (
             <>
               <ImportExport resource="requirements" label="Requirements" onDone={reload} />
@@ -876,6 +910,47 @@ function ComplianceInner() {
         </div>
       )}
 
+      {frameworks.length > 1 && (
+        <div role="list" aria-label="Frameworks" style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4, marginBottom: 14 }}>
+          {frameworks.map((f) => {
+            const on = f.id === selected;
+            return (
+              <button
+                key={f.id}
+                role="listitem"
+                type="button"
+                className="card"
+                aria-current={on ? "true" : undefined}
+                onClick={() => setSelected(f.id)}
+                style={{
+                  flex: "0 0 auto", minWidth: 220, maxWidth: 300, textAlign: "left", padding: "10px 12px", cursor: "pointer",
+                  border: on ? "1px solid var(--primary)" : undefined, boxShadow: on ? "0 0 0 2px var(--ring)" : undefined,
+                  font: "inherit", color: "inherit",
+                }}
+              >
+                <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.name}</div>
+                <div style={{ fontSize: 11.5, marginTop: 3 }}>
+                  {isSelfAssessed(f.kind)
+                    ? <span className="muted">{f.requirement_count} clauses · self-assessment, not scored</span>
+                    : f.posture
+                      ? <PostureLine p={f.posture} />
+                      : <span className="muted">{f.requirement_count} requirements · {f.compliant_count} compliant</span>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {selectedFw && !isSelfAssessed(selectedFw.kind) && canMapControls && (
+        <PendingSuggestionsHint
+          frameworkId={selectedFw.id}
+          frameworkName={selectedFw.name}
+          refreshKey={refreshKey}
+          onReview={() => setReviewSuggestions(true)}
+        />
+      )}
+
       {gap && (
         <div className="grid stat-grid">
           <div className="card stat">
@@ -893,17 +968,41 @@ function ComplianceInner() {
           ) : (
             <div className="card stat ok">
               <div className="stat-top"><span className="n" style={{ color: "var(--green)" }}>{gap.compliant_pct}%</span></div>
-              <span className="l">Compliant</span>
+              <span className="l">Assessed compliant</span>
               <div className="progress" style={{ marginTop: 4 }}>
                 <span style={{ width: `${gap.compliant_pct}%` }} />
               </div>
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                Moves only when a clause is assessed; mapping a control does not.
+              </div>
             </div>
           )}
+          {gap.posture ? (
+            <div className="card stat">
+              <div className="stat-top"><span className="n">{pctText(gap.posture.mapped_pct)}</span></div>
+              <span className="l">Mapped to a control</span>
+              <div className="progress" style={{ marginTop: 4 }}>
+                <span style={{ width: `${gap.posture.mapped_pct}%`, background: "var(--amber)" }} />
+              </div>
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                {gap.posture.mapped} of {gap.posture.applicable} applicable clauses
+              </div>
+            </div>
+          ) : null}
           <div className="card stat">
-            <div className="stat-top"><span className="n">{gap.assured}/{gap.total_requirements}</span></div>
-            <span className="l">Assured by a working control</span>
+            <div className="stat-top">
+              <span className="n">{gap.posture ? pctText(gap.posture.assured_pct) : `${gap.assured}/${gap.total_requirements}`}</span>
+            </div>
+            <span className="l">Tested — backed by a working control</span>
+            {gap.posture && (
+              <div className="progress" style={{ marginTop: 4 }}>
+                <span style={{ width: `${gap.posture.assured_pct}%` }} />
+              </div>
+            )}
             <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
-              {gap.covered} mapped · {gap.unassessed} not yet tested · {gap.failing} failing
+              {gap.posture
+                ? `${gap.posture.assured} of ${gap.posture.applicable} applicable · ${gap.posture.unassessed} mapped but not tested · ${gap.posture.failing} failing`
+                : `${gap.covered} mapped · ${gap.unassessed} not yet tested · ${gap.failing} failing`}
             </div>
           </div>
           <div className="card stat warn">
@@ -994,6 +1093,16 @@ function ComplianceInner() {
             </div>
           )}
         </div>
+      )}
+
+      {reviewSuggestions && selectedFw && (
+        <BulkSuggestMappings
+          scope="unmapped"
+          frameworkId={selectedFw.id}
+          frameworkName={selectedFw.name}
+          onClose={() => setReviewSuggestions(false)}
+          onDone={reload}
+        />
       )}
 
       {/* -------------------------------------------------- requirement detail drawer */}

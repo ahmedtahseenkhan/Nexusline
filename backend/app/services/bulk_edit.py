@@ -24,7 +24,11 @@
     incident whose timeline would then be out of order is skipped
     (``incident_clock``, as ``PATCH /incidents/{id}``);
   - policy — a new review frequency re-derives the next review from today; risk — from
-    the last review (as their edits do).
+    the last review (as their edits do), on the *effective* cycle: a risk's rating may
+    require a shorter one than the frequency set (``RiskSetting.review_cadence``), so a
+    new frequency that does not change the effective cycle leaves the date alone, and a
+    next review date later than the rating allows is skipped (F-22). Risks carry no bulk
+    status, so nothing here can move a risk out of Draft past its owner-and-unit rule.
 
   Setting a review frequency and a next review date in the same request is refused:
   the new frequency would re-derive the date the same request sets.
@@ -53,6 +57,7 @@ from app.services import audit, control_assurance, entity_types, master_data, re
 from app.services import incident_clock as clock
 from app.services.issue_closure import CLOSED_STATES as ISSUE_CLOSED_STATES
 from app.services.ref_fields import fit
+from app.services import risk_scoring
 from app.services.risk_scoring import next_review_date
 
 #: Every key a bulk patch may carry (each register accepts a subset).
@@ -169,7 +174,10 @@ REGISTERS: dict[str, Register] = {
         _user(text=None),  # a risk's owner never had a text column (risks.RISK_REFS)
         _category("risks"),
         _next_review(),
-        _frequency("The next review date is re-derived from each risk's last review (or today)."),
+        _frequency(
+            "The next review date is re-derived from each risk's last review (or today) when the "
+            "cycle changes; a risk's rating can require a shorter cycle than the one set."
+        ),
     )),
 }
 
@@ -245,10 +253,12 @@ class Value:
 
 
 def plan(register: Register, record: Any, values: dict[str, Value], *, today: date,
-         now: datetime | None = None) -> dict[str, Any]:
+         now: datetime | None = None, context: dict[str, Any] | None = None) -> dict[str, Any]:
     """The columns this record would change, as ``{column: new value}`` — only those
     that differ. Raises :class:`Skip` when a register rule leaves the record alone, or
-    when nothing would change. Pure: reads the record, never writes it."""
+    when nothing would change. Pure: reads the record, never writes it. ``context``
+    carries what a register rule needs beyond the record (a risk's ``scale`` and
+    ``cadence``)."""
     out: dict[str, Any] = {}
     for key, v in values.items():
         f = register.field(key)
@@ -260,7 +270,7 @@ def plan(register: Register, record: Any, values: dict[str, Value], *, today: da
                 out[f.text_column] = v.column_text or ""
     hook = _RULES.get(register.entity_type)
     if hook is not None:
-        out = hook(record, values, out, today=today, now=now or datetime.now(timezone.utc))
+        out = hook(record, values, out, today=today, now=now or datetime.now(timezone.utc), context=context or {})
     if not out:
         raise Skip(NO_CHANGE)
     return out
@@ -274,7 +284,7 @@ def _keep_changed(record: Any, out: dict[str, Any], column: str, value: Any) -> 
 
 
 def _control_rules(record: Any, values: dict[str, Value], out: dict[str, Any], *, today: date,
-                   now: datetime) -> dict[str, Any]:
+                   now: datetime, **_: Any) -> dict[str, Any]:
     """The test clock, as ``PATCH /controls/{id}`` runs it."""
     status_after = out.get("status", record.status)
     live_after = control_assurance.carries_test_clock(status_after)
@@ -337,10 +347,26 @@ def _policy_rules(record: Any, values: dict[str, Value], out: dict[str, Any], *,
 
 
 def _risk_rules(record: Any, values: dict[str, Value], out: dict[str, Any], *, today: date,
-                **_: Any) -> dict[str, Any]:
+                context: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
+    """The review clock on the effective cycle, as ``PATCH /risks/{id}`` runs it."""
+    context = context or {}
+    scale = context.get("scale")
+    severity = risk_scoring.current_severity(record, scale) if scale is not None else None
+    cadence = context.get("cadence")
+    before = risk_scoring.effective_review_frequency(getattr(record, "review_frequency", None), severity, cadence)[0]
     if "review_frequency" in out:
-        anchor = getattr(record, "last_review_date", None) or today
-        _keep_changed(record, out, "next_review_date", next_review_date(out["review_frequency"], anchor))
+        after = risk_scoring.effective_review_frequency(out["review_frequency"], severity, cadence)[0]
+        _keep_changed(record, out, "next_review_date", risk_scoring.rescheduled_review(
+            current=getattr(record, "next_review_date", None),
+            last_review=getattr(record, "last_review_date", None),
+            effective_before=before, effective_after=after, frequency_changed=True, today=today,
+        ))
+    elif "next_review_date" in out and severity is not None:
+        latest = next_review_date(before, today)
+        if latest is not None and out["next_review_date"] > latest:
+            raise Skip(
+                f"{severity.value} — its rating needs a review by {latest.isoformat()}"
+            )
     return out
 
 
@@ -442,6 +468,12 @@ async def run(db, user: Any, entity_type: str, ids: list[uuid.UUID], patch: dict
     batch = new_batch_id()
     today = date.today()
     now = datetime.now(timezone.utc)
+    context: dict[str, Any] = {}
+    if entity_type == "risk":
+        from app.services.risk_settings import get_or_create_settings, scale_for
+
+        settings = await get_or_create_settings(db, user.tenant_id)
+        context = {"scale": scale_for(settings), "cadence": dict(settings.review_cadence or {})}
 
     wanted = list(dict.fromkeys(ids))
     rows = {r.id: r for r in (await db.scalars(select(model).where(model.id.in_(wanted)))).all()}
@@ -457,7 +489,7 @@ async def run(db, user: Any, entity_type: str, ids: list[uuid.UUID], patch: dict
             results.append(BulkResultItem(id=rid, reference=ref, label=label, outcome="skipped", reason=ARCHIVED))
             continue
         try:
-            changes = plan(register, record, values, today=today, now=now)
+            changes = plan(register, record, values, today=today, now=now, context=context)
         except Skip as why:
             results.append(BulkResultItem(id=rid, reference=ref, label=label, outcome="skipped", reason=str(why)))
             continue

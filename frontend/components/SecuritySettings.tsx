@@ -107,6 +107,7 @@ export default function SecuritySettings({
               <b style={{ fontSize: 14 }}>Two-factor authentication (TOTP)</b>
               <div className="muted" style={{ fontSize: 12.5 }}>
                 Status: {me?.mfa_enabled ? <span style={{ color: "var(--green)", fontWeight: 600 }}>Enabled</span> : "Not enabled"}
+                {me?.mfa_via_identity_provider && !me?.mfa_enabled && " · Handled by your identity provider when you sign in with single sign-on"}
                 {required && (
                   <>
                     {" · "}

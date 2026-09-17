@@ -210,6 +210,9 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "awareness:write",
             "workflow:read",
             "workflow:write",
+            # The compliance head decides the default policy approval route
+            # (services/default_governance.py), so the role must be able to approve.
+            "workflow:approve",
             "report:read",
             "report:write",
             "risk:read",

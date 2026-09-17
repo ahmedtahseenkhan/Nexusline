@@ -286,7 +286,9 @@ async def _do_login(db, body: LoginRequest) -> _Outcome:
     # Not enrolled. If the policy requires MFA for this user, start (or apply) the grace
     # period; past it, the session may only enrol.
     state, deadline = mfa_policy.enrolment_state(
-        required=mfa_policy.user_requires_mfa(authed, settings),
+        required=mfa_policy.user_requires_mfa(
+            authed, settings, await mfa_policy.tenant_required_roles(db, tenant.id)
+        ),
         mfa_enabled=authed.mfa_enabled,
         grace_until=authed.mfa_grace_until,
         now=now,
@@ -406,7 +408,9 @@ async def mfa_activate(body: MfaActivateRequest, db: DbSession, user: CurrentUse
 
 @router.post("/mfa/disable", response_model=UserRead, summary="Disable MFA for the current user")
 async def mfa_disable(body: MfaDisableRequest, db: DbSession, user: CurrentUser) -> UserRead:
-    if user.mfa_enabled and mfa_policy.user_requires_mfa(user, settings):
+    if user.mfa_enabled and mfa_policy.user_requires_mfa(
+        user, settings, await mfa_policy.tenant_required_roles(db)
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Two-factor authentication is required for your role and cannot be turned off.",
@@ -440,9 +444,12 @@ async def change_password(body: ChangePasswordRequest, db: DbSession, user: Curr
 @router.get("/me", response_model=MeRead, summary="Current authenticated user")
 async def me(
     user: CurrentUser,
+    db: DbSession,
     payload: Annotated[dict[str, Any], Depends(get_token_payload)],
 ) -> MeRead:
-    required = mfa_policy.user_requires_mfa(user, settings)
+    required = mfa_policy.user_requires_mfa(
+        user, settings, await mfa_policy.tenant_required_roles(db)
+    )
     enrol_only = bool(payload.get(mfa_policy.ENROL_ONLY_CLAIM))
     due = user.mfa_grace_until if (required and not user.mfa_enabled) else None
     return MeRead.model_validate(user).model_copy(
@@ -450,5 +457,8 @@ async def me(
             "mfa_enrolment_required": enrol_only,
             "mfa_enrolment_due": due,
             "mfa_required_for_user": required,
+            "mfa_via_identity_provider": bool(
+                await mfa_policy.sso_enabled(db) and user.id in await mfa_policy.sso_signers(db, [user.id])
+            ),
         }
     )

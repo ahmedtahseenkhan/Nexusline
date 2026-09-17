@@ -35,10 +35,13 @@ from app.models.enums import ReviewFrequency, Severity
 
 __all__ = [
     "DEFAULT_MATRIX_SIZE", "DEFAULT_MAX_SCORE", "MAX_MATRIX_SIZE", "MIN_MATRIX_SIZE",
-    "AppetiteBook", "IMPACT_MODES", "SEVERITY_VALUES", "SeverityScale",
-    "add_months", "appetite_status", "band_ranges", "cell_key", "effective_score",
-    "impact_from_dimensions", "max_score_for", "next_review_date", "parse_cell_key",
-    "score", "severity_for_score", "validate_bands", "validate_cells",
+    "AppetiteBook", "CADENCE_FREQUENCIES", "DEFAULT_REVIEW_CADENCE", "FREQUENCY_ORDER",
+    "IMPACT_MODES", "SEVERITY_VALUES", "SeverityScale",
+    "add_months", "appetite_status", "band_ranges", "cell_key", "current_severity",
+    "effective_review_frequency", "effective_score", "frequency_word", "impact_from_dimensions",
+    "is_scored", "max_score_for", "next_review_date", "parse_cell_key", "rescheduled_review",
+    "review_cadence", "score", "severity_for_score", "stricter_frequency", "validate_bands",
+    "validate_cells", "validate_review_cadence",
 ]
 
 _ONE_DAY = timedelta(days=1)
@@ -359,3 +362,167 @@ def next_review_date(
     if months is None:
         return None
     return add_months(anchor or date.today(), months)
+
+
+# ------------------------------------------------------------------ is it scored?
+def is_scored(status, last_assessed_at) -> bool:
+    """Whether a risk carries a real assessment rather than the stored 1x1 placeholder.
+
+    ``inherent_likelihood``/``inherent_impact`` are NOT NULL (default 1), so the columns
+    alone cannot say "nobody has scored this". A draft that no score change has ever
+    stamped (``last_assessed_at`` is set by every score change) is unscored; anything
+    past draft had to be scored to leave it. The record page's ``isUnscored``, the
+    register columns, the dashboard and the breach alerts all read this one rule.
+    """
+    return getattr(status, "value", status) != "draft" or last_assessed_at is not None
+
+
+# ------------------------------------------------------------ rating-driven review
+# A bank's methodology ties how often a risk is reviewed to how bad it is: a critical
+# risk reviewed once a year is a finding. ``RiskSetting.review_cadence`` maps a severity
+# to the *longest* interval allowed; the owner may choose a shorter one. The effective
+# frequency is the stricter of the two, and it follows the rating: when a re-score makes
+# the risk critical, its review comes in without anyone editing the cycle.
+
+#: Most frequent first. ``none`` (no cycle) is looser than any cycle.
+FREQUENCY_ORDER: tuple[ReviewFrequency, ...] = (
+    ReviewFrequency.daily, ReviewFrequency.weekly, ReviewFrequency.fortnightly,
+    ReviewFrequency.monthly, ReviewFrequency.quarterly, ReviewFrequency.semiannual,
+    ReviewFrequency.annual, ReviewFrequency.none,
+)
+#: What a tenant may set as a severity's longest interval (the risk form's cycles).
+CADENCE_FREQUENCIES: tuple[ReviewFrequency, ...] = (
+    ReviewFrequency.monthly, ReviewFrequency.quarterly, ReviewFrequency.semiannual, ReviewFrequency.annual,
+)
+#: The product default for a severity the tenant has not configured.
+DEFAULT_REVIEW_CADENCE: dict[str, ReviewFrequency] = {
+    "critical": ReviewFrequency.monthly,
+    "high": ReviewFrequency.quarterly,
+    "medium": ReviewFrequency.semiannual,
+    "low": ReviewFrequency.annual,
+}
+_FREQUENCY_WORD: dict[str, str] = {
+    "daily": "Daily", "weekly": "Weekly", "fortnightly": "Fortnightly", "monthly": "Monthly",
+    "quarterly": "Quarterly", "semiannual": "Twice a year", "annual": "Annual", "none": "No cycle",
+}
+
+
+def frequency_word(frequency) -> str:
+    """"Monthly", "Twice a year" — how the form names a cycle."""
+    value = getattr(frequency, "value", frequency)
+    return _FREQUENCY_WORD.get(str(value), str(value).replace("_", " ").capitalize())
+
+
+def _as_frequency(value) -> ReviewFrequency | None:
+    try:
+        return ReviewFrequency(getattr(value, "value", value))
+    except (ValueError, TypeError):
+        return None
+
+
+def stricter_frequency(a, b) -> ReviewFrequency:
+    """The more frequent of two cycles; ``none`` or an unknown value loses to any cycle."""
+    fa, fb = _as_frequency(a) or ReviewFrequency.none, _as_frequency(b) or ReviewFrequency.none
+    return fa if FREQUENCY_ORDER.index(fa) <= FREQUENCY_ORDER.index(fb) else fb
+
+
+def review_cadence(configured: Mapping | None) -> dict[str, ReviewFrequency]:
+    """The tenant's cadence over the product default, one entry per severity. A stored
+    value that is not an allowed cadence is ignored rather than trusted."""
+    out = dict(DEFAULT_REVIEW_CADENCE)
+    for severity, value in (configured or {}).items():
+        freq = _as_frequency(value)
+        if severity in out and freq in CADENCE_FREQUENCIES:
+            out[severity] = freq
+    return out
+
+
+def validate_review_cadence(value: Mapping | None) -> dict[str, str]:
+    """Check a cadence a person sent; return it normalised (severity -> frequency value).
+
+    Keys are severities, values one of :data:`CADENCE_FREQUENCIES`. A worse severity may
+    not be allowed a longer interval than a milder one (critical annual while high is
+    quarterly), taking the product default for any severity left out. Raises
+    ``ValueError`` with a sentence a user can act on.
+    """
+    out: dict[str, str] = {}
+    for severity, raw in (value or {}).items():
+        if severity not in DEFAULT_REVIEW_CADENCE:
+            raise ValueError(f"review_cadence: '{severity}' is not a severity (critical, high, medium, low)")
+        freq = _as_frequency(raw)
+        if freq not in CADENCE_FREQUENCIES:
+            raise ValueError(
+                f"review_cadence: {severity} must be one of "
+                + ", ".join(f.value for f in CADENCE_FREQUENCIES)
+            )
+        out[severity] = freq.value
+    merged = review_cadence(out)
+    worst_first = ("critical", "high", "medium", "low")
+    for worse, milder in zip(worst_first, worst_first[1:]):
+        if FREQUENCY_ORDER.index(merged[worse]) > FREQUENCY_ORDER.index(merged[milder]):
+            raise ValueError(
+                f"A {worse} risk can't be reviewed less often than a {milder} one "
+                f"({frequency_word(merged[worse]).lower()} against {frequency_word(merged[milder]).lower()})"
+            )
+    return out
+
+
+def current_severity(risk, scale: SeverityScale) -> Severity | None:
+    """The band the cadence follows: residual when assessed, else inherent — and none for
+    a risk nobody has scored (its 1x1 is a placeholder, not a low rating)."""
+    if not is_scored(getattr(risk, "status", None), getattr(risk, "last_assessed_at", None)):
+        return None
+    return scale.for_risk(
+        getattr(risk, "inherent_likelihood", None), getattr(risk, "inherent_impact", None),
+        getattr(risk, "residual_likelihood", None), getattr(risk, "residual_impact", None),
+    )
+
+
+def effective_review_frequency(
+    chosen, severity, cadence: Mapping | None = None
+) -> tuple[ReviewFrequency, str]:
+    """``(frequency, reason)``: the stricter of the chosen cycle and the longest the
+    rating allows. ``reason`` is "" when the chosen cycle stands, else the sentence the
+    form shows ("Monthly — required for Critical risks")."""
+    picked = _as_frequency(chosen) or ReviewFrequency.annual
+    sev = getattr(severity, "value", severity)
+    if not sev:
+        return picked, ""
+    required = review_cadence(cadence).get(str(sev))
+    if required is None or stricter_frequency(picked, required) == picked:
+        return picked, ""
+    return required, f"{frequency_word(required)} — required for {str(sev).capitalize()} risks"
+
+
+def rescheduled_review(
+    *,
+    current: date | None,
+    last_review: date | None,
+    effective_before,
+    effective_after,
+    frequency_changed: bool,
+    today: date | None = None,
+) -> date | None:
+    """The next review date after an edit, a re-score or a cadence change.
+
+    * The owner changed the cycle (and so the effective one): re-derived from the last
+      review, or today.
+    * The rating (or the cadence) tightened the effective cycle: brought in to a cycle
+      from the last review (or today) — never pushed out.
+    * The effective cycle loosened on its own, or did not move: the date stands (a date
+      missing while a cycle applies is derived). Re-saving a form never moves it.
+    """
+    today = today or date.today()
+    after = _as_frequency(effective_after) or ReviewFrequency.none
+    before = _as_frequency(effective_before) or ReviewFrequency.none
+    anchor = last_review or today
+    if after == ReviewFrequency.none:
+        return None if frequency_changed else current
+    if frequency_changed and before != after:
+        return next_review_date(after, anchor)
+    if before != after and stricter_frequency(before, after) == after:
+        candidate = next_review_date(after, anchor)
+        return min(current, candidate) if current and candidate else candidate or current
+    if current is None:
+        return next_review_date(after, anchor)
+    return current

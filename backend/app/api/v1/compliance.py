@@ -35,6 +35,7 @@ from app.schemas.compliance import (
     CrosswalkItem,
     CrosswalkUpdate,
     FrameworkCreate,
+    FrameworkPostureRead,
     FrameworkRead,
     FrameworkSummary,
     FrameworkUpdate,
@@ -48,7 +49,7 @@ from app.schemas.compliance import (
     SoaSummary,
     StatementOfApplicabilityRead,
 )
-from app.services import audit, soa_export
+from app.services import audit, compliance_posture, soa_export
 from app.services.framework_library import normalize_name
 
 router = APIRouter(tags=["compliance"])
@@ -68,7 +69,9 @@ async def search_requirements(db: DbSession, search: str | None = None, limit: i
         stmt = stmt.where(
             Requirement.title.ilike(f"%{search}%") | Requirement.reference.ilike(f"%{search}%")
         )
-    rows = (await db.scalars(stmt.order_by(Requirement.reference).limit(lim))).all()
+    rows = (await db.scalars(
+        stmt.order_by(Requirement.reference_sort_key, Requirement.reference).limit(lim)
+    )).all()
     return [
         {
             "id": str(r.id),
@@ -336,7 +339,8 @@ async def load_framework_template(key: str, db: DbSession, user: CurrentUser) ->
 
 # ----------------------------------------------------------------- requirements
 _REQUIREMENT_SORTABLE = {
-    "reference": Requirement.reference,
+    # Natural order (A.5.2 before A.5.10), not text order (F-16).
+    "reference": Requirement.reference_sort_key,
     "title": Requirement.title,
     "status": Requirement.status,
     "domain": Requirement.domain,
@@ -374,9 +378,9 @@ async def list_requirements(
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
-        stmt = apply_sort(stmt, params, _REQUIREMENT_SORTABLE, default=Requirement.reference)
+        stmt = apply_sort(stmt, params, _REQUIREMENT_SORTABLE, default=Requirement.reference_sort_key)
     else:
-        stmt = stmt.order_by(Requirement.reference)
+        stmt = stmt.order_by(Requirement.reference_sort_key, Requirement.reference)
     rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
     await _attach_counts(db, rows)
     items = []
@@ -1000,7 +1004,10 @@ async def _crosswalks_for(db, requirement_id: uuid.UUID) -> list[CrosswalkItem]:
             framework_id=r.framework_id,
             framework_name=r.framework.name if r.framework else "",
         )
-        for r in reqs
+        for r in sorted(
+            reqs,
+            key=lambda r: ((r.framework.name if r.framework else "").lower(), soa_export.natural_key(r.reference), r.title),
+        )
     ]
 
 
@@ -1011,10 +1018,14 @@ def _assessed(reqs: list[Requirement]) -> int:
 
 
 def _compliant_pct(reqs: list[Requirement]) -> tuple[int, int, float]:
-    applicable = [r for r in reqs if r.status != ComplianceStatus.not_applicable]
-    compliant = sum(1 for r in applicable if r.status == ComplianceStatus.compliant)
-    pct = round(100 * compliant / len(applicable), 1) if applicable else 0.0
-    return compliant, len(applicable), pct
+    """Assessed compliant, of the applicable clauses. Only an assessment moves it —
+    mapping a control does not; the posture shows mapped and tested beside it."""
+    p = compliance_posture.posture(reqs)
+    return p.compliant, p.applicable, p.compliant_pct
+
+
+def _posture_read(p: compliance_posture.Posture) -> FrameworkPostureRead:
+    return FrameworkPostureRead(**p.as_dict(), line=p.line)
 
 
 # ---------------------------------------------------------------------------
@@ -1123,6 +1134,7 @@ async def gap_analysis(framework_id: uuid.UUID, db: DbSession) -> GapAnalysis:
         failing=by_coverage.get(control_assurance.FAILING, 0),
         compliant_pct=pct,
         gaps=gaps,
+        posture=_posture_read(compliance_posture.posture(reqs)),
     )
 
 
@@ -1137,18 +1149,17 @@ async def compliance_summary(db: DbSession) -> ComplianceSummary:
     )).all()
     rows: list[FrameworkSummary] = []
     total_reqs = 0
-    total_compliant = 0
-    total_applicable = 0
+    counted: list[compliance_posture.Posture] = []
     for fw in frameworks:
         reqs = [r for r in fw.requirements if not r.deleted]
-        compliant, applicable, pct = _compliant_pct(reqs)
+        fw_posture = compliance_posture.posture(reqs)
+        compliant, pct = fw_posture.compliant, fw_posture.compliant_pct
         total_reqs += len(reqs)
         kind = fw.kind or "compliance"
         # A maturity self-assessment is not an obligation: it has no compliance score
         # and does not move the overall percentage.
         if kind == "compliance":
-            total_compliant += compliant
-            total_applicable += applicable
+            counted.append(fw_posture)
         rows.append(
             FrameworkSummary(
                 framework_id=fw.id,
@@ -1158,13 +1169,16 @@ async def compliance_summary(db: DbSession) -> ComplianceSummary:
                 compliant=compliant,
                 compliant_pct=pct,
                 assessed=_assessed(reqs),
+                posture=_posture_read(fw_posture),
             )
         )
-    overall = round(100 * total_compliant / total_applicable, 1) if total_applicable else 0.0
+    overall = compliance_posture.combine(counted)
     return ComplianceSummary(
         total_frameworks=len(frameworks),
         total_requirements=total_reqs,
-        overall_compliant_pct=overall,
+        overall_compliant_pct=overall.compliant_pct,
+        overall_mapped_pct=overall.mapped_pct,
+        overall_assured_pct=overall.assured_pct,
         frameworks=rows,
     )
 

@@ -40,6 +40,9 @@ export interface SoaSummary {
   excluded: number;
   no_control: number;
   missing_justification: number;
+  /** Applicable clauses with a control, and with a tested, working control. */
+  mapped?: number;
+  assured?: number;
 }
 
 export interface StatementOfApplicability {
@@ -101,6 +104,73 @@ export const bulkSuggestRequirements = (controlIds: string[], minScore = 0.5, li
 
 export const bulkAcceptSuggestions = (pairs: { control_id: string; requirement_id: string }[]) =>
   apiCall<{ linked: number; controls: number }>("POST", "/controls/suggest-requirements/bulk/accept", { pairs });
+
+/** A suggestion this strong is pre-ticked ("Strong"); the server's STRONG. */
+export const STRONG_SUGGESTION = 0.75;
+
+/** Register-wide review scope: controls with no clause mapped (of the framework, when one
+ *  is given), or every control. */
+export type SuggestionScope = "unmapped" | "all";
+
+export interface SuggestionReviewPage {
+  scope: SuggestionScope;
+  framework_id: string | null;
+  total_controls: number;
+  offset: number;
+  page_size: number;
+  scanned: number;
+  next_offset: number | null;
+  groups: ControlSuggestions[];
+  suggestion_count: number;
+  strong_count: number;
+  frameworks: { framework_id: string | null; framework: string; suggestions: number; strong: number }[];
+}
+
+export const reviewSuggestionsPage = (opts: {
+  scope: SuggestionScope; frameworkId?: string | null; offset: number; pageSize?: number; minScore?: number; limit?: number;
+}) => {
+  const q = new URLSearchParams({
+    scope: opts.scope,
+    offset: String(opts.offset),
+    page_size: String(opts.pageSize ?? 100),
+    min_score: String(opts.minScore ?? 0.5),
+    limit: String(opts.limit ?? 5),
+  });
+  if (opts.frameworkId) q.set("framework_id", opts.frameworkId);
+  return apiCall<SuggestionReviewPage>("GET", `/controls/suggest-requirements/review?${q}`);
+};
+
+export interface PendingSuggestions {
+  framework_id: string | null;
+  unmapped_controls: number;
+  scanned: number;
+  capped: boolean;
+  controls_with_strong: number;
+  strong_suggestions: number;
+}
+
+export const getPendingSuggestions = (frameworkId?: string | null) =>
+  apiCall<PendingSuggestions>(
+    "GET", `/controls/suggest-requirements/pending${frameworkId ? `?framework_id=${encodeURIComponent(frameworkId)}` : ""}`,
+  );
+
+/* ------------------------------------------------------------ framework posture */
+/** Assessed compliant / mapped / tested, of the applicable clauses (F-19). Mapping never
+ *  makes a clause compliant; this shows what it did achieve. */
+export interface FrameworkPosture {
+  total: number;
+  applicable: number;
+  compliant: number;
+  mapped: number;
+  assured: number;
+  unassessed: number;
+  failing: number;
+  compliant_pct: number;
+  mapped_pct: number;
+  assured_pct: number;
+  /** "0% assessed compliant · 62% mapped · 8% tested" */
+  line: string;
+}
 
 /* ------------------------------------------------------- controls-pack preview */
 export type PackAction = "create" | "match-by-reference" | "match-by-name" | "map-to-existing";

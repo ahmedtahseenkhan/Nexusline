@@ -84,7 +84,9 @@ class Settings(BaseSettings):
     lockout_minutes: int = 15
     # MFA (TOTP). When ``mfa_required`` is true every user who signs in with a password
     # must enrol. Otherwise it is required for *privileged* users only: anyone holding a
-    # role named in ``mfa_required_roles`` (case-insensitive) or any permission ending in
+    # role named in the organisation's MFA role list (Settings → Organisation → Security;
+    # ``mfa_required_roles`` below is the default until an organisation sets its own, and
+    # the Admin role can never be taken off) or any permission ending in
     # ":approve" (a checker). Unenrolled users get ``mfa_grace_days`` of normal sign-in
     # from their first such login; after that the session can only enrol. SSO sign-ins
     # are exempt (the identity provider owns the second factor); LDAP/AD password
@@ -94,9 +96,11 @@ class Settings(BaseSettings):
     mfa_required_roles: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["admin"])
     mfa_grace_days: int = 7
     # Approve / Reject links in e-mail (phase 3). Deciding from an e-mail skips two-factor
-    # authentication, so a bank whose policy requires 2FA for every approval sets this to
-    # false: no links are issued, and links already sent stop working.
-    email_actions_enabled: bool = True
+    # authentication — the link is the credential — so they are OFF unless an installation
+    # opts in: a checker must sign in (with MFA where the policy requires it) to decide.
+    # While false no links are issued, digests carry no Approve / Reject buttons, and
+    # links already sent stop working.
+    email_actions_enabled: bool = False
     # LDAP / Active Directory (per-tenant config in DB; this only gates the feature)
     ldap_enabled: bool = False
 

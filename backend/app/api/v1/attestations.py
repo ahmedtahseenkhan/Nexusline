@@ -229,6 +229,20 @@ async def _history(db, entity_type: str, entity_id: uuid.UUID) -> list[Attestati
     )
 
 
+async def _native_frequency(db, user: User, entity_type: str, record: Any):
+    """The cycle a record's own review clock runs on. A risk's is its *effective* cycle:
+    the stricter of the frequency set and the longest its rating allows
+    (``RiskSetting.review_cadence``, F-22) — the same one ``POST /risks/{id}/review`` uses."""
+    if entity_type != "risk":
+        return record.review_frequency
+    from app.services.risk_scoring import current_severity, effective_review_frequency
+    from app.services.risk_settings import get_or_create_settings, scale_for
+
+    settings = await get_or_create_settings(db, user.tenant_id)
+    severity = current_severity(record, scale_for(settings))
+    return effective_review_frequency(record.review_frequency, severity, settings.review_cadence or {})[0]
+
+
 def _native(entity_type: str, record: Any) -> bool:
     return (
         entity_type in REVIEW_CLOCK_ENTITY_TYPES
@@ -258,7 +272,7 @@ async def _bundle(
     # One clock: for a record with its own review cycle, the record's dates are the truth
     # (a review recorded on the record itself moves them too).
     next_due = record.next_review_date if native else (rows[0].next_due if rows else None)
-    frequency = record.review_frequency if native else (rows[0].frequency if rows else None)
+    frequency = await _native_frequency(db, user, entity_type, record) if native else (rows[0].frequency if rows else None)
     if not rows:
         state = "never"
     elif next_due is not None and next_due < date.today():
@@ -337,7 +351,7 @@ async def attest(
 
     today = date.today()
     native = _native(entity_type, record)
-    frequency = record.review_frequency if native else body.frequency
+    frequency = await _native_frequency(db, user, entity_type, record) if native else body.frequency
     next_due = next_review_date(frequency, today)
     statement = body.statement.strip() or default_statement(entity_type)
     row = Attestation(

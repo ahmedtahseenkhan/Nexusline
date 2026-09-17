@@ -21,6 +21,7 @@ import app.models  # noqa: F401 - populate mappers
 from app.models.asset import Asset
 from app.models.base import WorkflowState
 from app.models.enums import WorkflowStatus
+from app.models.organization import BusinessUnit
 from app.models.risk import Risk
 from app.services import record_workflow as rw
 
@@ -267,7 +268,10 @@ def quiet(monkeypatch):
 
 
 async def test_submit_moves_to_review_and_audits(quiet):
-    risk = Risk(id=uuid.uuid4(), title="R", reference="R-1", workflow_status=WorkflowState.draft)
+    # F-21: a risk is submitted with an owner and a business unit.
+    risk = Risk(id=uuid.uuid4(), title="R", reference="R-1", workflow_status=WorkflowState.draft,
+                owner_id=uuid.uuid4())
+    risk.business_units.append(BusinessUnit(id=uuid.uuid4(), name="Retail"))
     result = await rw.apply(_FakeDb(), _user("risk:read", "risk:write"), risk, "risk", "submit")
     assert result.state == "in_review" and risk.workflow_status == WorkflowState.in_review
     assert quiet["start"], "submit must offer the record to an enabled route"

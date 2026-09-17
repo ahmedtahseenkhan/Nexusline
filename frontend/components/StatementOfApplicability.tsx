@@ -78,6 +78,8 @@ export default function StatementOfApplicability({ frameworkId, frameworkName, o
         excluded: nextRows.filter((r) => !r.applicable).length,
         no_control: nextRows.filter((r) => r.applicable && r.controls.length === 0).length,
         missing_justification: nextRows.filter((r) => !r.applicable && !r.justification.trim()).length,
+        mapped: nextRows.filter((r) => r.applicable && r.controls.length > 0).length,
+        assured: nextRows.filter((r) => r.applicable && r.coverage === "assured").length,
       };
       return { ...cur, rows: nextRows, summary };
     });
@@ -133,6 +135,7 @@ export default function StatementOfApplicability({ frameworkId, frameworkName, o
           <span className="sub">
             {s.total} clauses · {s.applicable} applicable · {s.excluded} excluded ·{" "}
             <span style={{ color: s.no_control ? "var(--orange)" : undefined }}>{s.no_control} applicable without a control</span>
+            {s.assured !== undefined && <> · {s.assured} backed by a tested control</>}
             {s.missing_justification > 0 && (
               <> · <span style={{ color: "var(--amber)" }}>{s.missing_justification} excluded without a justification</span></>
             )}

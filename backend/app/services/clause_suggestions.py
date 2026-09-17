@@ -335,12 +335,8 @@ def topics_in(text: str | None) -> list[tuple[Topic, int]]:
     return found
 
 
-def natural_key(reference: str) -> tuple:
-    """"A.5.9" before "A.5.10"; letters compare case-insensitively."""
-    return tuple(
-        (0, int(part)) if part.isdigit() else (1, part.lower())
-        for part in re.findall(r"\d+|[A-Za-z]+", reference or "")
-    )
+# One natural-order rule for every surface (F-16); re-exported for existing callers.
+from app.services.reference_sort import natural_key  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +711,118 @@ async def suggest_for_controls(
             control_text(c), index, exclude=mapped.get(c.id, set()), limit=limit, min_score=min_score,
         )
         for c in controls
+    }
+
+
+# ---------------------------------------------------------------------------
+# Register-wide review (F-19)
+# ---------------------------------------------------------------------------
+# The per-control panel and the "Suggest mappings" bulk action only ever saw the
+# controls someone opened or ticked, so a freshly installed catalogue stayed unmapped
+# and compliance read 0%. The review walks the whole register in pages (controls in
+# reference order), optionally for one framework, and the hint counts the strong
+# suggestions waiting on controls with nothing mapped.
+#: A suggestion this strong is pre-ticked and counted in the hint (the UI's "Strong").
+STRONG = 0.75
+#: Scope values for the review.
+SCOPE_UNMAPPED = "unmapped"
+SCOPE_ALL = "all"
+REVIEW_SCOPES = (SCOPE_UNMAPPED, SCOPE_ALL)
+#: The hint scores at most this many unmapped controls per request.
+PENDING_SCAN_CAP = 1000
+
+
+def for_framework(suggestions: list[Suggestion], framework_id, limit: int | None) -> list[Suggestion]:
+    """Keep one framework's suggestions (all when ``framework_id`` is None), best first,
+    then cap. Pure."""
+    kept = [s for s in suggestions if framework_id is None or s.framework_id == framework_id]
+    return kept[:limit] if limit else kept
+
+
+def framework_counts(groups: Iterable[list[Suggestion]]) -> list[dict]:
+    """Suggestions and strong suggestions per framework, by framework name. Pure."""
+    counts: dict[object, dict] = {}
+    for suggestions in groups:
+        for s in suggestions:
+            row = counts.setdefault(
+                s.framework_id, {"framework_id": s.framework_id, "framework": s.framework, "suggestions": 0, "strong": 0},
+            )
+            row["suggestions"] += 1
+            if s.score >= STRONG:
+                row["strong"] += 1
+    return sorted(counts.values(), key=lambda r: (r["framework"].lower(), str(r["framework_id"])))
+
+
+def scope_statement(scope: str, framework_id=None):
+    """Live controls in scope, in register order (reference, name, id). ``unmapped``
+    means no live clause linked — of ``framework_id`` when one is given."""
+    from sqlalchemy import select
+
+    from app.models.compliance import Requirement, requirement_controls
+    from app.models.control import Control
+
+    stmt = select(Control).where(Control.deleted.is_(False))
+    if scope == SCOPE_UNMAPPED:
+        linked = (
+            select(requirement_controls.c.control_id)
+            .join(Requirement, Requirement.id == requirement_controls.c.requirement_id)
+            .where(requirement_controls.c.control_id == Control.id, Requirement.deleted.is_(False))
+        )
+        if framework_id is not None:
+            linked = linked.where(Requirement.framework_id == framework_id)
+        stmt = stmt.where(~linked.exists())
+    return stmt.order_by(Control.reference, Control.name, Control.id)
+
+
+async def review_page(
+    db, *, scope: str = SCOPE_UNMAPPED, framework_id=None, offset: int = 0, page_size: int = 100,
+    min_score: float = 0.5, limit: int | None = 5,
+) -> dict:
+    """One page of the register-wide review. Nothing is written."""
+    from sqlalchemy import func, select
+
+    stmt = scope_statement(scope, framework_id)
+    total = await db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+    controls = list((await db.scalars(stmt.offset(offset).limit(page_size))).all())
+    found = await suggest_for_controls(db, controls, limit=None, min_score=min_score) if controls else {}
+    groups = []
+    for c in controls:
+        kept = for_framework(found.get(c.id, []), framework_id, limit)
+        if kept:
+            groups.append((c, kept))
+    lists = [kept for _, kept in groups]
+    end = offset + len(controls)
+    return {
+        "scope": scope,
+        "framework_id": framework_id,
+        "total_controls": total,
+        "offset": offset,
+        "page_size": page_size,
+        "scanned": len(controls),
+        "next_offset": end if controls and end < total else None,
+        "groups": groups,
+        "suggestion_count": sum(len(k) for k in lists),
+        "strong_count": sum(1 for k in lists for s in k if s.score >= STRONG),
+        "frameworks": framework_counts(lists),
+    }
+
+
+async def pending_strong(db, *, framework_id=None, cap: int = PENDING_SCAN_CAP) -> dict:
+    """Unmapped controls with strong suggestions waiting, for the hint."""
+    from sqlalchemy import func, select
+
+    stmt = scope_statement(SCOPE_UNMAPPED, framework_id)
+    total = await db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+    controls = list((await db.scalars(stmt.limit(cap))).all()) if total else []
+    found = await suggest_for_controls(db, controls, limit=None, min_score=STRONG) if controls else {}
+    strong = [for_framework(found.get(c.id, []), framework_id, None) for c in controls]
+    return {
+        "framework_id": framework_id,
+        "unmapped_controls": total,
+        "scanned": len(controls),
+        "capped": total > len(controls),
+        "controls_with_strong": sum(1 for k in strong if k),
+        "strong_suggestions": sum(len(k) for k in strong),
     }
 
 

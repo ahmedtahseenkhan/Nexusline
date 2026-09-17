@@ -70,7 +70,7 @@ import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
 import type { MenuItem } from "@/components/Menu";
-import { BulkSuggestMappings } from "@/components/SuggestedClauses";
+import { BulkSuggestMappings, PendingSuggestionsHint } from "@/components/SuggestedClauses";
 import BulkEditBar from "@/components/BulkEditBar";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
@@ -480,6 +480,8 @@ function ControlsInner() {
   const filters = useFilterParams(CONTROL_FILTERS);
   // Register bulk action "Suggest mappings": the selected control ids under review.
   const [suggestFor, setSuggestFor] = useState<string[] | null>(null);
+  // "Review all suggestions": the whole register, a page at a time (F-19).
+  const [reviewAll, setReviewAll] = useState(false);
   const fetchControls = useCallback((qs: string) => apiCall<PagedList<Control>>("GET", `/controls?${qs}`), []);
 
   /** The control with its tests and maintenance log, set together so the summary never
@@ -1388,11 +1390,18 @@ function ControlsInner() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <ImportExport resource="controls" label="Controls" onDone={reload} />
+          {canWrite && (
+            <button className="btn secondary" onClick={() => setReviewAll(true)} title="Suggested framework clauses for every control, reviewed and accepted in one place">
+              Review all suggestions
+            </button>
+          )}
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add control</button>
         </div>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
+
+      {canWrite && <PendingSuggestionsHint refreshKey={refreshKey} onReview={() => setReviewAll(true)} />}
 
       <DataTable<Control>
         toolbarRight={<ArchivedRecords entityType="control" noun="controls" onRestored={reload} refreshKey={refreshKey} />}
@@ -1452,6 +1461,9 @@ function ControlsInner() {
 
       {suggestFor && (
         <BulkSuggestMappings controlIds={suggestFor} onClose={() => setSuggestFor(null)} onDone={reload} />
+      )}
+      {reviewAll && (
+        <BulkSuggestMappings scope="unmapped" onClose={() => setReviewAll(false)} onDone={reload} />
       )}
 
       {showForm && (

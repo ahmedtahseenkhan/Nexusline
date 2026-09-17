@@ -1,7 +1,9 @@
 """First-run seeding: bootstrap org/admin plus a few sample GRC records.
 
 The demo org gets two people so segregation of duties is visible rather than switched
-off: the seeded admin (checker) and a risk manager, Ayesha Siddiqui (maker). Ayesha
+off: the seeded admin (checker, who also holds the Risk Approver and Compliance Manager
+roles the default approval routes are assigned to) and a risk manager, Ayesha Siddiqui
+(maker). Ayesha
 entered the sample controls and policies, owns the sample risks and raised APR-002, so
 the admin can legitimately test, publish and approve them; APR-001 was raised by the
 admin, who therefore sees it as their own and cannot decide it.
@@ -130,65 +132,25 @@ def _created_by(tenant_id, maker: User, entity_type: str, entity_id, label: str)
     )
 
 
-#: Default approval routes, seeded DISABLED so behaviour does not change until an admin
-#: switches one on under Workflows. (entity_type, name, description, stages) where each
+#: Default approval routes now live in ``services/default_governance.py`` and are created
+#: — enabled — for every organisation by ``create_organization``. Kept here as
+#: (entity_type, name, description, stages) for callers that read the old shape; each
 #: stage is (name, approver_mode, approver_ref).
-DEFAULT_WORKFLOWS: tuple[tuple[str, str, str, tuple[tuple[str, str, str], ...]], ...] = (
-    (
-        "policy",
-        "Policy approval",
-        "Policy owner, then Compliance, then the CISO sign off before a policy is published.",
-        (
-            ("Policy owner review", "record_owner", ""),
-            ("Compliance review", "role", "Compliance Manager"),
-            ("CISO sign-off", "role", "CISO"),
-        ),
-    ),
-    (
-        "risk",
-        "Risk acceptance",
-        "Risk owner, then the department head, then the CRO approve accepting a risk.",
-        (
-            ("Risk owner confirmation", "record_owner", ""),
-            ("Department head approval", "line_manager", ""),
-            ("CRO approval", "role", "CRO"),
-        ),
-    ),
+from app.services.default_governance import DEFAULT_ROUTES as _DEFAULT_ROUTES  # noqa: E402
+
+DEFAULT_WORKFLOWS: tuple[tuple[str, str, str, tuple[tuple[str, str, str], ...]], ...] = tuple(
+    (r.entity_type, r.name, r.description, tuple((s.name, s.approver_mode, s.approver_ref) for s in r.stages))
+    for r in _DEFAULT_ROUTES
 )
 
 
 async def seed_default_workflows(db: AsyncSession, tenant_id) -> int:
-    """Insert the default routes a tenant does not already have one for. Idempotent:
-    an entity type with any definition (enabled or not) is left alone."""
-    from app.models.workflow import ApproverMode, WorkflowDefinition, WorkflowStage
+    """Add the default routes (enabled) a tenant has none for, and upgrade the untouched
+    disabled routes older demo seeds created. Idempotent; never overwrites."""
+    from app.services.default_governance import ensure_default_routes
 
-    have = set((await db.scalars(select(WorkflowDefinition.entity_type))).all())
-    added = 0
-    for entity_type, name, description, stages in DEFAULT_WORKFLOWS:
-        if entity_type in have:
-            continue
-        definition = WorkflowDefinition(
-            tenant_id=tenant_id,
-            entity_type=entity_type,
-            name=name,
-            description=description,
-            enabled=False,
-        )
-        definition.stages = [
-            WorkflowStage(
-                tenant_id=tenant_id,
-                order_index=i,
-                name=stage_name,
-                approver_mode=ApproverMode(mode),
-                approver_ref=ref,
-                required_approvals=1,
-            )
-            for i, (stage_name, mode, ref) in enumerate(stages, start=1)
-        ]
-        db.add(definition)
-        added += 1
-    await db.flush()
-    return added
+    added, upgraded = await ensure_default_routes(db, tenant_id)
+    return len(added) + len(upgraded)
 
 
 #: Default KPI tiles, (metric_key, viz). Titles come from the metric catalogue.
@@ -224,9 +186,26 @@ async def seed_default_widgets(db: AsyncSession, tenant_id) -> int:
     return added
 
 
+#: Roles the demo admin also holds, so the one login a demo uses can decide every stage of
+#: the default approval routes (services/default_governance.py) that Ayesha submits.
+DEMO_CHECKER_ROLES: tuple[str, ...] = ("Risk Approver", "Compliance Manager")
+
+
+async def _grant_demo_checker_roles(db: AsyncSession, admin: User) -> None:
+    """Give the demo admin the route approver roles. Idempotent."""
+    have = {r.name for r in admin.roles}
+    wanted = [n for n in DEMO_CHECKER_ROLES if n not in have]
+    if not wanted:
+        return
+    roles = (await db.scalars(select(Role).where(Role.name.in_(wanted)))).all()
+    admin.roles = [*admin.roles, *roles]
+    await db.flush()
+
+
 async def _seed_sample_data(db: AsyncSession, tenant_id, admin: User) -> None:
     today = date.today()
     maker = await _seed_demo_maker(db, tenant_id)
+    await _grant_demo_checker_roles(db, admin)
 
     # Baseline lookups (media types, vendor types, labels) were already inserted by
     # create_organization -> ensure_reference_data; index them by name for the sample
@@ -1204,8 +1183,11 @@ async def _seed_sample_data(db: AsyncSession, tenant_id, admin: User) -> None:
     # --- Default KPI dashboard widgets (idempotent; catalogue titles) ---
     await seed_default_widgets(db, tenant_id)
 
-    # --- Default approval routes (disabled until an admin switches one on) ---
-    await seed_default_workflows(db, tenant_id)
+    # --- Default approval routes and dual-control rules (enabled). create_organization
+    # already added them; this keeps a re-seeded demo tenant complete. ---
+    from app.services.default_governance import ensure_default_governance
+
+    await ensure_default_governance(db, tenant_id)
 
     # --- Collaboration (comments / tags / attachments on the seeded project) ---
     from app.models.collab import Attachment, Comment, EntityTag, Tag
@@ -1333,7 +1315,9 @@ async def seed_if_empty() -> None:
     """Create the bootstrap org (+ demo data when ``seed_data``) if no tenants exist yet.
 
     ``seed_data`` → the demo: bootstrap org, admin, sample records, the second maker
-    user, default tiles and (disabled) approval routes, plus the empty isolation-demo org.
+    user, default tiles, plus the empty isolation-demo org. Every organisation — demo or
+    not — gets the enabled default approval routes and dual-control rules from
+    ``create_organization``.
     ``seed_bootstrap`` alone → a clean first organisation and its admin, nothing else —
     what a client installation gets.
     """

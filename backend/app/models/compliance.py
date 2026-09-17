@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Column, Date, ForeignKey, Index, Integer, String, Table, Text, Uuid, func, text
+from sqlalchemy import Column, Date, ForeignKey, Index, Integer, String, Table, Text, Uuid, event, func, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -93,7 +93,7 @@ class Framework(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
         back_populates="framework",
         cascade="all, delete-orphan",
         lazy="selectin",
-        order_by="Requirement.reference",
+        order_by="Requirement.reference_sort_key",
     )
 
     @property
@@ -104,6 +104,14 @@ class Framework(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
     def compliant_count(self) -> int:
         return sum(1 for r in self.requirements if r.status == ComplianceStatus.compliant)
 
+    @property
+    def posture(self):
+        """Assessed compliant / mapped / tested, side by side (F-19). Mapping never
+        makes a clause compliant; this shows what it did achieve."""
+        from app.services.compliance_posture import posture
+
+        return posture(self.requirements)
+
 
 class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "requirements"
@@ -112,6 +120,8 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
         Uuid, ForeignKey("frameworks.id", ondelete="CASCADE"), nullable=False, index=True
     )
     reference: Mapped[str] = mapped_column(String(64), default="", index=True)  # "A.5.1"
+    # Natural-order key for ``reference`` (A.5.2 before A.5.10); lists sort on this.
+    reference_sort_key: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     # Statement of Applicability: why a clause is in or out of scope.
     applicability_justification: Mapped[str] = mapped_column(Text, default="", nullable=False)
@@ -202,6 +212,20 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
     @property
     def open_findings(self) -> int:
         return sum(1 for f in self.findings if f.status == FindingStatus.open)
+
+
+@event.listens_for(Requirement, "before_insert")
+@event.listens_for(Requirement, "before_update")
+def _fill_reference_sort_key(_mapper, _connection, target: Requirement) -> None:
+    """Every ORM write of a requirement — the API, imports, a framework install or
+    upgrade — keeps ``reference_sort_key`` in step with ``reference`` (F-16). Rows
+    written around the ORM are caught by the boot repair
+    (``data_repairs.fill_requirement_sort_keys``)."""
+    from app.services.reference_sort import reference_sort_key
+
+    key = reference_sort_key(target.reference)
+    if target.reference_sort_key != key:
+        target.reference_sort_key = key
 
 
 class ComplianceFinding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, SoftDeleteMixin, Base):

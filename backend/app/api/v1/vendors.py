@@ -38,6 +38,7 @@ from app.schemas.vendor import (
     VendorCertificationCreate,
     VendorCertificationRead,
     VendorCertificationUpdate,
+    VendorConcentration,
     VendorCreate,
     VendorOutsourcingFacts,
     VendorRead,
@@ -115,8 +116,66 @@ def outsourcing_facts(arrangements, country_labels: dict) -> list[VendorOutsourc
             sbp_approval_status=getattr(a.sbp_approval_status, "value", a.sbp_approval_status) or "",
             contract_end=a.contract_end, exit_plan=a.exit_plan or "",
             exit_plan_tested=bool(a.exit_plan_tested),
+            materiality_assessment=getattr(a, "materiality_assessment", "") or "",
+            substitutability=getattr(a, "substitutability", "") or "",
+            concentration_level=getattr(a, "concentration_level", "") or "",
+            concentration_note=getattr(a, "concentration_note", "") or "",
         ))
     return out
+
+
+#: Criticality words that make a third party (or a process it supports) critical.
+_CRITICAL = ("high", "critical")
+_LEVEL_RANK = {"": 0, "low": 1, "medium": 2, "high": 3}
+#: Live material arrangements / high-or-critical processes at which concentration is high.
+HIGH_MATERIAL_ARRANGEMENTS = 2
+HIGH_CRITICAL_PROCESSES = 3
+
+
+def _word(value) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def concentration_view(vendor, arrangements=None, processes=None) -> VendorConcentration:
+    """How much depends on this third party (F-11). Pure.
+
+    Counts the live (not terminated) arrangements — material ones apart — and the
+    supported processes rated high or critical, and takes the highest concentration
+    level recorded on an arrangement. High when an arrangement says high, when two or
+    more material arrangements rely on the provider, or when three or more critical
+    processes do; medium when one material arrangement or one or two critical processes
+    do, or an arrangement says medium."""
+    on_file = [
+        a for a in (arrangements if arrangements is not None else getattr(vendor, "outsourcing_arrangements", None) or [])
+        if not getattr(a, "deleted", False)
+    ]
+    arrangements = [a for a in on_file if _word(a.status) != "terminated"]
+    processes = [
+        p for p in (processes if processes is not None else getattr(vendor, "processes", None) or [])
+        if not getattr(p, "deleted", False)
+    ]
+    material = [a for a in arrangements if _word(a.materiality) == "material"]
+    critical = [p for p in processes if _word(getattr(p, "criticality", None)) in _CRITICAL]
+    recorded = max((_word(getattr(a, "concentration_level", "")) for a in arrangements),
+                   key=lambda v: _LEVEL_RANK.get(v, 0), default="")
+    reasons: list[str] = []
+    if recorded == "high":
+        reasons.append("An outsourcing arrangement records high concentration on this provider.")
+    if len(material) >= HIGH_MATERIAL_ARRANGEMENTS:
+        reasons.append(f"{len(material)} material outsourcing arrangements rely on this provider.")
+    if len(critical) >= HIGH_CRITICAL_PROCESSES:
+        reasons.append(f"{len(critical)} high or critical processes depend on this provider.")
+    level = "high" if reasons else "medium" if (recorded == "medium" or material or critical) else "low"
+    crit = _word(getattr(vendor, "criticality", None))
+    tier = _word(getattr(vendor, "inherent_tier", None))
+    # Any arrangement on file, even a terminated one, means the decision was made.
+    expected = not on_file and (crit in _CRITICAL or tier in _CRITICAL or bool(critical))
+    return VendorConcentration(
+        material_arrangements=len(material), arrangements=len(arrangements),
+        critical_processes=len(critical), processes=len(processes),
+        recorded_level=recorded, level=level, flagged=level == "high", reasons=reasons,
+        arrangement_expected=expected,
+    )
 
 
 def tiering_view(vendor, questionnaire_id=None) -> VendorTiering:
@@ -173,6 +232,7 @@ async def _reads(db, rows) -> list[VendorRead]:
     for row, item in zip(rows, items):
         item.active_contract_totals = contract_totals(row.contracts, org_ccy)
         item.outsourcing = outsourcing_facts(getattr(row, "outsourcing_arrangements", None) or [], labels)
+        item.concentration = concentration_view(row)
         item.tiering = tiering_view(row, qid)
     return items
 

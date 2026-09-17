@@ -15,6 +15,7 @@ type TestState =
 
 const ADMIN_LINKS: { href: string; label: string; desc: string }[] = [
   { href: "/organisation-settings", label: "Organisation Settings", desc: "Currency, timezone, date format, fiscal year, retention" },
+  { href: "/organisation-settings#security", label: "Security", desc: "Roles that must use MFA, segregation of duties, approval routes" },
   { href: "/organization", label: "Users & Roles", desc: "Accounts, role permissions, effective access" },
   { href: "/sso-settings", label: "Single Sign-On", desc: "OIDC / OAuth2 identity provider configuration" },
   { href: "/webhooks", label: "Webhooks", desc: "Outbound HMAC-signed event delivery" },

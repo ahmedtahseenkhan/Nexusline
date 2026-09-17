@@ -63,6 +63,16 @@ from app.services import framework_library as fl
 from app.services.residual_engine import ControlInput, ResidualPolicySpec, suggest_residual
 from app.services.risk_scoring import AppetiteBook, SeverityScale
 
+async def _no_review_policy(db, user):
+    from app.services.risk_scoring import SeverityScale
+
+    return SeverityScale(), {}
+
+
+async def _no_alert_refresh(db, user, risk):
+    return None
+
+
 TODAY = date.today()
 AGO = lambda days: TODAY - timedelta(days=days)  # noqa: E731
 
@@ -286,6 +296,11 @@ def stub(monkeypatch):
     monkeypatch.setattr(risks_api, "_load_risk", load)
     monkeypatch.setattr(risks_api, "_read", read)
     monkeypatch.setattr(risks_api, "get_matrix_size", size)
+    # F-22: the review clock and the alert refresh need the tenant's settings and the
+    # notifications table; neither is under test here.
+    monkeypatch.setattr(risks_api, "_review_policy", _no_review_policy)
+    monkeypatch.setattr(risks_api, "_refresh_alerts", _no_alert_refresh)
+    monkeypatch.setattr(risks_api, "_reconcile_title_flag", _no_alert_refresh)
     monkeypatch.setattr(risks_api, "get_or_create_residual_policy", policy)
     monkeypatch.setattr(risks_api, "policy_spec", lambda p: ResidualPolicySpec())
     return state

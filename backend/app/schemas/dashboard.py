@@ -89,7 +89,35 @@ class CategoryPosture(BaseModel):
     breach: int = 0
 
 
+class DataCompleteness(BaseModel):
+    """How far the board figures can be trusted (F-21): what they are taken over, what
+    they leave out, and how complete the live register is. Percentages are of
+    ``live_risks`` and None when there are none."""
+
+    #: Every live (not archived) risk.
+    live_risks: int
+    #: Risks the figures count: scored, out of Draft, not accepted or closed.
+    board_risks: int
+    #: Drafts — scored or not — which no figure includes until they are validated.
+    pending_validation: int
+    #: Of those, never scored at all.
+    unscored: int = 0
+    #: Accepted or closed: settled, so out of breach and top-risk figures by design.
+    settled: int = 0
+    #: The register filtered to the pending drafts.
+    pending_href: str = ""
+    owned: int = 0
+    owned_pct: float | None = None
+    #: Tagged with at least one live business unit.
+    tagged: int = 0
+    tagged_pct: float | None = None
+    #: Approved through the record lifecycle (``workflow_status``).
+    approved: int = 0
+    approved_pct: float | None = None
+
+
 class Posture(BaseModel):
+    #: The board register (see ``DataCompleteness.board_risks``).
     total_risks: int
     appetite_score: int
     tolerance_score: int
@@ -220,3 +248,4 @@ class DashboardOverview(BaseModel):
     third_parties: ThirdParties
     segments: list[SegmentRow]
     movement: Movement
+    completeness: DataCompleteness | None = None

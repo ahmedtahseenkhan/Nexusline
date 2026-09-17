@@ -101,6 +101,8 @@ export type RiskRecord = {
   consequence?: string | null;
   status: string;
   owner_id: string | null;
+  /** Business units the risk sits in; absent on an older API (nothing is said then). */
+  business_units?: { id: string; name?: string }[] | null;
   category?: string | null;
   category_id?: string | null;
   category_ref?: { label: string; path?: string | null } | null;
@@ -109,6 +111,9 @@ export type RiskRecord = {
   inherent_impact: number | null;
   inherent_score: number | null;
   inherent_severity: string | null;
+  /** The server's is_scored (F-23): false for a draft nobody has scored. Absent on an
+   *  older API, where the page applies the same rule itself. */
+  inherent_scored?: boolean | null;
   residual_likelihood: number | null;
   residual_impact: number | null;
   residual_score: number | null;
@@ -137,11 +142,15 @@ export type RiskRecord = {
   annual_loss_expectancy: number | null;
 
   review_frequency?: string | null;
+  /** The cycle the review clock runs on: the stricter of review_frequency and the longest
+   *  the rating allows (F-22), and why when the rating decides it. */
+  effective_review_frequency?: string | null;
+  review_frequency_reason?: string | null;
   last_review_date?: string | null;
   next_review_date: string | null;
   expired_reviews?: number | null;
 
-  /** The server's rollup of the linked controls' health: "ok" | "issues" | "none". */
+  /** The server's rollup of the linked controls' health: "ok" | "untested" | "issues" | "none". */
   control_health?: string | null;
   controls: RiskControlRef[];
   exceptions?: RiskExceptionRef[] | null;
@@ -228,9 +237,21 @@ export const categoryText = (r: Pick<RiskRecord, "category" | "category_ref">) =
 export const reviewReasons = (r: { review_reason?: string | null }) =>
   (r.review_reason || "").split("\n").filter((x) => x.trim());
 
-/** A draft never scored: its stored 1×1 is a placeholder, not an assessment. */
-export const isUnscored = (r: Pick<RiskRecord, "inherent_score" | "status" | "last_assessed_at">) =>
-  r.inherent_score == null || (r.status === "draft" && !r.last_assessed_at);
+/** A draft never scored: its stored 1×1 is a placeholder, not an assessment. The server
+ *  says so (`inherent_scored`, risk_scoring.is_scored); an older API gets the same rule here. */
+export const isUnscored = (r: Pick<RiskRecord, "inherent_score" | "status" | "last_assessed_at" | "inherent_scored">) =>
+  r.inherent_score == null
+  || (typeof r.inherent_scored === "boolean" ? !r.inherent_scored : r.status === "draft" && !r.last_assessed_at);
+
+/** "Monthly", "Twice a year" — the risk form's words for a review cycle. */
+export function frequencyWord(v: string): string {
+  if (v === "semiannual") return "Twice a year";
+  if (v === "none") return "No cycle";
+  return sentenceCase(v);
+}
+
+/** "Monthly — required for Critical risks" when the rating decides the cycle, else null. */
+export const cadenceNote = (r: Pick<RiskRecord, "review_frequency_reason">) => trimmed(r.review_frequency_reason) || null;
 
 // ------------------------------------------------------------------ appetite
 
@@ -335,12 +356,14 @@ export function exceptionMeta(x: RiskExceptionRef, fmt: Fmt): string | null {
 export const hasAssurance = (controls: RiskControlRef[]) =>
   controls.length > 0 && controls.every((c) => typeof c.effectiveness_basis === "string");
 
-/** A rating set by hand or by override, with none, or with no reviewed test on file. */
+/** A rating set by hand or by override, with none, or with no reviewed test on file —
+ *  control_assurance.rests_on_untested_rating, which the register's "Not tested" reads. */
 export const isUntested = (c: RiskControlRef) =>
   c.effectiveness_basis === "manual" || c.effectiveness_basis === "override" || c.effectiveness_basis === "none" || !(c.audit_count ?? 0);
 
 /** A failed last (reviewed) test, a test overdue, an open audit finding or an open issue:
- *  a superset of what the residual engine withholds credit for. */
+ *  a superset of what the residual engine withholds credit for, and exactly what the
+ *  register's "Control issues" counts (control_assurance.control_health_state). */
 export const isFailing = (c: RiskControlRef) =>
   c.last_audit_result === "failed" || !!c.is_audit_overdue || (c.open_finding_count ?? 0) > 0 || (c.open_issue_count ?? 0) > 0;
 
@@ -460,8 +483,9 @@ export function controlsNote(r: RiskRecord): string | null {
       : lead;
   }
   const base = "Assurance detail isn't available for linked controls yet.";
-  if (r.control_health === "issues") return `${base} At least one failed its last reviewed test, is overdue for one or has an open audit finding.`;
-  if (r.control_health === "ok") return `${base} None has a failed or overdue test or an open audit finding.`;
+  if (r.control_health === "issues") return `${base} At least one failed its last reviewed test, is overdue for one, or has an open audit finding or issue.`;
+  if (r.control_health === "untested") return `${base} At least one is rated without a reviewed test; none has a failed or overdue test or anything open.`;
+  if (r.control_health === "ok") return `${base} Every rating rests on reviewed tests; none has a failed or overdue test or anything open.`;
   return base;
 }
 
@@ -501,9 +525,13 @@ export function quantificationText(r: RiskRecord, fmt: Fmt): string | null {
   return `${figure(aro)} / yr × ${fmt.money(sle)}${r.annual_loss_expectancy != null ? ` = ${fmt.money(r.annual_loss_expectancy)} / yr` : ""}`;
 }
 
-/** "Annual · last 03 Jul 2026" or "Annual · never reviewed", with " · 2 reviews missed" only when some were. */
+/** "Annual · last 03 Jul 2026" or "Annual · never reviewed", with " · 2 reviews missed" only when some were.
+ *  When the rating requires a shorter cycle than the one set: "Monthly (required for Critical risks) · …". */
 export function reviewCycleText(r: RiskRecord, fmt: Fmt): string {
-  const freq = r.review_frequency ? sentenceCase(r.review_frequency) : "No cycle";
+  const reason = trimmed(r.review_frequency_reason);
+  const cycle = reason && r.effective_review_frequency ? r.effective_review_frequency : r.review_frequency;
+  const word = cycle ? frequencyWord(cycle) : "No cycle";
+  const freq = reason ? `${word} (${reason.split(" — ").slice(1).join(" — ") || reason})` : word;
   return `${freq} · ${r.last_review_date ? `last ${fmt.date(r.last_review_date)}` : "never reviewed"}${missedReviewsText(r.expired_reviews)}`;
 }
 
@@ -739,7 +767,7 @@ function relianceTile(r: RiskRecord, fmt: Fmt): TileModel {
   if (!hasAssurance(r.controls)) {
     return {
       ...base,
-      value: { text: plural(n, "control"), unit: r.control_health === "issues" ? "with issues" : undefined },
+      value: { text: plural(n, "control"), unit: r.control_health === "issues" ? "with issues" : r.control_health === "untested" ? "not tested" : undefined },
       because: ["Assurance detail isn't available here; open each control."],
       basis: { kind: "missing", text: "Basis not shown" },
     };
@@ -796,8 +824,20 @@ export function riskOpenPoints(input: RiskInput, ctx: Ctx): OpenPoint[] {
   const canAttest = gov.attestation?.canAttest !== false;
   const why = trimmed(r.assessment_rationale);
 
+  // F-21: a risk leaves Draft only with an owner and a business unit; both points say so.
+  const draft = r.status === "draft";
   if (!r.owner_id)
-    gaps.push({ id: "risk.owner", level: "gap", text: ["No risk owner: accountability can't be shown."], action: { kind: "edit", target: "general", label: "Assign owner" } });
+    gaps.push({
+      id: "risk.owner", level: "gap",
+      text: [draft ? "No risk owner: it can't leave Draft, and accountability can't be shown." : "No risk owner: accountability can't be shown."],
+      action: { kind: "edit", target: "general", label: "Assign owner" },
+    });
+  if (Array.isArray(r.business_units) && r.business_units.length === 0)
+    gaps.push({
+      id: "risk.business_unit", level: "gap",
+      text: [draft ? "No business unit: it can't leave Draft, and no segment reports it." : "No business unit: no segment reports this risk."],
+      action: { kind: "edit", target: "links", label: "Add business unit" },
+    });
 
   if (ASSESSED_STATUSES.has(r.status) && (!why || !r.last_assessed_at)) {
     const st = sentenceCase(r.status);
