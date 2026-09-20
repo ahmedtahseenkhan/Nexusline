@@ -42,6 +42,9 @@ class BusinessUnit(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMix
         Uuid, ForeignKey("business_units.id", ondelete="SET NULL"), nullable=True
     )
     manager: Mapped[str] = mapped_column(String(200), default="")  # BU head / accountable contact
+    manager_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `manager`
     email: Mapped[str] = mapped_column(String(255), default="")
     location: Mapped[str] = mapped_column(String(200), default="")
 
@@ -65,6 +68,9 @@ class Process(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
         Uuid, ForeignKey("business_units.id", ondelete="SET NULL"), nullable=True, index=True
     )
     owner: Mapped[str] = mapped_column(String(200), default="")
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `owner`
     criticality: Mapped[Criticality] = mapped_column(
         SAEnum(Criticality, name="criticality"), default=Criticality.medium, nullable=False
     )
@@ -88,6 +94,9 @@ class Legal(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Sof
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(120), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     jurisdiction: Mapped[str] = mapped_column(String(120), default="")
     reference: Mapped[str] = mapped_column(String(120), default="")
     countries: Mapped[str] = mapped_column(String(512), default="")  # CSV of applicable countries

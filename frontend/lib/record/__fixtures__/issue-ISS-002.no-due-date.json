@@ -1,0 +1,171 @@
+{
+  "_source": "ISS-002 as the dev stack returns it on 2026-09-13 (GET /api/v1/issues/f37086d2-…): open, High, 63 days old, raised from a risk assessment against R-001, no owner, no due date, no actions. Pins the no-target-date gap next to the owner gap.",
+  "type": "issue",
+  "input": {
+    "issue": {
+      "title": "Issue against risk test",
+      "description": "",
+      "source_type": "risk_assessment",
+      "source_reference": "",
+      "source_id": "7c26d242-a956-44e5-bff4-dbb001cb7705",
+      "category": "",
+      "category_id": null,
+      "severity": "high",
+      "status": "open",
+      "owner": "",
+      "owner_id": null,
+      "business_unit": "",
+      "business_unit_id": null,
+      "identified_date": "2026-07-12",
+      "due_date": null,
+      "root_cause": "",
+      "root_cause_category_id": null,
+      "management_response": "",
+      "repeat_finding": false,
+      "regulator_related": false,
+      "workflow_owner_id": null,
+      "id": "f37086d2-7823-4849-8cf4-00769bf3b1bf",
+      "reference": "ISS-002",
+      "workflow_status": "draft",
+      "workflow_owner": "",
+      "owner_ref": null,
+      "business_unit_ref": null,
+      "category_ref": null,
+      "workflow_owner_ref": null,
+      "root_cause_category_ref": null,
+      "closed_date": null,
+      "validated_by_id": null,
+      "validated_by_ref": null,
+      "validated_at": null,
+      "validation_result": null,
+      "validation_note": "",
+      "risks": [
+        {
+          "id": "7c26d242-a956-44e5-bff4-dbb001cb7705",
+          "reference": "R-001",
+          "title": "Unauthorized access to customer data",
+          "name": ""
+        }
+      ],
+      "controls": [],
+      "requirements": [],
+      "assets": [],
+      "vendors": [],
+      "due_date_changes": [],
+      "due_date_moves": 0,
+      "action_count": 0,
+      "open_action_count": 0,
+      "is_overdue": false,
+      "age_days": 63,
+      "created_at": "2026-07-12T22:45:15.393866Z",
+      "actions": [],
+      "updates": []
+    },
+    "source": {
+      "kind": "risk",
+      "label": "R-001 Unauthorized access to customer data"
+    },
+    "meId": "8e9676e6-3fdd-4991-a40d-e510d27d3b15",
+    "canApprove": true,
+    "primaryLabel": "Submit for review"
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "draft",
+      "approvalSteps": 0,
+      "lastStep": null,
+      "lastSubmitAt": null,
+      "attestation": null
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "due",
+        "value": "No due date",
+        "because": "No target remediation date, so the issue can't show as overdue.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "age",
+        "value": "63 days",
+        "because": "Identified 12 Jul 2026.",
+        "basis": {
+          "kind": "derived",
+          "text": "Calculated"
+        }
+      },
+      {
+        "key": "remediation",
+        "value": "No actions",
+        "because": "No corrective or preventive action recorded.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "source",
+        "value": "R-001 Unauthorized access to customer data",
+        "because": "Raised from risk assessment; linked to 1 risk and 0 controls.",
+        "basis": {
+          "kind": "derived",
+          "text": "From the source link"
+        }
+      },
+      {
+        "key": "rootcause",
+        "value": "Not analysed",
+        "because": "No root cause recorded — needed before closure.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "closure",
+        "value": "Not validated",
+        "because": "To close: finish every action (0 open), attach closure evidence, and have someone independent validate the fix.",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "issue.owner",
+        "level": "gap",
+        "text": "No issue owner.",
+        "action": {
+          "kind": "edit",
+          "target": "general"
+        }
+      },
+      {
+        "id": "issue.no_due_date",
+        "level": "gap",
+        "text": "No target remediation date: it can't go overdue.",
+        "action": {
+          "kind": "edit",
+          "target": "remediation"
+        }
+      },
+      {
+        "id": "issue.no_actions",
+        "level": "note",
+        "text": "No corrective action recorded",
+        "action": {
+          "kind": "open",
+          "target": "add-action"
+        }
+      }
+    ],
+    "headline": "High issue; no actions recorded; not validated."
+  }
+}

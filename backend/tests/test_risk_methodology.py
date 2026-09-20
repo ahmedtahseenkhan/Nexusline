@@ -282,7 +282,8 @@ def _risk_read_payload(inherent_score: int) -> dict:
 
     return dict(
         id=uuid.uuid4(), reference="R-1", title="t", description="", category="",
-        status="draft", owner_id=None, inherent_likelihood=3, inherent_impact=4,
+        # Assessed: an unscored draft is never banded (risk_scoring.is_scored).
+        status="assessed", owner_id=None, inherent_likelihood=3, inherent_impact=4,
         inherent_score=inherent_score, residual_likelihood=None, residual_impact=None,
         residual_score=None, annual_loss_frequency=None, single_loss_expectancy=None,
         annual_loss_expectancy=None, treatment_strategy=None, treatment_description="",

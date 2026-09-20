@@ -6,7 +6,18 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Boolean, Column, Date, ForeignKey, Integer, String, Table, Text, UniqueConstraint, Uuid
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    ForeignKey,
+    Integer,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -28,8 +39,31 @@ policies_related = Table(
 )
 
 
+policy_business_units = Table(
+    "policy_business_units",
+    Base.metadata,
+    Column("policy_id", Uuid, ForeignKey("policies.id", ondelete="CASCADE"), primary_key=True),
+    Column("business_unit_id", Uuid, ForeignKey("business_units.id", ondelete="CASCADE"), primary_key=True),
+)
+
+policy_roles = Table(
+    "policy_roles",
+    Base.metadata,
+    Column("policy_id", Uuid, ForeignKey("policies.id", ondelete="CASCADE"), primary_key=True),
+    Column("role_id", Uuid, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
 class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "policies"
+    # Phase 2: document governance.
+    approving_authority_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("committees.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # board or committee that approves it
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("policies.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # the policy this one replaces
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)  # eramba "index"
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -37,6 +71,9 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     body: Mapped[str] = mapped_column(Text, default="")
     url: Mapped[str] = mapped_column(String(1024), default="")  # external document link
     category: Mapped[str] = mapped_column(String(100), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     document_type: Mapped[PolicyDocType] = mapped_column(
         SAEnum(PolicyDocType, name="policy_doc_type"), default=PolicyDocType.policy, nullable=False
     )
@@ -45,6 +82,9 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
         SAEnum(PolicyStatus, name="policy_status"), default=PolicyStatus.draft, nullable=False
     )
     owner: Mapped[str] = mapped_column(String(200), default="")
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `owner`
     label_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("asset_labels.id", ondelete="SET NULL"), nullable=True
     )
@@ -87,6 +127,8 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     # Reverse (read-only) links into the graph.
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(  # noqa: F821
         "ExceptionRecord", secondary="exception_policies", lazy="selectin", viewonly=True,
+        # An archived exception is not on the register: never show it as a live link.
+        secondaryjoin="and_(exception_policies.c.exception_id == ExceptionRecord.id, ExceptionRecord.deleted == False)",
     )
     projects: Mapped[list["Project"]] = relationship(  # noqa: F821
         "Project", secondary="project_policies", lazy="selectin", viewonly=True,
@@ -96,6 +138,24 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     )
     processing_activities: Mapped[list["ProcessingActivity"]] = relationship(  # noqa: F821
         "ProcessingActivity", secondary="ropa_policies", lazy="selectin", viewonly=True,
+    )
+    # Phase 2: who it applies to. Users are not linked to business units, so the units
+    # are recorded (and reported) but acknowledgement targeting reads the roles.
+    business_units: Mapped[list["BusinessUnit"]] = relationship(  # noqa: F821
+        "BusinessUnit", secondary=policy_business_units, lazy="selectin",
+        secondaryjoin="and_(policy_business_units.c.business_unit_id == BusinessUnit.id, BusinessUnit.deleted == False)",
+    )
+    roles: Mapped[list["Role"]] = relationship(  # noqa: F821
+        "Role", secondary=policy_roles, lazy="selectin",
+    )
+    # For CSV export only: read models expose ``approving_authority_ref`` /
+    # ``supersedes_ref`` / ``superseded_by``, filled by the router in one query each, so
+    # these are never lazy-loaded in a handler.
+    approving_authority: Mapped["Committee | None"] = relationship(  # noqa: F821
+        "Committee", foreign_keys=[approving_authority_id], lazy="select",
+    )
+    supersedes: Mapped["Policy | None"] = relationship(
+        "Policy", foreign_keys=[supersedes_id], remote_side="Policy.id", lazy="select",
     )
 
     @property
@@ -118,6 +178,9 @@ class PolicyReview(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMix
     planned_date: Mapped[date] = mapped_column(Date, nullable=False)
     actual_review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     reviewer: Mapped[str] = mapped_column(String(200), default="")
+    reviewer_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: picked from the user list; replaces free-text `reviewer`
     comments: Mapped[str] = mapped_column(Text, default="")
 
     policy: Mapped[Policy] = relationship(back_populates="reviews")

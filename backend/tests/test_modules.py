@@ -85,11 +85,13 @@ def test_license_without_modules_unlocks_everything(signed_license):
     assert mod.enabled_modules() == set(ALL_MODULE_KEYS)
 
 
-def test_expired_license_locks_optional_modules(signed_license):
+def test_expired_license_keeps_its_modules(signed_license):
+    # Decision 1: an expired licence runs through grace and then read-only; the bank must
+    # still reach every module it licensed to read its records.
     info = signed_license(expires=(date.today() - timedelta(days=1)).isoformat(),
-                          modules=["all"])
+                          modules=["islamic_banking"])
     assert info.status == "expired"
-    assert mod.enabled_modules() == set()
+    assert mod.enabled_modules() == {"shariah"}
 
 
 def test_config_denylist_subtracts(signed_license, monkeypatch):

@@ -7,10 +7,14 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import Link from "next/link";
+import { unconvertedNote, useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ local types
 interface FraudRisk {
@@ -85,19 +89,21 @@ interface FraudSummary {
   checklist_pct: number;
   risks_by_band: Record<string, number>;
   high_residual_risks: number;
+  /** Decision 4: the currency the loss figures above are in. */
+  reporting_currency?: string;
+  /** Case amounts with no exchange rate, left out of the totals. */
+  unconverted?: { currency: string; count: number; amount: number }[];
 }
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
-const pkr = (n: number | null | undefined) => (n == null ? "—" : "PKR " + Number(n).toLocaleString());
 const band = (score: number) => (score >= 15 ? "high" : score >= 8 ? "medium" : "low");
 
 // ------------------------------------------------------------------ enum lists
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const SCORES = opts(["1", "2", "3", "4", "5"]);
 const CONTROL_EFF = opts(["not_assessed", "ineffective", "partially_effective", "effective"]);
 const FRAUD_SCHEME = opts([
@@ -191,7 +197,6 @@ type RiskForm = {
   red_flags: string;
   owner: string;
   status: string;
-  workflow_status: string;
 };
 const BLANK_RISK: RiskForm = {
   title: "",
@@ -208,7 +213,6 @@ const BLANK_RISK: RiskForm = {
   red_flags: "",
   owner: "",
   status: "open",
-  workflow_status: "draft",
 };
 function fromRisk(r: FraudRisk): RiskForm {
   return {
@@ -226,7 +230,6 @@ function fromRisk(r: FraudRisk): RiskForm {
     red_flags: r.red_flags || "",
     owner: r.owner || "",
     status: r.status || "open",
-    workflow_status: r.workflow_status || "draft",
   };
 }
 function riskPayload(f: RiskForm): Record<string, unknown> {
@@ -245,7 +248,6 @@ function riskPayload(f: RiskForm): Record<string, unknown> {
     red_flags: f.red_flags,
     owner: f.owner,
     status: f.status,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -270,7 +272,6 @@ type CaseForm = {
   investigator: string;
   root_cause: string;
   resolution: string;
-  workflow_status: string;
 };
 const BLANK_CASE: CaseForm = {
   title: "",
@@ -283,7 +284,7 @@ const BLANK_CASE: CaseForm = {
   reported_date: "",
   amount_involved: "",
   amount_recovered: "",
-  currency: "PKR",
+  currency: "",
   perpetrator_type: "unknown",
   customer_impacted: false,
   customers_affected: "",
@@ -292,9 +293,8 @@ const BLANK_CASE: CaseForm = {
   investigator: "",
   root_cause: "",
   resolution: "",
-  workflow_status: "draft",
 };
-function fromCase(c: FraudCase): CaseForm {
+function fromCase(c: FraudCase, defaultCurrency: string): CaseForm {
   return {
     title: c.title,
     scheme: c.scheme || "digital_channel_fraud",
@@ -306,7 +306,7 @@ function fromCase(c: FraudCase): CaseForm {
     reported_date: c.reported_date || "",
     amount_involved: c.amount_involved != null ? String(c.amount_involved) : "",
     amount_recovered: c.amount_recovered != null ? String(c.amount_recovered) : "",
-    currency: c.currency || "PKR",
+    currency: c.currency || defaultCurrency,
     perpetrator_type: c.perpetrator_type || "unknown",
     customer_impacted: !!c.customer_impacted,
     customers_affected: c.customers_affected != null ? String(c.customers_affected) : "",
@@ -315,7 +315,6 @@ function fromCase(c: FraudCase): CaseForm {
     investigator: c.investigator || "",
     root_cause: c.root_cause || "",
     resolution: c.resolution || "",
-    workflow_status: c.workflow_status || "draft",
   };
 }
 function casePayload(f: CaseForm): Record<string, unknown> {
@@ -339,7 +338,6 @@ function casePayload(f: CaseForm): Record<string, unknown> {
     investigator: f.investigator,
     root_cause: f.root_cause,
     resolution: f.resolution,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -399,6 +397,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 
 function FraudInner() {
   const [section, setSection] = useState<SectionId>("risks");
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const [error, setError] = useState<string | null>(null);
 
   const [summary, setSummary] = useState<FraudSummary | null>(null);
@@ -496,12 +495,12 @@ function FraudInner() {
   // ------------------------------------------------------------- case CRUD
   function openNewCase() {
     setEditingCase(null);
-    setCf(BLANK_CASE);
+    setCf({ ...BLANK_CASE, currency });
     setShowCaseForm(true);
   }
   function openEditCase(c: FraudCase) {
     setEditingCase(c);
-    setCf(fromCase(c));
+    setCf(fromCase(c, currency));
     setShowCaseForm(true);
   }
   async function saveCase() {
@@ -610,9 +609,9 @@ function FraudInner() {
     { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
     { key: "title", header: "Title", sortable: true, render: (c) => <span className="cell-title">{c.title}</span> },
     { key: "scheme", header: "Scheme", sortable: true, render: (c) => <Badge tone="info">{cap(c.scheme)}</Badge> },
-    { key: "amount_involved", header: "Involved", sortable: true, render: (c) => <span className="muted">{num(c.amount_involved)} {c.currency}</span> },
-    { key: "amount_recovered", header: "Recovered", sortable: true, render: (c) => <span className="muted">{num(c.amount_recovered)}</span> },
-    { key: "net_loss", header: "Net loss", render: (c) => <span className="muted">{num(c.net_loss)}</span> },
+    { key: "amount_involved", header: "Involved", sortable: true, render: (c) => <span className="muted">{formatMoney(c.amount_involved, c.currency)}</span> },
+    { key: "amount_recovered", header: "Recovered", sortable: true, render: (c) => <span className="muted">{formatMoney(c.amount_recovered, c.currency)}</span> },
+    { key: "net_loss", header: "Net loss", render: (c) => <span className="muted">{formatMoney(c.net_loss, c.currency)}</span> },
     { key: "perpetrator_type", header: "Perpetrator", sortable: true, render: (c) => <span className="muted">{cap(c.perpetrator_type)}</span> },
     { key: "regulator", header: "Regulator", render: (c) => (c.reported_to_regulator ? <Badge tone="high">Reported{c.regulator_ref ? ` · ${c.regulator_ref}` : ""}</Badge> : <span className="muted">Not reported</span>) },
     { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CASE_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
@@ -625,7 +624,7 @@ function FraudInner() {
     { key: "category", header: "Category", sortable: true, render: (k) => <Badge tone="info">{cap(k.category)}</Badge> },
     { key: "sbp_reference", header: "SBP ref", sortable: true, render: (k) => <span className="muted">{k.sbp_reference || "—"}</span> },
     { key: "owner", header: "Owner", sortable: true, render: (k) => <span className="muted">{k.owner || "—"}</span> },
-    { key: "target_date", header: "Target", sortable: true, render: (k) => <span className="muted">{k.target_date || "—"}</span> },
+    { key: "target_date", header: "Target", sortable: true, render: (k) => <span className="muted">{formatDate(k.target_date)}</span> },
     { key: "status", header: "Status", sortable: true, render: (k) => <Badge tone={CONTROL_STATUS_TONE[k.status] || "neutral"}>{cap(k.status)}</Badge> },
     { key: "implemented", header: "Implemented", render: (k) => <span onClick={(e) => e.stopPropagation()}><Toggle checked={k.implemented} onChange={() => toggleImplemented(k)} /></span> },
     { key: "actions", header: "", render: (k) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCheck(k)}>Delete</button></div> },
@@ -656,6 +655,7 @@ function FraudInner() {
       <Field label="Description">
         <TextArea value={rf.description} onChange={(v) => setR("description", v)} rows={3} placeholder="How the fraud could occur." />
       </Field>
+      <RecordApproval entityType="fraud_risk" entityId={editingRisk?.id ?? null} onChanged={reloadRisks} />
     </>
   );
   const riskAssessment = (
@@ -685,14 +685,9 @@ function FraudInner() {
       <Field label="Red flags" help="Warning indicators that this fraud may be occurring.">
         <TextArea value={rf.red_flags} onChange={(v) => setR("red_flags", v)} rows={3} placeholder="Out-of-pattern cash-outs, dormant-account reactivation…" />
       </Field>
-      <div className="field-row">
-        <Field label="Owner">
-          <TextInput value={rf.owner} onChange={(v) => setR("owner", v)} placeholder="Risk owner" />
-        </Field>
-        <Field label="Workflow" help="Approval lifecycle for this record.">
-          <Select value={rf.workflow_status} onChange={(v) => setR("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-      </div>
+      <Field label="Owner">
+        <TextInput value={rf.owner} onChange={(v) => setR("owner", v)} placeholder="Risk owner" />
+      </Field>
     </>
   );
 
@@ -726,16 +721,16 @@ function FraudInner() {
   const caseLoss = (
     <>
       <div className="field-row">
-        <Field label="Amount involved" help="Gross fraud amount (PKR).">
+        <Field label="Amount involved" help="Gross fraud amount.">
           <TextInput type="number" value={cf.amount_involved} onChange={(v) => setC("amount_involved", v)} placeholder="0" />
         </Field>
-        <Field label="Amount recovered" help="Recovered so far (PKR). Net loss = involved − recovered.">
+        <Field label="Amount recovered" help="Recovered so far. Net loss = involved − recovered.">
           <TextInput type="number" value={cf.amount_recovered} onChange={(v) => setC("amount_recovered", v)} placeholder="0" />
         </Field>
       </div>
       <div className="field-row">
         <Field label="Currency">
-          <TextInput value={cf.currency} onChange={(v) => setC("currency", v)} placeholder="PKR" />
+          <Select value={cf.currency} onChange={(v) => setC("currency", v)} options={currencyOptions} />
         </Field>
         <Field label="Customers affected">
           <TextInput type="number" value={cf.customers_affected} onChange={(v) => setC("customers_affected", v)} placeholder="0" />
@@ -773,9 +768,6 @@ function FraudInner() {
       </Field>
       <Field label="Resolution">
         <TextArea value={cf.resolution} onChange={(v) => setC("resolution", v)} rows={3} placeholder="Outcome, recovery and remediation." />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this record.">
-        <Select value={cf.workflow_status} onChange={(v) => setC("workflow_status", v)} options={WORKFLOW} />
       </Field>
     </>
   );
@@ -855,7 +847,7 @@ function FraudInner() {
           <span className="l">Open fraud cases</span>
         </div>
         <div className="card stat">
-          <div className="stat-top"><span className="n">{summary ? pkr(summary.total_net_loss) : "—"}</span></div>
+          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_net_loss, summary.reporting_currency) : "—"}</span></div>
           <span className="l">Total net fraud loss</span>
         </div>
         <div className="card stat">
@@ -867,6 +859,13 @@ function FraudInner() {
           <span className="l">High residual risks</span>
         </div>
       </div>
+
+      {summary && unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_net_loss, unconverted: summary.unconverted }) && (
+        <div className="card card-pad" style={{ marginBottom: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_net_loss, unconverted: summary.unconverted })}
+          {" — "}<Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
         {SECTIONS.map((s) => (
@@ -938,6 +937,7 @@ function FraudInner() {
 
       {/* ===================== FRAUD CASE — read-only detail view (?id=) */}
       <RecordDrawer
+        aside={detail ? <RecordApproval entityType="fraud_case" entityId={detail.id} onChanged={() => { reloadCases(); loadDetail(detail.id); }} /> : null}
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? `${detail.reference || "—"} — ${detail.title}` : "…"}
@@ -953,9 +953,9 @@ function FraudInner() {
         {detail && (
           <>
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-end", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Amount involved</div><div style={{ marginTop: 4 }}>{num(detail.amount_involved)} {detail.currency}</div></div>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Recovered</div><div style={{ marginTop: 4 }}>{num(detail.amount_recovered)} {detail.currency}</div></div>
-              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Net loss</div><div style={{ marginTop: 4 }}>{num(detail.net_loss)} {detail.currency}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Amount involved</div><div style={{ marginTop: 4 }}>{formatMoney(detail.amount_involved, detail.currency)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Recovered</div><div style={{ marginTop: 4 }}>{formatMoney(detail.amount_recovered, detail.currency)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Net loss</div><div style={{ marginTop: 4 }}>{formatMoney(detail.net_loss, detail.currency)}</div></div>
               <div style={{ marginLeft: "auto", textAlign: "right" }}><div className="muted" style={{ fontSize: 12 }}>Status</div><div style={{ marginTop: 4 }}><Badge tone={CASE_STATUS_TONE[detail.status] || "neutral"}>{cap(detail.status)}</Badge></div></div>
             </div>
 
@@ -963,7 +963,6 @@ function FraudInner() {
               {field("Scheme", <Badge tone="info">{cap(detail.scheme)}</Badge>)}
               {field("Channel", cap(detail.channel))}
               {field("Perpetrator", cap(detail.perpetrator_type))}
-              {field("Workflow", cap(detail.workflow_status))}
             </div>
 
             {detail.description && (
@@ -983,9 +982,9 @@ function FraudInner() {
             </div>
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
-              {field("Incident date", detail.incident_date || "—")}
-              {field("Discovery date", detail.discovery_date || "—")}
-              {field("Reported date", detail.reported_date || "—")}
+              {field("Incident date", formatDate(detail.incident_date))}
+              {field("Discovery date", formatDate(detail.discovery_date))}
+              {field("Reported date", formatDate(detail.reported_date))}
             </div>
 
             <div style={{ padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>

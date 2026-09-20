@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type MatrixBand, type RiskMatrix } from "@/lib/api";
+import { api, type MatrixBand, type RiskMatrix, type RiskMatrixCell } from "@/lib/api";
 
 /* The grid, its axis wording and its severity bands all come from the server, because
    the matrix is per-organisation configurable (3x3 to 6x6, ISO 27005 / 31000 / in-house
@@ -22,6 +22,11 @@ function bandFor(score: number, bands: MatrixBand[]): string {
   return hit ? hit.severity : "low";
 }
 
+/** A cell's band: the server's (it applies the organisation's cell-by-cell overrides),
+ *  else its score's band. */
+const cellBand = (c: RiskMatrixCell | undefined, score: number, bands: MatrixBand[]) =>
+  c?.band ?? bandFor(score, bands);
+
 export default function RiskHeatmap() {
   const [matrix, setMatrix] = useState<RiskMatrix | null>(null);
   const [mode, setMode] = useState<"inherent" | "residual">("residual");
@@ -38,7 +43,7 @@ export default function RiskHeatmap() {
     const out: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
     for (const c of matrix?.cells ?? []) {
       const n = mode === "inherent" ? c.inherent_count : c.residual_count;
-      if (n) out[bandFor(c.score, bands)] += n;
+      if (n) out[cellBand(c, c.score, bands)] += n;
     }
     return out;
   }, [matrix, mode, bands]);
@@ -92,11 +97,11 @@ export default function RiskHeatmap() {
                       <div
                         key={`${l}-${i}`}
                         className={`hm-cell${n ? " filled" : ""}`}
-                        style={n ? { background: BAND_COLOR[bandFor(score, bands)] } : undefined}
+                        style={n ? { background: BAND_COLOR[cellBand(c, score, bands)] } : undefined}
                         title={
                           `Likelihood ${levelName("likelihood", l)}\n` +
                           `Impact ${levelName("impact", i)}\n` +
-                          `Score ${score} (${bandFor(score, bands)})\n${refs(l, i)}`
+                          `Score ${score} (${cellBand(c, score, bands)})\n${refs(l, i)}`
                         }
                       >
                         {n || ""}

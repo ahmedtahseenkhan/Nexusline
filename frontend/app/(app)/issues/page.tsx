@@ -1,24 +1,52 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
-import { apiCall } from "@/lib/api";
+import Link from "next/link";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { api, apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
+import { useFormat } from "@/lib/format";
+import { confirmDeleteWithImpact, records } from "@/lib/records";
+import type { LookupRef, UnitRef, UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { useFilterParams, type FilterSpec } from "@/lib/useFilterParams";
 import DataTable, { type Column } from "@/components/DataTable";
+import BulkEditBar from "@/components/BulkEditBar";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import AsyncMultiSelect from "@/components/AsyncMultiSelect";
+import { type GraphRef } from "@/components/RelatedChips";
+import { useHasPermission } from "@/lib/tenantSettings";
+import UserPicker, { UserName } from "@/components/UserPicker";
+import LookupSelect from "@/components/LookupSelect";
+import BusinessUnitSelect, { UnitName } from "@/components/BusinessUnitSelect";
+import ArchivedRecords from "@/components/ArchivedRecords";
+import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import {
+  Disclosure, FactList, LabelledSearch, OpenPoints, PrimaryAction, RecordSection, RelatedGroups, SectionNav, SummaryBand,
+  approvalHintFor, approvalMetaItem, pickPrimary, primaryLabel, relatedCount, rowAction, rowLabel, useRecordCtx,
+  useRecordGovernanceData, useRecordSections, withBaseMoreItems, type MetaItem, type PrimaryCandidate, type RelatedGroup,
+} from "@/components/record";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import ImportExport from "@/components/ImportExport";
+import { titleCase } from "@/lib/text";
+import { plural, sentenceCase, textOnlyPerson, uniqueLabels } from "@/lib/record/text";
+import {
+  ISSUE_CLEAR_TEXT, isIssueClosed, issueClosureGuidance, issueHeadline, issueOpenPoints, issueOverdueText, issueSourceLabel,
+  issueTiles, type IssueInput,
+} from "@/lib/record/issue";
+import type { PointAction } from "@/lib/record/types";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
+const errMsg = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 
 // ------------------------------------------------------------------ local types
 type IssueAction = {
@@ -28,6 +56,8 @@ type IssueAction = {
   description: string;
   action_type: string;
   owner: string;
+  owner_id: string | null;
+  owner_ref: UserRef | null;
   due_date: string | null;
   status: string;
   completed_date: string | null;
@@ -41,10 +71,31 @@ type IssueUpdate = {
   issue_id: string;
   note: string;
   author: string;
+  author_id: string | null;
+  author_ref: UserRef | null;
   update_date: string | null;
   status_change: string;
   created_at?: string;
 };
+
+type DueDateChange = {
+  id: string;
+  issue_id: string;
+  old_due_date: string | null;
+  new_due_date: string | null;
+  reason: string;
+  /** pending | approved | rejected */
+  status: string;
+  requested_by_id: string | null;
+  requested_by_ref: UserRef | null;
+  /** Who decided it; empty when no approval was needed. */
+  approved_by_id: string | null;
+  approved_by_ref: UserRef | null;
+  approved_at: string | null;
+  created_at: string;
+};
+
+type AssetRef = GraphRef & { asset_class?: string };
 
 type Issue = {
   id: string;
@@ -54,18 +105,42 @@ type Issue = {
   source_type: string;
   source_reference: string;
   source_id: string | null;
+  /** Legacy text (the picked value's label once a category is picked). */
   category: string;
+  category_id: string | null;
+  category_ref: LookupRef | null;
   severity: string;
   status: string;
+  /** Legacy text (the picked user's name once an owner is picked). */
   owner: string;
+  owner_id: string | null;
+  owner_ref: UserRef | null;
   business_unit: string;
+  business_unit_id: string | null;
+  business_unit_ref: UnitRef | null;
   identified_date: string | null;
   due_date: string | null;
+  /** Set by the server when the issue closes; cleared on reopen. Read-only. */
   closed_date: string | null;
   root_cause: string;
+  root_cause_category_id: string | null;
+  root_cause_category_ref: LookupRef | null;
   management_response: string;
   repeat_finding: boolean;
   regulator_related: boolean;
+  validated_by_id: string | null;
+  validated_by_ref: UserRef | null;
+  validated_at: string | null;
+  /** effective | not_effective */
+  validation_result: string | null;
+  validation_note: string;
+  risks: GraphRef[];
+  controls: GraphRef[];
+  requirements: GraphRef[];
+  assets: AssetRef[];
+  vendors: GraphRef[];
+  due_date_changes: DueDateChange[];
+  due_date_moves: number;
   workflow_status: string;
   action_count: number;
   open_action_count: number;
@@ -84,6 +159,7 @@ type IssuesSummary = {
   overdue_count: number;
   repeat_finding_count: number;
   regulator_related_open: number;
+  due_date_changes_pending?: number;
 };
 
 // ------------------------------------------------------------------ enum lists
@@ -98,12 +174,114 @@ const SOURCE_TYPES = opts([
   "risk_assessment",
   "self_identified",
   "other",
-]);
+  "ccm",
+]).map((o) => (o.value === "ccm" ? { ...o, label: "Continuous monitoring" } : o));
 const ISSUE_STATUS = opts(["open", "in_progress", "remediated", "closed", "risk_accepted"]);
+/** What the edit form may set; closing goes through Validate and Close. */
+const OPEN_STATUS = opts(["open", "in_progress"]);
+const CLOSE_STATUS = opts(["closed", "remediated", "risk_accepted"]);
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 const CAPA_TYPE = ["corrective", "preventive"];
+/** Register filters, kept in the URL so a link can open the list already filtered
+ *  (the dashboard's "issues past due" → `/issues?overdue=true`). */
+const ISSUE_FILTERS = {
+  status: ["open", "in_progress", "remediated", "closed", "risk_accepted"],
+  source_type: [
+    "internal_audit", "compliance", "rcsa", "shariah", "assessment", "incident",
+    "external_inspection", "risk_assessment", "self_identified", "other", "ccm",
+  ],
+  overdue: "boolean",
+  regulator_related: "boolean",
+  due_date_change_pending: "boolean",
+  min_due_date_moves: ["1", "2", "3"],
+} as const satisfies FilterSpec;
 const ACTION_STATUS = ["open", "in_progress", "done", "cancelled"];
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
+
+// ------------------------------------------------------------------ source record link
+/* `source_id` is a bare id with no type column: the kind of record it points at is picked
+   here, and an existing link is recognised by asking the generic records API which
+   register holds it (the guess from `source_type` first). */
+type SourceKind = "risk" | "control" | "requirement" | "incident";
+const SOURCE_KINDS: { value: SourceKind; label: string }[] = [
+  { value: "risk", label: "Risk" },
+  { value: "control", label: "Control" },
+  { value: "requirement", label: "Compliance requirement" },
+  { value: "incident", label: "Incident" },
+];
+/** Unknown kind: an id we could not place in any of the registers above (kept as is). */
+const OTHER_KIND = "other";
+const SOURCE_TYPE_FOR_KIND: Partial<Record<SourceKind, string>> = {
+  risk: "risk_assessment",
+  requirement: "compliance",
+  incident: "incident",
+};
+const SOURCE_HREF: Record<SourceKind, string> = {
+  risk: "/risks",
+  control: "/controls",
+  requirement: "/compliance",
+  incident: "/incidents",
+};
+const KIND_FOR_SOURCE_TYPE: Record<string, SourceKind> = {
+  risk_assessment: "risk",
+  compliance: "requirement",
+  incident: "incident",
+};
+
+type Referenced = { id: string; reference?: string; title?: string; name?: string };
+const refLabel = (x: Referenced) =>
+  [x.reference, x.title || x.name].filter(Boolean).join(" · ") || x.id;
+const pagedSearch = (path: string) => (q: string): Promise<AsyncOption[]> =>
+  apiCall<PagedList<Referenced>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+    r.items.map((x) => ({ value: x.id, label: refLabel(x) })),
+  );
+const SOURCE_SEARCH: Record<SourceKind, (q: string) => Promise<AsyncOption[]>> = {
+  risk: pagedSearch("risks"),
+  control: pagedSearch("controls"),
+  incident: pagedSearch("incidents"),
+  requirement: (q) =>
+    apiCall<{ id: string; reference: string; title: string; framework: string }[]>(
+      "GET",
+      `/requirements?search=${encodeURIComponent(q)}&limit=20`,
+    ).then((rows) => rows.map((r) => ({ value: r.id, label: refLabel(r), sub: r.framework }))),
+};
+
+/* Typed links (issue_risks, issue_controls …): what the issue concerns, beside where it
+   came from (the source fields above). */
+type LinkKind = "risk" | "control" | "requirement" | "asset" | "vendor";
+type LinkField = "risk_ids" | "control_ids" | "requirement_ids" | "asset_ids" | "vendor_ids";
+const LINKS: { kind: LinkKind; field: LinkField; label: string; help: string; search: (q: string) => Promise<AsyncOption[]> }[] = [
+  { kind: "risk", field: "risk_ids", label: "Risks", help: "Risks this issue affects or evidences.", search: SOURCE_SEARCH.risk },
+  { kind: "control", field: "control_ids", label: "Controls", help: "Controls found deficient. While the issue is open it holds each control at partially effective.", search: SOURCE_SEARCH.control },
+  { kind: "requirement", field: "requirement_ids", label: "Compliance requirements", help: "Clauses the gap breaches.", search: SOURCE_SEARCH.requirement },
+  { kind: "asset", field: "asset_ids", label: "Assets", help: "IT or information assets involved.", search: pagedSearch("assets") },
+  { kind: "vendor", field: "vendor_ids", label: "Third parties", help: "Vendors or outsourcing providers involved.", search: pagedSearch("vendors") },
+];
+const LINK_FIELD_FOR_SOURCE: Partial<Record<SourceKind, LinkField>> = {
+  risk: "risk_ids",
+  control: "control_ids",
+  requirement: "requirement_ids",
+};
+const toOptions = (items: GraphRef[] | undefined): AsyncOption[] =>
+  (items ?? []).map((x) => ({ value: x.id, label: refLabel(x) }));
+
+type ResolvedSource = { kind: SourceKind | typeof OTHER_KIND; label: string };
+
+/** Which register holds `id`, and its label; `other` when none of them does. */
+async function resolveSource(id: string, sourceType: string): Promise<ResolvedSource> {
+  const guess = KIND_FOR_SOURCE_TYPE[sourceType];
+  const order: SourceKind[] = guess
+    ? [guess, ...SOURCE_KINDS.map((k) => k.value).filter((k) => k !== guess)]
+    : SOURCE_KINDS.map((k) => k.value);
+  for (const kind of order) {
+    try {
+      const r = await records.impact(kind, id);
+      return { kind, label: r.label || id };
+    } catch {
+      /* not this register — try the next */
+    }
+  }
+  return { kind: OTHER_KIND, label: "" };
+}
 
 // ------------------------------------------------------------------ tones
 const STATUS_TONE: Record<string, Tone> = {
@@ -128,46 +306,65 @@ function SevBadge({ value }: { value: string | null }) {
   return <Badge tone={SEV_TONE[value] || "neutral"}>{cap(value)}</Badge>;
 }
 
+// ------------------------------------------------------------------ record copy
+/* The issue's judgement wording (tiles, open points, headline, closure guidance) lives in
+   lib/record/issue.ts, pinned by lib/record/__fixtures__/issue-*.json. */
+const isClosed = isIssueClosed;
+
+/** Labels of the built-in fields a custom field could duplicate (admins get a note). */
+const ISSUE_BUILT_IN_LABELS = ["Owner", "Severity", "Status", "Due date", "Category", "Business unit", "Root cause", "Source"];
+
 // ------------------------------------------------------------------ form state
 type IssueForm = {
   title: string;
   description: string;
   source_type: string;
   source_reference: string;
-  source_id: string;
-  category: string;
+  source_id: string | null;
+  /** "" = no linked record; "other" = an id outside the pickable registers. */
+  source_kind: string;
+  source_label: string;
+  category_id: string | null;
   severity: string;
   status: string;
-  owner: string;
-  business_unit: string;
+  owner_id: string | null;
+  business_unit_id: string | null;
   identified_date: string;
   due_date: string;
-  closed_date: string;
+  /** Required when an existing due date changes; logged with the change. */
+  due_date_reason: string;
   root_cause: string;
+  root_cause_category_id: string | null;
   management_response: string;
   repeat_finding: boolean;
   regulator_related: boolean;
-  workflow_status: string;
-};
+} & Record<LinkField, AsyncOption[]>;
 const BLANK_ISSUE: IssueForm = {
   title: "",
   description: "",
   source_type: "self_identified",
   source_reference: "",
-  source_id: "",
-  category: "",
+  source_id: null,
+  source_kind: "",
+  source_label: "",
+  category_id: null,
   severity: "medium",
   status: "open",
-  owner: "",
-  business_unit: "",
+  owner_id: null,
+  business_unit_id: null,
   identified_date: "",
   due_date: "",
-  closed_date: "",
+  due_date_reason: "",
   root_cause: "",
+  root_cause_category_id: null,
   management_response: "",
   repeat_finding: false,
   regulator_related: false,
-  workflow_status: "draft",
+  risk_ids: [],
+  control_ids: [],
+  requirement_ids: [],
+  asset_ids: [],
+  vendor_ids: [],
 };
 function fromIssue(i: Issue): IssueForm {
   return {
@@ -175,81 +372,113 @@ function fromIssue(i: Issue): IssueForm {
     description: i.description || "",
     source_type: i.source_type || "self_identified",
     source_reference: i.source_reference || "",
-    source_id: i.source_id || "",
-    category: i.category || "",
+    source_id: i.source_id || null,
+    // Guessed from the source type until resolveSource() places the id.
+    source_kind: i.source_id ? KIND_FOR_SOURCE_TYPE[i.source_type] || "risk" : "",
+    source_label: i.source_id ? "Loading…" : "",
+    category_id: i.category_id,
     severity: i.severity || "medium",
     status: i.status || "open",
-    owner: i.owner || "",
-    business_unit: i.business_unit || "",
+    owner_id: i.owner_id,
+    business_unit_id: i.business_unit_id,
     identified_date: i.identified_date || "",
     due_date: i.due_date || "",
-    closed_date: i.closed_date || "",
+    due_date_reason: "",
     root_cause: i.root_cause || "",
+    root_cause_category_id: i.root_cause_category_id ?? null,
     management_response: i.management_response || "",
     repeat_finding: !!i.repeat_finding,
     regulator_related: !!i.regulator_related,
-    workflow_status: i.workflow_status || "draft",
+    risk_ids: toOptions(i.risks),
+    control_ids: toOptions(i.controls),
+    requirement_ids: toOptions(i.requirements),
+    asset_ids: toOptions(i.assets),
+    vendor_ids: toOptions(i.vendors),
   };
 }
-function issuePayload(f: IssueForm): Record<string, unknown> {
+/** Whether saving this form moves an agreed due date (which needs a reason). */
+const movesDueDate = (f: IssueForm, original: Issue | null) =>
+  !!original?.due_date && (f.due_date || "") !== original.due_date;
+function issuePayload(f: IssueForm, original: Issue | null): Record<string, unknown> {
   return {
+    ...(movesDueDate(f, original) ? { due_date_reason: f.due_date_reason } : {}),
+    root_cause_category_id: f.root_cause_category_id,
+    ...Object.fromEntries(LINKS.map((l) => [l.field, f[l.field].map((o) => o.value)])),
     title: f.title,
     description: f.description,
     source_type: f.source_type,
     source_reference: f.source_reference,
-    source_id: f.source_id.trim() === "" ? null : f.source_id.trim(),
-    category: f.category,
+    source_id: f.source_id,
+    category_id: f.category_id,
     severity: f.severity,
     status: f.status,
-    owner: f.owner,
-    business_unit: f.business_unit,
+    owner_id: f.owner_id,
+    business_unit_id: f.business_unit_id,
     identified_date: f.identified_date || null,
     due_date: f.due_date || null,
-    closed_date: f.closed_date || null,
     root_cause: f.root_cause,
     management_response: f.management_response,
     repeat_finding: f.repeat_finding,
     regulator_related: f.regulator_related,
-    workflow_status: f.workflow_status,
   };
 }
 
 type ActionDraft = {
   title: string;
   action_type: string;
-  owner: string;
+  owner_id: string | null;
   due_date: string;
   status: string;
 };
 const BLANK_ACTION: ActionDraft = {
   title: "",
   action_type: "corrective",
-  owner: "",
+  owner_id: null,
   due_date: "",
   status: "open",
 };
 
 type UpdateDraft = {
   note: string;
-  author: string;
+  /** null = the signed-in user (the server's default). */
+  author_id: string | null;
   update_date: string;
   status_change: string;
 };
-const BLANK_UPDATE: UpdateDraft = { note: "", author: "", update_date: "", status_change: "" };
+const BLANK_UPDATE: UpdateDraft = { note: "", author_id: null, update_date: "", status_change: "" };
+
+/** A lifecycle step taken from the drawer, each in its own small dialog. */
+type Step =
+  | { kind: "validate" }
+  | { kind: "close" }
+  | { kind: "decide"; change: DueDateChange; approve: boolean };
 
 /* ================================================================ page ===== */
 function IssuesInner() {
+  const { formatDate, formatDateTime } = useFormat();
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<Issue | null>(null);
+  const [detailSource, setDetailSource] = useState<ResolvedSource | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<IssuesSummary | null>(null);
+  // Approving a later due date needs the issue approve-equivalent permission, and never
+  // the person who asked for it (the server enforces both; this only hides the buttons).
+  const canApprove = useHasPermission("workflow:approve");
+  const [meId, setMeId] = useState<string | null>(null);
+  useEffect(() => { api.me().then((m) => setMeId(m.id)).catch(() => {}); }, []);
 
-  // ---- filters ----
-  const [fStatus, setFStatus] = useState("");
-  const [fSource, setFSource] = useState("");
-  const [fOverdue, setFOverdue] = useState(false);
-  const [fRegulator, setFRegulator] = useState(false);
+  // ---- filters (in the URL: see ISSUE_FILTERS) ----
+  const filterParams = useFilterParams(ISSUE_FILTERS);
+  const fv = filterParams.values;
+
+  // ---- lifecycle step dialog (validate / close / decide a due-date change) ----
+  const [step, setStep] = useState<Step | null>(null);
+  const [stepResult, setStepResult] = useState("effective");
+  const [stepStatus, setStepStatus] = useState("closed");
+  const [stepNote, setStepNote] = useState("");
+  const [stepError, setStepError] = useState<string | null>(null);
+  const [stepSaving, setStepSaving] = useState(false);
 
   // ---- issue dialog ----
   const [editing, setEditing] = useState<Issue | null>(null);
@@ -276,88 +505,214 @@ function IssuesInner() {
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
   useEffect(() => { loadSummary(); }, [loadSummary]);
 
+  // ---- the record page (dossier, record-page-spec §4.6) ----
+  // Issues have no status rules (the status-rules engine does not cover them).
+  const gov = useRecordGovernanceData("issue", detail?.id ?? null, { statusRulesModel: null });
+  const canWrite = useHasPermission("issue:write");
+  const ctx = useRecordCtx(gov, canWrite);
+  const sections = useRecordSections();
+  const cf = useCustomFieldFacts("issue", detail?.id, { builtInLabels: ISSUE_BUILT_IN_LABELS });
+  /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
+  const [editTab, setEditTab] = useState<string | undefined>(undefined);
+  const [actionFormOpen, setActionFormOpen] = useState(false);
+  const actionTriggerRef = useRef<HTMLButtonElement>(null);
+  const [progressFormOpen, setProgressFormOpen] = useState(false);
+  const progressTriggerRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { setActionFormOpen(false); setProgressFormOpen(false); }, [openId]);
+  /** After any change: the governance (primary, sign-off), the record, the list and its totals. */
+  const refresh = () => {
+    void gov.reload();
+    if (openId) loadDetail(openId);
+    reload();
+    loadSummary();
+  };
+
+  // Place the open issue's source record (for the drawer link).
+  const detailSourceId = detail?.source_id ?? null;
+  const detailSourceType = detail?.source_type ?? "";
+  useEffect(() => {
+    let live = true;
+    setDetailSource(null);
+    if (detailSourceId) resolveSource(detailSourceId, detailSourceType).then((r) => live && setDetailSource(r));
+    return () => { live = false; };
+  }, [detailSourceId, detailSourceType]);
+
+  // Place the edited issue's source record (for the form picker).
+  const editingSourceId = showForm ? editing?.source_id ?? null : null;
+  const editingSourceType = editing?.source_type ?? "";
+  useEffect(() => {
+    let live = true;
+    if (!editingSourceId) return;
+    resolveSource(editingSourceId, editingSourceType).then((r) => {
+      if (!live) return;
+      setF((p) => (p.source_id === editingSourceId ? { ...p, source_kind: r.kind, source_label: r.label } : p));
+    });
+    return () => { live = false; };
+  }, [editingSourceId, editingSourceType]);
+
   // ------------------------------------------------------------- issue CRUD
-  function openNew() { setEditing(null); setF(BLANK_ISSUE); setError(null); setShowForm(true); }
-  function openEdit(i: Issue) { setEditing(i); setF(fromIssue(i)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK_ISSUE); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(i: Issue, tab?: string) { setEditing(i); setF(fromIssue(i)); setError(null); setEditTab(tab); setShowForm(true); }
   async function save() {
     setError(null); setSaving(true);
     try {
-      const payload = issuePayload(f);
-      if (editing) await apiCall<Issue>("PATCH", `/issues/${editing.id}`, payload);
-      else await apiCall<Issue>("POST", "/issues", payload);
-      setShowForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
-      toast(editing ? "Changes saved" : "Issue raised");
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to save issue"); }
+      const payload = issuePayload(f, editing);
+      let message = "Issue raised";
+      if (editing) {
+        const saved = await apiCall<Issue>("PATCH", `/issues/${editing.id}`, payload);
+        const waiting = movesDueDate(f, editing) && saved.due_date === editing.due_date
+          && saved.due_date_changes.some((c) => c.status === "pending");
+        message = waiting ? "Saved. The later due date is waiting for approval." : "Changes saved";
+      } else {
+        await apiCall<Issue>("POST", "/issues", payload);
+      }
+      setShowForm(false); refresh();
+      toast(message);
+    } catch (e) { setError(errMsg(e, "Failed to save issue")); }
     finally { setSaving(false); }
   }
+
+  // ------------------------------------------------------------- validate / close / decide
+  function openStep(next: Step) {
+    setStep(next); setStepNote(""); setStepError(null); setStepResult("effective"); setStepStatus("closed");
+  }
+  async function submitStep() {
+    if (!detail || !step) return;
+    setStepSaving(true); setStepError(null);
+    try {
+      if (step.kind === "validate") {
+        await apiCall<Issue>("POST", `/issues/${detail.id}/validate`, { result: stepResult, note: stepNote });
+        toast(stepResult === "effective" ? "Validation recorded" : "Sent back to the owner (in progress)");
+      } else if (step.kind === "close") {
+        await apiCall<Issue>("POST", `/issues/${detail.id}/close`, { status: stepStatus, note: stepNote });
+        toast(`Closed as ${cap(stepStatus).toLowerCase()}`);
+      } else {
+        await apiCall<Issue>("POST", `/issues/${detail.id}/due-date-changes/${step.change.id}/decide`, {
+          approve: step.approve, note: stepNote,
+        });
+        toast(step.approve ? "New due date approved" : "Due-date change rejected");
+      }
+      setStep(null); refresh();
+    } catch (e) {
+      // 409/403 bodies say exactly what is missing (open actions, evidence, validation, SoD).
+      setStepError(errMsg(e, "Could not complete this step"));
+    } finally { setStepSaving(false); }
+  }
   async function remove(i: Issue) {
-    if (!(await confirmDialog({ title: `Delete issue ${i.reference || i.title}?`, danger: true }))) return;
-    setError(null);
+    const label = i.reference ? `${i.reference} ${i.title}` : i.title;
+    if (!(await confirmDeleteWithImpact("issue", i.id, label))) return;
     try {
       await apiCall<void>("DELETE", `/issues/${i.id}`);
       setShowForm(false);
       if (openId === i.id) setOpenId(null);
-      reload(); loadSummary(); toast("Deleted");
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to delete"); }
+      reload(); loadSummary(); toast(`Deleted ${i.reference || "issue"}`);
+    } catch (e) {
+      // A 403 here is segregation of duties: the server's message says who may delete it.
+      toast(errMsg(e, "Failed to delete"), "error");
+    }
   }
 
   // ------------------------------------------------------------- CAPA actions (inline)
-  async function addAction() {
-    if (!detail) return; setError(null);
+  /** True when the action was added (the form then closes). */
+  async function addAction(): Promise<boolean> {
+    if (!detail) return false;
     try {
       await apiCall<Issue>("POST", `/issues/${detail.id}/actions`, {
-        title: ad.title, action_type: ad.action_type, owner: ad.owner,
+        title: ad.title, action_type: ad.action_type, owner_id: ad.owner_id,
         due_date: ad.due_date || null, status: ad.status,
       });
-      setAd(BLANK_ACTION); loadDetail(detail.id); reload(); loadSummary();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to add action"); }
+      setAd(BLANK_ACTION); refresh(); toast("Action added");
+      return true;
+    } catch (e) { toast(errMsg(e, "Failed to add action"), "error"); return false; }
   }
   async function setActionStatus(lineId: string, status: string) {
-    if (!detail) return; setError(null);
+    if (!detail) return;
     try {
       await apiCall<IssueAction>("PATCH", `/issue-actions/${lineId}`, { status });
-      loadDetail(detail.id); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to update action"); }
+      refresh();
+    } catch (e) { toast(errMsg(e, "Failed to update action"), "error"); }
+  }
+  async function setActionOwner(lineId: string, ownerId: string | null) {
+    if (!detail) return;
+    try {
+      await apiCall<IssueAction>("PATCH", `/issue-actions/${lineId}`, { owner_id: ownerId });
+      refresh();
+    } catch (e) { toast(errMsg(e, "Failed to change the action owner"), "error"); }
   }
   async function removeAction(lineId: string) {
     if (!detail) return;
     if (!(await confirmDialog({ title: "Remove this action?", danger: true }))) return;
-    setError(null);
     try {
       await apiCall<void>("DELETE", `/issue-actions/${lineId}`);
-      loadDetail(detail.id); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to remove action"); }
+      refresh();
+    } catch (e) { toast(errMsg(e, "Failed to remove action"), "error"); }
   }
 
   // ------------------------------------------------------------- updates (inline)
-  async function addUpdate() {
-    if (!detail) return; setError(null);
+  /** True when the update was logged (the form then closes). */
+  async function addUpdate(): Promise<boolean> {
+    if (!detail) return false;
     try {
       await apiCall<Issue>("POST", `/issues/${detail.id}/updates`, {
-        note: ud.note, author: ud.author, update_date: ud.update_date || null, status_change: ud.status_change,
+        note: ud.note,
+        // Omitted when blank: the server records the signed-in user as the author.
+        ...(ud.author_id ? { author_id: ud.author_id } : {}),
+        update_date: ud.update_date || null,
+        status_change: ud.status_change,
       });
-      setUd(BLANK_UPDATE); loadDetail(detail.id); reload();
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed to add update"); }
+      setUd(BLANK_UPDATE); refresh(); toast("Progress logged");
+      return true;
+    } catch (e) { toast(errMsg(e, "Failed to add update"), "error"); return false; }
   }
+
+  const ownerName = (i: Issue) => i.owner_ref?.full_name || i.owner_ref?.email || i.owner || "";
 
   const columns: Column<Issue>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (i) => <span className="ref">{i.reference || "—"}</span> },
     { key: "title", header: "Title", sortable: true, render: (i) => <span className="cell-title">{i.title}{i.repeat_finding && <> <Badge tone="medium">Repeat</Badge></>}{i.regulator_related && <> <Badge tone="info">Regulator</Badge></>}</span> },
     { key: "source_type", header: "Source", sortable: true, render: (i) => <Badge tone="info">{cap(i.source_type)}</Badge> },
+    { key: "category", header: "Category", hidden: true, render: (i) => <span className="muted">{i.category_ref?.label || i.category || "—"}</span>, text: (i) => i.category_ref?.label || i.category || "" },
     { key: "severity", header: "Severity", sortable: true, render: (i) => <SevBadge value={i.severity} /> },
-    { key: "owner", header: "Owner", sortable: true, render: (i) => <span className="muted">{i.owner || "—"}</span> },
+    { key: "owner", header: "Owner", sortable: true, render: (i) => <span className="muted"><UserName user={i.owner_ref} fallback={i.owner} /></span>, text: ownerName },
+    { key: "business_unit", header: "Business unit", hidden: true, render: (i) => <span className="muted"><UnitName unit={i.business_unit_ref} fallback={i.business_unit} /></span>, text: (i) => i.business_unit_ref?.name || i.business_unit || "" },
     { key: "status", header: "Status", sortable: true, render: (i) => <StatusBadge value={i.status} /> },
     { key: "actions_count", header: "Actions", align: "center", render: (i) => <span className="muted">{i.open_action_count}/{i.action_count}</span> },
-    { key: "due_date", header: "Due", sortable: true, render: (i) => (i.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{i.due_date || "—"}</span>) },
-    { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(i)}>Delete</button></div> },
+    { key: "due_date", header: "Due", sortable: true, render: (i) => (i.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(i.due_date)}</span>), text: (i) => (i.due_date ? formatDate(i.due_date) : "") },
+    { key: "due_date_moves", header: "Date moved", sortable: true, align: "center", hidden: true, render: (i) => (i.due_date_moves ? <Badge tone={i.due_date_moves > 1 ? "high" : "medium"}>{i.due_date_moves}×</Badge> : <span className="muted">—</span>), text: (i) => String(i.due_date_moves || 0) },
+    { key: "closed_date", header: "Closed", sortable: true, hidden: true, render: (i) => <span className="muted">{formatDate(i.closed_date)}</span>, text: (i) => (i.closed_date ? formatDate(i.closed_date) : "") },
+    { key: "actions", header: "", render: (i) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" {...rowAction("Edit", rowLabel(i.reference, i.title))} onClick={() => openEdit(i)}>Edit</button> <button className="btn secondary sm" {...rowAction("Delete", rowLabel(i.reference, i.title))} onClick={() => remove(i)}>Delete</button></div> },
   ];
 
-  const filters = {
-    status: fStatus || undefined,
-    source_type: fSource || undefined,
-    overdue: fOverdue || undefined,
-    regulator_related: fRegulator || undefined,
-  };
+  const filters = filterParams.values;
+
+  // ------------------------------------------------------------- source picker
+  function pickSourceKind(kind: string) {
+    setF((p) => ({ ...p, source_kind: kind, source_id: null, source_label: "" }));
+  }
+  function pickSource(id: string | null, opt: AsyncOption | null) {
+    setF((p) => {
+      if (!id) return { ...p, source_id: null, source_label: "" };
+      const kind = p.source_kind as SourceKind;
+      const suggested = SOURCE_TYPE_FOR_KIND[kind];
+      const reference = (opt?.label || "").split(" · ")[0];
+      // The record it was raised against is also linked (the server does the same).
+      const linkField = LINK_FIELD_FOR_SOURCE[kind];
+      const linked = linkField && !p[linkField].some((o) => o.value === id)
+        ? { [linkField]: [...p[linkField], { value: id, label: opt?.label || id }] }
+        : {};
+      return {
+        ...p,
+        ...linked,
+        source_id: id,
+        source_label: opt?.label || "",
+        // A linked risk / requirement / incident says where the issue came from.
+        source_type: suggested && (p.source_type === "self_identified" || p.source_type === "other") ? suggested : p.source_type,
+        source_reference: p.source_reference.trim() ? p.source_reference : reference,
+      };
+    });
+  }
+  const sourceKindOptions: Option[] =
+    f.source_kind === OTHER_KIND ? [...SOURCE_KINDS, { value: OTHER_KIND, label: "Other record" }] : SOURCE_KINDS;
 
   // ------------------------------------------------------------- form tabs
   const generalTab = (
@@ -370,18 +725,39 @@ function IssuesInner() {
       </Field>
       <div className="field-row">
         <Field label="Owner" help="Accountable for remediation.">
-          <TextInput value={f.owner} onChange={(v) => setFF("owner", v)} placeholder="Remediation owner" />
+          <UserPicker
+            value={f.owner_id}
+            onChange={(id) => setFF("owner_id", id)}
+            selected={editing?.owner_ref ?? null}
+            legacyText={editing && !editing.owner_id ? editing.owner : null}
+            placeholder="Remediation owner…"
+          />
         </Field>
         <Field label="Business unit">
-          <TextInput value={f.business_unit} onChange={(v) => setFF("business_unit", v)} placeholder="Payments" />
+          <BusinessUnitSelect
+            value={f.business_unit_id}
+            onChange={(id) => setFF("business_unit_id", id)}
+            legacyText={editing && !editing.business_unit_id ? editing.business_unit : null}
+          />
         </Field>
       </div>
       <div className="field-row">
         <Field label="Severity">
           <Select value={f.severity} onChange={(v) => setFF("severity", v)} options={SEVERITY} />
         </Field>
-        <Field label="Status">
-          <Select value={f.status} onChange={(v) => setFF("status", v)} options={ISSUE_STATUS} />
+        <Field
+          label="Status"
+          help={editing && isClosed(editing.status)
+            ? "Choosing an open status reopens the issue and clears its validation."
+            : "To close an issue, use Validate… and Close… on its record."}
+        >
+          <Select
+            value={f.status}
+            onChange={(v) => setFF("status", v)}
+            options={editing && isClosed(editing.status)
+              ? [{ value: editing.status, label: `${cap(editing.status)} (current)` }, ...OPEN_STATUS]
+              : OPEN_STATUS}
+          />
         </Field>
       </div>
     </>
@@ -393,14 +769,41 @@ function IssuesInner() {
           <Select value={f.source_type} onChange={(v) => setFF("source_type", v)} options={SOURCE_TYPES} />
         </Field>
         <Field label="Category">
-          <TextInput value={f.category} onChange={(v) => setFF("category", v)} placeholder="Operational" />
+          <LookupSelect
+            lookupKey="issue_category"
+            value={f.category_id}
+            onChange={(id) => setFF("category_id", id)}
+            legacyText={editing && !editing.category_id ? editing.category : null}
+            allowCreate
+          />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Raised against" help="The record this issue concerns — it then lists the issue too.">
+          <Select value={f.source_kind} onChange={pickSourceKind} options={sourceKindOptions} placeholder="No linked record" />
+        </Field>
+        <Field label="Source record">
+          {f.source_kind === OTHER_KIND ? (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+              <span className="muted">Linked to a record from another module.</span>
+              <button type="button" className="btn secondary sm" onClick={() => pickSourceKind("")}>Unlink</button>
+            </div>
+          ) : f.source_kind ? (
+            <AsyncSelect
+              key={f.source_kind}
+              search={SOURCE_SEARCH[f.source_kind as SourceKind]}
+              value={f.source_id}
+              selectedLabel={f.source_label}
+              placeholder={`Search ${SOURCE_KINDS.find((k) => k.value === f.source_kind)?.label.toLowerCase() ?? "records"}…`}
+              onChange={pickSource}
+            />
+          ) : (
+            <span className="muted" style={{ fontSize: 13 }}>Choose what the issue was raised against first.</span>
+          )}
         </Field>
       </div>
       <Field label="Source reference" help='Pointer to the originating record, e.g. "AUD-004 finding 3".'>
-        <TextInput value={f.source_reference} onChange={(v) => setFF("source_reference", v)} placeholder="AUD-004 finding 3" />
-      </Field>
-      <Field label="Source record ID" help="Optional UUID of the originating record.">
-        <TextInput value={f.source_id} onChange={(v) => setFF("source_id", v)} placeholder="Optional UUID" />
+        <TextInput value={f.source_reference} onChange={(v) => setFF("source_reference", v)} placeholder="e.g. AUD-004 finding 3" />
       </Field>
       <div className="field-row">
         <Field label="Repeat finding" help="Recurrence of a previously raised issue.">
@@ -412,18 +815,57 @@ function IssuesInner() {
       </div>
     </>
   );
+  const linksTab = (
+    <>
+      <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+        What this issue concerns. Each linked record lists the issue on its own page.
+      </p>
+      {LINKS.map((l) => (
+        <Field key={l.field} label={l.label} help={l.help}>
+          <AsyncMultiSelect search={l.search} value={f[l.field]} onChange={(v) => setFF(l.field, v)} />
+        </Field>
+      ))}
+    </>
+  );
+  const dueDateMoving = movesDueDate(f, editing);
   const remediationTab = (
     <>
       <div className="field-row">
         <Field label="Identified date">
           <TextInput type="date" value={f.identified_date} onChange={(v) => setFF("identified_date", v)} />
         </Field>
-        <Field label="Due date" help="Target remediation date — drives the overdue flag.">
+        <Field
+          label="Due date"
+          help={editing?.due_date
+            ? "Moving an agreed date needs a reason and is logged. A later date on a regulator-related, high or critical issue waits for approval."
+            : "Target remediation date — drives the overdue flag."}
+        >
           <TextInput type="date" value={f.due_date} onChange={(v) => setFF("due_date", v)} />
         </Field>
       </div>
-      <Field label="Closed date" help="Set automatically when the issue is closed / remediated / risk-accepted.">
-        <TextInput type="date" value={f.closed_date} onChange={(v) => setFF("closed_date", v)} />
+      {dueDateMoving && (
+        <Field label="Reason for the new due date" required help={`Currently ${formatDate(editing?.due_date ?? null)}. Kept in the issue's date history.`}>
+          <textarea
+            className="input"
+            rows={2}
+            required
+            value={f.due_date_reason}
+            onChange={(e) => setFF("due_date_reason", e.target.value)}
+            placeholder="Why the date is moving"
+          />
+        </Field>
+      )}
+      <Field label="Closed date" help="Set by the system on Close; cleared if the issue is reopened.">
+        <div style={{ fontSize: 13, padding: "6px 0" }}>
+          {editing?.closed_date ? formatDate(editing.closed_date) : <span className="muted">Not closed</span>}
+        </div>
+      </Field>
+      <Field label="Root cause category" help="From the root-cause category list; describe the detail below.">
+        <LookupSelect
+          lookupKey="root_cause_category"
+          value={f.root_cause_category_id}
+          onChange={(id) => setFF("root_cause_category_id", id)}
+        />
       </Field>
       <Field label="Root cause">
         <TextArea value={f.root_cause} onChange={(v) => setFF("root_cause", v)} rows={3} placeholder="Underlying cause." />
@@ -431,21 +873,107 @@ function IssuesInner() {
       <Field label="Management response">
         <TextArea value={f.management_response} onChange={(v) => setFF("management_response", v)} rows={3} placeholder="Agreed management action." />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this issue record.">
-        <Select value={f.workflow_status} onChange={(v) => setFF("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
+
+  // ------------------------------------------------------------- dossier
+  const primaryCandidates: PrimaryCandidate[] = detail ? [
+    { kind: "workflow", action: "approve" },
+    { kind: "workflow", action: "submit" },
+    {
+      kind: "custom", label: "Close…", onClick: () => openStep({ kind: "close" }),
+      when: canWrite && !isClosed(detail.status) && detail.open_action_count === 0 && detail.validation_result === "effective",
+    },
+    {
+      kind: "custom", label: "Validate…", onClick: () => openStep({ kind: "validate" }),
+      when: canWrite && !isClosed(detail.status) && !detail.validation_result,
+    },
+    { kind: "attest" },
+  ] : [];
+  const primary = pickPrimary(primaryCandidates, gov);
+  const issueInput: IssueInput | null = detail
+    ? { issue: detail, source: detailSource, meId, canApprove, primaryLabel: primary ? primaryLabel(primary) : null }
+    : null;
+
+  function openActionForm() {
+    sections.scrollTo("remediation");
+    setActionFormOpen(true);
+  }
+  function openProgressForm() {
+    sections.scrollTo("progress");
+    setProgressFormOpen(true);
+  }
+  /** Open-point fixes only move: scroll, focus, open Edit on a tab or open a form. */
+  function handlePoint(a: PointAction) {
+    if (!detail) return;
+    if (a.kind === "section") sections.scrollTo(a.target);
+    else if (a.kind === "edit") openEdit(detail, a.target);
+    else if (a.kind === "focus") document.getElementById(a.target)?.focus();
+    else if (a.kind === "attest") gov.openAttest();
+    else if (a.kind === "open" && a.target === "add-action") openActionForm();
+  }
+
+  const detailOwner = detail ? ownerName(detail) : "";
+  // Header meta (record-page-spec §4.6, v1.1 D1): Issue status, Record approval, then
+  // Severity, Owner, Due, Raised against.
+  const statusMeta: MetaItem | undefined = detail ? {
+    key: "status", label: "Issue status",
+    value: <Badge tone={STATUS_TONE[detail.status] || "neutral"} asIs>{sentenceCase(detail.status)}</Badge>,
+    hint: "Where the issue is in remediation. Separate from record approval.",
+  } : undefined;
+  const sourceText = detail ? issueSourceLabel(detail, detailSource) : null;
+  const issueMeta: MetaItem[] = detail ? [
+    { key: "severity", label: "Severity", value: detail.severity ? <Badge tone={SEV_TONE[detail.severity] || "neutral"} asIs>{sentenceCase(detail.severity)}</Badge> : null },
+    {
+      key: "owner", label: "Owner", value: detailOwner || null, hint: "Accountable for remediation.",
+      // Free text with no person picked is a label nobody can be notified at.
+      gap: !detailOwner ? { text: "Not assigned", fix: canWrite ? { label: "Assign", onClick: () => openEdit(detail, "general") } : undefined }
+        : textOnlyPerson(detail.owner_id, detail.owner) ? { text: "Text only", fix: canWrite ? { label: "Pick a person", onClick: () => openEdit(detail, "general") } : undefined }
+        : undefined,
+    },
+    {
+      key: "due", label: "Due",
+      value: detail.is_overdue && detail.due_date
+        ? <Badge tone="high" asIs>{issueOverdueText(detail, ctx.now)}</Badge>
+        : detail.due_date ? formatDate(detail.due_date) : null,
+      sub: detail.due_date_moves > 0 ? `moved ${detail.due_date_moves}×` : undefined,
+      hint: "Target remediation date. Moving an agreed date needs a reason and is logged.",
+      // An open issue with no target date can never go overdue: a gap, not a neutral blank.
+      gap: detail.due_date || isClosed(detail.status) ? undefined
+        : { text: "Not set", fix: canWrite ? { label: "Set due date", onClick: () => openEdit(detail, "remediation") } : undefined },
+    },
+    {
+      key: "source", label: "Raised against",
+      value: !sourceText ? <span className="muted">Not linked</span>
+        : !detailSource || detailSource.kind === OTHER_KIND ? <span className="muted">{sourceText}</span>
+        : <Link href={`${SOURCE_HREF[detailSource.kind]}?id=${detail.source_id}`}>{sourceText}</Link>,
+      sub: sentenceCase(detail.source_type || "other"),
+    },
+  ] : [];
+
+  const itAssets = detail ? detail.assets.filter((a) => a.asset_class === "it_asset") : [];
+  const linkGroups: RelatedGroup[] = detail ? [
+    { key: "risks", label: "Risks", items: detail.risks, href: "/risks" },
+    { key: "controls", label: "Controls", items: detail.controls, href: "/controls" },
+    { key: "requirements", label: "Compliance requirements", items: detail.requirements, href: "/compliance" },
+    ...(itAssets.length ? [{ key: "it_assets", label: "IT assets", items: itAssets, href: "/it-assets" }] : []),
+    {
+      key: "info_assets", label: itAssets.length ? "Information assets" : "Assets",
+      items: detail.assets.filter((a) => a.asset_class !== "it_asset"), href: "/information-assets",
+    },
+    { key: "vendors", label: "Third parties", items: detail.vendors, href: "/vendors" },
+  ] : [];
 
   // ------------------------------------------------------------- render
   return (
     <>
-      <div className="page-head row-between">
-        <div>
+      <div className="page-head row-between" style={{ flexWrap: "wrap" }}>
+        {/* The actions wrap under the title on a phone instead of widening the page. */}
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
           <h1>Issues &amp; Actions</h1>
           <p>One unified register of findings and corrective/preventive actions (CAPA) aggregated from audit, compliance, RCSA, Shariah, assessments, incidents and regulatory inspections.</p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <ImportExport resource="issues" label="Issues" onDone={() => setRefreshKey((k) => k + 1)} />
           <button className="btn" onClick={openNew}>
             <IconPlus width={16} height={16} /> New issue
@@ -473,6 +1001,10 @@ function IssuesInner() {
           <div className="stat-top"><span className="n">{summary ? summary.regulator_related_open.toLocaleString() : "—"}</span></div>
           <span className="l">Regulator-related open</span>
         </div>
+        <div className="card stat">
+          <div className="stat-top"><span className="n">{summary ? (summary.due_date_changes_pending ?? 0).toLocaleString() : "—"}</span></div>
+          <span className="l">Due-date extensions awaiting approval</span>
+        </div>
       </div>
 
       <DataTable<Issue>
@@ -484,22 +1016,36 @@ function IssuesInner() {
         searchPlaceholder="Search title, reference, owner…"
         defaultSort={{ by: "created_at", dir: "desc" }}
         filters={filters}
+        onApplyFilters={filterParams.replace}
+        bulkActions={(rows, clear) => (
+          <BulkEditBar entityType="issue" rows={rows} onDone={() => { clear(); reload(); loadSummary(); }} />
+        )}
         toolbarRight={
           <>
-            <select className="select" style={{ maxWidth: 170 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
+            <select className="select" style={{ maxWidth: 170 }} value={fv.status ?? ""} onChange={(e) => filterParams.set("status", (e.target.value || undefined) as typeof fv.status)}>
               <option value="">All statuses</option>
               {ISSUE_STATUS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
-            <select className="select" style={{ maxWidth: 190 }} value={fSource} onChange={(e) => setFSource(e.target.value)}>
+            <select className="select" style={{ maxWidth: 190 }} value={fv.source_type ?? ""} onChange={(e) => filterParams.set("source_type", (e.target.value || undefined) as typeof fv.source_type)}>
               <option value="">All sources</option>
               {SOURCE_TYPES.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
             <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-              <input type="checkbox" checked={fOverdue} onChange={(e) => setFOverdue(e.target.checked)} /> Overdue
+              <input type="checkbox" checked={fv.overdue === true} onChange={(e) => filterParams.set("overdue", e.target.checked || undefined)} /> Overdue
             </label>
             <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-              <input type="checkbox" checked={fRegulator} onChange={(e) => setFRegulator(e.target.checked)} /> Regulator
+              <input type="checkbox" checked={fv.regulator_related === true} onChange={(e) => filterParams.set("regulator_related", e.target.checked || undefined)} /> Regulator
             </label>
+            <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+              <input type="checkbox" checked={fv.due_date_change_pending === true} onChange={(e) => filterParams.set("due_date_change_pending", e.target.checked || undefined)} /> Extension pending
+            </label>
+            <select className="select" style={{ maxWidth: 170 }} value={fv.min_due_date_moves ?? ""} onChange={(e) => filterParams.set("min_due_date_moves", (e.target.value || undefined) as typeof fv.min_due_date_moves)} aria-label="Due date moved">
+              <option value="">Any date history</option>
+              <option value="1">Date moved 1+ times</option>
+              <option value="2">Date moved 2+ times</option>
+              <option value="3">Date moved 3+ times</option>
+            </select>
+            <ArchivedRecords entityType="issue" noun="issues" refreshKey={refreshKey} onRestored={() => { reload(); loadSummary(); }} />
           </>
         }
         emptyMessage="No issues. Raise an issue, or feed findings from audit, compliance, RCSA, Shariah, incidents and inspections into one register."
@@ -507,134 +1053,352 @@ function IssuesInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="issue" entityId={detail.id} /> : null}
+        variant="dossier"
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
-        title={detail ? `${detail.reference} — ${detail.title}` : "…"}
-        subtitle={detail ? `${cap(detail.status)} · ${cap(detail.source_type)}${detail.owner ? " · owner " + detail.owner : ""} · ${detail.age_days}d old` : ""}
-        width={820}
-        actions={detail && (
-          <>
-            <button className="btn secondary sm" onClick={() => openEdit(detail)}>Edit</button>
-            <button className="btn secondary sm" onClick={() => remove(detail)}>Delete</button>
-          </>
-        )}
+        governance={gov}
+        identity={detail ? {
+          kind: "Issue",
+          backLabel: "Issues & Actions",
+          reference: detail.reference || null,
+          name: detail.title,
+          lead: detail.description || null,
+          badges: (detail.repeat_finding || detail.regulator_related) ? (
+            <>
+              {detail.repeat_finding && <Badge tone="medium" asIs>Repeat finding</Badge>}
+              {detail.regulator_related && <Badge tone="info" asIs>Regulator-related</Badge>}
+            </>
+          ) : null,
+          status: statusMeta,
+          approval: approvalMetaItem(gov, ctx.fmt, approvalHintFor("Issue status")),
+          meta: issueMeta,
+          statusRules: null,
+        } : undefined}
+        primaryAction={<PrimaryAction candidates={primaryCandidates} onChanged={refresh} />}
+        onEdit={detail && canWrite ? () => openEdit(detail) : undefined}
+        moreItems={detail ? withBaseMoreItems(
+          canWrite ? [
+            ...(!isClosed(detail.status) ? [
+              { label: "Validate…", onClick: () => openStep({ kind: "validate" }), hint: "Record whether the fix works" },
+              { label: "Close…", onClick: () => openStep({ kind: "close" }) },
+            ] : []),
+            { label: "Add action", onClick: openActionForm },
+            { label: "Log progress", onClick: openProgressForm },
+            { label: "Change due date…", onClick: () => openEdit(detail, "remediation"), hint: "Asks for a reason and records it" },
+          ] : [],
+          { onDelete: canWrite ? () => remove(detail) : undefined },
+        ) : []}
+        aside={detail ? (
+          <RecordPanels model="issue" entityId={detail.id} layout="dossier" signOff={{ onChanged: refresh }} trail={{ reference: detail.reference }} />
+        ) : null}
       >
-        {detail && (
+        {detail && issueInput && (
           <>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-              <SevBadge value={detail.severity} />
-              <StatusBadge value={detail.status} />
-              {detail.is_overdue && <Badge tone="high">Overdue</Badge>}
-            </div>
+            <SummaryBand tiles={issueTiles(issueInput, ctx)} headline={issueHeadline(issueInput, ctx)} />
+            <OpenPoints
+              points={issueOpenPoints(issueInput, ctx)}
+              canAct={canWrite}
+              onAction={handlePoint}
+              clearText={ISSUE_CLEAR_TEXT}
+            />
+            <SectionNav />
 
-            {(detail.description || detail.root_cause || detail.management_response) && (
-              <div style={{ marginBottom: 16, display: "grid", gap: 8 }}>
-                {detail.description && <div><span className="muted" style={{ fontSize: 12 }}>Description</span><div>{detail.description}</div></div>}
-                {detail.root_cause && <div><span className="muted" style={{ fontSize: 12 }}>Root cause</span><div>{detail.root_cause}</div></div>}
-                {detail.management_response && <div><span className="muted" style={{ fontSize: 12 }}>Management response</span><div>{detail.management_response}</div></div>}
-              </div>
-            )}
+            <RecordSection
+              id="finding"
+              title="Finding"
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "remediation")}>Edit finding</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "root_cause", label: "Root cause", value: detail.root_cause?.trim() || null, wide: true, tab: "remediation" },
+                  { key: "response", label: "Management response", value: detail.management_response?.trim() || null, wide: true, tab: "remediation" },
+                  { key: "rc_category", label: "Root-cause category", value: detail.root_cause_category_ref?.label || null, tab: "remediation" },
+                  { key: "category", label: "Category", value: detail.category_ref?.label || detail.category || null, tab: "classification" },
+                  {
+                    key: "unit", label: "Business unit", tab: "general",
+                    value: detail.business_unit_ref || detail.business_unit ? <UnitName unit={detail.business_unit_ref} fallback={detail.business_unit} /> : null,
+                  },
+                  { key: "identified", label: "Identified", value: detail.identified_date ? formatDate(detail.identified_date) : null, tab: "remediation" },
+                  {
+                    key: "source", label: "Source", tab: "classification",
+                    value: `${sentenceCase(detail.source_type || "other")}${detail.source_reference ? ` · ${detail.source_reference}` : ""}`,
+                  },
+                ]}
+                onFillIn={canWrite ? (tab) => openEdit(detail, tab) : undefined}
+              />
+            </RecordSection>
 
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Corrective &amp; preventive actions (CAPA)</h3></div>
-              <div className="card-pad">
-                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
-                  The remediation plan for this issue. Marking an action done stamps its completion date.
-                </p>
-                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); addAction(); }}>
-                  <div style={{ flex: "1 1 200px" }}>
-                    <label className="label">Action title</label>
-                    <input className="input" value={ad.title} onChange={(ev) => setAD("title", ev.target.value)} placeholder="Corrective action" required />
-                  </div>
-                  <div style={{ width: 140 }}>
-                    <label className="label">Type</label>
-                    <select className="select" value={ad.action_type} onChange={(ev) => setAD("action_type", ev.target.value)}>
-                      {CAPA_TYPE.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                    </select>
-                  </div>
-                  <div style={{ width: 130 }}>
-                    <label className="label">Owner</label>
-                    <input className="input" value={ad.owner} onChange={(ev) => setAD("owner", ev.target.value)} placeholder="Owner" />
-                  </div>
-                  <div style={{ width: 140 }}>
-                    <label className="label">Due date</label>
-                    <input className="input" type="date" value={ad.due_date} onChange={(ev) => setAD("due_date", ev.target.value)} />
-                  </div>
-                  <button className="btn">Add</button>
-                </form>
-
-                <div className="table-wrap">
-                  <table>
-                    <thead><tr><th>Title</th><th>Type</th><th>Owner</th><th>Due</th><th>Completed</th><th>Status</th><th></th></tr></thead>
+            <RecordSection
+              id="remediation"
+              title="Remediation (CAPA)"
+              count={detail.actions.length}
+              sub={detail.actions.length ? "Marking an action done stamps its completion date" : undefined}
+              actions={canWrite ? (
+                <button
+                  ref={actionTriggerRef}
+                  type="button"
+                  className="btn secondary sm"
+                  aria-expanded={actionFormOpen}
+                  aria-controls="issue-add-action"
+                  onClick={() => setActionFormOpen((v) => !v)}
+                >
+                  Add action
+                </button>
+              ) : undefined}
+              empty={detail.actions.length === 0 && !actionFormOpen ? "No actions recorded yet." : undefined}
+            >
+              <Disclosure label="Add action" hideTrigger open={actionFormOpen} onOpenChange={setActionFormOpen} id="issue-add-action" triggerRef={actionTriggerRef}>
+                {(close) => (
+                  <form className="row" onSubmit={async (ev) => { ev.preventDefault(); if (await addAction()) close(); }}>
+                    <div style={{ flex: "1 1 200px" }}>
+                      <label className="label" htmlFor="capa-title">Action title</label>
+                      <input id="capa-title" className="input" value={ad.title} onChange={(ev) => setAD("title", ev.target.value)} placeholder="Corrective action" required />
+                    </div>
+                    <div style={{ width: 140 }}>
+                      <label className="label" htmlFor="capa-type">Type</label>
+                      <select id="capa-type" className="select" value={ad.action_type} onChange={(ev) => setAD("action_type", ev.target.value)}>
+                        {CAPA_TYPE.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                      </select>
+                    </div>
+                    <div style={{ width: 210 }}>
+                      <LabelledSearch label="Owner">
+                        <UserPicker value={ad.owner_id} onChange={(id) => setAD("owner_id", id)} placeholder="Action owner…" />
+                      </LabelledSearch>
+                    </div>
+                    <div style={{ width: 140 }}>
+                      <label className="label" htmlFor="capa-due">Due date</label>
+                      <input id="capa-due" className="input" type="date" value={ad.due_date} onChange={(ev) => setAD("due_date", ev.target.value)} />
+                    </div>
+                    <button type="submit" className="btn secondary sm" disabled={!ad.title.trim()}>Add</button>
+                    <button type="button" className="btn secondary sm" onClick={close}>Cancel</button>
+                  </form>
+                )}
+              </Disclosure>
+              {detail.actions.length > 0 && (
+                <div className="rec-table-wrap" style={{ marginTop: actionFormOpen ? 12 : 0 }}>
+                  <table className="compact">
+                    <thead><tr><th>Title</th><th>Type</th><th>Owner</th><th>Due</th><th>Completed</th><th>Status</th><th aria-label="Actions" /></tr></thead>
                     <tbody>
-                      {detail.actions.map((a) => (
+                      {detail.actions.map((a, ai, all) => {
+                        // The row's name for its controls (decision D3): title, and the due
+                        // date when set; still unique when two actions share both.
+                        const al = uniqueLabels(all.map((x) => (x.due_date ? `${x.title} (due ${formatDate(x.due_date)})` : x.title)))[ai];
+                        return (
                         <tr key={a.id}>
                           <td className="cell-title">{a.title}</td>
-                          <td><Badge tone={a.action_type === "preventive" ? "info" : "neutral"}>{cap(a.action_type)}</Badge></td>
-                          <td className="muted">{a.owner || "—"}</td>
-                          <td>{a.is_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{a.due_date || "—"}</span>}</td>
-                          <td className="muted">{a.completed_date || "—"}</td>
-                          <td>
-                            <select className="select" value={a.status} onChange={(ev) => setActionStatus(a.id, ev.target.value)} style={{ padding: "2px 6px", height: "auto" }}>
-                              {ACTION_STATUS.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
-                            </select>
+                          <td><Badge tone={a.action_type === "preventive" ? "info" : "neutral"} asIs>{sentenceCase(a.action_type)}</Badge></td>
+                          <td style={{ minWidth: canWrite ? 180 : undefined }}>
+                            {canWrite ? (
+                              <LabelledSearch label={`Owner of ${al}`} hideLabel>
+                                <UserPicker
+                                  value={a.owner_id}
+                                  selected={a.owner_ref}
+                                  legacyText={a.owner_id ? null : a.owner}
+                                  onChange={(id) => setActionOwner(a.id, id)}
+                                  placeholder="No owner"
+                                />
+                              </LabelledSearch>
+                            ) : a.owner_ref || a.owner ? <UserName user={a.owner_ref} fallback={a.owner} /> : <span className="muted">Not assigned</span>}
                           </td>
-                          <td><button className="btn secondary sm" onClick={() => removeAction(a.id)}>Remove</button></td>
+                          <td style={{ whiteSpace: "nowrap" }}>{a.is_overdue ? <Badge tone="high" asIs>Overdue</Badge> : a.due_date ? <span className="muted">{formatDate(a.due_date)}</span> : <span className="muted">Not set</span>}</td>
+                          <td className="muted" style={{ whiteSpace: "nowrap" }}>{a.completed_date ? formatDate(a.completed_date) : "Not yet"}</td>
+                          <td>
+                            {canWrite ? (
+                              <select className="select" value={a.status} aria-label={`Status of ${al}`} onChange={(ev) => setActionStatus(a.id, ev.target.value)} style={{ padding: "2px 6px", height: "auto" }}>
+                                {ACTION_STATUS.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
+                              </select>
+                            ) : sentenceCase(a.status)}
+                          </td>
+                          <td>{canWrite && <button type="button" className="btn secondary sm" {...rowAction("Remove", al)} onClick={() => removeAction(a.id)}>Remove</button>}</td>
                         </tr>
-                      ))}
-                      {detail.actions.length === 0 && (<tr><td colSpan={7}><span className="muted">No actions recorded yet.</span></td></tr>)}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
-              </div>
-            </div>
+              )}
+            </RecordSection>
 
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Progress log</h3></div>
-              <div className="card-pad">
-                <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>Chronological remediation updates and status changes.</p>
-                <form style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }} onSubmit={(ev) => { ev.preventDefault(); addUpdate(); }}>
-                  <div style={{ flex: "1 1 220px" }}>
-                    <label className="label">Update note</label>
-                    <input className="input" value={ud.note} onChange={(ev) => setUD("note", ev.target.value)} placeholder="Progress note" required />
-                  </div>
-                  <div style={{ width: 130 }}>
-                    <label className="label">Author</label>
-                    <input className="input" value={ud.author} onChange={(ev) => setUD("author", ev.target.value)} placeholder="Author" />
-                  </div>
-                  <div style={{ width: 140 }}>
-                    <label className="label">Date</label>
-                    <input className="input" type="date" value={ud.update_date} onChange={(ev) => setUD("update_date", ev.target.value)} />
-                  </div>
-                  <div style={{ width: 160 }}>
-                    <label className="label">Status change</label>
-                    <input className="input" value={ud.status_change} onChange={(ev) => setUD("status_change", ev.target.value)} placeholder="open → in_progress" />
-                  </div>
-                  <button className="btn">Log</button>
-                </form>
-
-                <div className="table-wrap">
-                  <table>
+            <RecordSection
+              id="progress"
+              title="Progress log"
+              count={detail.updates.length}
+              actions={canWrite ? (
+                <button
+                  ref={progressTriggerRef}
+                  type="button"
+                  className="btn secondary sm"
+                  aria-expanded={progressFormOpen}
+                  aria-controls="issue-log-progress"
+                  onClick={() => setProgressFormOpen((v) => !v)}
+                >
+                  Log progress
+                </button>
+              ) : undefined}
+              empty={detail.updates.length === 0 && !progressFormOpen ? "No progress logged yet." : undefined}
+            >
+              <Disclosure label="Log progress" hideTrigger open={progressFormOpen} onOpenChange={setProgressFormOpen} id="issue-log-progress" triggerRef={progressTriggerRef}>
+                {(close) => (
+                  <form className="row" onSubmit={async (ev) => { ev.preventDefault(); if (await addUpdate()) close(); }}>
+                    <div style={{ flex: "1 1 220px" }}>
+                      <label className="label" htmlFor="upd-note">Update note</label>
+                      <input id="upd-note" className="input" value={ud.note} onChange={(ev) => setUD("note", ev.target.value)} placeholder="Progress note" required />
+                    </div>
+                    <div style={{ width: 200 }}>
+                      <LabelledSearch label="Author">
+                        <UserPicker value={ud.author_id} onChange={(id) => setUD("author_id", id)} placeholder="You" />
+                      </LabelledSearch>
+                    </div>
+                    <div style={{ width: 140 }}>
+                      <label className="label" htmlFor="upd-date">Date</label>
+                      <input id="upd-date" className="input" type="date" value={ud.update_date} onChange={(ev) => setUD("update_date", ev.target.value)} />
+                    </div>
+                    <div style={{ width: 160 }}>
+                      <label className="label" htmlFor="upd-status">Status change</label>
+                      <input id="upd-status" className="input" value={ud.status_change} onChange={(ev) => setUD("status_change", ev.target.value)} placeholder="open → in_progress" />
+                    </div>
+                    <button type="submit" className="btn secondary sm" disabled={!ud.note.trim()}>Log</button>
+                    <button type="button" className="btn secondary sm" onClick={close}>Cancel</button>
+                  </form>
+                )}
+              </Disclosure>
+              {detail.updates.length > 0 && (
+                <div className="rec-table-wrap" style={{ marginTop: progressFormOpen ? 12 : 0 }}>
+                  <table className="compact">
                     <thead><tr><th>Date</th><th>Author</th><th>Note</th><th>Status change</th></tr></thead>
                     <tbody>
                       {[...detail.updates]
                         .sort((a, b) => (b.update_date || "").localeCompare(a.update_date || ""))
                         .map((u) => (
                           <tr key={u.id}>
-                            <td className="muted">{u.update_date || "—"}</td>
-                            <td className="muted">{u.author || "—"}</td>
-                            <td className="cell-title">{u.note || "—"}</td>
-                            <td className="muted">{u.status_change || "—"}</td>
+                            <td className="muted" style={{ whiteSpace: "nowrap" }}>{u.update_date ? formatDate(u.update_date) : "Not dated"}</td>
+                            <td className="muted"><UserName user={u.author_ref} fallback={u.author} /></td>
+                            <td className="cell-title">{u.note || <span className="muted">No note</span>}</td>
+                            <td className="muted">{u.status_change || "None"}</td>
                           </tr>
                         ))}
-                      {detail.updates.length === 0 && (<tr><td colSpan={4}><span className="muted">No progress logged yet.</span></td></tr>)}
                     </tbody>
                   </table>
                 </div>
-              </div>
-            </div>
+              )}
+            </RecordSection>
 
+            <RecordSection
+              id="due"
+              title="Due date history"
+              count={detail.due_date_changes.length}
+              sub={detail.due_date_moves ? `Date moved ${plural(detail.due_date_moves, "time")}` : undefined}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "remediation")}>Change due date</button> : undefined}
+              empty={detail.due_date_changes.length === 0 ? "Date never moved. Editing the due date asks for a reason and records it here." : undefined}
+            >
+              <div className="rec-table-wrap">
+                <table className="compact">
+                  <thead><tr><th>Asked</th><th>From</th><th>To</th><th>Reason</th><th>Asked by</th><th>Status</th><th aria-label="Decision" /></tr></thead>
+                  <tbody>
+                    {[...detail.due_date_changes].reverse().map((c) => {
+                      const canDecide = c.status === "pending" && canApprove && !!meId && c.requested_by_id !== meId;
+                      return (
+                        <tr key={c.id}>
+                          <td className="muted" style={{ whiteSpace: "nowrap" }}>{formatDate(c.created_at)}</td>
+                          <td className="muted" style={{ whiteSpace: "nowrap" }}>{c.old_due_date ? formatDate(c.old_due_date) : "No date"}</td>
+                          <td style={{ whiteSpace: "nowrap" }}>{c.new_due_date ? formatDate(c.new_due_date) : <span className="muted">No date</span>}</td>
+                          <td className="cell-title">{c.reason || <span className="muted">No reason</span>}</td>
+                          <td className="muted"><UserName user={c.requested_by_ref} fallback="" /></td>
+                          <td>
+                            <Badge tone={c.status === "approved" ? "low" : c.status === "rejected" ? "neutral" : "medium"} asIs>
+                              {c.status === "pending" ? "Awaiting approval" : sentenceCase(c.status)}
+                            </Badge>
+                            {c.approved_by_ref && (
+                              <div className="muted" style={{ fontSize: 11.5 }}>
+                                <UserName user={c.approved_by_ref} fallback="" /> · {formatDateTime(c.approved_at)}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            {canDecide && (
+                              <>
+                                <button type="button" className="btn secondary sm" {...rowAction("Approve", `the move to ${c.new_due_date ? formatDate(c.new_due_date) : "no date"}`)} onClick={() => openStep({ kind: "decide", change: c, approve: true })}>Approve</button>{" "}
+                                <button type="button" className="btn secondary sm" {...rowAction("Reject", `the move to ${c.new_due_date ? formatDate(c.new_due_date) : "no date"}`)} onClick={() => openStep({ kind: "decide", change: c, approve: false })}>Reject</button>
+                              </>
+                            )}
+                            {c.status === "pending" && !canDecide && (
+                              <span className="muted" style={{ fontSize: 11.5 }}>
+                                {c.requested_by_id === meId ? "Someone else must approve" : "Needs an approver"}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </RecordSection>
+
+            <RecordSection
+              id="closure"
+              title="Validation & closure"
+              actions={!isClosed(detail.status) && canWrite ? (
+                <>
+                  <button type="button" className="btn secondary sm" aria-label={`Validate ${detail.reference || "this issue"}`} onClick={() => openStep({ kind: "validate" })}>Validate…</button>
+                  <button type="button" className="btn secondary sm" aria-label={`Close ${detail.reference || "this issue"}`} onClick={() => openStep({ kind: "close" })}>Close…</button>
+                </>
+              ) : undefined}
+            >
+              <div style={{ fontSize: 13 }}>
+                {detail.validation_result ? (
+                  <div style={{ display: "grid", gap: 4 }}>
+                    <div>
+                      <Badge tone={detail.validation_result === "effective" ? "low" : "high"} asIs>
+                        {detail.validation_result === "effective" ? "Validated effective" : "Validated not effective"}
+                      </Badge>{" "}
+                      <span className="muted">
+                        by <UserName user={detail.validated_by_ref} fallback="" /> · {formatDateTime(detail.validated_at)}
+                      </span>
+                    </div>
+                    {detail.validation_note && <p className="rec-quote">{detail.validation_note}</p>}
+                  </div>
+                ) : (
+                  <span className="muted">Not validated yet.</span>
+                )}
+                {isClosed(detail.status) ? (
+                  <p className="muted" style={{ margin: "10px 0 0" }}>
+                    {sentenceCase(detail.status)} on {formatDate(detail.closed_date)}. To reopen, edit the issue and choose an open status — its validation is cleared.
+                  </p>
+                ) : (
+                  <p className="muted" style={{ margin: "10px 0 0", maxWidth: "86ch" }}>{issueClosureGuidance(detail.open_action_count)}</p>
+                )}
+              </div>
+            </RecordSection>
+
+            <RecordSection
+              id="details"
+              title="Details"
+              actions={canWrite ? <button type="button" className="btn secondary sm" aria-label="Edit details" onClick={() => openEdit(detail)}>Edit</button> : undefined}
+            >
+              <FactList
+                items={[
+                  { key: "repeat", label: "Repeat finding", value: detail.repeat_finding ? "Yes" : "No", tab: "classification" },
+                  { key: "regulator", label: "Regulator-related", value: detail.regulator_related ? "Yes" : "No", tab: "classification" },
+                  { key: "closed", label: "Closed", value: detail.closed_date ? formatDate(detail.closed_date) : "Not closed" },
+                  { key: "created", label: "Created", value: detail.created_at ? formatDate(detail.created_at) : null },
+                  ...cf.facts,
+                ]}
+                onFillIn={canWrite ? (tab) => (tab === "custom" ? cf.setEditing(true) : openEdit(detail, tab)) : undefined}
+              />
+              {cf.editor}
+              {cf.editLink(canWrite)}
+            </RecordSection>
+
+            <RecordSection
+              id="linked"
+              title="Linked records"
+              count={relatedCount(linkGroups)}
+              actions={canWrite ? <button type="button" className="btn secondary sm" onClick={() => openEdit(detail, "links")}>Link records</button> : undefined}
+            >
+              {/* The head holds "Link records"; the empty line needs no second one (v1.1 D3). */}
+              <RelatedGroups groups={linkGroups} />
+            </RecordSection>
           </>
         )}
       </RecordDrawer>
@@ -647,8 +1411,10 @@ function IssuesInner() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "classification", label: "Classification", content: classificationTab },
+            { id: "links", label: "Links", content: linksTab },
             { id: "remediation", label: "Remediation", content: remediationTab },
           ]}
+          initialTab={editTab}
           onClose={() => setShowForm(false)}
           onSave={save}
           saving={saving}
@@ -663,8 +1429,91 @@ function IssuesInner() {
           }
         />
       )}
+
+      {step && detail && (
+        <FormModal
+          title={
+            step.kind === "validate" ? `Validate ${detail.reference}`
+              : step.kind === "close" ? `Close ${detail.reference}`
+              : `${step.approve ? "Approve" : "Reject"} new due date — ${detail.reference}`
+          }
+          tabs={[{ id: "step", label: "Step", content: stepContent(step, detail) }]}
+          onClose={() => setStep(null)}
+          onSave={submitStep}
+          saving={stepSaving}
+          error={stepError}
+          saveLabel={
+            step.kind === "validate" ? "Record validation"
+              : step.kind === "close" ? "Close issue"
+              : step.approve ? "Approve" : "Reject"
+          }
+        />
+      )}
     </>
   );
+
+  function stepContent(s: Step, i: Issue) {
+    if (s.kind === "validate") {
+      return (
+        <>
+          <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+            You are certifying whether the remediation works. You must not be the issue&apos;s owner or the person who raised it.
+            Recording it as effective needs closure evidence attached to the issue; not effective sends it back to the owner.
+          </p>
+          <Field label="Result" required>
+            <Select value={stepResult} onChange={setStepResult} options={[
+              { value: "effective", label: "Effective — the fix works" },
+              { value: "not_effective", label: "Not effective — send back" },
+            ]} />
+          </Field>
+          <Field label="Validation note" required help="What you checked and what you found.">
+            <textarea className="input" rows={3} required value={stepNote} onChange={(e) => setStepNote(e.target.value)} />
+          </Field>
+        </>
+      );
+    }
+    if (s.kind === "close") {
+      const ready = [
+        { ok: i.open_action_count === 0, text: i.open_action_count ? `${i.open_action_count} action(s) still open` : "No open actions" },
+        { ok: i.validation_result === "effective", text: i.validation_result === "effective" ? "Validated effective" : "No effective validation yet" },
+      ];
+      return (
+        <>
+          <Field label="Close as" required>
+            <Select value={stepStatus} onChange={setStepStatus} options={CLOSE_STATUS} />
+          </Field>
+          <ul style={{ margin: "0 0 12px", paddingLeft: 18, fontSize: 13 }}>
+            {stepStatus === "risk_accepted" ? (
+              <>
+                <li className={i.open_action_count ? "" : "muted"}>{ready[0].text}</li>
+                <li className="muted">Needs an approved risk acceptance on a linked risk, or a note from someone who may approve issues.</li>
+              </>
+            ) : (
+              ready.map((r) => <li key={r.text} style={{ color: r.ok ? undefined : "var(--danger, #c0392b)" }}>{r.ok ? "✓ " : "✗ "}{r.text}</li>)
+            )}
+            <li className="muted">The person who raised the issue cannot close it.</li>
+          </ul>
+          <Field label="Closure note" required={stepStatus === "risk_accepted"} help="Kept in the progress log and the audit trail.">
+            <textarea className="input" rows={3} value={stepNote} onChange={(e) => setStepNote(e.target.value)} />
+          </Field>
+        </>
+      );
+    }
+    return (
+      <>
+        <p style={{ margin: "0 0 12px", fontSize: 13 }}>
+          Move the due date from <strong>{formatDate(s.change.old_due_date)}</strong> to{" "}
+          <strong>{s.change.new_due_date ? formatDate(s.change.new_due_date) : "no date"}</strong>.
+        </p>
+        <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+          Reason given by <UserName user={s.change.requested_by_ref} fallback="the requester" />: {s.change.reason || "—"}
+        </p>
+        <Field label="Note" help="Optional; kept in the progress log.">
+          <textarea className="input" rows={2} value={stepNote} onChange={(e) => setStepNote(e.target.value)} />
+        </Field>
+      </>
+    );
+  }
 }
 
 export default function IssuesPage() {

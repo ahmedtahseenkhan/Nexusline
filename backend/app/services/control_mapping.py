@@ -13,7 +13,10 @@ answer as content, the way the scenario library holds threats and vulnerabilitie
 * **Scenario mapping.** For each of the 42 scenarios, the controls that address it, in
   every control framework the library ships. Authored against ISO 27001 Annex A first
   (the vocabulary everything else cross-walks to), then CIS v8 and the SBP
-  Cybersecurity framework, which is what the client's regulator examines against.
+  Cybersecurity framework, which is what the client's regulator examines against —
+  and then the rest of the SBP set a Pakistani bank is examined on: ETGRM (technology
+  governance), the Outsourcing framework and the BCP guidelines, so a generated risk
+  in a bank that installed only the SBP frameworks still lands on controls.
 
 Two rules keep this honest. The mapping says *"meant to address"*, never *"working"*:
 a generated risk gets its controls linked, and its residual stays equal to inherent
@@ -38,14 +41,63 @@ class ControlFramework:
     #: Only requirements whose reference starts with one of these are controls; the
     #: rest are management-system clauses (ISO 27001's 4-10) and stay requirements only.
     control_ref_prefixes: tuple[str, ...] = ()
+    #: Individual references that are controls although their section is not (ETGRM's
+    #: "1.6 Segregation of duties" sits in the governance pillar). Exact match — a
+    #: prefix would make ``OS-1.5`` swallow ``OS-1.50``.
+    control_refs: tuple[str, ...] = ()
+    #: For a framework whose catalogue spelling adds no prefix: the namespace its own
+    #: references already carry (``A.``, ``CS-``, ``ETGRM-``), which is how a catalogue
+    #: reference is traced back to its framework.
+    namespace: str = ""
 
 
+#: The SBP frameworks are split the way ISO 27001 is. Governance, risk-management and
+#: assurance clauses (board oversight, the IT risk framework, the audit function) are
+#: the management system and stay requirements; the operational ones — something a
+#: bank does, and could test, on a schedule — are controls:
+#:
+#: * **ETGRM** — pillars 3 Information Security, 4 IT Operations, 5 Project Management
+#:   & Acquisition, 6 BCP/DR and 7 IT Outsourcing, plus 1.6 Segregation of duties and
+#:   1.9 Regulatory compliance (ISO's A.5.3 and A.5.31 are Annex A controls too).
+#:   Pillars 1 (governance), 2 (IT risk management) and 8 (IT audit) are clauses.
+#: * **Outsourcing** — sections 3-10 (due diligence, contracts, monitoring, data
+#:   security, continuity, cloud/offshore, exit, regulatory notification) plus the
+#:   outsourcing register (1.5) and the per-arrangement risk assessment, oversight and
+#:   reassessment (2.3-2.5). Policy, accountability and the materiality method are
+#:   governance.
+#: * **BCP** — BIA (2), recovery strategy (4), plans (5), crisis management (6),
+#:   testing (7), DR site and backup (9), plus periodic plan review (8.1) and training
+#:   (8.3). Governance (1), the risk assessment (3), change-driven updates (8.2) and
+#:   independent audit (8.4) are clauses.
+#:
+#: Their references are already namespaced (``ETGRM-3.4``, ``OS-6.2``, ``BCP-9.4``), so
+#: the catalogue spells them as the framework does, like ``CS-3.3``: no two frameworks
+#: can collide, and a control a bank already keyed as ``ETGRM-3.4`` is matched, not
+#: duplicated.
 CONTROL_FRAMEWORKS: dict[str, ControlFramework] = {
-    "iso-27001-2022": ControlFramework("iso-27001-2022", "", ("A.",)),
+    "iso-27001-2022": ControlFramework("iso-27001-2022", "", ("A.",), namespace="A."),
     "cis-controls-v8": ControlFramework("cis-controls-v8", "CIS "),
-    "sbp-cybersecurity": ControlFramework("sbp-cybersecurity", ""),
+    "sbp-cybersecurity": ControlFramework("sbp-cybersecurity", "", namespace="CS-"),
     "nist-800-53-r5": ControlFramework("nist-800-53-r5", ""),
     "pci-dss-4.0": ControlFramework("pci-dss-4.0", "PCI "),
+    "sbp-etgrm": ControlFramework(
+        "sbp-etgrm", "",
+        ("ETGRM-3.", "ETGRM-4.", "ETGRM-5.", "ETGRM-6.", "ETGRM-7."),
+        ("ETGRM-1.6", "ETGRM-1.9"),
+        namespace="ETGRM-",
+    ),
+    "sbp-outsourcing": ControlFramework(
+        "sbp-outsourcing", "",
+        ("OS-3.", "OS-4.", "OS-5.", "OS-6.", "OS-7.", "OS-8.", "OS-9.", "OS-10."),
+        ("OS-1.5", "OS-2.3", "OS-2.4", "OS-2.5"),
+        namespace="OS-",
+    ),
+    "sbp-bcp": ControlFramework(
+        "sbp-bcp", "",
+        ("BCP-2.", "BCP-4.", "BCP-5.", "BCP-6.", "BCP-7.", "BCP-9."),
+        ("BCP-8.1", "BCP-8.3"),
+        namespace="BCP-",
+    ),
 }
 
 
@@ -59,7 +111,11 @@ def is_control_requirement(template_key: str, reference: str) -> bool:
     fw = CONTROL_FRAMEWORKS.get(template_key)
     if fw is None:
         return False
-    return not fw.control_ref_prefixes or reference.startswith(fw.control_ref_prefixes)
+    if not fw.control_ref_prefixes and not fw.control_refs:
+        return True
+    return reference in fw.control_refs or (
+        bool(fw.control_ref_prefixes) and reference.startswith(fw.control_ref_prefixes)
+    )
 
 
 def catalogue_reference(template_key: str, reference: str) -> str:
@@ -77,7 +133,10 @@ def control_requirements(template: dict, template_key: str) -> list[dict]:
 # Scenario → controls
 # ---------------------------------------------------------------------------
 #: Scenario reference -> catalogue-spelled control references, ISO first, then CIS,
-#: then SBP. Order is presentation order in the proposal.
+#: then SBP Cybersecurity. Order is presentation order in the proposal. The ETGRM,
+#: Outsourcing and BCP references are kept in ``_SBP_SCENARIO_CONTROLS`` below and
+#: appended, so the original mapping reads as it did and the addition can be told
+#: apart (see ``upgraded_references``).
 SCENARIO_CONTROLS: dict[str, tuple[str, ...]] = {
     # --- access control -------------------------------------------------------------
     "RS-001": ("A.5.15", "A.5.18", "A.8.3", "CIS 6.1", "CIS 6.2", "CIS 6.8", "CS-3.1", "CS-3.2"),
@@ -133,8 +192,95 @@ SCENARIO_CONTROLS: dict[str, tuple[str, ...]] = {
 }
 
 
+#: The rest of the SBP set, per scenario: ETGRM technology controls, then Outsourcing
+#: (where a third party is in the chain), then BCP (where the scenario is a disruption).
+#: Chosen from each clause's title and text; every reference is a control of its
+#: framework (pinned by ``tests/test_control_mapping.py``).
+_SBP_SCENARIO_CONTROLS: dict[str, tuple[str, ...]] = {
+    # --- access control
+    "RS-001": ("ETGRM-3.4", "ETGRM-3.5"),
+    "RS-002": ("ETGRM-3.5", "ETGRM-3.10", "ETGRM-1.6"),
+    "RS-003": ("ETGRM-3.5", "ETGRM-3.4"),
+    "RS-004": ("ETGRM-3.4", "ETGRM-3.10"),
+    # --- data protection
+    "RS-005": ("ETGRM-3.11", "ETGRM-3.3"),
+    "RS-006": ("ETGRM-7.6", "ETGRM-3.3", "OS-6.1", "OS-4.3"),
+    "RS-007": ("ETGRM-3.8",),
+    "RS-008": ("ETGRM-3.8", "ETGRM-3.6"),
+    "RS-009": ("ETGRM-3.3", "ETGRM-3.11"),
+    "RS-010": ("ETGRM-3.11", "ETGRM-4.3", "OS-6.5"),
+    # --- cyber security
+    "RS-011": ("ETGRM-3.7", "ETGRM-4.6", "ETGRM-3.9", "ETGRM-6.5", "BCP-9.3", "BCP-9.4"),
+    "RS-012": ("ETGRM-3.7", "ETGRM-3.6"),
+    "RS-013": ("ETGRM-3.9", "ETGRM-4.9"),
+    "RS-014": ("ETGRM-3.6", "ETGRM-4.4", "ETGRM-6.5", "BCP-9.5"),
+    "RS-015": ("ETGRM-5.4", "ETGRM-5.5", "ETGRM-3.6"),
+    "RS-016": ("ETGRM-4.3", "ETGRM-3.7"),
+    "RS-017": ("ETGRM-7.5", "ETGRM-4.9", "ETGRM-5.6", "OS-3.3", "OS-5.2"),
+    # --- business continuity
+    "RS-018": ("ETGRM-6.5", "ETGRM-6.3", "ETGRM-6.4", "BCP-4.1", "BCP-5.1", "BCP-9.5"),
+    "RS-019": ("ETGRM-4.6", "ETGRM-6.6", "BCP-9.3", "BCP-9.4"),
+    "RS-020": ("ETGRM-6.6", "ETGRM-6.4", "BCP-9.2", "BCP-7.1"),
+    "RS-021": ("BCP-4.4", "BCP-5.2"),
+    "RS-022": ("ETGRM-4.7", "BCP-9.5", "BCP-4.5"),
+    # --- change / operations
+    "RS-023": ("ETGRM-4.2", "ETGRM-1.6", "ETGRM-5.7"),
+    "RS-024": ("ETGRM-4.2", "ETGRM-5.5", "ETGRM-4.8"),
+    "RS-025": ("ETGRM-4.8", "ETGRM-3.10", "ETGRM-4.5"),
+    "RS-026": ("ETGRM-1.6", "ETGRM-3.4"),
+    "RS-027": ("ETGRM-3.10",),
+    "RS-028": ("ETGRM-4.4", "ETGRM-4.10"),
+    "RS-029": ("ETGRM-4.3", "ETGRM-3.9"),
+    # --- third party
+    "RS-030": ("ETGRM-7.5", "ETGRM-7.8", "OS-7.1", "OS-7.3", "OS-5.1"),
+    "RS-031": ("ETGRM-7.6", "OS-6.2", "OS-4.3"),
+    "RS-032": ("ETGRM-7.8", "OS-7.4", "OS-9.1"),
+    # --- physical
+    "RS-033": ("ETGRM-3.7", "ETGRM-3.8", "ETGRM-4.3"),
+    "RS-034": ("ETGRM-4.7",),
+    "RS-035": ("ETGRM-4.7", "ETGRM-6.4", "BCP-9.1", "BCP-4.3"),
+    # --- compliance
+    "RS-036": ("ETGRM-1.9", "OS-10.1"),
+    "RS-037": ("OS-8.3", "OS-8.4", "OS-8.2", "ETGRM-7.7"),
+    "RS-038": ("ETGRM-3.3", "ETGRM-1.9", "OS-6.1"),
+    "RS-039": ("ETGRM-1.9", "OS-4.4", "OS-10.3"),
+    # --- financial crime
+    "RS-040": ("ETGRM-1.6", "ETGRM-3.5", "ETGRM-3.10"),
+    "RS-041": ("ETGRM-3.5", "ETGRM-3.10"),
+    "RS-042": ("ETGRM-1.9", "ETGRM-3.10"),
+}
+
+#: The mapping as shipped before the SBP additions — what a tenant's scenario row holds
+#: if it was installed then and never edited.
+_PREVIOUS_SCENARIO_CONTROLS: dict[str, tuple[str, ...]] = dict(SCENARIO_CONTROLS)
+
+for _scenario, _refs in _SBP_SCENARIO_CONTROLS.items():
+    SCENARIO_CONTROLS[_scenario] = SCENARIO_CONTROLS.get(_scenario, ()) + tuple(
+        r for r in _refs if r not in SCENARIO_CONTROLS.get(_scenario, ())
+    )
+del _scenario, _refs
+
+
 def references_for(scenario_reference: str) -> tuple[str, ...]:
     return SCENARIO_CONTROLS.get(scenario_reference, ())
+
+
+def upgraded_references(scenario_reference: str, stored: Iterable[str]) -> tuple[str, ...] | None:
+    """The current mapping for a tenant scenario row that still holds an earlier
+    shipped mapping verbatim, or None when the row should be left alone.
+
+    ``install-library`` never overwrites a row: a tenant may have retuned it. But a row
+    whose references are exactly what an earlier release shipped is not retuned — it is
+    just old — so it can take the SBP additions. Anything else (edited, cleared,
+    re-ordered) is the tenant's decision and returns None.
+    """
+    have = tuple(r.strip() for r in stored if r and r.strip())
+    current = references_for(scenario_reference)
+    if not have or have == current:
+        return None
+    if have == _PREVIOUS_SCENARIO_CONTROLS.get(scenario_reference):
+        return current
+    return None
 
 
 def template_for_reference(reference: str) -> tuple[str, str] | None:
@@ -144,10 +290,11 @@ def template_for_reference(reference: str) -> tuple[str, str] | None:
     for key, fw in CONTROL_FRAMEWORKS.items():
         if fw.prefix and reference.startswith(fw.prefix):
             return key, reference[len(fw.prefix):]
-    if reference.startswith("A."):
-        return "iso-27001-2022", reference
-    if reference.startswith("CS-"):
-        return "sbp-cybersecurity", reference
+    for key, fw in CONTROL_FRAMEWORKS.items():
+        if fw.namespace and reference.startswith(fw.namespace):
+            return key, reference
+    # NIST SP 800-53 families (AC-2, SC-7): two letters and a dash. Checked after the
+    # namespaced frameworks so ``OS-6.2`` is SBP Outsourcing, not a NIST family.
     if len(reference) > 3 and reference[:2].isalpha() and reference[2] == "-":
         return "nist-800-53-r5", reference
     return None

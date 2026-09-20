@@ -10,11 +10,14 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconAlert, IconPlus, IconShield } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ---- inline types (mirror backend RopaRead — schemas/privacy.py) ----
 type Ref = { id: string; name?: string; title?: string; reference?: string };
@@ -69,12 +72,11 @@ type Ropa = {
 
 type BizUnit = { id: string; name: string };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const refToOpt = (r: Ref): AsyncOption => ({ value: r.id, label: r.title || r.name || r.reference || r.id, sub: r.reference });
 
 const STATUS = opts(["draft", "active", "under_review", "retired"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const BASES = opts(["consent", "contract", "legal_obligation", "vital_interests", "public_task", "legitimate_interests"]);
 const DPIA = opts(["not_required", "required", "in_progress", "completed"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
@@ -91,7 +93,6 @@ type FormState = {
   description: string;
   purpose: string;
   status: string;
-  workflow_status: string;
   controller: string;
   processor: string;
   dpo: string;
@@ -133,7 +134,7 @@ type FormState = {
 };
 
 const BLANK: FormState = {
-  name: "", description: "", purpose: "", status: "draft", workflow_status: "draft",
+  name: "", description: "", purpose: "", status: "draft",
   controller: "", processor: "", dpo: "", business_unit_id: "",
   lawful_basis: "consent", data_subjects: "", data_categories: "", data_types: "",
   collection_methods: "", volume: "", special_category: false,
@@ -148,7 +149,7 @@ const BLANK: FormState = {
 function fromRopa(r: Ropa): FormState {
   return {
     name: r.name, description: r.description || "", purpose: r.purpose || "",
-    status: r.status, workflow_status: r.workflow_status,
+    status: r.status,
     controller: r.controller || "", processor: r.processor || "", dpo: r.dpo || "",
     business_unit_id: r.business_unit_id || "",
     lawful_basis: r.lawful_basis, data_subjects: r.data_subjects || "",
@@ -190,6 +191,7 @@ const linkCount = (r: Ropa) => r.processes.length + r.policies.length + r.assets
 /* ================================================================ page ===== */
 function PrivacyInner() {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate } = useFormat();
   const [detail, setDetail] = useState<Ropa | null>(null);
   const [units, setUnits] = useState<BizUnit[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -325,14 +327,9 @@ function PrivacyInner() {
           <Select value={f.business_unit_id} onChange={(v) => set("business_unit_id", v)} options={unitOpts} placeholder="— none —" />
         </Field>
       </div>
-      <div className="field-row">
-        <Field label="Status">
-          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
-        </Field>
-        <Field label="Workflow">
-          <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-      </div>
+      <Field label="Status">
+        <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
+      </Field>
     </>
   );
 
@@ -500,7 +497,12 @@ function PrivacyInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="processing_activity" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="processing_activity" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="processing_activity" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? `${detail.reference} — ${detail.name}` : "…"}
@@ -533,7 +535,7 @@ function PrivacyInner() {
             <div style={{ display: "flex", gap: 20, flexWrap: "wrap", padding: "12px 14px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 16 }}>
               <div><div className="muted" style={{ fontSize: 12 }}>Retention</div><div style={{ marginTop: 4, fontSize: 13 }}>{detail.retention_period || "—"}</div></div>
               <div><div className="muted" style={{ fontSize: 12 }}>DPO</div><div style={{ marginTop: 4, fontSize: 13 }}>{detail.dpo || "—"}</div></div>
-              <div><div className="muted" style={{ fontSize: 12 }}>Next review</div><div style={{ marginTop: 4, fontSize: 13 }}>{detail.review_date || "—"}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Next review</div><div style={{ marginTop: 4, fontSize: 13 }}>{formatDate(detail.review_date)}</div></div>
             </div>
 
           </>

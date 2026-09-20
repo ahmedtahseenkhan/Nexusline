@@ -15,12 +15,19 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from app.core.config import settings
 from app.core.database import Base
 from app.db.rls import apply_rls_policies
+from app.db.phase4 import all_ddl_statements as phase4_ddl_statements
+from app.db.phase5 import all_ddl_statements as phase5_ddl_statements
 from app.db.schema_patches import (
     asset_split_ddl_statements,
     risk_methodology_ddl_statements,
     audit_type_ddl_statements,
     fortnightly_ddl_statements,
     platform_admin_ddl_statements,
+    phase0_ddl_statements,
+    phase1_ddl_statements,
+    phase2_ddl_statements,
+    phase3_ddl_statements,
+    recheck_ddl_statements,
     scenario_control_references_ddl_statements,
     tat_ddl_statements,
 )
@@ -96,6 +103,13 @@ async def init_models() -> None:
             *fortnightly_ddl_statements(),
             *platform_admin_ddl_statements(),
             *scenario_control_references_ddl_statements(),
+            *phase0_ddl_statements(),
+            *phase1_ddl_statements(),
+            *phase2_ddl_statements(),
+            *phase3_ddl_statements(),
+            *recheck_ddl_statements(),
+            *phase4_ddl_statements(),
+            *phase5_ddl_statements(),
         ):
             await conn.execute(text(statement))
         await apply_rls_policies(conn)

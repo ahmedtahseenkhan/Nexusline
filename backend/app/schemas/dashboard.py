@@ -21,6 +21,8 @@ class DashboardStats(BaseModel):
     risks_elevated: int
     risks_in_breach: int
     total_exposure: float
+    #: The currency ``total_exposure`` is in (risk ALE is entered in the reporting currency).
+    exposure_currency: str = "PKR"
 
 
 # --------------------------------------------------------------------------- overview
@@ -31,15 +33,27 @@ class DashboardStats(BaseModel):
 class HealthComponent(BaseModel):
     key: str
     label: str
-    value: float
+    #: None when the component has no population ("no data"), never a free 0 or 100.
+    value: float | None
     weight: float
     detail: str
+    population: int = 0
+    formula: str = ""
+
+
+class HealthCoverage(BaseModel):
+    """What the score was computed on: "scored on 2 of 4 measures (55 % of weight)"."""
+
+    scored: int
+    total: int
+    weight_pct: float
 
 
 class Health(BaseModel):
     score: int
     band: str
     components: list[HealthComponent]
+    coverage: HealthCoverage | None = None
 
 
 class TopRisk(BaseModel):
@@ -56,9 +70,56 @@ class TopRisk(BaseModel):
     next_review_date: date | None
     review_overdue: bool
     control_count: int
+    #: Set when something the risk depended on changed underneath it (an asset removed,
+    #: residual above inherent); the page flags it until a person has looked.
+    needs_review: bool = False
+    review_reason: str = ""
+
+
+class CategoryPosture(BaseModel):
+    """Appetite and tolerance for one top-level risk category (phase 2), with where its
+    risks stand against them. ``category_id`` None is the organisation-wide default,
+    covering every risk whose category has no appetite of its own."""
+
+    category_id: uuid.UUID | None = None
+    label: str
+    appetite_score: int
+    tolerance_score: int
+    risks: int = 0
+    within_appetite: int = 0
+    elevated: int = 0
+    breach: int = 0
+
+
+class DataCompleteness(BaseModel):
+    """How far the board figures can be trusted (F-21): what they are taken over, what
+    they leave out, and how complete the live register is. Percentages are of
+    ``live_risks`` and None when there are none."""
+
+    #: Every live (not archived) risk.
+    live_risks: int
+    #: Risks the figures count: scored, out of Draft, not accepted or closed.
+    board_risks: int
+    #: Drafts — scored or not — which no figure includes until they are validated.
+    pending_validation: int
+    #: Of those, never scored at all.
+    unscored: int = 0
+    #: Accepted or closed: settled, so out of breach and top-risk figures by design.
+    settled: int = 0
+    #: The register filtered to the pending drafts.
+    pending_href: str = ""
+    owned: int = 0
+    owned_pct: float | None = None
+    #: Tagged with at least one live business unit.
+    tagged: int = 0
+    tagged_pct: float | None = None
+    #: Approved through the record lifecycle (``workflow_status``).
+    approved: int = 0
+    approved_pct: float | None = None
 
 
 class Posture(BaseModel):
+    #: The board register (see ``DataCompleteness.board_risks``).
     total_risks: int
     appetite_score: int
     tolerance_score: int
@@ -68,6 +129,8 @@ class Posture(BaseModel):
     by_inherent_severity: dict[str, int]
     by_residual_severity: dict[str, int]
     top_risks: list[TopRisk]
+    #: Per-category appetite rows (only when some category has its own appetite).
+    by_category: list[CategoryPosture] = []
 
 
 class Assurance(BaseModel):
@@ -75,11 +138,15 @@ class Assurance(BaseModel):
     effective: int
     partially_effective: int
     ineffective: int
+    #: Never tested, among controls that are implemented or operational.
     not_assessed: int
     tests_overdue: int
     tests_due_30d: int
     last_test_failed: int
     tests_in_period: int
+    #: Planned or retired: nothing to test, excluded from every testing count and from
+    #: the assurance percentage. ``total`` includes them so the bar still adds up.
+    not_operating: int = 0
 
 
 class FrameworkPosture(BaseModel):
@@ -93,11 +160,17 @@ class FrameworkPosture(BaseModel):
     unmapped: int
     compliant_pct: float
     gaps: int
+    #: compliance | maturity | guidance — only compliance frameworks feed the totals.
+    kind: str = "compliance"
 
 
 class CompliancePosture(BaseModel):
+    #: Compliance frameworks: the obligations the percentage and gap counts are taken over.
     frameworks: list[FrameworkPosture]
     overall_assured_pct: float
+    #: Maturity and guidance frameworks (ISO 31000, ISO 27005): self-assessed good
+    #: practice, listed for reference but never counted as gaps or in the percentage.
+    other_frameworks: list[FrameworkPosture] = []
 
 
 class ActionItem(BaseModel):
@@ -177,3 +250,4 @@ class DashboardOverview(BaseModel):
     third_parties: ThirdParties
     segments: list[SegmentRow]
     movement: Movement
+    completeness: DataCompleteness | None = None

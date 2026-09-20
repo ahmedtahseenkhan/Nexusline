@@ -1,15 +1,29 @@
 import type { ReactNode } from "react";
 
+export type BadgeTone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
+
+/** A status pill. `asIs` keeps the text's own casing (`.badge` capitalises every word
+ *  by default, which turns "In review" into "In Review"); `hollow` draws the outline-only
+ *  variant for "Not assessed" / "Not recorded" / "Never attested", so a missing judgement
+ *  never looks like a real status. Both default off, so existing badges are unchanged. */
 export function Badge({
   tone = "neutral",
   children,
   plain,
+  asIs,
+  hollow,
 }: {
-  tone?: "low" | "medium" | "high" | "critical" | "neutral" | "info";
+  tone?: BadgeTone;
   children: ReactNode;
   plain?: boolean;
+  asIs?: boolean;
+  hollow?: boolean;
 }) {
-  return <span className={`badge ${tone}${plain ? " plain" : ""}`}>{children}</span>;
+  return (
+    <span className={`badge ${hollow ? "hollow" : tone}${plain ? " plain" : ""}${asIs ? " as-is" : ""}`}>
+      {children}
+    </span>
+  );
 }
 
 const SEVERITY_TONE: Record<string, "low" | "medium" | "high" | "critical"> = {

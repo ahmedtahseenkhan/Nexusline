@@ -43,6 +43,14 @@ async def lifespan(app: FastAPI):
         lookups = await reconcile_reference_data()
         if lookups:
             logger.info("Reconciled reference data: added %s lookup rows", lookups)
+        # Bring data written before the product-review rules into line with them
+        # (duplicate frameworks and tiles, test clocks on planned controls, residual
+        # above inherent), then add the unique indexes those rules rely on.
+        from app.db.data_repairs import repair_data
+
+        repaired = await repair_data()
+        if repaired.any():
+            logger.info("Data repairs: %s", repaired)
     except Exception:  # noqa: BLE001
         logger.exception("Startup DB initialization failed")
         raise
@@ -62,6 +70,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Read-only mode after the licence grace period (decision 1). Added before CORS so CORS
+# stays the outer layer and a refused write still carries the CORS headers the browser
+# needs to read the message.
+from app.core.licence_guard import LicenceReadOnlyMiddleware  # noqa: E402
+
+app.add_middleware(LicenceReadOnlyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -71,7 +85,7 @@ app.add_middleware(
     # Exports name their file server-side (Content-Disposition). A browser on another
     # origin — the dev server, or a web tier on its own host — cannot read that header
     # unless it is exposed, and silently falls back to "download.pdf".
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "X-Error-Code"],
 )
 # Compress list/detail JSON payloads (nested-collection responses are large at scale).
 app.add_middleware(GZipMiddleware, minimum_size=1024)

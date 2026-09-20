@@ -27,7 +27,9 @@ from app.schemas.risk_quant import (
     SimulationResult,
 )
 from app.services.refs import next_reference
+from app.schemas.fx import UnconvertedAmount
 from app.services import audit as audit_log
+from app.services import fx
 
 router = APIRouter(tags=["risk quantification"])
 
@@ -205,27 +207,41 @@ class QuantSummary(BaseModel):
     count_simulated: int
     highest_p90: float
     top: list[QuantSummaryTop]
+    #: Decision 4: the currency the figures above are in (converted at today's rate —
+    #: an annual loss expectancy is a forward-looking figure, not a dated one).
+    reporting_currency: str = "PKR"
+    #: Quantifications whose currency has no exchange rate; left out of the total.
+    unconverted: list[UnconvertedAmount] = []
 
 
 @router.get("/risk-quantification-summary", response_model=QuantSummary, dependencies=[_READ],
             summary="Aggregate loss-exposure roll-up across quantified risks")
 async def quant_summary(db: DbSession) -> QuantSummary:
     rows = (await db.scalars(select(RiskQuantification).where(RiskQuantification.deleted.is_(False)))).all()
-    total_mean = sum(float(r.last_mean_ale or 0) for r in rows)
-    highest_p90 = max((float(r.last_p90 or 0) for r in rows), default=0.0)
+    book = await fx.load_rate_book(db)
+    total = fx.MoneyTotal(book)
+    converted: list[tuple] = []
+    for r in rows:
+        mean = book.convert(r.last_mean_ale or 0, r.currency)
+        p90 = book.convert(r.last_p90 or 0, r.currency)
+        total.add(r.last_mean_ale or 0, r.currency)
+        converted.append((r, mean, p90))
+    highest_p90 = max((float(p90.amount) for _r, _m, p90 in converted if p90.amount is not None), default=0.0)
     simulated = [r for r in rows if r.last_simulated is not None]
-    top = sorted(rows, key=lambda r: float(r.last_mean_ale or 0), reverse=True)[:5]
+    top = sorted(converted, key=lambda c: float(c[1].amount or 0), reverse=True)[:5]
     return QuantSummary(
-        total_mean_ale=round(total_mean, 2),
+        total_mean_ale=fx.money(total.total),
         count_quantified=len(rows),
         count_simulated=len(simulated),
         highest_p90=round(highest_p90, 2),
         top=[
             QuantSummaryTop(
                 id=r.id, title=r.title,
-                last_mean_ale=round(float(r.last_mean_ale or 0), 2),
-                last_p90=round(float(r.last_p90 or 0), 2),
+                last_mean_ale=round(float(mean.amount or 0), 2),
+                last_p90=round(float(p90.amount or 0), 2),
             )
-            for r in top
+            for r, mean, p90 in top
         ],
+        reporting_currency=book.reporting_currency,
+        unconverted=[UnconvertedAmount(**u) for u in total.as_dict()["unconverted"]],
     )

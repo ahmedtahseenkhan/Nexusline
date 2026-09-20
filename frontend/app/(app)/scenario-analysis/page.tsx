@@ -8,10 +8,14 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval, { WorkflowBadge } from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import Link from "next/link";
+import { getFormatSettings, unconvertedNote, useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 type ScenarioAnalysis = {
@@ -56,6 +60,9 @@ type CapitalCalculation = {
 type ScenarioSummary = {
   rows: { basel_event_type: string; count: number; expected_annual_loss: number }[];
   total_expected_annual_loss: number;
+  /** Decision 4: the currency the figures above are in, and what has no exchange rate. */
+  reporting_currency?: string;
+  unconverted?: { currency: string; count: number; amount: number }[];
   total_count: number;
   approved_count: number;
   latest_capital: {
@@ -72,12 +79,11 @@ type ScenarioSummary = {
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
 
 // ------------------------------------------------------------------ enum lists
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const SCENARIO_STATUS = opts(["draft", "workshopped", "approved", "closed"]);
 const CAPITAL_STATUS = opts(["draft", "final"]);
 const BASEL_TYPES = opts([
@@ -118,7 +124,6 @@ type ScenarioForm = {
   owner: string;
   status: string;
   review_date: string;
-  workflow_status: string;
 };
 const BLANK_SCENARIO: ScenarioForm = {
   title: "",
@@ -135,7 +140,6 @@ const BLANK_SCENARIO: ScenarioForm = {
   owner: "",
   status: "draft",
   review_date: "",
-  workflow_status: "draft",
 };
 function fromScenario(s: ScenarioAnalysis): ScenarioForm {
   return {
@@ -146,14 +150,13 @@ function fromScenario(s: ScenarioAnalysis): ScenarioForm {
     frequency_per_year: s.frequency_per_year != null ? String(s.frequency_per_year) : "",
     typical_loss: s.typical_loss != null ? String(s.typical_loss) : "",
     worst_case_loss: s.worst_case_loss != null ? String(s.worst_case_loss) : "",
-    currency: s.currency || "PKR",
+    currency: s.currency || getFormatSettings().currency,
     confidence_level: s.confidence_level || "",
     participants: s.participants || "",
     assumptions: s.assumptions || "",
     owner: s.owner || "",
     status: s.status || "draft",
     review_date: s.review_date || "",
-    workflow_status: s.workflow_status || "draft",
   };
 }
 function scenarioPayload(f: ScenarioForm): Record<string, unknown> {
@@ -172,7 +175,6 @@ function scenarioPayload(f: ScenarioForm): Record<string, unknown> {
     owner: f.owner,
     status: f.status,
     review_date: f.review_date || null,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -184,7 +186,6 @@ type CapitalForm = {
   currency: string;
   notes: string;
   status: string;
-  workflow_status: string;
 };
 const BLANK_CAPITAL: CapitalForm = {
   period: "",
@@ -193,17 +194,15 @@ const BLANK_CAPITAL: CapitalForm = {
   currency: "PKR",
   notes: "",
   status: "draft",
-  workflow_status: "draft",
 };
 function fromCapital(c: CapitalCalculation): CapitalForm {
   return {
     period: c.period || "",
     business_indicator: c.business_indicator != null ? String(c.business_indicator) : "",
     avg_annual_loss: c.avg_annual_loss != null ? String(c.avg_annual_loss) : "",
-    currency: c.currency || "PKR",
+    currency: c.currency || getFormatSettings().currency,
     notes: c.notes || "",
     status: c.status || "draft",
-    workflow_status: c.workflow_status || "draft",
   };
 }
 function capitalPayload(f: CapitalForm): Record<string, unknown> {
@@ -214,7 +213,6 @@ function capitalPayload(f: CapitalForm): Record<string, unknown> {
     currency: f.currency,
     notes: f.notes,
     status: f.status,
-    workflow_status: f.workflow_status,
   };
 }
 
@@ -225,6 +223,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 ];
 
 function ScenarioAnalysisInner() {
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const [section, setSection] = useState<SectionId>("scenarios");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -286,7 +285,7 @@ function ScenarioAnalysisInner() {
   // ------------------------------------------------------------- scenario CRUD
   function openNewScenario() {
     setEditingScenario(null);
-    setSf(BLANK_SCENARIO);
+    setSf({ ...BLANK_SCENARIO, currency });
     setError(null);
     setShowScenarioForm(true);
   }
@@ -332,7 +331,7 @@ function ScenarioAnalysisInner() {
   // ------------------------------------------------------------- capital CRUD
   function openNewCapital() {
     setEditingCapital(null);
-    setCf(BLANK_CAPITAL);
+    setCf({ ...BLANK_CAPITAL, currency });
     setError(null);
     setShowCapitalForm(true);
   }
@@ -380,8 +379,8 @@ function ScenarioAnalysisInner() {
     { key: "basel_event_type", header: "Basel event type", sortable: true, render: (s) => <Badge tone="info">{cap(s.basel_event_type)}</Badge> },
     { key: "business_line", header: "Business line", sortable: true, render: (s) => <span className="muted">{s.business_line || "—"}</span> },
     { key: "frequency_per_year", header: "Freq/yr", sortable: true, render: (s) => <span className="muted">{num(s.frequency_per_year)}</span> },
-    { key: "expected_annual_loss", header: "Expected annual loss", render: (s) => <span className="muted">{num(s.expected_annual_loss)} {s.currency}</span> },
-    { key: "worst_case_loss", header: "Worst case", sortable: true, render: (s) => <span className="muted">{num(s.worst_case_loss)}</span> },
+    { key: "expected_annual_loss", header: "Expected annual loss", render: (s) => <span className="muted">{formatMoney(s.expected_annual_loss, s.currency)}</span> },
+    { key: "worst_case_loss", header: "Worst case", sortable: true, render: (s) => <span className="muted">{formatMoney(s.worst_case_loss, s.currency)}</span> },
     { key: "status", header: "Status", sortable: true, render: (s) => <Badge tone={SCENARIO_STATUS_TONE[s.status] || "neutral"}>{cap(s.status)}</Badge> },
     { key: "actions", header: "", render: (s) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditScenario(s)}>Edit</button> <button className="btn secondary sm" onClick={() => removeScenario(s)}>Delete</button></div> },
   ];
@@ -389,13 +388,14 @@ function ScenarioAnalysisInner() {
   const capitalColumns: Column<CapitalCalculation>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (c) => <span className="ref">{c.reference || "—"}</span> },
     { key: "period", header: "Period", sortable: true, render: (c) => <span className="cell-title">{c.period || "—"}</span> },
-    { key: "business_indicator", header: "Business Indicator", sortable: true, render: (c) => <span className="muted">{num(c.business_indicator)} {c.currency}</span> },
-    { key: "avg_annual_loss", header: "Avg annual loss", sortable: true, render: (c) => <span className="muted">{num(c.avg_annual_loss)}</span> },
-    { key: "bic", header: "BIC", render: (c) => <span className="muted">{num(c.bic)}</span> },
-    { key: "loss_component", header: "Loss Component", render: (c) => <span className="muted">{num(c.loss_component)}</span> },
+    { key: "business_indicator", header: "Business Indicator", sortable: true, render: (c) => <span className="muted">{formatMoney(c.business_indicator, c.currency)}</span> },
+    { key: "avg_annual_loss", header: "Avg annual loss", sortable: true, render: (c) => <span className="muted">{formatMoney(c.avg_annual_loss, c.currency)}</span> },
+    { key: "bic", header: "BIC", render: (c) => <span className="muted">{formatMoney(c.bic, c.currency)}</span> },
+    { key: "loss_component", header: "Loss Component", render: (c) => <span className="muted">{formatMoney(c.loss_component, c.currency)}</span> },
     { key: "ilm", header: "ILM", render: (c) => <span className="muted">{num(c.ilm)}</span> },
-    { key: "orc", header: "ORC", render: (c) => <Badge tone="critical">{num(c.orc)} {c.currency}</Badge> },
+    { key: "orc", header: "ORC", render: (c) => <Badge tone="critical">{formatMoney(c.orc, c.currency)}</Badge> },
     { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CAPITAL_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
+    { key: "workflow_status", header: "Approval", render: (c) => <WorkflowBadge state={c.workflow_status} /> },
     { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCapital(c)}>Delete</button></div> },
   ];
 
@@ -416,14 +416,9 @@ function ScenarioAnalysisInner() {
       <Field label="Description" help="What happens in this scenario and how it unfolds.">
         <TextArea value={sf.description} onChange={(v) => setS("description", v)} rows={3} placeholder="Scenario narrative." />
       </Field>
-      <div className="field-row">
-        <Field label="Status">
-          <Select value={sf.status} onChange={(v) => setS("status", v)} options={SCENARIO_STATUS} />
-        </Field>
-        <Field label="Workflow" help="Approval lifecycle for this scenario record.">
-          <Select value={sf.workflow_status} onChange={(v) => setS("workflow_status", v)} options={WORKFLOW} />
-        </Field>
-      </div>
+      <Field label="Status">
+        <Select value={sf.status} onChange={(v) => setS("status", v)} options={SCENARIO_STATUS} />
+      </Field>
     </>
   );
   const estimatesTab = (
@@ -437,16 +432,16 @@ function ScenarioAnalysisInner() {
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Typical loss (PKR)" help="Expected loss per occurrence.">
+        <Field label={`Typical loss (${sf.currency || currency})`} help="Expected loss per occurrence.">
           <TextInput type="number" value={sf.typical_loss} onChange={(v) => setS("typical_loss", v)} placeholder="0" />
         </Field>
-        <Field label="Worst-case loss (PKR)" help="Severe but plausible loss per occurrence.">
+        <Field label={`Worst-case loss (${sf.currency || currency})`} help="Severe but plausible loss per occurrence.">
           <TextInput type="number" value={sf.worst_case_loss} onChange={(v) => setS("worst_case_loss", v)} placeholder="0" />
         </Field>
       </div>
       <div className="field-row">
         <Field label="Currency">
-          <TextInput value={sf.currency} onChange={(v) => setS("currency", v)} placeholder="PKR" />
+          <Select value={sf.currency} onChange={(v) => setS("currency", v)} options={currencyOptions} />
         </Field>
         <Field label="Review date" help="When this scenario should be re-workshopped.">
           <TextInput type="date" value={sf.review_date} onChange={(v) => setS("review_date", v)} />
@@ -477,15 +472,15 @@ function ScenarioAnalysisInner() {
       <Field label="Period" required help="Reporting period, e.g. FY2026.">
         <TextInput value={cf.period} onChange={(v) => setC("period", v)} placeholder="FY2026" required />
       </Field>
-      <Field label="Business Indicator — BI (PKR)" help="The Basel Business Indicator (interest, services & financial components).">
+      <Field label={`Business Indicator — BI (${cf.currency || currency})`} help="The Basel Business Indicator (interest, services & financial components).">
         <TextInput type="number" value={cf.business_indicator} onChange={(v) => setC("business_indicator", v)} placeholder="0" />
       </Field>
-      <Field label="Average annual loss (PKR)" help="10-year average of internal operational losses (drives the Loss Component).">
+      <Field label={`Average annual loss (${cf.currency || currency})`} help="10-year average of internal operational losses (drives the Loss Component).">
         <TextInput type="number" value={cf.avg_annual_loss} onChange={(v) => setC("avg_annual_loss", v)} placeholder="0" />
       </Field>
       <div className="field-row">
         <Field label="Currency">
-          <TextInput value={cf.currency} onChange={(v) => setC("currency", v)} placeholder="PKR" />
+          <Select value={cf.currency} onChange={(v) => setC("currency", v)} options={currencyOptions} />
         </Field>
         <Field label="Status">
           <Select value={cf.status} onChange={(v) => setC("status", v)} options={CAPITAL_STATUS} />
@@ -493,9 +488,6 @@ function ScenarioAnalysisInner() {
       </div>
       <Field label="Notes">
         <TextArea value={cf.notes} onChange={(v) => setC("notes", v)} rows={3} placeholder="Basis of preparation, data sources, sign-off." />
-      </Field>
-      <Field label="Workflow" help="Approval lifecycle for this calculation record.">
-        <Select value={cf.workflow_status} onChange={(v) => setC("workflow_status", v)} options={WORKFLOW} />
       </Field>
       <p className="muted" style={{ fontSize: 13 }}>
         BIC, Loss Component, ILM and ORC are computed server-side under the Basel III Standardised Approach.
@@ -536,15 +528,15 @@ function ScenarioAnalysisInner() {
         </div>
         <div className="card stat">
           <div className="stat-top">
-            <span className="n">{summary ? summary.total_expected_annual_loss.toLocaleString() : "—"}</span>
+            <span className="n">{summary ? formatMoney(summary.total_expected_annual_loss, summary.reporting_currency, { compact: "auto" }) : "—"}</span>
           </div>
-          <span className="l">Total expected annual loss (PKR)</span>
+          <span className="l">Total expected annual loss</span>
         </div>
         <div className="card stat">
           <div className="stat-top">
-            <span className="n">{latestOrc != null ? latestOrc.toLocaleString() : "—"}</span>
+            <span className="n">{latestOrc != null ? formatMoney(latestOrc, summary?.latest_capital?.currency, { compact: "auto" }) : "—"}</span>
           </div>
-          <span className="l">Latest ORC (PKR)</span>
+          <span className="l">Latest ORC</span>
         </div>
         <div className="card stat">
           <div className="stat-top">
@@ -566,6 +558,14 @@ function ScenarioAnalysisInner() {
           </button>
         ))}
       </div>
+
+      {summary && unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_expected_annual_loss, unconverted: summary.unconverted }) && (
+        <div className="card card-pad" style={{ marginTop: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_expected_annual_loss, unconverted: summary.unconverted })}
+          {" — "}<Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
+
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
@@ -619,7 +619,12 @@ function ScenarioAnalysisInner() {
 
       {/* ============================================= SCENARIO DRAWER */}
       <RecordDrawer
-        aside={scenarioDetail ? <RecordPanels model="scenario_analysis" entityId={scenarioDetail.id} /> : null}
+        aside={scenarioDetail ? (
+          <>
+            <RecordApproval entityType="scenario_analysis" entityId={scenarioDetail.id} onChanged={() => { reload(); loadScenarioDetail(scenarioDetail.id); }} />
+            <RecordPanels model="scenario_analysis" entityId={scenarioDetail.id} />
+          </>
+        ) : null}
         open={section === "scenarios" && !!openId && !!scenarioDetail}
         onClose={() => setOpenId(null)}
         title={scenarioDetail ? `${scenarioDetail.reference || ""} ${scenarioDetail.title}`.trim() : "…"}
@@ -638,7 +643,7 @@ function ScenarioAnalysisInner() {
               <div className="card-pad">
                 <div style={{ textAlign: "right", marginBottom: 12 }}>
                   <div className="muted" style={{ fontSize: 12 }}>Expected annual loss</div>
-                  <strong style={{ fontSize: 18 }}>{num(scenarioDetail.expected_annual_loss)} {scenarioDetail.currency}</strong>
+                  <strong style={{ fontSize: 18 }}>{formatMoney(scenarioDetail.expected_annual_loss, scenarioDetail.currency)}</strong>
                 </div>
                 <div className="field-row" style={{ gap: 24, flexWrap: "wrap" }}>
                   <div>
@@ -647,11 +652,11 @@ function ScenarioAnalysisInner() {
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Typical loss</div>
-                    <strong>{num(scenarioDetail.typical_loss)} {scenarioDetail.currency}</strong>
+                    <strong>{formatMoney(scenarioDetail.typical_loss, scenarioDetail.currency)}</strong>
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Worst case</div>
-                    <strong>{num(scenarioDetail.worst_case_loss)} {scenarioDetail.currency}</strong>
+                    <strong>{formatMoney(scenarioDetail.worst_case_loss, scenarioDetail.currency)}</strong>
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Confidence</div>
@@ -659,7 +664,7 @@ function ScenarioAnalysisInner() {
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Review date</div>
-                    <strong>{scenarioDetail.review_date || "—"}</strong>
+                    <strong>{formatDate(scenarioDetail.review_date)}</strong>
                   </div>
                 </div>
                 {scenarioDetail.description && (

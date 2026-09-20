@@ -90,6 +90,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     # MFA (TOTP)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     mfa_secret: Mapped[str] = mapped_column(String(64), default="")  # base32; empty until enrolled
+    # When MFA became mandatory for this user and they had not enrolled, the moment the
+    # grace period ends. Set on the first such login; after it passes, the session can
+    # do nothing except enrol.
+    mfa_grace_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Brute-force protection / account lockout
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

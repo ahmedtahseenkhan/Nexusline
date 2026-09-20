@@ -8,6 +8,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
@@ -17,6 +18,8 @@ import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconCheck } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ----------------------------------------------------------------- inline types
 type Ref = { id: string; name: string };
@@ -81,11 +84,10 @@ type ContinuityPlan = {
 };
 
 // ----------------------------------------------------------------- option sets
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const STATUS = opts(["draft", "active", "under_review", "retired"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const CRIT = opts(["low", "medium", "high", "critical"]);
 const RESULT = opts(["not_assessed", "passed", "failed"]);
@@ -108,7 +110,6 @@ type FormState = {
   description: string;
   owner: string;
   status: string;
-  workflow_status: string;
   business_unit_id: string;
   process_id: string;
   bia: string;
@@ -125,7 +126,7 @@ type FormState = {
 };
 
 const BLANK: FormState = {
-  name: "", description: "", owner: "", status: "active", workflow_status: "draft",
+  name: "", description: "", owner: "", status: "active",
   business_unit_id: "", process_id: "",
   bia: "", invocation: "", criticality: "high",
   max_tolerable_downtime_hours: "", rto_hours: "", rpo_hours: "", test_frequency: "annual",
@@ -138,7 +139,6 @@ function fromPlan(p: ContinuityPlan): FormState {
     description: p.description || "",
     owner: p.owner || "",
     status: p.status,
-    workflow_status: p.workflow_status,
     business_unit_id: p.business_unit_id || "",
     process_id: p.process_id || "",
     bia: p.bia || "",
@@ -162,7 +162,6 @@ function toPayload(f: FormState) {
     description: f.description,
     owner: f.owner,
     status: f.status,
-    workflow_status: f.workflow_status,
     business_unit_id: f.business_unit_id || null,
     process_id: f.process_id || null,
     bia: f.bia,
@@ -185,6 +184,7 @@ const BLANK_TEST = { result: "passed", planned_date: "", conducted_date: "", res
 /* ================================================================ page ===== */
 function ContinuityInner() {
   const [openId, setOpenId] = useRecordParam("id");
+  const { formatDate } = useFormat();
   const [detail, setDetail] = useState<ContinuityPlan | null>(null);
   const [units, setUnits] = useState<Ref[]>([]);
   const [processes, setProcesses] = useState<Ref[]>([]);
@@ -294,7 +294,7 @@ function ContinuityInner() {
     { key: "status", header: "Status", sortable: true, render: (p) => <Badge tone={STATUS_TONE[p.status] || "neutral"}>{cap(p.status)}</Badge> },
     { key: "tasks", header: "Tasks", align: "center", render: (p) => <Badge tone="info" plain>{p.task_count}</Badge> },
     { key: "tests", header: "Tests", align: "center", render: (p) => (p.last_test_result ? <Badge tone={RESULT_TONE[p.last_test_result] || "neutral"}>{p.test_count}</Badge> : <Badge tone="neutral" plain>{p.test_count}</Badge>) },
-    { key: "next_test_date", header: "Next test", sortable: true, render: (p) => (p.is_test_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{p.next_test_date || "—"}</span>) },
+    { key: "next_test_date", header: "Next test", sortable: true, render: (p) => (p.is_test_overdue ? <Badge tone="high">Overdue</Badge> : <span className="muted">{formatDate(p.next_test_date)}</span>) },
     { key: "actions", header: "", render: (p) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEdit(p)}>Edit</button> <button className="btn secondary sm" onClick={() => remove(p)}>Delete</button></div> },
   ];
 
@@ -310,7 +310,6 @@ function ContinuityInner() {
       <div className="field-row">
         <Field label="Owner"><TextInput value={f.owner} onChange={(v) => set("owner", v)} placeholder="BCM Coordinator" /></Field>
         <Field label="Status"><Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} /></Field>
-        <Field label="Workflow"><Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} /></Field>
       </div>
     </>
   );
@@ -405,7 +404,12 @@ function ContinuityInner() {
       />
 
       <RecordDrawer
-        aside={detail ? <RecordPanels model="continuity_plan" entityId={detail.id} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="continuity_plan" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <RecordPanels model="continuity_plan" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference : "…"}
@@ -484,8 +488,8 @@ function ContinuityInner() {
                       {detail.tests.map((t) => (
                         <tr key={t.id}>
                           <td><Badge tone={RESULT_TONE[t.result] || "neutral"}>{cap(t.result)}</Badge></td>
-                          <td className="muted">{t.planned_date || "—"}</td>
-                          <td className="muted">{t.conducted_date || "—"}</td>
+                          <td className="muted">{formatDate(t.planned_date)}</td>
+                          <td className="muted">{formatDate(t.conducted_date)}</td>
                           <td className="muted">{t.tester || "—"}</td>
                           <td className="muted">{t.result_description || "—"}</td>
                           <td><button className="btn secondary sm" type="button" onClick={() => child(apiCall<ContinuityPlan>("DELETE", `/continuity-plans/${detail.id}/tests/${t.id}`))}>Remove</button></td>

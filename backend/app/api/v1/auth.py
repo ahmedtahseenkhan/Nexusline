@@ -4,6 +4,12 @@ Login is hardened for banking: brute-force lockout, optional LDAP/AD directory a
 with JIT provisioning, and TOTP multi-factor. Failed-attempt counters are persisted
 by completing the DB transaction first and only then raising the HTTP error, so a
 rollback can never erase a recorded failure.
+
+MFA is *enforced* for privileged users (``services/mfa_policy.py``): a password login by
+a user who must enrol and has not starts a grace period, and once it lapses the login
+returns an enrol-only token (``mfa_enrolment_required``) that ``core/deps.py`` confines
+to the enrolment endpoints. SSO sign-ins (``api/v1/sso.py``) bypass this module and so
+the policy — the identity provider owns their second factor.
 """
 from __future__ import annotations
 
@@ -11,14 +17,15 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any
 
 import jwt
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import set_session_tenant, system_session, tenant_session
-from app.core.deps import CurrentUser, DbSession
+from app.core.deps import CurrentUser, DbSession, get_token_payload
 from app.core.security import (
     create_access_token,
     create_mfa_challenge,
@@ -34,6 +41,7 @@ from app.schemas.auth import (
     ChangePasswordRequest,
     LoginRequest,
     LoginResult,
+    MeRead,
     MfaActivateRequest,
     MfaDisableRequest,
     MfaSetupResponse,
@@ -43,7 +51,7 @@ from app.schemas.auth import (
 )
 from app.schemas.user import UserRead
 from app.services import audit as audit_log
-from app.services import ldap_auth, password_policy, totp
+from app.services import ldap_auth, licence_state, mfa_policy, password_policy, totp
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -64,13 +72,40 @@ def _token_response(user: User, tenant_id) -> TokenResponse:
     )
 
 
-def _login_result(user: User, tenant_id) -> LoginResult:
+def _login_result(user: User, tenant_id, *, enrolment_due: datetime | None = None) -> LoginResult:
     tr = _token_response(user, tenant_id)
     return LoginResult(
         mfa_required=False,
         access_token=tr.access_token,
         expires_in=tr.expires_in,
         user=tr.user,
+        mfa_enrolment_due=enrolment_due,
+    )
+
+
+#: An enrol-only session is for one job; it does not need the full session lifetime.
+_ENROL_ONLY_MINUTES = 15
+
+
+def _enrol_only_result(user: User, tenant_id) -> LoginResult:
+    """A token that can do nothing but enrol MFA (and read /auth/me). No permissions are
+    carried in it; ``core/deps.py`` refuses every other path for it."""
+    minutes = min(_ENROL_ONLY_MINUTES, settings.access_token_expire_minutes)
+    token = create_access_token(
+        subject=str(user.id),
+        tenant_id=str(tenant_id),
+        roles=[],
+        permissions=[],
+        expires_minutes=minutes,
+        extra_claims={mfa_policy.ENROL_ONLY_CLAIM: True},
+    )
+    return LoginResult(
+        mfa_required=False,
+        access_token=token,
+        expires_in=minutes * 60,
+        user=UserRead.model_validate(user),
+        mfa_enrolment_required=True,
+        mfa_enrolment_due=user.mfa_grace_until,
     )
 
 
@@ -138,10 +173,13 @@ def _reset_lockout(user: User) -> None:
 
 async def _jit_upsert(db, tenant_id, profile: ldap_auth.LdapProfile, default_role: str, existing: User | None) -> User:
     if existing is not None:
+        if not existing.is_active and not existing.is_platform_admin:
+            await licence_state.ensure_seat_available()  # decision 1: re-activation takes a seat
         existing.full_name = profile.full_name or existing.full_name
         existing.auth_source = "ldap"
         existing.is_active = True
         return existing
+    await licence_state.ensure_seat_available()  # decision 1: a new directory user takes a seat
     user = User(
         tenant_id=tenant_id,
         email=profile.email,
@@ -222,7 +260,11 @@ async def _do_login(db, body: LoginRequest) -> _Outcome:
                 _register_failed(user)
             await _audit("login_failed", f"Failed directory login for {body.email}", reason="rejected", method="ldap")
             return _Outcome(error=_INVALID)
-        authed = await _jit_upsert(db, tenant.id, profile, ldap_cfg.default_role, existing=user)
+        try:
+            authed = await _jit_upsert(db, tenant.id, profile, ldap_cfg.default_role, existing=user)
+        except HTTPException as exc:  # licence seats exhausted (decision 1)
+            await _audit("login_failed", f"Directory login refused for {body.email}: no licence seat", reason="seat_limit", method="ldap")
+            return _Outcome(error=exc)
     else:
         await _audit("login_failed", f"Failed login for {body.email}: unknown account", reason="unknown_account")
         return _Outcome(error=_INVALID)
@@ -247,8 +289,38 @@ async def _do_login(db, body: LoginRequest) -> _Outcome:
         await _audit("login_challenged", f"{body.email} passed password, MFA required", method=method)
         challenge = create_mfa_challenge(str(authed.id), str(tenant.id))
         return _Outcome(result=LoginResult(mfa_required=True, challenge_token=challenge))
+
+    # Not enrolled. If the policy requires MFA for this user, start (or apply) the grace
+    # period; past it, the session may only enrol.
+    state, deadline = mfa_policy.enrolment_state(
+        required=mfa_policy.user_requires_mfa(
+            authed, settings, await mfa_policy.tenant_required_roles(db, tenant.id)
+        ),
+        mfa_enabled=authed.mfa_enabled,
+        grace_until=authed.mfa_grace_until,
+        now=now,
+        grace_days=settings.mfa_grace_days,
+    )
+    if state in ("grace", "enrol_only") and authed.mfa_grace_until is None:
+        authed.mfa_grace_until = deadline
+        await _audit(
+            "mfa_grace_started",
+            f"MFA is required for {body.email}; enrolment due by {deadline:%Y-%m-%d %H:%M UTC}",
+            until=deadline.isoformat(),
+        )
+        await db.flush()
+    if state == "enrol_only":
+        await _audit(
+            "login_enrol_only",
+            f"{body.email} signed in without MFA after the grace period; session limited to MFA enrolment",
+            method=method,
+            mfa=False,
+        )
+        return _Outcome(result=_enrol_only_result(authed, tenant.id))
     await _audit("login", f"{body.email} signed in", method=method, mfa=False)
-    return _Outcome(result=_login_result(authed, tenant.id))
+    return _Outcome(
+        result=_login_result(authed, tenant.id, enrolment_due=deadline if state == "grace" else None)
+    )
 
 
 @router.post("/login", response_model=LoginResult, summary="Log in (password → MFA if enabled)")
@@ -333,6 +405,9 @@ async def mfa_activate(body: MfaActivateRequest, db: DbSession, user: CurrentUse
     if not totp.verify(user.mfa_secret, body.code):
         raise HTTPException(status_code=400, detail="Invalid code — check your authenticator app")
     user.mfa_enabled = True
+    # Enrolled: the grace period (if one was running) no longer applies. An enrol-only
+    # session stays enrol-only until the user signs in again — this time with the code.
+    user.mfa_grace_until = None
     await _audit_self(db, user, "mfa_enabled", f"{user.email} enabled multi-factor authentication")
     await db.flush()
     return UserRead.model_validate(user)
@@ -340,6 +415,13 @@ async def mfa_activate(body: MfaActivateRequest, db: DbSession, user: CurrentUse
 
 @router.post("/mfa/disable", response_model=UserRead, summary="Disable MFA for the current user")
 async def mfa_disable(body: MfaDisableRequest, db: DbSession, user: CurrentUser) -> UserRead:
+    if user.mfa_enabled and mfa_policy.user_requires_mfa(
+        user, settings, await mfa_policy.tenant_required_roles(db)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Two-factor authentication is required for your role and cannot be turned off.",
+        )
     if user.mfa_enabled and not totp.verify(user.mfa_secret, body.code):
         raise HTTPException(status_code=400, detail="A valid MFA code is required to disable MFA")
     user.mfa_enabled = False
@@ -366,6 +448,25 @@ async def change_password(body: ChangePasswordRequest, db: DbSession, user: Curr
     await db.flush()
 
 
-@router.get("/me", response_model=UserRead, summary="Current authenticated user")
-async def me(user: CurrentUser) -> UserRead:
-    return UserRead.model_validate(user)
+@router.get("/me", response_model=MeRead, summary="Current authenticated user")
+async def me(
+    user: CurrentUser,
+    db: DbSession,
+    payload: Annotated[dict[str, Any], Depends(get_token_payload)],
+) -> MeRead:
+    required = mfa_policy.user_requires_mfa(
+        user, settings, await mfa_policy.tenant_required_roles(db)
+    )
+    enrol_only = bool(payload.get(mfa_policy.ENROL_ONLY_CLAIM))
+    due = user.mfa_grace_until if (required and not user.mfa_enabled) else None
+    return MeRead.model_validate(user).model_copy(
+        update={
+            "mfa_enrolment_required": enrol_only,
+            "mfa_enrolment_due": due,
+            "mfa_required_for_user": required,
+            "mfa_required_for_everyone": bool(settings.mfa_required),
+            "mfa_via_identity_provider": bool(
+                await mfa_policy.sso_enabled(db) and user.id in await mfa_policy.sso_signers(db, [user.id])
+            ),
+        }
+    )

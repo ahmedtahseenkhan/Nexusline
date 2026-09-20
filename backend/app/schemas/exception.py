@@ -25,7 +25,6 @@ class ExceptionBase(BaseModel):
     rationale: str = ""
     compensating_controls: str = ""
     business_owner: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
     start_date: date | None = None
     expires_at: date | None = None
 
@@ -48,7 +47,6 @@ class ExceptionUpdate(BaseModel):
     compensating_controls: str | None = None
     business_owner: str | None = None
     status: ExceptionStatus | None = None  # manual override; /decision & /close are the primary path
-    workflow_status: WorkflowState | None = None
     start_date: date | None = None
     expires_at: date | None = None
     closure_date: date | None = None
@@ -65,6 +63,8 @@ class ExceptionDecision(BaseModel):
 
 
 class ExceptionRead(ExceptionBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

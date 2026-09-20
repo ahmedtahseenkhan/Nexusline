@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_search, apply_sort
+from app.models.incident import Incident
 from app.models.data_protection import (
     BreachStatus,
     ConsentRecord,
@@ -246,10 +247,32 @@ async def get_data_breach(bid: uuid.UUID, db: DbSession) -> DataBreachRead:
     return DataBreachRead.model_validate(await _get(db, DataBreach, bid, "Data breach"))
 
 
+async def _link_incident(db, obj: DataBreach, incident_id, user) -> None:
+    """The breach ↔ incident hand-off (phase 2): a breach names the incident it came
+    from, and that incident is flagged as a personal data breach so the security register
+    shows it too. (Flagging the incident first creates the breach — ``api.v1.incidents``.)"""
+    if incident_id is None:
+        obj.incident = None
+        return
+    inc = await db.get(Incident, incident_id)
+    if inc is None or inc.deleted:
+        raise HTTPException(status_code=400, detail="incident_id: that incident does not exist or is archived.")
+    obj.incident = inc
+    if not inc.personal_data_breach:
+        inc.personal_data_breach = True
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="incident", entity_id=inc.id,
+            summary=f"Flagged incident {inc.reference} as a personal data breach "
+                    f"(linked from breach {obj.reference or 'register'})",
+            changes={"personal_data_breach": True},
+        )
+
+
 @router.post("/data-breaches", response_model=DataBreachRead, status_code=201, dependencies=[_WRITE])
 async def create_data_breach(body: DataBreachCreate, db: DbSession, user: CurrentUser) -> DataBreachRead:
     obj = DataBreach(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db, DataBreach, "BR")
+    await _link_incident(db, obj, body.incident_id, user)
     db.add(obj)
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="data_breach",
@@ -259,10 +282,14 @@ async def create_data_breach(body: DataBreachCreate, db: DbSession, user: Curren
 
 
 @router.patch("/data-breaches/{bid}", response_model=DataBreachRead, dependencies=[_WRITE])
-async def update_data_breach(bid: uuid.UUID, body: DataBreachUpdate, db: DbSession) -> DataBreachRead:
+async def update_data_breach(bid: uuid.UUID, body: DataBreachUpdate, db: DbSession,
+                             user: CurrentUser) -> DataBreachRead:
     obj = await _get(db, DataBreach, bid, "Data breach")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    for k, v in data.items():
         setattr(obj, k, v)
+    if "incident_id" in data and data["incident_id"] != getattr(obj.incident, "id", None):
+        await _link_incident(db, obj, data["incident_id"], user)
     await db.flush()
     return DataBreachRead.model_validate(obj)
 

@@ -72,7 +72,6 @@ class BiaBase(BaseModel):
     status: BiaStatus = BiaStatus.draft
     assessment_date: date | None = None
     next_review_date: date | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class BiaCreate(BiaBase):
@@ -103,10 +102,11 @@ class BiaUpdate(BaseModel):
     status: BiaStatus | None = None
     assessment_date: date | None = None
     next_review_date: date | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class BiaRead(BiaBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

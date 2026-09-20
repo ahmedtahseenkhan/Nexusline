@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, type SystemInfo, type SystemHealth, type BackupItem, type ModuleState } from "@/lib/api";
 import { Badge } from "@/components/badges";
+import { useFormat } from "@/lib/format";
 
 function fmtBytes(n: number) {
   if (!n) return "0 B";
@@ -11,8 +12,19 @@ function fmtBytes(n: number) {
   return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
 }
 
+const LICENCE_STATE_LABEL: Record<string, string> = {
+  active: "Active",
+  expiring: "Expiring soon",
+  grace: "Expired — grace period",
+  read_only: "Expired — read-only",
+  unlicensed: "No licence",
+  evaluation: "Evaluation build",
+  invalid: "Invalid licence",
+};
+
 /** On-prem System admin: version, health, license status, backups, support bundle. */
 export default function SystemSettings() {
+  const { formatDate, formatDateTime } = useFormat();
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [backups, setBackups] = useState<BackupItem[]>([]);
@@ -57,11 +69,34 @@ export default function SystemSettings() {
     }
   }
 
+  async function installLicence(file: File) {
+    setBusy("licence");
+    setErr(null);
+    setMsg(null);
+    try {
+      const token = (await file.text()).trim();
+      const installed = await api.installLicence(token);
+      setMsg(
+        `Licence installed for ${installed.licensed_to}${installed.expires ? `, valid until ${formatDate(installed.expires)}` : ""}. It is in force now; no restart needed.`,
+      );
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "The licence could not be installed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const lic = info?.license;
-  const licTone = lic?.valid ? "low" : lic?.status === "expired" ? "critical" : "neutral";
+  const life = lic?.lifecycle;
+  const licTone =
+    life?.state === "active" ? "low"
+      : life?.state === "expiring" ? "medium"
+      : life?.state === "grace" || life?.state === "read_only" || life?.state === "invalid" || life?.state === "unlicensed" ? "critical"
+      : "neutral";
 
   return (
-    <div className="card" style={{ marginTop: 16 }}>
+    <div className="card" id="system" style={{ marginTop: 16 }}>
       <div className="card-head">
         <h3>System</h3>
         {info && <span className="sub">v{info.app_version} · {info.deployment_mode} · {info.environment}</span>}
@@ -92,12 +127,45 @@ export default function SystemSettings() {
           <div>
             <b style={{ fontSize: 14 }}>License</b>
             <div style={{ marginTop: 8, fontSize: 13, display: "flex", flexDirection: "column", gap: 4 }}>
-              <div><Badge tone={licTone}>{lic?.status ?? "…"}</Badge></div>
+              <div><Badge tone={licTone}>{life ? LICENCE_STATE_LABEL[life.state] : lic?.status ?? "…"}</Badge></div>
               {lic?.licensed_to && <div className="muted">Licensed to <b>{lic.licensed_to}</b></div>}
-              {lic?.plan && <div className="muted">Plan: {lic.plan} · {lic.seats} seats</div>}
-              {lic?.expires && <div className="muted">Expires: {lic.expires}</div>}
+              {lic?.plan && <div className="muted">Plan: {lic.plan}</div>}
+              {lic?.expires && <div className="muted">Expires: {formatDate(lic.expires)}</div>}
+              {life?.grace_until && (life.state === "grace" || life.state === "read_only") && (
+                <div className="muted">Grace period {life.state === "grace" ? "ends" : "ended"}: {formatDate(life.grace_until)}</div>
+              )}
+              {lic && (
+                <div className="muted">
+                  Seats:{" "}
+                  {lic.seats
+                    ? `${life?.seats_used ?? "?"} of ${lic.seats} active users`
+                    : "no limit"}
+                  {life?.seats_full ? " — full: new or re-activated users are refused" : life?.seats_warning ? " — over 90% in use" : ""}
+                </div>
+              )}
               {lic?.features?.length ? <div className="muted">Features: {lic.features.join(", ")}</div> : null}
-              {lic && !lic.valid && <div className="muted">{lic.message}</div>}
+              {life?.message && life.state !== "active" && (
+                <div style={{ color: licTone === "critical" ? "var(--red)" : undefined }}>{life.message}</div>
+              )}
+              <label className="btn secondary sm" style={{ marginTop: 6, alignSelf: "flex-start", cursor: busy ? "not-allowed" : "pointer" }}>
+                {busy === "licence" ? "Installing…" : "Install licence file"}
+                <input
+                  type="file"
+                  accept=".key,.lic,.txt,text/plain"
+                  hidden
+                  disabled={busy !== null}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (f) installLicence(f);
+                  }}
+                />
+              </label>
+              <span className="muted" style={{ fontSize: 12 }}>
+                The file your vendor sent (license.key). It is checked before it replaces the current licence.
+                After expiry everything keeps working for 30 days; then records are read-only until a renewed
+                licence is installed.
+              </span>
             </div>
           </div>
         </div>
@@ -147,7 +215,7 @@ export default function SystemSettings() {
                   <tr key={b.filename}>
                     <td className="ref">{b.filename}</td>
                     <td className="muted">{fmtBytes(b.size_bytes)}</td>
-                    <td className="muted">{new Date(b.created_at).toLocaleString()}</td>
+                    <td className="muted">{formatDateTime(b.created_at)}</td>
                   </tr>
                 ))}
               </tbody>

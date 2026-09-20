@@ -1,13 +1,15 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { api, apiCall, type ApprovalRequest } from "@/lib/api";
+import { api, apiCall, type ApprovalRequest, type Me } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
+import { useFormat } from "@/lib/format";
+import { useRecordParam } from "@/lib/useRecordParam";
 
 const TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
   approved: "low",
@@ -16,10 +18,51 @@ const TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
   cancelled: "neutral",
 };
 
+/** Whether `me` raised this request — matched on the maker id, or on the e-mail for
+ *  requests that only carry one (the server applies the same rule). */
+function raisedBy(a: ApprovalRequest, me: Me | null): boolean {
+  if (!me) return false;
+  if (a.requested_by && a.requested_by === me.id) return true;
+  const maker = (a.requested_by_email || "").trim().toLowerCase();
+  return !!maker && maker === (me.email || "").trim().toLowerCase();
+}
+
 export default function ApprovalsPage() {
+  return (
+    <Suspense fallback={<div className="muted" style={{ padding: 24 }}>Loading…</div>}>
+      <ApprovalsInner />
+    </Suspense>
+  );
+}
+
+function ApprovalsInner() {
+  const { formatDate } = useFormat();
+  // `/approvals?id=` — the link My Work, notifications and e-mails carry — opens that request.
+  const [openId, setOpenId] = useRecordParam("id");
+  const [opened, setOpened] = useState<ApprovalRequest | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Who is looking: the maker of a request sees it but cannot decide it.
+  const [me, setMe] = useState<Me | null>(null);
+  useEffect(() => {
+    api.me().then(setMe).catch(() => setMe(null));
+  }, []);
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  useEffect(() => {
+    if (!openId) { setOpened(null); setOpenError(null); return; }
+    let live = true;
+    setOpenError(null);
+    apiCall<ApprovalRequest>("GET", `/approvals/${encodeURIComponent(openId)}`)
+      .then((a) => live && setOpened(a))
+      .catch((e) => {
+        if (!live) return;
+        setOpened(null);
+        setOpenError(e instanceof Error ? e.message : "Could not open this request");
+      });
+    return () => { live = false; };
+  }, [openId, refreshKey]);
 
   // per-row rejection reason (kept in the row, replaces window.prompt)
   const [rejectReason, setRejectReason] = useState<Record<string, string>>({});
@@ -77,6 +120,50 @@ export default function ApprovalsPage() {
     setReason(a.id, "");
   }
 
+  async function cancel(a: ApprovalRequest) {
+    const route = a.approver_role ? " This also cancels the rest of its approval route and returns the record to draft." : "";
+    if (!(await confirmDialog({ title: `Cancel ${a.reference}?`, message: `The request is withdrawn without a decision.${route}`, danger: true, confirmLabel: "Cancel request" }))) return;
+    await act(api.cancelApproval(a.id), "Request cancelled");
+  }
+
+  /** Approve / reject / cancel for one request — in its table row and in the opened request. */
+  const decisionControls = (a: ApprovalRequest) => (
+    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
+      {raisedBy(a, me) ? (
+        <span className="muted" aria-disabled="true" style={{ fontSize: 12.5 }}>
+          You submitted this — an independent checker must decide
+        </span>
+      ) : a.can_decide === false && a.decide_blocked_reason ? (
+        <span className="muted" aria-disabled="true" style={{ fontSize: 12.5, maxWidth: 280 }}>
+          {a.decide_blocked_reason}
+        </span>
+      ) : (
+        <>
+          <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true), "Decision recorded")} title="An independent checker approves">
+            <IconCheck width={13} height={13} /> Approve
+          </button>
+          <input
+            className="input"
+            style={{ width: 150 }}
+            placeholder="Rejection reason"
+            value={rejectReason[a.id] || ""}
+            onChange={(e) => setReason(a.id, e.target.value)}
+          />
+          <button className="btn secondary sm" onClick={() => reject(a)}>Reject</button>
+        </>
+      )}
+      {a.can_cancel && (
+        <button
+          className="btn secondary sm"
+          onClick={() => cancel(a)}
+          title={raisedBy(a, me) ? "Withdraw your request" : "Cancel as an administrator"}
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+  );
+
   // -------------------------------------------------------- pending columns
   const pendingColumns: Column<ApprovalRequest>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (a) => <span className="ref">{a.reference}</span> },
@@ -92,6 +179,20 @@ export default function ApprovalsPage() {
     },
     { key: "maker", header: "Maker", render: (a) => <span className="muted">{a.requested_by_email}</span> },
     {
+      key: "approver",
+      header: "Decided by",
+      render: (a) => (
+        <div style={{ fontSize: 12.5 }}>
+          <span className="muted">{a.approver_role || a.approver || "Any approver"}</span>
+          {a.approver_role_gap && (
+            <div role="note" style={{ color: "var(--amber)", marginTop: 4, maxWidth: 260 }}>
+              {a.approver_role_gap} <Link href="/organization" style={{ fontWeight: 600 }}>Users</Link>
+            </div>
+          )}
+        </div>
+      ),
+    },
+    {
       key: "approvals",
       header: "Approvals",
       render: (a) => (
@@ -106,31 +207,12 @@ export default function ApprovalsPage() {
       sortable: true,
       render: (a) => (
         <span className="muted">
-          {a.due_date || "—"}
+          {formatDate(a.due_date)}
           {a.is_overdue && <span style={{ marginLeft: 6 }}><Badge tone="high">overdue</Badge></span>}
         </span>
       ),
     },
-    {
-      key: "actions",
-      header: "",
-      render: (a) => (
-        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true), "Decision recorded")} title="An independent checker approves">
-            <IconCheck width={13} height={13} /> Approve
-          </button>
-          <input
-            className="input"
-            style={{ width: 150 }}
-            placeholder="Rejection reason"
-            value={rejectReason[a.id] || ""}
-            onChange={(e) => setReason(a.id, e.target.value)}
-          />
-          <button className="btn secondary sm" onClick={() => reject(a)}>Reject</button>
-          <button className="btn secondary sm" onClick={() => act(api.cancelApproval(a.id), "Request cancelled")}>Cancel</button>
-        </div>
-      ),
-    },
+    { key: "actions", header: "", render: (a) => decisionControls(a) },
   ];
 
   // -------------------------------------------------------- all-requests columns
@@ -156,6 +238,44 @@ export default function ApprovalsPage() {
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
+
+      {openId && (openError || opened) && (
+        <section className="card card-pad" aria-label="Opened approval request" style={{ marginBottom: 18 }}>
+          <div className="row-between" style={{ alignItems: "flex-start", gap: 12 }}>
+            {opened ? (
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <span className="ref">{opened.reference}</span>
+                  <Badge tone={TONE[opened.status] || "neutral"}>{opened.status}</Badge>
+                  {opened.is_overdue && <Badge tone="high">overdue</Badge>}
+                </div>
+                <h3 style={{ margin: "6px 0 4px" }}>{opened.title}</h3>
+                {opened.description && <p className="muted" style={{ margin: "0 0 6px", fontSize: 13 }}>{opened.description}</p>}
+                <p className="muted" style={{ margin: 0, fontSize: 12.5 }}>
+                  Raised by {opened.requested_by_email || "unknown"} · decided by {opened.approver_role || opened.approver || "any approver"}
+                  {" "}· {opened.approvals_received}/{opened.required_approvals} approvals
+                  {opened.due_date && <> · due {formatDate(opened.due_date)}</>}
+                  {opened.link && opened.entity_label && <> · <Link href={opened.link}>{opened.entity_label}</Link></>}
+                </p>
+                {opened.approver_role_gap && (
+                  <p role="note" style={{ color: "var(--amber)", margin: "6px 0 0", fontSize: 12.5 }}>{opened.approver_role_gap}</p>
+                )}
+                {opened.status !== "pending" && (
+                  <p className="muted" style={{ margin: "6px 0 0", fontSize: 12.5 }}>
+                    {opened.decided_by_email ? `Decided by ${opened.decided_by_email}` : "Closed"}
+                    {opened.decided_at && ` on ${formatDate(opened.decided_at)}`}
+                    {opened.decision_comment && ` — ${opened.decision_comment}`}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="error" style={{ flex: 1 }}>{openError}</div>
+            )}
+            <button className="btn secondary sm" onClick={() => setOpenId(null)} aria-label="Close the opened request">Close</button>
+          </div>
+          {opened?.status === "pending" && <div style={{ marginTop: 12 }}>{decisionControls(opened)}</div>}
+        </section>
+      )}
 
       {showForm && (
         <form className="card card-pad" style={{ marginBottom: 18 }} onSubmit={submit}>
@@ -196,6 +316,8 @@ export default function ApprovalsPage() {
           fetcher={fetchApprovals}
           rowKey={(a) => a.id}
           filters={{ status: "pending" }}
+          activeKey={openId}
+          onRowClick={(a) => setOpenId(a.id)}
           defaultSort={{ by: "created_at", dir: "asc" }}
           searchPlaceholder="Search pending…"
           emptyMessage="Nothing awaiting approval."
@@ -210,6 +332,8 @@ export default function ApprovalsPage() {
         columns={allColumns}
         fetcher={fetchApprovals}
         rowKey={(a) => a.id}
+        activeKey={openId}
+        onRowClick={(a) => setOpenId(a.id)}
         defaultSort={{ by: "created_at", dir: "desc" }}
         searchPlaceholder="Search requests…"
         emptyMessage="No approval requests yet."

@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
+from app.schemas.fx import UnconvertedAmount
 from app.models.enums import BaselEventType
 from app.models.scenario import CapitalStatus, ScenarioStatus
 
@@ -26,7 +27,6 @@ class ScenarioBase(BaseModel):
     owner: str = ""
     status: ScenarioStatus = ScenarioStatus.draft
     review_date: date | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class ScenarioCreate(ScenarioBase):
@@ -48,10 +48,11 @@ class ScenarioUpdate(BaseModel):
     owner: str | None = None
     status: ScenarioStatus | None = None
     review_date: date | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class ScenarioRead(ScenarioBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -67,7 +68,6 @@ class CapitalBase(BaseModel):
     currency: str = "PKR"
     notes: str = ""
     status: CapitalStatus = CapitalStatus.draft
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class CapitalCreate(CapitalBase):
@@ -81,10 +81,11 @@ class CapitalUpdate(BaseModel):
     currency: str | None = None
     notes: str | None = None
     status: CapitalStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class CapitalRead(CapitalBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -118,3 +119,7 @@ class ScenarioSummary(BaseModel):
     total_count: int
     approved_count: int
     latest_capital: CapitalSnapshot | None
+    #: Decision 4: the currency the expected losses above are in (converted at today's rate).
+    reporting_currency: str = "PKR"
+    #: Scenarios whose currency has no exchange rate; left out of the totals.
+    unconverted: list[UnconvertedAmount] = []

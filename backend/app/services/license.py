@@ -13,8 +13,9 @@ mint their own licenses.
 
 The ``cryptography`` import is lazy: in a dev build a missing package leaves the
 app *unconfigured/unlicensed* instead of crashing. In a release build
-(``build.PRODUCTION_BUILD``) enforcement is unconditional — an invalid, expired
-or absent license fails startup, and no environment variable can turn that off.
+(``build.PRODUCTION_BUILD``) enforcement is unconditional — an invalid or absent license
+fails startup, and no environment variable can turn that off. An expired license does not:
+it gets grace and then read-only mode (``services/licence_state.py``).
 """
 from __future__ import annotations
 
@@ -156,21 +157,75 @@ def verify_token(token: str) -> LicenseInfo:
     return info
 
 
+def signature_ok(info: LicenseInfo) -> bool:
+    """The licence was issued by the vendor, whatever its dates: ``valid`` or ``expired``.
+
+    An expired licence still identifies the customer, its seats and modules — decision 1
+    keeps the installation working through grace and then read-only
+    (``services/licence_state.py``), never locked out."""
+    return info.status in ("valid", "expired")
+
+
 # ------------------------------------------------------------------------- runtime ---
 _cached: LicenseInfo | None = None
+#: (path, modification time) the cache was read from: a licence file replaced on disk is
+#: picked up on the next call, without a restart.
+_cached_source: tuple[str, float | None] | None = None
+
+
+def _source() -> tuple[str, float | None]:
+    path = Path(settings.license_file)
+    try:
+        return str(path), path.stat().st_mtime if path.is_file() else None
+    except OSError:
+        return str(path), None
 
 
 def load_current(refresh: bool = False) -> LicenseInfo:
-    """Load + verify the deployment's license file (cached)."""
-    global _cached
-    if _cached is not None and not refresh:
+    """Load + verify the deployment's license file (cached until the file changes)."""
+    global _cached, _cached_source
+    source = _source()
+    if _cached is not None and not refresh and _cached_source == source:
         return _cached
     path = Path(settings.license_file)
+    _cached_source = source
     if not path.is_file():
         _cached = LicenseInfo(status="unlicensed", message="no license file present")
         return _cached
     _cached = verify_token(path.read_text())
     return _cached
+
+
+class LicenceInstallError(ValueError):
+    """A licence offered for installation that must not replace the current one."""
+
+
+def install_token(token: str) -> LicenseInfo:
+    """Verify ``token`` and, when it is a current licence from the vendor, write it to
+    ``settings.license_file`` (atomically, keeping the previous file as ``.previous``) and
+    reload. Raises :class:`LicenceInstallError` with a message for the administrator."""
+    global _cached
+    text_ = (token or "").strip()
+    if not text_:
+        raise LicenceInstallError("The licence file is empty.")
+    info = verify_token(text_)
+    if info.status == "unconfigured":
+        raise LicenceInstallError(f"This build cannot verify licences: {info.message}.")
+    if info.status == "invalid":
+        raise LicenceInstallError(f"This is not a valid licence: {info.message}.")
+    if info.status == "expired":
+        raise LicenceInstallError(
+            f"This licence expired on {info.expires}. Ask your vendor for a renewed licence."
+        )
+    path = Path(settings.license_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file():
+        path.with_name(path.name + ".previous").write_text(path.read_text())
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text_ + "\n")
+    tmp.replace(path)
+    _cached = None
+    return load_current(refresh=True)
 
 
 def enforce_on_startup() -> None:
@@ -187,11 +242,20 @@ def enforce_on_startup() -> None:
             "Run `python -m app.tools.license keygen` before building."
         )
     info = load_current(refresh=True)
-    if not info.valid:
+    # Decision 1: a missing or forged licence refuses start-up; an expired one never does.
+    # It runs through grace and then read-only (services/licence_state.py), so a bank can
+    # always read its records.
+    if not signature_ok(info):
         raise RuntimeError(
             f"License is {info.status}: {info.message}. "
             f"Install a valid license at {settings.license_file}."
         )
+    if info.status == "expired":
+        logger.warning(
+            "License for %s expired on %s — starting in grace or read-only mode; install a renewed license",
+            info.licensed_to, info.expires,
+        )
+        return
     logger.info("License valid — licensed to %s (%s), expires %s", info.licensed_to, info.plan, info.expires)
 
 
@@ -200,4 +264,5 @@ def has_feature(feature: str) -> bool:
     # Without enforcement (dev/self-host), don't gate features.
     if not enforcement_enabled() and info.status in ("unlicensed", "unconfigured"):
         return True
-    return info.valid and feature in info.features
+    # An expired licence keeps its features through grace and read-only (decision 1).
+    return signature_ok(info) and feature in info.features

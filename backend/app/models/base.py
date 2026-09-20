@@ -80,3 +80,7 @@ class WorkflowMixin:
         nullable=False,
     )
     workflow_owner: Mapped[str] = mapped_column(String(200), default="")
+    # Phase 1: the approval owner as a user, replacing free-text ``workflow_owner``.
+    workflow_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )

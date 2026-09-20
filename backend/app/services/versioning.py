@@ -61,7 +61,21 @@ MODEL_MAP: dict[str, type] = {
     "regulatory_change": RegulatoryChange,
 }
 
-_SKIP = {"tenant_id"}
+#: Never snapshotted: the tenant key, and every credential. A version is restorable, so a
+#: secret in history would come back on restore — a revoked KRI feed token, a rotated
+#: webhook secret, an old password hash. Kept by column name so a new model with one of
+#: these columns is covered without touching this file.
+_SKIP = {
+    "tenant_id",
+    "feed_token_hash",
+    "access_hash",
+    "hashed_password",
+    "mfa_secret",
+    "client_secret",
+    "secret",
+    "ingest_token_hash",
+    "token_hash",
+}
 
 
 def _json(value):

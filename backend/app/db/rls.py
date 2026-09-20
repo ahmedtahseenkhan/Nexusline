@@ -18,6 +18,30 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 # Tables carrying a tenant_id that must be isolated.
 TENANT_SCOPED_TABLES: list[str] = [
+    # Decision 4: exchange rates into the reporting currency
+    "fx_rates",
+    # Phase 4E: questionnaire engine
+    "questionnaire_sections",
+    "assessment_links",
+    "assessment_access_logs",
+    # Phase 4A: computed-figure cache (pending clause suggestions)
+    "tenant_computed_cache",
+    # Phase 4B: workspaces, period snapshots, committee members, board-pack branding
+    "metric_snapshots",
+    "user_workspace_preferences",
+    "committee_members",
+    "board_pack_brandings",
+    "risk_proposals",
+    "action_tokens",
+    "board_packs",
+    "issue_due_date_changes",
+    "risk_impact_dimensions",
+    "risk_appetites",
+    "risk_treatment_actions",
+    "kri_escalations",
+    "vendor_certifications",
+    "tenant_settings",
+    "lookups",
     "roles",
     "users",
     "audit_logs",
@@ -170,6 +194,7 @@ TENANT_SCOPED_TABLES: list[str] = [
     "import_profiles",
     "sso_configs",
     "ldap_configs",
+    "crosswalk_rejections",
 ]
 
 _POLICY = "tenant_isolation"

@@ -42,6 +42,11 @@ class StatusRuleRead(BaseModel):
 class StatusLabel(BaseModel):
     label: str
     color: str
+    #: The condition that fired the rule, as stored on it (B9): the page shows
+    #: "{field} {operator} {value}". ``value`` is empty for operators that take none.
+    field: str | None = None
+    operator: str | None = None
+    value: str | None = None
 
 
 class BulkEvaluateRequest(BaseModel):

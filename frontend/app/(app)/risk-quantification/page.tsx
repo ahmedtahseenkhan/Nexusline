@@ -8,11 +8,15 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import Link from "next/link";
+import { getFormatSettings, unconvertedNote, useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 type RiskQuant = {
@@ -52,6 +56,9 @@ type SimResult = {
 
 type QuantSummary = {
   total_mean_ale: number;
+  /** Decision 4: the currency the figures above are in, and what has no exchange rate. */
+  reporting_currency?: string;
+  unconverted?: { currency: string; count: number; amount: number }[];
   count_quantified: number;
   count_simulated: number;
   highest_p90: number;
@@ -63,14 +70,11 @@ type RiskRef = { id: string; reference: string; title: string };
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 const num = (n: number | null | undefined) => (n == null ? "—" : Number(n).toLocaleString());
-const pkr = (n: number | null | undefined, ccy = "PKR") =>
-  n == null ? "—" : `${ccy} ${Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
 const QUANT_STATUS = opts(["draft", "simulated", "approved"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 
 const STATUS_TONE: Record<string, Tone> = {
   draft: "neutral",
@@ -96,7 +100,6 @@ type QuantForm = {
   owner: string;
   notes: string;
   status: string;
-  workflow_status: string;
 };
 const BLANK: QuantForm = {
   title: "",
@@ -115,7 +118,6 @@ const BLANK: QuantForm = {
   owner: "",
   notes: "",
   status: "draft",
-  workflow_status: "draft",
 };
 function fromQuant(q: RiskQuant): QuantForm {
   return {
@@ -130,12 +132,11 @@ function fromQuant(q: RiskQuant): QuantForm {
     lm_min: String(q.lm_min ?? 0),
     lm_likely: String(q.lm_likely ?? 0),
     lm_max: String(q.lm_max ?? 0),
-    currency: q.currency || "PKR",
+    currency: q.currency || getFormatSettings().currency,
     iterations: String(q.iterations ?? 10000),
     owner: q.owner || "",
     notes: q.notes || "",
     status: q.status || "draft",
-    workflow_status: q.workflow_status || "draft",
   };
 }
 function payload(f: QuantForm): Record<string, unknown> {
@@ -151,17 +152,17 @@ function payload(f: QuantForm): Record<string, unknown> {
     lm_min: n(f.lm_min),
     lm_likely: n(f.lm_likely),
     lm_max: n(f.lm_max),
-    currency: f.currency || "PKR",
+    currency: f.currency || getFormatSettings().currency,
     iterations: n(f.iterations, 10000),
     owner: f.owner,
     notes: f.notes,
     status: f.status,
-    workflow_status: f.workflow_status,
   };
 }
 
 // ------------------------------------------------------------------ loss-curve bars
 function SimBars({ p50, p90, max, currency }: { p50: number; p90: number; max: number; currency: string }) {
+  const { formatMoney } = useFormat();
   const scale = max > 0 ? max : 1;
   const rows: { label: string; value: number; color: string }[] = [
     { label: "P50 (median)", value: p50, color: "#2f855a" },
@@ -185,7 +186,7 @@ function SimBars({ p50, p90, max, currency }: { p50: number; p90: number; max: n
             />
           </div>
           <span className="ref" style={{ width: 150, textAlign: "right", flex: "0 0 auto" }}>
-            {pkr(r.value, currency)}
+            {formatMoney(r.value, currency, { decimals: 0 })}
           </span>
         </div>
       ))}
@@ -195,6 +196,8 @@ function SimBars({ p50, p90, max, currency }: { p50: number; p90: number; max: n
 
 // ------------------------------------------------------------------ page
 function RiskQuantificationInner() {
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
+  const money = (n: number | null | undefined, ccy?: string | null) => formatMoney(n, ccy, { decimals: 0 });
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -243,7 +246,7 @@ function RiskQuantificationInner() {
   // ------------------------------------------------------------- CRUD
   function openNew() {
     setEditing(null);
-    setF(BLANK);
+    setF({ ...BLANK, currency });
     setError(null);
     setShowForm(true);
   }
@@ -314,9 +317,9 @@ function RiskQuantificationInner() {
     { key: "reference", header: "Ref", sortable: true, render: (q) => <span className="ref">{q.reference || "—"}</span> },
     { key: "title", header: "Title", sortable: true, render: (q) => <span className="cell-title">{q.title}</span> },
     { key: "asset_at_risk", header: "Asset at risk", sortable: true, render: (q) => <span className="muted">{q.asset_at_risk || "—"}</span> },
-    { key: "ale_point", header: "ALE point", render: (q) => <span className="muted">{pkr(q.ale_point, q.currency)}</span> },
-    { key: "last_mean_ale", header: "Mean ALE", sortable: true, render: (q) => <span className="muted">{q.last_simulated ? pkr(q.last_mean_ale, q.currency) : "—"}</span> },
-    { key: "last_p90", header: "P90", sortable: true, render: (q) => <span className="muted">{q.last_simulated ? pkr(q.last_p90, q.currency) : "—"}</span> },
+    { key: "ale_point", header: "ALE point", render: (q) => <span className="muted">{money(q.ale_point, q.currency)}</span> },
+    { key: "last_mean_ale", header: "Mean ALE", sortable: true, render: (q) => <span className="muted">{q.last_simulated ? money(q.last_mean_ale, q.currency) : "—"}</span> },
+    { key: "last_p90", header: "P90", sortable: true, render: (q) => <span className="muted">{q.last_simulated ? money(q.last_p90, q.currency) : "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (q) => <Badge tone={STATUS_TONE[q.status] || "neutral"}>{cap(q.status)}</Badge> },
     { key: "actions", header: "", render: (q) => (
       <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
@@ -375,7 +378,7 @@ function RiskQuantificationInner() {
   const magnitudeTab = (
     <>
       <p className="muted" style={{ fontSize: 13, margin: "0 0 12px" }}>
-        Loss Magnitude per event in {f.currency || "PKR"}, as a triangular estimate
+        Loss Magnitude per event in {f.currency || currency}, as a triangular estimate
         (minimum, most-likely, maximum).
       </p>
       <div className="field-row">
@@ -390,7 +393,7 @@ function RiskQuantificationInner() {
         </Field>
       </div>
       <Field label="Currency">
-        <TextInput value={f.currency} onChange={(v) => set("currency", v)} placeholder="PKR" />
+        <Select value={f.currency} onChange={(v) => set("currency", v)} options={currencyOptions} />
       </Field>
     </>
   );
@@ -414,9 +417,6 @@ function RiskQuantificationInner() {
           placeholder="Search the risk register…"
         />
       </Field>
-      <Field label="Workflow" help="Approval lifecycle for this quantification record.">
-        <Select value={f.workflow_status} onChange={(v) => set("workflow_status", v)} options={WORKFLOW} />
-      </Field>
     </>
   );
 
@@ -429,7 +429,7 @@ function RiskQuantificationInner() {
       <div className="page-head row-between">
         <div>
           <h1>Risk Quantification</h1>
-          <p>FAIR-style loss exposure — Monte Carlo simulation of annualised loss (ALE) in PKR on top of the qualitative risk register.</p>
+          <p>FAIR-style loss exposure — Monte Carlo simulation of annualised loss (ALE) on top of the qualitative risk register.</p>
         </div>
         <button className="btn" onClick={openNew}>
           <IconPlus width={16} height={16} /> New quantification
@@ -444,11 +444,11 @@ function RiskQuantificationInner() {
           <span className="l">Quantified risks</span>
         </div>
         <div className="card stat">
-          <div className="stat-top"><span className="n">{summary ? pkr(summary.total_mean_ale) : "—"}</span></div>
+          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_mean_ale, summary.reporting_currency, { compact: "auto" }) : "—"}</span></div>
           <span className="l">Total mean ALE</span>
         </div>
         <div className="card stat">
-          <div className="stat-top"><span className="n">{summary ? pkr(summary.highest_p90) : "—"}</span></div>
+          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.highest_p90, summary.reporting_currency, { compact: "auto" }) : "—"}</span></div>
           <span className="l">Highest single P90</span>
         </div>
         <div className="card stat">
@@ -456,6 +456,13 @@ function RiskQuantificationInner() {
           <span className="l">Simulated</span>
         </div>
       </div>
+
+      {summary && unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_mean_ale, unconverted: summary.unconverted }) && (
+        <div className="card card-pad" style={{ marginTop: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_mean_ale, unconverted: summary.unconverted })}
+          {" — "}<Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
 
       <DataTable<RiskQuant>
         columns={columns}
@@ -465,17 +472,22 @@ function RiskQuantificationInner() {
         activeKey={openId}
         searchPlaceholder="Search quantifications by title, reference or asset…"
         defaultSort={{ by: "last_mean_ale", dir: "desc" }}
-        emptyMessage="No quantified risks. Frame a loss scenario with frequency and magnitude estimates, then run a Monte Carlo to size the exposure in PKR."
+        emptyMessage="No quantified risks. Frame a loss scenario with frequency and magnitude estimates, then run a Monte Carlo to size the exposure."
         refreshKey={refreshKey}
       />
 
       {/* ============================================= DRAWER */}
       <RecordDrawer
-        aside={quantDetail ? <RecordPanels model="risk_quantification" entityId={quantDetail.id} /> : null}
+        aside={quantDetail ? (
+          <>
+            <RecordApproval entityType="risk_quantification" entityId={quantDetail.id} onChanged={() => { reload(); loadDetail(quantDetail.id); }} />
+            <RecordPanels model="risk_quantification" entityId={quantDetail.id} />
+          </>
+        ) : null}
         open={!!openId && !!quantDetail}
         onClose={() => setOpenId(null)}
         title={quantDetail ? `${quantDetail.reference || ""} ${quantDetail.title}`.trim() : "…"}
-        subtitle={quantDetail ? `${cap(quantDetail.status)} · ${quantDetail.asset_at_risk || "no asset"}${quantDetail.last_simulated ? " · last simulated " + quantDetail.last_simulated : " · not yet simulated"}` : ""}
+        subtitle={quantDetail ? `${cap(quantDetail.status)} · ${quantDetail.asset_at_risk || "no asset"}${quantDetail.last_simulated ? " · last simulated " + formatDate(quantDetail.last_simulated) : " · not yet simulated"}` : ""}
         width={720}
         actions={quantDetail && (
           <>
@@ -498,11 +510,11 @@ function RiskQuantificationInner() {
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Loss Magnitude / event</div>
-                    <strong>{pkr(quantDetail.lm_min, quantDetail.currency)} · {pkr(quantDetail.lm_likely, quantDetail.currency)} · {pkr(quantDetail.lm_max, quantDetail.currency)}</strong>
+                    <strong>{money(quantDetail.lm_min, quantDetail.currency)} · {money(quantDetail.lm_likely, quantDetail.currency)} · {money(quantDetail.lm_max, quantDetail.currency)}</strong>
                   </div>
                   <div>
                     <div className="muted" style={{ fontSize: 12 }}>Point ALE · iterations</div>
-                    <strong>{pkr(quantDetail.ale_point, quantDetail.currency)} · {num(quantDetail.iterations)}</strong>
+                    <strong>{money(quantDetail.ale_point, quantDetail.currency)} · {num(quantDetail.iterations)}</strong>
                   </div>
                 </div>
 
@@ -516,11 +528,11 @@ function RiskQuantificationInner() {
                 {fresh && (
                   <>
                     <div className="grid stat-grid" style={{ marginTop: 12 }}>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p10, quantDetail.currency)}</span></div><span className="l">P10</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p50, quantDetail.currency)}</span></div><span className="l">P50 (median)</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.p90, quantDetail.currency)}</span></div><span className="l">P90</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.mean, quantDetail.currency)}</span></div><span className="l">Mean ALE</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(fresh.max, quantDetail.currency)}</span></div><span className="l">Max</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{money(fresh.p10, quantDetail.currency)}</span></div><span className="l">P10</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{money(fresh.p50, quantDetail.currency)}</span></div><span className="l">P50 (median)</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{money(fresh.p90, quantDetail.currency)}</span></div><span className="l">P90</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{money(fresh.mean, quantDetail.currency)}</span></div><span className="l">Mean ALE</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{money(fresh.max, quantDetail.currency)}</span></div><span className="l">Max</span></div>
                     </div>
                     <SimBars p50={fresh.p50} p90={fresh.p90} max={fresh.max} currency={quantDetail.currency} />
                     <p className="muted" style={{ marginTop: 10, fontSize: 12 }}>
@@ -532,12 +544,12 @@ function RiskQuantificationInner() {
                 {!fresh && quantDetail.last_simulated && (
                   <>
                     <div className="grid stat-grid" style={{ marginTop: 12 }}>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(quantDetail.last_mean_ale, quantDetail.currency)}</span></div><span className="l">Mean ALE (cached)</span></div>
-                      <div className="card stat"><div className="stat-top"><span className="n">{pkr(quantDetail.last_p90, quantDetail.currency)}</span></div><span className="l">P90 (cached)</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{money(quantDetail.last_mean_ale, quantDetail.currency)}</span></div><span className="l">Mean ALE (cached)</span></div>
+                      <div className="card stat"><div className="stat-top"><span className="n">{money(quantDetail.last_p90, quantDetail.currency)}</span></div><span className="l">P90 (cached)</span></div>
                     </div>
                     <SimBars p50={quantDetail.last_mean_ale} p90={quantDetail.last_p90} max={quantDetail.last_p90} currency={quantDetail.currency} />
                     <p className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-                      Cached from the run on {quantDetail.last_simulated}. Run again for the full P10 / P50 / max breakdown.
+                      Cached from the run on {formatDate(quantDetail.last_simulated)}. Run again for the full P10 / P50 / max breakdown.
                     </p>
                   </>
                 )}

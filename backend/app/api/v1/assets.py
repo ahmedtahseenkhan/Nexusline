@@ -12,6 +12,7 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import aliased, selectinload
 
@@ -59,11 +60,15 @@ from app.schemas.asset import (
     AssetTagUpdate,
     AssetUpdate,
     ClassificationRef,
+    ExceptionLinkRef,
+    InformationAssetRef,
     LinkRef,
+    RiskExposureRef,
 )
-from app.schemas.common import GraphRef, Page
-from app.services import audit
-from app.services.risk_scoring import next_review_date
+from app.schemas.common import GraphRef, Page, exception_status
+from app.services import audit, fx, risk_integrity
+from app.services.risk_scoring import AppetiteBook, SeverityScale, effective_score, next_review_date
+from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -114,17 +119,86 @@ def _ref(obj) -> LinkRef | None:
     return LinkRef(id=obj.id, label=str(label))
 
 
+def _info_ref(obj) -> InformationAssetRef | None:
+    """The information asset in a dependency, with its business value (B8)."""
+    ref = _ref(obj)
+    if ref is None:
+        return None
+    return InformationAssetRef(id=ref.id, label=ref.label, business_value=getattr(obj, "business_value", None))
+
+
 def _dep_ref(dep: AssetDependency) -> AssetDependencyRead:
     return AssetDependencyRead(
         id=dep.id,
         relationship_type=dep.relationship_type,
         notes=dep.notes,
-        information_asset=_ref(dep.information_asset),
+        information_asset=_info_ref(dep.information_asset),
         it_asset=_ref(dep.it_asset),
     )
 
 
-def _serialize(a: Asset) -> AssetRead:
+def _exception_ref(x) -> ExceptionLinkRef:
+    """A linked exception with its state and expiry (B3)."""
+    ref = _ref(x)
+    return ExceptionLinkRef(
+        id=ref.id, label=ref.label,
+        status=exception_status(getattr(x, "status", None), getattr(x, "expires_at", None)),
+        expires_at=getattr(x, "expires_at", None),
+    )
+
+
+#: What an asset read needs to band its risks the way the register does: the tenant's
+#: scale (bands and cell overrides) and appetite book. None = not loaded (the list), or
+#: the viewer may not read risks.
+Exposure = tuple[SeverityScale, AppetiteBook] | None
+
+
+def risk_exposure_ref(r, exposure: Exposure = None, *, scores: bool = True) -> RiskExposureRef:
+    """A risk on an asset (B8). Scores are given when ``scores`` (the viewer may read
+    risks); the bands and the appetite status only with the tenant's ``exposure``
+    context, using the rules ``RiskRead`` and the dashboard use: bands per matrix cell,
+    appetite on the effective score (residual when assessed, else inherent) against the
+    risk category's thresholds. ``label`` is the risk's title (the reference only when it
+    has none); ``reference`` carries the reference. Pure."""
+    # The label is the risk's name and the reference stays separate, so a chip reads
+    # "R-002 Ransomware encrypts production systems" like every other linked record.
+    reference = getattr(r, "reference", "") or ""
+    label = getattr(r, "title", None) or getattr(r, "name", None) or reference or str(r.id)[:8]
+    out = RiskExposureRef(id=r.id, label=str(label), reference=reference)
+    if not scores:
+        return out
+    out.inherent_score = getattr(r, "inherent_score", None)
+    out.residual_score = getattr(r, "residual_score", None)
+    if exposure is not None:
+        scale, book = exposure
+        out.inherent_severity = scale.for_cell(r.inherent_likelihood, r.inherent_impact)
+        out.residual_severity = scale.for_cell(r.residual_likelihood, r.residual_impact)
+        out.appetite_status = book.status(
+            effective_score(out.inherent_score, out.residual_score), getattr(r, "category_id", None)
+        )
+    return out
+
+
+def _can_read_risks(user) -> bool:
+    return "risk:read" in set(getattr(user, "permission_codes", None) or [])
+
+
+async def _exposure(db, asset: Asset, user) -> Exposure:
+    """The tenant's scale and appetite for banding the asset's risks — only for a viewer
+    who may read risks: an asset reader without ``risk:read`` sees which risks sit on the
+    asset (as before), not their scores' judgements."""
+    if not _can_read_risks(user) or not asset.risks:
+        return None
+    settings = await get_or_create_settings(db, asset.tenant_id)
+    return scale_for(settings), await load_appetite_book(db, asset.tenant_id, settings)
+
+
+async def _read(db, asset: Asset, user) -> AssetRead:
+    """The single-asset read (and every write response): risks carry their exposure."""
+    return _serialize(asset, await _exposure(db, asset, user), can_read_risks=_can_read_risks(user))
+
+
+def _serialize(a: Asset, exposure: Exposure = None, *, can_read_risks: bool = False) -> AssetRead:
     # An IT asset shows the info assets it hosts; an information asset shows the IT it runs on.
     deps = a.hosted_dependencies if a.asset_class == AssetClass.it_asset else a.hosting_dependencies
     return AssetRead(
@@ -186,9 +260,9 @@ def _serialize(a: Asset) -> AssetRead:
         legals=[_ref(x) for x in a.legals],
         requirements=[_ref(x) for x in a.requirements],
         incidents=[_ref(x) for x in a.incidents],
-        exceptions=[_ref(x) for x in a.exceptions],
+        exceptions=[_exception_ref(x) for x in a.exceptions],
         related_assets=[_ref(x) for x in a.related_assets],
-        risks=[_ref(x) for x in a.risks],
+        risks=[risk_exposure_ref(x, exposure, scores=can_read_risks) for x in a.risks],
         vendors=[GraphRef.model_validate(x) for x in a.vendors],
         access_reviews=[GraphRef.model_validate(x) for x in a.access_reviews],
         controls=[GraphRef.model_validate(x) for x in a.controls],
@@ -274,6 +348,7 @@ _ASSET_SORTABLE = {
 @router.get("", response_model=Page[AssetRead], dependencies=[Depends(require("asset:read"))])
 async def list_assets(
     db: DbSession,
+    user: CurrentUser,
     search: Annotated[str | None, Query()] = None,
     asset_class: Annotated[AssetClass | None, Query(description="Filter by IT vs Information asset")] = None,
     media_type_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -299,7 +374,24 @@ async def list_assets(
     stmt = apply_sort(stmt, params, _ASSET_SORTABLE, default=Asset.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))).all()
-    return Page(items=[_serialize(r) for r in rows], total=total, limit=limit, offset=offset)
+    can_read_risks = _can_read_risks(user)
+    return Page(items=[_serialize(r, can_read_risks=can_read_risks) for r in rows], total=total, limit=limit, offset=offset)
+
+
+async def replacement_value(db, filters) -> dict:
+    """Replacement cost of the matching assets in the reporting currency (``MoneyTotalRead``
+    shape): one grouped query, converted at today's rate; currencies with no rate are listed
+    in ``unconverted`` and left out of ``total``."""
+    groups = (await db.execute(
+        select(Asset.currency, func.coalesce(func.sum(Asset.replacement_cost), 0), func.count())
+        .where(*filters, Asset.replacement_cost > 0)
+        .group_by(Asset.currency)
+    )).all()
+    book = await fx.load_rate_book(db) if groups else fx.RateBook(await fx.reporting_currency(db))
+    total = fx.MoneyTotal(book)
+    for code, amount, count in groups:
+        total.add(amount, code, count=int(count or 0))
+    return total.as_dict()
 
 
 @router.get("/summary", dependencies=[Depends(require("asset:read"))])
@@ -324,9 +416,9 @@ async def asset_summary(
     with_pii = await db.scalar(_count(Asset.data_categories.ilike("%pii%"))) or 0
     # --- IT-asset figures (server-computed so the stat cards are right at any scale) ---
     production = await db.scalar(_count(Asset.environment == AssetEnvironment.production)) or 0
-    total_value = await db.scalar(
-        select(func.coalesce(func.sum(Asset.replacement_cost), 0)).where(*filters)
-    ) or 0
+    # Decision 4: replacement cost is summed per currency, then converted to the reporting
+    # currency at today's rate (a stock figure: what replacing the estate costs now).
+    replacement = await replacement_value(db, filters)
     # effective criticality == critical iff cost band critical (>=10M) OR availability
     # critical OR it hosts an information asset whose business value is critical.
     info = aliased(Asset)
@@ -349,7 +441,8 @@ async def asset_summary(
         "self_assessed_pct": round(self_assessed / total * 100, 1) if total else 0.0,
         "with_pii": with_pii,
         "production": production,
-        "total_replacement_value": float(total_value),
+        "total_replacement_value": replacement["total"],
+        "replacement_value": replacement,
         "effective_critical": effective_critical,
     }
 
@@ -369,12 +462,15 @@ async def create_asset(body: AssetCreate, db: DbSession, user: CurrentUser) -> A
     await db.flush()
     await audit.record(db, actor=user, action="create", entity_type="asset", entity_id=asset.id,
                        summary=f"Created asset {asset.name}")
-    return _serialize(await _fresh(db, asset.id))
+    return await _read(db, await _fresh(db, asset.id), user)
 
 
 @router.get("/{asset_id}", response_model=AssetRead, dependencies=[Depends(require("asset:read"))])
-async def get_asset(asset_id: uuid.UUID, db: DbSession) -> AssetRead:
-    return _serialize(await _get_or_404(db, asset_id))
+async def get_asset(asset_id: uuid.UUID, db: DbSession, user: CurrentUser) -> AssetRead:
+    """The asset. Its ``risks`` carry their scores, bands and appetite status (for a
+    viewer who holds ``risk:read``); its information-asset dependencies carry their
+    business value; its exceptions their status and expiry."""
+    return await _read(db, await _get_or_404(db, asset_id), user)
 
 
 @router.patch("/{asset_id}", response_model=AssetRead, dependencies=[Depends(require("asset:write"))])
@@ -388,18 +484,43 @@ async def update_asset(asset_id: uuid.UUID, body: AssetUpdate, db: DbSession, us
     await db.flush()
     await audit.record(db, actor=user, action="update", entity_type="asset", entity_id=asset.id,
                        summary=f"Updated asset {asset.name}")
-    return _serialize(await _fresh(db, asset.id))
+    return await _read(db, await _fresh(db, asset.id), user)
+
+
+class AssetImpact(BaseModel):
+    """Live records that link to an asset — what deleting it would touch."""
+
+    risks: int
+    controls: int
+
+
+@router.get("/{asset_id}/impact", response_model=AssetImpact, dependencies=[Depends(require("asset:read"))])
+async def asset_impact(asset_id: uuid.UUID, db: DbSession) -> AssetImpact:
+    """Counts for the delete confirmation: linked live risks are flagged for review when
+    the asset goes, so the person deleting it should know how many first."""
+    await _get_or_404(db, asset_id)
+    return AssetImpact(**await risk_integrity.asset_impact(db, asset_id))
 
 
 @router.delete("/{asset_id}", status_code=204, dependencies=[Depends(require("asset:write"))])
 async def delete_asset(asset_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    """Soft delete. Every live risk written against the asset is kept and flagged
+    ``needs_review`` with the asset's name, so a person decides what happens to it —
+    nothing is archived or relinked on its own."""
     from datetime import datetime, timezone
 
     asset = await _get_or_404(db, asset_id)
+    risks = await risk_integrity.live_risks_for_assets(db, [asset.id])
+    flagged = risk_integrity.flag_for_asset_removal(risks, asset.name)
     asset.deleted = True
     asset.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    summary = f"Archived asset {asset.name}"
+    if flagged:
+        summary += f"; flagged {flagged} linked risk(s) for review"
     await audit.record(db, actor=user, action="delete", entity_type="asset", entity_id=asset.id,
-                       summary=f"Archived asset {asset.name}")
+                       summary=summary,
+                       changes={"risks_flagged": ", ".join(sorted(r.reference for r in risks))} if flagged else None)
 
 
 # ----------------------------------------------------------------- review cycle
@@ -410,14 +531,22 @@ async def list_reviews(asset_id: uuid.UUID, db: DbSession) -> list[AssetReviewRe
 
 
 @router.post("/{asset_id}/reviews", response_model=AssetRead, status_code=201, dependencies=[Depends(require("asset:write"))])
-async def schedule_review(asset_id: uuid.UUID, body: AssetReviewCreate, db: DbSession) -> AssetRead:
+async def schedule_review(asset_id: uuid.UUID, body: AssetReviewCreate, db: DbSession, user: CurrentUser) -> AssetRead:
     asset = await _get_or_404(db, asset_id)
     db.add(AssetReview(tenant_id=asset.tenant_id, asset_id=asset.id, reviewer=body.reviewer,
                        scheduled_date=body.scheduled_date, comments=body.comments,
                        status=AssetReviewStatus.scheduled))
+    before = asset.next_review_date
     asset.next_review_date = body.scheduled_date
     await db.flush()
-    return _serialize(await _fresh(db, asset.id))
+    await audit.record(
+        db, actor=user, action="update", entity_type="asset", entity_id=asset.id,
+        summary=f"Scheduled a review of asset {asset.name} for {body.scheduled_date.isoformat()}",
+        changes={"next_review_date": {"from": before.isoformat() if before else None,
+                                      "to": body.scheduled_date.isoformat()},
+                 **({"reviewer": body.reviewer} if body.reviewer else {})},
+    )
+    return await _read(db, await _fresh(db, asset.id), user)
 
 
 @router.post("/{asset_id}/reviews/{review_id}/complete", response_model=AssetRead, dependencies=[Depends(require("asset:write"))])
@@ -437,7 +566,7 @@ async def complete_review(asset_id: uuid.UUID, review_id: uuid.UUID, body: Asset
     await audit.record(db, actor=user, action="review", entity_type="asset", entity_id=asset.id,
                        summary=f"Reviewed asset {asset.name} ({body.outcome})")
     await db.flush()
-    return _serialize(await _fresh(db, asset.id))
+    return await _read(db, await _fresh(db, asset.id), user)
 
 
 # -------------------------------------------- information ↔ IT dependency links

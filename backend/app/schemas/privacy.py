@@ -22,7 +22,6 @@ class RopaBase(BaseModel):
     description: str = ""
     purpose: str = ""
     status: RopaStatus = RopaStatus.draft
-    workflow_status: WorkflowState = WorkflowState.draft
     lawful_basis: LawfulBasis = LawfulBasis.consent
     data_subjects: str = ""
     data_categories: str = ""
@@ -67,7 +66,6 @@ class RopaUpdate(BaseModel):
     description: str | None = None
     purpose: str | None = None
     status: RopaStatus | None = None
-    workflow_status: WorkflowState | None = None
     lawful_basis: LawfulBasis | None = None
     data_subjects: str | None = None
     data_categories: str | None = None
@@ -105,6 +103,8 @@ class RopaUpdate(BaseModel):
 
 
 class RopaRead(RopaBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

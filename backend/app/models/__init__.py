@@ -1,6 +1,12 @@
 """SQLAlchemy models. Import all here so metadata is fully populated."""
 from app.models.base import Base
 from app.models.tenant import Tenant
+from app.models.settings import TenantSettings
+from app.models.risk_scenario import RiskProposal
+from app.models.notification import ActionToken
+from app.models.governance import BoardPack
+from app.models.vendor import VendorCertification
+from app.models.lookup import Lookup
 from app.models.identity import Permission, Role, User, role_permissions, user_roles
 from app.models.audit import AuditLog
 from app.models.access_review import AccessReview, AccessReviewItem
@@ -38,11 +44,19 @@ from app.models.assessment import (
     QuestionOption,
     Questionnaire,
 )
+from app.models.assessment import (  # phase 4E: questionnaire engine
+    AssessmentAccessLog,
+    AssessmentLink,
+    QuestionnaireSection,
+)
 from app.models.collab import Attachment, Comment, EntityTag, StoredFile, Tag
 from app.models.continuity import ContinuityPlan, ContinuityTask, ContinuityTest
 from app.models.control import Control, ControlAudit, ControlMaintenance, control_policies
 from app.models.custom_field import CustomField, CustomFieldValue
 from app.models.risk import (
+    RiskAppetite,
+    RiskImpactDimension,
+    RiskTreatmentAction,
     ResidualPolicy,
     Risk,
     RiskAcceptance,
@@ -62,6 +76,7 @@ from app.models.threat import (
     risk_vulnerabilities,
 )
 from app.models.compliance import (
+    CrosswalkRejection,
     ComplianceFinding,
     Framework,
     Requirement,
@@ -93,6 +108,7 @@ from app.models.shariah import (
     ShariahRuling,
 )
 from app.models.operational_risk import (
+    KriEscalation,
     KeyRiskIndicator,
     KriMeasurement,
     LossEvent,
@@ -128,7 +144,7 @@ from app.models.audit_plan import (
     AuditProgramStep,
 )
 # --- Banking-productionization modules (gap-analysis build) ---
-from app.models.issue import Issue, IssueAction, IssueUpdate
+from app.models.issue import Issue, IssueAction, IssueDueDateChange, IssueUpdate
 from app.models.regulatory_change import Obligation, RegulatoryChange, RegulatoryReturn
 from app.models.icfr import IcfrControl, IcfrDeficiency, IcfrProcess, IcfrTest
 from app.models.bia import BiaAssessment, BiaDependency
@@ -177,8 +193,26 @@ from app.models.status_rule import StatusRule
 from app.models.version import RecordVersion
 from app.models.webhook import Webhook, WebhookDelivery
 from app.models.widget import DashboardWidget
+# Phase 4A: per-organisation computed-figure cache
+from app.models.computed_cache import TenantComputedCache
+# Phase 4B: workspaces, period snapshots, committee members and board-pack branding
+from app.models.governance import BoardPackBranding, CommitteeMember
+from app.models.workspace import MetricSnapshot, UserWorkspacePreference
+# Decision 4: exchange rates into the reporting currency
+from app.models.fx import FxRate
 
 __all__ = [
+    "RiskProposal",
+    "ActionToken",
+    "BoardPack",
+    "IssueDueDateChange",
+    "RiskAppetite",
+    "RiskImpactDimension",
+    "RiskTreatmentAction",
+    "KriEscalation",
+    "VendorCertification",
+    "TenantSettings",
+    "Lookup",
     "Base",
     "Tenant",
     "User",
@@ -221,6 +255,7 @@ __all__ = [
     "requirement_risks",
     "requirement_policies",
     "requirement_crosswalks",
+    "CrosswalkRejection",
     "Evidence",
     "Incident",
     "IncidentStage",
@@ -340,4 +375,17 @@ __all__ = [
     "FraudControlCheck",
     "AuthorityMatrix",
     "DualControlRule",
+    # Phase 4A
+    "TenantComputedCache",
+    # Phase 4B
+    "BoardPackBranding",
+    "CommitteeMember",
+    "MetricSnapshot",
+    "UserWorkspacePreference",
+    # Phase 4E: questionnaire engine
+    "QuestionnaireSection",
+    "AssessmentLink",
+    "AssessmentAccessLog",
+    # Decision 4: exchange rates
+    "FxRate",
 ]

@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import tenant_session
 from app.core.security import decode_access_token
 from app.models.identity import User
+from app.services import mfa_policy
 
 bearer_scheme = HTTPBearer(auto_error=True)
 
@@ -24,13 +25,40 @@ _CREDENTIALS_EXC = HTTPException(
 )
 
 
+def check_session_scope(payload: dict[str, Any], path: str) -> None:
+    """Refuse tokens that are not full session tokens, and narrow enrol-only sessions.
+
+    * A token carrying a ``purpose`` claim is a single-use artefact signed with the same
+      key — the MFA challenge issued after the password step, the SSO state token — and
+      must never be accepted as a bearer session. Without this check the MFA challenge
+      alone opened a full session, i.e. the password was enough.
+    * A token carrying the MFA enrol-only claim (see ``services/mfa_policy.py``) may
+      reach only the enrolment endpoints, ``/auth/me`` and logout; anything else is a
+      403 with ``X-Error-Code: mfa_enrolment_required``.
+    """
+    if payload.get("purpose"):
+        raise _CREDENTIALS_EXC
+    if payload.get(mfa_policy.ENROL_ONLY_CLAIM) and not mfa_policy.enrol_only_path_allowed(path):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=mfa_policy.ENROL_REQUIRED_DETAIL,
+            headers={"X-Error-Code": mfa_policy.ENROL_REQUIRED_CODE},
+        )
+
+
 async def get_token_payload(
+    request: Request,
     creds: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
 ) -> dict[str, Any]:
     try:
-        return decode_access_token(creds.credentials)
+        payload = decode_access_token(creds.credentials)
     except jwt.PyJWTError as exc:  # noqa: BLE001
         raise _CREDENTIALS_EXC from exc
+    # Every authenticated dependency (session, current user, RBAC) hangs off this one,
+    # so the MFA enrol-only restriction cannot be skipped by an endpoint that only asks
+    # for a DB session.
+    check_session_scope(payload, request.url.path)
+    return payload
 
 
 async def get_db(
@@ -47,7 +75,7 @@ async def get_db(
 
 async def get_current_user(
     payload: Annotated[dict[str, Any], Depends(get_token_payload)],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: Annotated[AsyncSession, Depends(get_db, scope="function")],
 ) -> User:
     try:
         user_id = uuid.UUID(payload["sub"])
@@ -61,7 +89,11 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
-DbSession = Annotated[AsyncSession, Depends(get_db)]
+# ``scope="function"`` closes the session — and so commits — before the response is
+# sent. With the default request scope the commit ran after the response had gone out:
+# a constraint or guard failure at commit rolled the write back while the client had
+# already been told 200. (Found in the product review; FastAPI >= 0.121.)
+DbSession = Annotated[AsyncSession, Depends(get_db, scope="function")]
 
 
 async def require_platform_admin(user: CurrentUser) -> User:

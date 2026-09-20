@@ -10,6 +10,8 @@ import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Toggle, MultiSelect, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus, IconShield, IconUsers } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
 
 // ----------------------------------------------------------------- inline API types
 type RoleSummary = { id: string; name: string; description: string };
@@ -21,6 +23,10 @@ type UserRecord = {
   created_at: string;
   permission_codes: string[];
   roles: RoleSummary[];
+  mfa_enabled?: boolean;
+  /** Where the user stands against the organisation's MFA policy (api/v1/users.py). */
+  mfa_status?: "enabled" | "required" | "overdue" | "identity_provider" | "not_required" | null;
+  mfa_due?: string | null;
 };
 type RoleRecord = {
   id: string;
@@ -33,8 +39,27 @@ type Permission = { code: string; description: string };
 type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 
 // --------------------------------------------------------------------------- helpers
-const cap = (s: string) => s.replace(/[:_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-const fmtDate = (s: string | null) => (s ? new Date(s).toLocaleDateString() : "—");
+const cap = (s: string) => titleCase(s.replace(/:/g, " "));
+
+/** The MFA column: enabled, required with its deadline, handled by the IdP, or not required. */
+function MfaStatus({ user, formatDate }: { user: UserRecord; formatDate: (v: string | null | undefined) => string }) {
+  switch (user.mfa_status) {
+    case "enabled":
+      return <Badge tone="low" asIs>Enabled</Badge>;
+    case "overdue":
+      return <Badge tone="high" asIs>Required, overdue since {formatDate(user.mfa_due)}</Badge>;
+    case "required":
+      return (
+        <Badge tone="medium" asIs>
+          {user.mfa_due ? `Required, due ${formatDate(user.mfa_due)}` : "Required, due after next sign-in"}
+        </Badge>
+      );
+    case "identity_provider":
+      return <span className="muted" style={{ fontSize: 12.5 }}>Handled by your identity provider</span>;
+    default:
+      return <span className="muted" style={{ fontSize: 12.5 }}>Not required</span>;
+  }
+}
 const resourceOf = (code: string) => code.split(":")[0] || "other";
 
 // ----------------------------------------------------------------------- user dialog
@@ -52,6 +77,7 @@ type RoleForm = { name: string; description: string; permission_codes: string[] 
 const BLANK_ROLE: RoleForm = { name: "", description: "", permission_codes: [] };
 
 function OrganizationInner() {
+  const { formatDate } = useFormat();
   const [view, setView] = useState<"users" | "roles">("users");
 
   const [roles, setRoles] = useState<RoleRecord[]>([]);
@@ -361,8 +387,9 @@ function OrganizationInner() {
     { key: "email", header: "Email", sortable: true, render: (u) => <span className="muted">{u.email}</span> },
     { key: "roles", header: "Roles", render: (u) => <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{u.roles.length === 0 && <span className="muted">—</span>}{u.roles.map((r) => <Badge key={r.id} tone="info" plain>{r.name}</Badge>)}</div> },
     { key: "permissions", header: "Permissions", align: "center", render: (u) => <span className="muted">{u.permission_codes.length}</span> },
+    { key: "mfa", header: "MFA", render: (u) => <MfaStatus user={u} formatDate={formatDate} /> },
     { key: "is_active", header: "Status", sortable: true, render: (u) => <Badge tone={u.is_active ? "low" : "neutral"}>{u.is_active ? "active" : "inactive"}</Badge> },
-    { key: "created_at", header: "Created", sortable: true, render: (u) => <span className="muted">{fmtDate(u.created_at)}</span> },
+    { key: "created_at", header: "Created", sortable: true, render: (u) => <span className="muted">{formatDate(u.created_at)}</span> },
     { key: "actions", header: "", render: (u) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => openEditUser(u)}>Edit</button> <button className="btn secondary sm" onClick={() => toggleActive(u)}>{u.is_active ? "Deactivate" : "Activate"}</button></div> },
   ];
 
@@ -409,6 +436,10 @@ function OrganizationInner() {
           <div className="card-head">
             <h3>Roles & permissions</h3>
             <span className="sub">{roles.length} roles</span>
+          </div>
+          <div className="card-pad muted" style={{ fontSize: 12.5, paddingTop: 0 }}>
+            Roles that can approve anything must use two-factor authentication. Choose other roles that must under{" "}
+            <a href="/organisation-settings#mfa">Organisation settings → Security</a>.
           </div>
           <div className="table-wrap">
             <table>
@@ -500,8 +531,12 @@ function OrganizationInner() {
                 </div>
               </div>
               <div style={{ minWidth: 140 }}>
+                <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Two-factor authentication</div>
+                <div style={{ marginTop: 3 }}><MfaStatus user={detail} formatDate={formatDate} /></div>
+              </div>
+              <div style={{ minWidth: 140 }}>
                 <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>Created</div>
-                <div style={{ marginTop: 3 }}>{fmtDate(detail.created_at)}</div>
+                <div style={{ marginTop: 3 }}>{formatDate(detail.created_at)}</div>
               </div>
             </div>
 

@@ -42,7 +42,9 @@ from app.schemas.fraud import (
     FraudRiskUpdate,
 )
 from app.services.refs import next_reference
+from app.schemas.fx import UnconvertedAmount
 from app.services import audit as audit_log
+from app.services import fx
 
 router = APIRouter(tags=["fraud risk"])
 
@@ -320,6 +322,11 @@ class FraudSummary(BaseModel):
     checklist_pct: float
     risks_by_band: dict[str, int]
     high_residual_risks: int
+    #: Decision 4: the losses above are converted to this currency at each case's
+    #: discovery date (else the incident date, else the date it was reported).
+    reporting_currency: str = "PKR"
+    #: Amounts with no exchange rate, left out of the totals.
+    unconverted: list[UnconvertedAmount] = []
 
 
 def _band(score: int) -> str:
@@ -339,19 +346,24 @@ async def fraud_summary(db: DbSession) -> FraudSummary:
     risks = (await db.scalars(select(FraudRisk).where(FraudRisk.deleted.is_(False)))).all()
 
     cases_by_status: dict[str, int] = defaultdict(int)
-    loss_groups: dict[str, dict] = defaultdict(lambda: {"count": 0, "gross": 0.0, "net": 0.0})
+    book = await fx.load_rate_book(db)
+    loss_groups: dict[str, dict] = defaultdict(lambda: {"gross": fx.MoneyTotal(book), "net": fx.MoneyTotal(book)})
+    all_gross = fx.MoneyTotal(book)
     open_cases = 0
     for c in cases:
         cases_by_status[c.status.value] += 1
         if c.status not in (FraudCaseStatus.closed, FraudCaseStatus.recovered):
             open_cases += 1
         g = loss_groups[c.scheme.value]
-        g["count"] += 1
-        g["gross"] += float(c.amount_involved or 0)
-        g["net"] += c.net_loss
+        # A fraud loss is booked when it is found, so it converts at the discovery date.
+        on = c.discovery_date or c.incident_date or c.reported_date
+        g["gross"].add(c.amount_involved or 0, c.currency, on)
+        g["net"].add(c.net_loss, c.currency, on)
+        all_gross.add(c.amount_involved or 0, c.currency, on)
 
     loss_by_scheme = [
-        FraudLossRow(scheme=k, count=v["count"], gross_loss=round(v["gross"], 2), net_loss=round(v["net"], 2))
+        FraudLossRow(scheme=k, count=v["gross"].count,
+                     gross_loss=fx.money(v["gross"].total), net_loss=fx.money(v["net"].total))
         for k, v in sorted(loss_groups.items())
     ]
 
@@ -373,5 +385,7 @@ async def fraud_summary(db: DbSession) -> FraudSummary:
         checklist_implemented=checklist_implemented,
         checklist_pct=checklist_pct,
         risks_by_band=risks_by_band,
+        reporting_currency=book.reporting_currency,
+        unconverted=[UnconvertedAmount(**u) for u in all_gross.as_dict()["unconverted"]],
         high_residual_risks=risks_by_band["high"],
     )

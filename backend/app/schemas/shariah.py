@@ -29,7 +29,6 @@ class RulingBase(BaseModel):
     issued_date: date | None = None
     review_frequency: ReviewFrequency = ReviewFrequency.annual
     next_review_date: date | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class RulingCreate(RulingBase):
@@ -46,10 +45,11 @@ class RulingUpdate(BaseModel):
     issued_date: date | None = None
     review_frequency: ReviewFrequency | None = None
     next_review_date: date | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class RulingRead(RulingBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -67,7 +67,6 @@ class ProductBase(BaseModel):
     owner: str = ""
     launch_date: date | None = None
     approving_ruling_id: uuid.UUID | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class ProductCreate(ProductBase):
@@ -83,10 +82,11 @@ class ProductUpdate(BaseModel):
     owner: str | None = None
     launch_date: date | None = None
     approving_ruling_id: uuid.UUID | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class ProductRead(ProductBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -146,7 +146,6 @@ class ReviewBase(BaseModel):
     conclusion: str = ""
     rating: Severity | None = None
     product_id: uuid.UUID | None = None
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class ReviewCreate(ReviewBase):
@@ -165,10 +164,11 @@ class ReviewUpdate(BaseModel):
     conclusion: str | None = None
     rating: Severity | None = None
     product_id: uuid.UUID | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class ReviewRead(ReviewBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
@@ -189,7 +189,6 @@ class CharityBase(BaseModel):
     status: CharityStatus = CharityStatus.pending
     disbursement_date: date | None = None
     notes: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class CharityCreate(CharityBase):
@@ -205,10 +204,11 @@ class CharityUpdate(BaseModel):
     status: CharityStatus | None = None
     disbursement_date: date | None = None
     notes: str | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class CharityRead(CharityBase):
+    # Read-only here: moved by the lifecycle service (services/record_workflow.py).
+    workflow_status: WorkflowState
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str

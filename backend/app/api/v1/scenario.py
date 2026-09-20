@@ -35,7 +35,9 @@ from app.schemas.scenario import (
     ScenarioUpdate,
 )
 from app.services.refs import next_reference
+from app.schemas.fx import UnconvertedAmount
 from app.services import audit as audit_log
+from app.services import fx
 
 router = APIRouter(tags=["scenario analysis"])
 
@@ -211,16 +213,19 @@ async def delete_capital(cid: uuid.UUID, db: DbSession) -> None:
 async def scenario_summary(db: DbSession) -> ScenarioSummary:
     scenarios = (await db.scalars(
         select(ScenarioAnalysis).where(ScenarioAnalysis.deleted.is_(False)))).all()
-    groups: dict[str, dict] = defaultdict(lambda: {"count": 0, "eal": 0.0})
+    # Decision 4: a scenario's expected annual loss is forward-looking, so it converts at
+    # today's rate; a currency with no rate is reported, never added in.
+    book = await fx.load_rate_book(db)
+    groups: dict[str, fx.MoneyTotal] = defaultdict(lambda: fx.MoneyTotal(book))
+    all_eal = fx.MoneyTotal(book)
     approved = 0
     for s in scenarios:
-        g = groups[s.basel_event_type.value]
-        g["count"] += 1
-        g["eal"] += s.expected_annual_loss
+        groups[s.basel_event_type.value].add(s.expected_annual_loss, s.currency)
+        all_eal.add(s.expected_annual_loss, s.currency)
         if s.status == ScenarioStatus.approved:
             approved += 1
-    rows = [ScenarioSummaryRow(basel_event_type=k, count=v["count"],
-                               expected_annual_loss=round(v["eal"], 2))
+    rows = [ScenarioSummaryRow(basel_event_type=k, count=v.count,
+                               expected_annual_loss=fx.money(v.total))
             for k, v in sorted(groups.items())]
 
     latest = await db.scalar(
@@ -244,8 +249,10 @@ async def scenario_summary(db: DbSession) -> ScenarioSummary:
 
     return ScenarioSummary(
         rows=rows,
-        total_expected_annual_loss=round(sum(r.expected_annual_loss for r in rows), 2),
+        total_expected_annual_loss=fx.money(all_eal.total),
         total_count=sum(r.count for r in rows),
         approved_count=approved,
         latest_capital=latest_capital,
+        reporting_currency=book.reporting_currency,
+        unconverted=[UnconvertedAmount(**u) for u in all_eal.as_dict()["unconverted"]],
     )

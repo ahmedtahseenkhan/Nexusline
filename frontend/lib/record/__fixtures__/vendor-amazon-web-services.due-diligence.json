@@ -1,0 +1,367 @@
+{
+  "type": "vendor",
+  "note": "Amazon Web Services with a reviewed cloud-security due diligence (phase 4E): 52% Weak proposes high, the rating follows it, three findings are open and the next due diligence date (set short for the test) has passed.",
+  "input": {
+    "vendor": {
+      "name": "Amazon Web Services",
+      "description": "",
+      "category": "Cloud Infrastructure",
+      "category_id": "2a1d4146-39d6-428a-ac8e-662f2e051920",
+      "type_id": "513e23fa-e8d7-4b1d-9b69-659a2cb566c2",
+      "contact_name": "AWS Security Team",
+      "contact_email": "security@aws.example",
+      "contact_phone": "+1-206-555-0100",
+      "website": "https://aws.amazon.com",
+      "location": "Seattle, US",
+      "country_id": null,
+      "criticality": "critical",
+      "status": "active",
+      "workflow_owner_id": null,
+      "risk_rating": "high",
+      "shares_data": true,
+      "assessment_status": "completed",
+      "last_assessed_at": "2026-07-03",
+      "onboarded_at": "2023-01-10",
+      "offboarded_at": null,
+      "review_frequency": "annual",
+      "next_review_date": "2027-07-03",
+      "legal_name": "",
+      "registration_number": "",
+      "relationship_owner_id": "u9",
+      "data_classification_id": "dc2",
+      "annual_spend": null,
+      "spend_currency": "",
+      "id": "86790476-5725-48be-8ab0-43d75309da69",
+      "workflow_status": "approved",
+      "workflow_owner": "",
+      "category_ref": {
+        "id": "2a1d4146-39d6-428a-ac8e-662f2e051920",
+        "key": "vendor_category",
+        "value": "cloud_infrastructure",
+        "label": "Cloud Infrastructure"
+      },
+      "country_ref": null,
+      "workflow_owner_ref": null,
+      "type": {
+        "name": "Cloud Provider",
+        "description": "Infrastructure / SaaS provider",
+        "id": "513e23fa-e8d7-4b1d-9b69-659a2cb566c2"
+      },
+      "contracts": [
+        {
+          "name": "AWS Enterprise Agreement",
+          "description": "Cloud infrastructure + enterprise support.",
+          "value": 240000,
+          "currency": "",
+          "start_date": "2023-01-10",
+          "end_date": "2026-01-09",
+          "id": "bd29292b-52f7-4368-b4fd-fe9e34cfd32f",
+          "is_expired": true,
+          "created_at": "2026-07-03T20:35:46.947782Z"
+        },
+        {
+          "name": "AWS Enterprise Agreement 2026-2028",
+          "description": "Renewal with the Bahrain region added for DR.",
+          "value": 260000,
+          "currency": "USD",
+          "start_date": "2026-01-10",
+          "end_date": "2028-01-09",
+          "id": "c2",
+          "is_expired": false,
+          "created_at": "2026-01-05T08:00:00Z"
+        }
+      ],
+      "risks": [
+        {
+          "id": "5deaf5aa-734c-4517-9d55-1243ae638d8c",
+          "reference": "R-002",
+          "title": "Ransomware encrypts production systems",
+          "name": ""
+        }
+      ],
+      "assets": [
+        {
+          "id": "e5ae4ce4-34f7-42a9-960f-2cea8939f9e3",
+          "reference": "",
+          "title": "",
+          "name": "Customer Database"
+        },
+        {
+          "id": "72a69d43-130c-4f5a-89b1-681eaf7da072",
+          "reference": "",
+          "title": "",
+          "name": "Corporate Network"
+        }
+      ],
+      "incidents": [],
+      "assessments": [
+        {
+          "id": "7185b34c-8f49-49c1-b02d-35fd15c36981",
+          "reference": "",
+          "title": "AWS annual security review",
+          "name": ""
+        }
+      ],
+      "outsourcing_arrangements": [
+        {
+          "id": "o1",
+          "reference": "OUT-002",
+          "title": "Cloud hosting of internet banking",
+          "name": ""
+        }
+      ],
+      "requirements": [],
+      "controls": [],
+      "contract_count": 2,
+      "active_contract_value": 260000,
+      "active_contract_totals": {
+        "USD": 260000
+      },
+      "created_at": "2026-07-03T20:35:46.947782Z",
+      "relationship_owner_ref": {
+        "id": "u9",
+        "full_name": "Bilal Ahmed",
+        "email": "bilal.ahmed@bank.pk"
+      },
+      "data_classification_ref": {
+        "id": "dc2",
+        "key": "data_classification",
+        "value": "confidential",
+        "label": "Confidential"
+      },
+      "data_residency_countries": [
+        {
+          "id": "bh",
+          "key": "country",
+          "value": "bh",
+          "label": "Bahrain"
+        },
+        {
+          "id": "ie",
+          "key": "country",
+          "value": "ie",
+          "label": "Ireland"
+        }
+      ],
+      "processes": [],
+      "subcontractors": [],
+      "subcontractor_of": [],
+      "certifications": [
+        {
+          "id": "ct1",
+          "vendor_id": "86790476-5725-48be-8ab0-43d75309da69",
+          "cert_type": "iso_27001",
+          "cert_type_label": "ISO 27001",
+          "issuer": "BSI",
+          "certificate_number": "IS 667200",
+          "scope": "AWS global infrastructure",
+          "issued_on": "2024-03-31",
+          "expires_on": "2027-03-31",
+          "expiry_state": "valid",
+          "days_to_expiry": 199
+        },
+        {
+          "id": "ct2",
+          "vendor_id": "86790476-5725-48be-8ab0-43d75309da69",
+          "cert_type": "soc2_type2",
+          "cert_type_label": "SOC 2 Type II",
+          "issuer": "EY",
+          "certificate_number": "",
+          "scope": "Security, availability",
+          "issued_on": "2025-10-24",
+          "expires_on": "2026-10-24",
+          "expiry_state": "expiring",
+          "days_to_expiry": 41
+        },
+        {
+          "id": "ct3",
+          "vendor_id": "86790476-5725-48be-8ab0-43d75309da69",
+          "cert_type": "pci_dss",
+          "cert_type_label": "PCI DSS",
+          "issuer": "Coalfire",
+          "certificate_number": "",
+          "scope": "Card data environment services",
+          "issued_on": "2025-08-15",
+          "expires_on": "2026-08-15",
+          "expiry_state": "expired",
+          "days_to_expiry": -29
+        }
+      ],
+      "inherent_tier": "high",
+      "tier_override_reason": "Sole provider of the core banking DR site; the board treats it as critical.",
+      "tiering": {
+        "tier": "high",
+        "proposed_criticality": "high",
+        "overridden": true,
+        "override_reason": "Sole provider of the core banking DR site; the board treats it as critical.",
+        "assessment": {
+          "id": "5a1e0c2d-6b7f-4f3e-9d1a-2c8b7e4f9a10",
+          "reference": "",
+          "title": "Inherent risk tiering — Amazon Web Services",
+          "name": ""
+        },
+        "submitted_at": "2026-07-01T10:00:00Z",
+        "total_score": 25,
+        "max_score": 40,
+        "score_pct": 62.5,
+        "band_tier": "high",
+        "worst_case_answers": 1,
+        "floor_applied": false,
+        "explanation": "25 of 40 (62.5%)",
+        "stale": false,
+        "problem": "",
+        "questionnaire_id": "88f161b6-e2e3-43bb-b1ef-aca871b1f3f6"
+      },
+      "outsourcing": [
+        {
+          "id": "o1",
+          "reference": "OUT-002",
+          "title": "Cloud hosting of internet banking",
+          "status": "active",
+          "materiality": "material",
+          "is_cloud": true,
+          "data_offshored": true,
+          "country": "Bahrain",
+          "sbp_approval_status": "approved",
+          "contract_end": "2028-01-09",
+          "exit_plan": "Migrate to the on-premises DR site within 90 days.",
+          "exit_plan_tested": false
+        }
+      ],
+      "risk_rating_override_reason": "",
+      "due_diligence": {
+        "assessment_id": "a-dd-1",
+        "title": "AWS cloud service security 2026",
+        "reviewed_at": "2026-08-20T10:00:00Z",
+        "score_pct": 52.4,
+        "band": "Weak",
+        "proposed_rating": "high",
+        "overridden": false,
+        "override_reason": "",
+        "last_on": "2026-08-20",
+        "next_on": "2026-09-01",
+        "overdue": true,
+        "open_findings": 3,
+        "in_progress": 0
+      }
+    }
+  },
+  "ctx": {
+    "now": "2026-09-13T09:00:00Z",
+    "gov": {
+      "workflowState": "approved",
+      "approvalSteps": 0,
+      "lastStep": {
+        "action": "import",
+        "at": "2026-09-13T01:00:00Z",
+        "actor": "system@nexusline",
+        "reason": ""
+      },
+      "lastSubmitAt": null,
+      "attestation": {
+        "status": "never",
+        "nativeReview": true,
+        "nextDue": "2027-07-03",
+        "canAttest": true,
+        "blockedReason": null
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "tiles": [
+      {
+        "key": "tier",
+        "value": "High",
+        "because": "Tiering score 63% → high (bands 70 / 45 / 20%).",
+        "basis": {
+          "kind": "evidenced",
+          "text": "From questionnaire submitted 01 Jul 2026"
+        }
+      },
+      {
+        "key": "criticality",
+        "value": "Critical",
+        "because": "Set to critical instead of the proposed high: “Sole provider of the core banking DR site; the board treats…”.",
+        "basis": {
+          "kind": "declared",
+          "text": "Overridden by hand"
+        }
+      },
+      {
+        "key": "rating",
+        "value": "High",
+        "because": "Due diligence 52% → Weak, reviewed 20 Aug 2026; next due 01 Sep 2026.",
+        "basis": {
+          "kind": "evidenced",
+          "text": "From AWS cloud service security 2026"
+        }
+      },
+      {
+        "key": "data",
+        "value": "Handles our data",
+        "tone": "neutral",
+        "because": "Confidential data; resident in Bahrain and Ireland.",
+        "basis": {
+          "kind": "declared",
+          "text": "Recorded by hand"
+        }
+      },
+      {
+        "key": "contracts",
+        "value": "1 active",
+        "because": "2 contracts; active value USD 260,000; next expiry 09 Jan 2028.",
+        "basis": {
+          "kind": "derived",
+          "text": "From contract records"
+        }
+      },
+      {
+        "key": "certs",
+        "value": "2 valid",
+        "because": "ISO 27001 to 31 Mar 2027, SOC 2 Type II to 24 Oct 2026; 1 expiring within 60 days, 1 expired.",
+        "basis": {
+          "kind": "evidenced",
+          "text": "Certificates on file"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "vendor.cert_expired",
+        "level": "gap"
+      },
+      {
+        "id": "vendor.due_diligence_overdue",
+        "level": "gap",
+        "text": "Due diligence overdue since 01 Sep 2026.",
+        "action": {
+          "kind": "section",
+          "target": "diligence"
+        }
+      },
+      {
+        "id": "vendor.due_diligence_findings",
+        "level": "gap",
+        "text": "3 open due-diligence findings.",
+        "action": {
+          "kind": "href",
+          "target": "/assessments?id=a-dd-1"
+        }
+      },
+      {
+        "id": "vendor.exit_plan_untested",
+        "level": "gap"
+      },
+      {
+        "id": "vendor.approved_without_step",
+        "level": "gap"
+      },
+      {
+        "id": "vendor.cert_expiring",
+        "level": "note"
+      }
+    ],
+    "headline": "Critical third party (tiering proposes high); inherent tier high; 1 active contract; 2 valid certifications."
+  }
+}

@@ -92,6 +92,9 @@ async def resolve_user(db: AsyncSession, cfg: SsoConfig, tenant_id, code: str, r
     if not cfg.jit_provisioning:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No account for this user (JIT provisioning is off)")
 
+    from app.services import licence_state
+
+    await licence_state.ensure_seat_available()  # decision 1: a provisioned user takes a seat
     role = await db.scalar(select(Role).where(Role.name == cfg.default_role))
     user = User(
         tenant_id=tenant_id,

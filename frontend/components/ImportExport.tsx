@@ -1,7 +1,8 @@
 "use client";
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState, useRef } from "react";
 import { toast } from "@/lib/feedback";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 import { apiCall } from "@/lib/api";
 import { Badge } from "@/components/badges";
 
@@ -324,7 +325,12 @@ function ImportWizard({
   const [result, setResult] = useState<ImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
 
-  // Load the schema and any saved profiles; lock body scroll + Escape-to-close.
+  // Esc: a layer of the shared escape stack.
+  useEscapeLayer(true, onClose);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(true, dialogRef);
+
+  // Load the schema and any saved profiles; lock body scroll.
   useEffect(() => {
     let alive = true;
     apiCall<ResourceSchema>("GET", `/io/${resource}/schema`)
@@ -334,14 +340,9 @@ function ImportWizard({
       .then((p) => alive && setProfiles(p))
       .catch(() => {/* profiles are optional — never block the wizard on them */});
 
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
     return () => {
       alive = false;
-      window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
   }, [resource, onClose]);
@@ -550,7 +551,7 @@ function ImportWizard({
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal wide" role="dialog" aria-modal="true" aria-label={`Import ${label}`}>
+      <div ref={dialogRef} tabIndex={-1} className="modal wide" role="dialog" aria-modal="true" aria-label={`Import ${label}`} onKeyDown={(e) => trapTab(e, dialogRef.current)}>
         <div className="modal-head">
           <h2>Import {label}</h2>
           <button className="x" onClick={onClose} aria-label="Close">✕</button>

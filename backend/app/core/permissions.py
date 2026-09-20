@@ -13,6 +13,9 @@ PERMISSION_CATALOG: dict[str, str] = {
     "risk:accept": "Approve risk acceptances",
     "control:read": "View controls",
     "control:write": "Create and edit controls",
+    # Recording and reviewing control tests is assurance work, held apart from editing
+    # the control: a tester need not be able to rewrite the control they test.
+    "control:test": "Record control tests and review other people's tests",
     "compliance:read": "View frameworks and requirements",
     "compliance:write": "Manage frameworks, requirements and control mappings",
     "incident:read": "View incidents",
@@ -53,6 +56,10 @@ PERMISSION_CATALOG: dict[str, str] = {
     # edit a risk.
     "sla:manage": "Set turnaround-time (TAT) targets and escalation",
     "sso:manage": "Configure single sign-on (SSO)",
+    # Organisation-wide locale and retention. Held apart from ``org:write`` (which risk
+    # managers hold to maintain business units): the retention window decides when
+    # archived records are purged for good, so it is an administrator's decision.
+    "settings:manage": "Change organisation settings: currency, timezone, date format, fiscal year, retention",
     "asset:read": "View assets",
     "asset:write": "Create and edit assets",
     "user:read": "View users",
@@ -105,6 +112,11 @@ PERMISSION_CATALOG: dict[str, str] = {
     "riskquant:write": "Manage and simulate quantitative (FAIR) risk analyses",
     "ai:read": "View AI assist extractions",
     "ai:write": "Run AI assist / circular-intelligence extractions",
+    # --- Phase 4B: workspaces and board packs ---
+    "board:read": "View the board home: appetite, top risks, assurance, KRIs and committee decisions",
+    # Held apart from governance:write (which prepares packs and writes commentary): the
+    # person who signs a pack off for the committee is a separate decision.
+    "boardpack:release": "Review and release board packs to committee members",
 }
 
 ALL_PERMISSIONS = list(PERMISSION_CATALOG.keys())
@@ -123,6 +135,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "risk:delete",
             "control:read",
             "control:write",
+            "control:test",
             "asset:read",
             "asset:write",
             "incident:read",
@@ -170,6 +183,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "ccm:write",
             "ai:read",
             "ai:write",
+            "board:read",
         ],
     ),
     "Risk Approver": (
@@ -184,6 +198,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "workflow:read",
             "workflow:approve",
             "audit:read",
+            "board:read",
         ],
     ),
     "Compliance Manager": (
@@ -193,6 +208,7 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "compliance:write",
             "control:read",
             "control:write",
+            "control:test",
             "policy:read",
             "policy:write",
             "privacy:read",
@@ -201,6 +217,9 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "awareness:write",
             "workflow:read",
             "workflow:write",
+            # The compliance head decides the default policy approval route
+            # (services/default_governance.py), so the role must be able to approve.
+            "workflow:approve",
             "report:read",
             "report:write",
             "risk:read",
@@ -233,6 +252,8 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
             "dpo:write",
             "ai:read",
             "ai:write",
+            "board:read",
+            "boardpack:release",
         ],
     ),
     "Auditor": (
@@ -240,4 +261,10 @@ DEFAULT_ROLES: dict[str, tuple[str, list[str]]] = {
         _READ_ONLY + ["internal_audit:write"],
     ),
     "Viewer": ("Read-only access", _READ_ONLY),
+    # Phase 4B: directors and committee members. The board home and the committee's
+    # released packs, nothing operational.
+    "Board Member": (
+        "Board and committee members: the board home, committee decisions and released board packs",
+        ["board:read", "governance:read"],
+    ),
 }

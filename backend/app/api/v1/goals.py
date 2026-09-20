@@ -24,9 +24,26 @@ from app.schemas.goal import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import ref_fields
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/goals", tags=["goals"])
+
+#: The goal's picked fields (phase 1). See services.ref_fields.
+GOAL_REFS: tuple[ref_fields.RefField, ...] = (
+    ref_fields.user("owner_id", "owner"),
+    ref_fields.WORKFLOW_OWNER,
+)
+
+
+async def _reads(db, goals) -> list[GoalRead]:
+    items = [GoalRead.model_validate(g) for g in goals]
+    await ref_fields.fill_refs(db, list(zip(goals, items)), GOAL_REFS)
+    return items
+
+
+async def _read(db, goal: Goal) -> GoalRead:
+    return (await _reads(db, [goal]))[0]
 
 
 async def _load(db, goal_id: uuid.UUID) -> Goal:
@@ -88,6 +105,7 @@ _GOAL_SORTABLE = {
 async def list_goals(
     db: DbSession,
     search: Annotated[str | None, Query()] = None,
+    owner_id: uuid.UUID | None = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
@@ -96,15 +114,18 @@ async def list_goals(
     params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = select(Goal).where(Goal.deleted.is_(False))
     stmt = apply_search(stmt, params, [Goal.name, Goal.reference, Goal.owner])
+    if owner_id is not None:
+        stmt = stmt.where(Goal.owner_id == owner_id)
     stmt = apply_sort(stmt, params, _GOAL_SORTABLE, default=Goal.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    return Page(items=[GoalRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
+    return Page(items=await _reads(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=GoalRead, status_code=201, dependencies=[Depends(require("goal:write"))])
 async def create_goal(body: GoalCreate, db: DbSession, user: CurrentUser) -> GoalRead:
     data = body.model_dump(exclude={"risk_ids", "project_ids", "policy_ids"})
+    await ref_fields.apply_refs(db, Goal, data, GOAL_REFS)
     obj = Goal(tenant_id=user.tenant_id, **data)
     obj.reference = await _next_ref(db)
     # Derive the first audit date from the cadence unless the caller pinned one.
@@ -117,20 +138,23 @@ async def create_goal(body: GoalCreate, db: DbSession, user: CurrentUser) -> Goa
         db, actor=user, action="create", entity_type="goal", entity_id=obj.id,
         summary=f"Created goal {obj.reference}: {obj.name}",
     )
-    return GoalRead.model_validate(await _load(db, obj.id))
+    return await _read(db, await _load(db, obj.id))
 
 
 @router.get("/{goal_id}", response_model=GoalRead, dependencies=[Depends(require("goal:read"))])
 async def get_goal(goal_id: uuid.UUID, db: DbSession) -> GoalRead:
-    return GoalRead.model_validate(await _load(db, goal_id))
+    return await _read(db, await _load(db, goal_id))
 
 
 @router.patch("/{goal_id}", response_model=GoalRead, dependencies=[Depends(require("goal:write"))])
-async def update_goal(goal_id: uuid.UUID, body: GoalUpdate, db: DbSession) -> GoalRead:
+async def update_goal(
+    goal_id: uuid.UUID, body: GoalUpdate, db: DbSession, user: CurrentUser
+) -> GoalRead:
     obj = await _load(db, goal_id)
     full = body.model_dump(exclude_unset=True)
     await _apply_links(db, obj, full)
     data = body.model_dump(exclude_unset=True, exclude={"risk_ids", "project_ids", "policy_ids"})
+    await ref_fields.apply_refs(db, Goal, data, GOAL_REFS, record=obj)
     for f, v in data.items():
         setattr(obj, f, v)
     # Re-derive the next audit date when the cadence changes, unless the caller also
@@ -138,7 +162,12 @@ async def update_goal(goal_id: uuid.UUID, body: GoalUpdate, db: DbSession) -> Go
     if "audit_frequency" in data and "next_audit_date" not in data:
         obj.next_audit_date = next_review_date(obj.audit_frequency, obj.last_audit_date)
     await db.flush()
-    return GoalRead.model_validate(await _load(db, obj.id))
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="goal", entity_id=obj.id,
+        summary=f"Updated goal {obj.reference}: {obj.name}",
+        changes={k: str(v) for k, v in data.items()},
+    )
+    return await _read(db, await _load(db, obj.id))
 
 
 @router.post(
@@ -162,7 +191,7 @@ async def record_audit(
         db, actor=user, action="audit", entity_type="goal", entity_id=goal.id,
         summary=f"Recorded {body.result.value} audit for goal {goal.reference}",
     )
-    return GoalRead.model_validate(await _load_fresh(db, goal.id))
+    return await _read(db, await _load_fresh(db, goal.id))
 
 
 @router.get(
@@ -218,13 +247,18 @@ async def delete_audit(
         db, actor=user, action="delete", entity_type="goal", entity_id=goal.id,
         summary=f"Deleted an audit from goal {goal.reference}",
     )
-    return GoalRead.model_validate(await _load_fresh(db, goal.id))
+    return await _read(db, await _load_fresh(db, goal.id))
 
 
 @router.delete("/{goal_id}", status_code=204, dependencies=[Depends(require("goal:write"))])
-async def delete_goal(goal_id: uuid.UUID, db: DbSession) -> None:
+async def delete_goal(goal_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     from datetime import datetime, timezone
 
     obj = await _load(db, goal_id)
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="goal", entity_id=obj.id,
+        summary=f"Archived goal {obj.reference}: {obj.name}",
+    )

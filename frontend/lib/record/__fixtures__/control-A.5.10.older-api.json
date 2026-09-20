@@ -1,0 +1,179 @@
+{
+  "type": "control",
+  "note": "A.5.10 exactly as the older API build returns it (captured 2026-09-13): no B7 framework on requirements, no B1 can_attest / blocked_reason, suggestion count not loaded. The copy degrades without guessing: the reliance tile names the clause alone ('Implements A.5.10.'), and the header keeps the stored classification's own label (controlSourceMeta).",
+  "input": {
+    "control": {
+      "name": "Acceptable use of information and other associated assets",
+      "reference": "A.5.10",
+      "description": "Identify, document and implement rules for the acceptable use of assets.",
+      "objective": "Identify, document and implement rules for the acceptable use of assets.",
+      "owner_id": null,
+      "operator_id": null,
+      "owner": "",
+      "nature": null,
+      "automation": null,
+      "is_key": false,
+      "operating_frequency": null,
+      "iso27002_attributes": {},
+      "test_procedure": "",
+      "evidence_expected": "",
+      "control_type": "production",
+      "classification_id": "a5fd08b1-c0fd-400b-893c-24670a1d8075",
+      "classification": "ISO/IEC 27001:2022",
+      "documentation_url": "",
+      "status": "planned",
+      "effectiveness": "not_assessed",
+      "workflow_owner_id": null,
+      "opex": null,
+      "capex": null,
+      "resource_utilization": null,
+      "audit_frequency": "annual",
+      "audit_metric": "",
+      "audit_success_criteria": "",
+      "maintenance_frequency": "quarterly",
+      "id": "b238f522-6485-4ab7-a8d8-9e67fc9a318a",
+      "owner_ref": null,
+      "operator_ref": null,
+      "classification_ref": {
+        "id": "a5fd08b1-c0fd-400b-893c-24670a1d8075",
+        "key": "control_classification",
+        "value": "iso_iec_27001_2022",
+        "label": "ISO/IEC 27001:2022"
+      },
+      "workflow_status": "draft",
+      "workflow_owner": "",
+      "workflow_owner_ref": null,
+      "next_audit_date": null,
+      "last_audit_date": null,
+      "next_maintenance_date": null,
+      "last_maintenance_date": null,
+      "audit_count": 0,
+      "last_audit_result": null,
+      "is_audit_overdue": false,
+      "maintenance_count": 0,
+      "last_maintenance_result": null,
+      "is_maintenance_overdue": false,
+      "design_effectiveness": "not_assessed",
+      "operating_effectiveness": "not_assessed",
+      "effectiveness_override_reason": "",
+      "effectiveness_basis": "none",
+      "open_issues": [],
+      "pending_review_count": 0,
+      "business_units": [],
+      "processes": [],
+      "policies": [],
+      "requirements": [
+        {
+          "id": "7b03d5ae-a769-45ed-b12a-1787aa168c96",
+          "reference": "A.5.10",
+          "title": "Acceptable use of information and other associated assets",
+          "name": ""
+        }
+      ],
+      "risks": [],
+      "incidents": [],
+      "exceptions": [],
+      "projects": [],
+      "audit_findings": [],
+      "assets": [],
+      "vendors": []
+    },
+    "tests": [],
+    "maints": [],
+    "suggestionCount": null
+  },
+  "ctx": {
+    "now": "2026-09-12T09:00:00Z",
+    "gov": {
+      "workflowState": "draft",
+      "approvalSteps": 0,
+      "lastStep": null,
+      "lastSubmitAt": null,
+      "attestation": {
+        "status": "never",
+        "nativeReview": false,
+        "nextDue": null,
+        "canAttest": null,
+        "blockedReason": null
+      }
+    },
+    "canWrite": true
+  },
+  "expect": {
+    "headline": "Not assessed — no reviewed test; planned, so no test clock yet; relied on by no risk.",
+    "tiles": [
+      {
+        "key": "effectiveness",
+        "value": "Not assessed",
+        "because": "No reviewed test yet, so design and operating are both unrated.",
+        "basis": {
+          "kind": "missing",
+          "text": "No reviewed test"
+        }
+      },
+      {
+        "key": "testing",
+        "value": "No test clock",
+        "because": "The annual test cycle starts when the control is implemented.",
+        "basis": {
+          "kind": "missing",
+          "text": "No test on file"
+        }
+      },
+      {
+        "key": "maintenance",
+        "value": "No clock",
+        "because": "No maintenance clock until implemented (quarterly once it is).",
+        "basis": {
+          "kind": "missing",
+          "text": "Not on file"
+        }
+      },
+      {
+        "key": "reliedon",
+        "value": "0 risks · 1 requirement",
+        "because": "Implements A.5.10. No risk links it, so it earns no residual credit anywhere.",
+        "basis": {
+          "kind": "derived",
+          "text": "From links"
+        }
+      },
+      {
+        "key": "issues",
+        "value": "None",
+        "because": "No open issue caps its operating rating.",
+        "basis": {
+          "kind": "derived",
+          "text": "From issues and exceptions"
+        }
+      },
+      {
+        "key": "evidence",
+        "value": "None",
+        "because": "0 evidence items across 0 tests. Evidence expected: not defined.",
+        "basis": {
+          "kind": "missing",
+          "text": "Nothing attached to tests"
+        }
+      }
+    ],
+    "points": [
+      {
+        "id": "control.owner",
+        "level": "gap"
+      },
+      {
+        "id": "control.operator",
+        "level": "note"
+      },
+      {
+        "id": "control.no_procedure",
+        "level": "note"
+      },
+      {
+        "id": "control.no_risk",
+        "level": "note"
+      }
+    ]
+  }
+}

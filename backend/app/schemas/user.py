@@ -47,6 +47,11 @@ class UserRead(BaseModel):
     # ``User`` ORM exposes ``permission_codes`` and ``role_names`` as properties.
     permission_codes: list[str] = []
     roles: list[RoleSummary] = []
+    # Filled by the Users register only (``api/v1/users.py``): ``enabled``, ``required``
+    # (enrol by ``mfa_due``; no date until their next sign-in starts the grace period),
+    # ``overdue``, ``identity_provider`` (signs in through SSO) or ``not_required``.
+    mfa_status: str | None = None
+    mfa_due: datetime | None = None
 
 
 class UserCreate(BaseModel):

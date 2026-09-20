@@ -6,6 +6,7 @@ import { api, type Me, type RiskSetting } from "@/lib/api";
 import SecuritySettings from "@/components/SecuritySettings";
 import LdapSettings from "@/components/LdapSettings";
 import SystemSettings from "@/components/SystemSettings";
+import StartPageSetting from "@/components/StartPageSetting";
 
 type TestState =
   | { status: "idle" }
@@ -14,11 +15,13 @@ type TestState =
   | { status: "error"; message: string };
 
 const ADMIN_LINKS: { href: string; label: string; desc: string }[] = [
+  { href: "/organisation-settings", label: "Organisation Settings", desc: "Currency, timezone, date format, fiscal year, retention" },
+  { href: "/organisation-settings#security", label: "Security", desc: "Roles that must use MFA, segregation of duties, approval routes" },
   { href: "/organization", label: "Users & Roles", desc: "Accounts, role permissions, effective access" },
   { href: "/sso-settings", label: "Single Sign-On", desc: "OIDC / OAuth2 identity provider configuration" },
   { href: "/webhooks", label: "Webhooks", desc: "Outbound HMAC-signed event delivery" },
   { href: "/custom-fields", label: "Custom Fields", desc: "Tenant-defined fields per module" },
-  { href: "/lookups", label: "Lookups & Dropdowns", desc: "Media types, vendor types, labels and tags" },
+  { href: "/lookups", label: "Lookups & Dropdowns", desc: "Risk categories, regulators, countries, asset and vendor lists" },
   { href: "/status-rules", label: "Status Rules", desc: "Dynamic colored status labels" },
   { href: "/filters", label: "Saved Filters", desc: "Reusable advanced query definitions" },
   { href: "/data-io", label: "Import / Export", desc: "CSV bulk data movement for every module" },
@@ -99,6 +102,9 @@ export default function SettingsPage() {
 
       {/* System: version, health, license, backups, support bundle */}
       <SystemSettings />
+
+      {/* Your start page after sign-in (phase 4B workspaces) */}
+      <StartPageSetting />
 
       {/* Account security: MFA + password */}
       <SecuritySettings />

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
@@ -15,9 +16,18 @@ import FileAttachments from "@/components/FileAttachments";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconEvidence, IconPlus } from "@/components/icons";
+import { sentenceCase, titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
+import { safeLinkUrl } from "@/lib/sanitize";
+import { TEST_RESULT_LABEL as RESULT_LABEL, TEST_REVIEW_LABEL as REVIEW_LABEL, controlTestTitle } from "@/lib/record/control";
 
 // ---- inline types (backend: app/schemas/evidence.py, app/schemas/control.py) ----
 type ControlRef = { id: string; name: string; reference: string };
+/** The control test an evidence item supports (backend: ControlTestRef). */
+type ControlTestRef = {
+  id: string; control_id: string; test_type: string | null; result: string;
+  conducted_date: string | null; review_status: string;
+};
 
 type Evidence = {
   id: string;
@@ -30,16 +40,35 @@ type Evidence = {
   collected_at: string | null;
   valid_until: string | null;
   control?: ControlRef | null;
+  control_audit_id?: string | null;
+  control_audit?: ControlTestRef | null;
   is_expired: boolean;
+  display_status?: string;
   created_at: string;
 };
 
 type ControlListItem = { id: string; name: string; reference: string };
 
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
+// What the register shows. "Valid" with no collection date is a claim about nothing, so
+// uncollected evidence reads "Not collected" whatever its stored status says.
+function statusBadge(ev: Evidence) {
+  const shown = ev.display_status || (ev.is_expired ? "expired" : ev.status);
+  if (shown === "expired") return <Badge tone="critical">Expired</Badge>;
+  if (shown === "not_collected") return <Badge tone="neutral">Not collected</Badge>;
+  return <Badge tone={STATUS_TONE[shown] || "neutral"}>{cap(shown)}</Badge>;
+}
+
+function statusLabel(ev: Evidence) {
+  const shown = ev.display_status || (ev.is_expired ? "expired" : ev.status);
+  return shown === "not_collected" ? "Not collected" : cap(shown);
+}
+
 const TYPES = opts(["document", "screenshot", "log", "link", "configuration", "other"]);
+/* Test results and reviews use the control record's words (RESULT_LABEL / REVIEW_LABEL
+   come from lib/record/control.ts, the one home of that wording). */
 const STATUS = opts(["pending", "valid", "expired"]);
 
 const STATUS_TONE: Record<string, "low" | "medium" | "critical" | "neutral"> = {
@@ -66,7 +95,7 @@ const BLANK: FormState = {
   title: "",
   description: "",
   evidence_type: "document",
-  status: "valid",
+  status: "pending",
   reference: "",
   collected_at: "",
   valid_until: "",
@@ -104,6 +133,7 @@ function EvidenceInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [recordId, setRecordId] = useRecordParam("id");
+  const { formatDate, formatDateTime } = useFormat();
   // Read-only detail loaded for the view drawer (?id=). Edit is a separate action.
   const [detail, setDetail] = useState<Evidence | null>(null);
 
@@ -194,6 +224,39 @@ function EvidenceInner() {
   }
 
   const controlLabel = (e: Evidence) => (e.control ? e.control.reference || e.control.name : "—");
+  /** The control this evidence is collected against, as the control record names it:
+   *  reference chip, then the name, linking to the control. */
+  const controlLink = (e: Evidence) =>
+    e.control ? (
+      <Link
+        href={`/controls?id=${e.control.id}`}
+        className="chip chip-link"
+        title={[e.control.reference, e.control.name].filter(Boolean).join(" ")}
+        onClick={(ev) => ev.stopPropagation()}
+      >
+        {e.control.reference && <span className="ref" style={{ marginRight: 5 }}>{e.control.reference}</span>}
+        {e.control.name}
+      </Link>
+    ) : (
+      <span className="muted">Not set</span>
+    );
+  /** "Operating test of 12 Sep 2026 · Failed · Reviewed" — the test this evidence
+   *  supports, in the words of the control's "Effectiveness & tests" section. */
+  const testLabel = (t: ControlTestRef) =>
+    [
+      controlTestTitle(t, { date: formatDate }),
+      RESULT_LABEL[t.result] ?? sentenceCase(t.result),
+      REVIEW_LABEL[t.review_status] ?? sentenceCase(t.review_status),
+    ].join(" · ");
+  /** Opens the control on its "Effectiveness & tests" section (`#tests`), where the test is listed. */
+  const testLink = (e: Evidence) =>
+    e.control_audit ? (
+      <Link href={`/controls?id=${e.control_audit.control_id}#tests`} className="chip chip-link" onClick={(ev) => ev.stopPropagation()}>
+        {testLabel(e.control_audit)}
+      </Link>
+    ) : (
+      <span className="muted">Not attached to a test</span>
+    );
 
   // read-only helper for the view drawer
   const field = (label: string, value: React.ReactNode) => (
@@ -210,10 +273,13 @@ function EvidenceInner() {
       sortable: true,
       render: (ev) => (
         <span style={{ display: "inline-block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "bottom" }}>
-          {ev.reference ? (
-            <a href={ev.reference} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+          {ev.reference && safeLinkUrl(ev.reference) ? (
+            <a href={safeLinkUrl(ev.reference) ?? undefined} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
               {ev.reference}
             </a>
+          ) : ev.reference ? (
+            // Not a web or mail address (a file path, a folder name, or an unsafe scheme): text only.
+            <span title={ev.reference}>{ev.reference}</span>
           ) : (
             <span className="muted">—</span>
           )}
@@ -226,19 +292,16 @@ function EvidenceInner() {
       key: "status",
       header: "Status",
       sortable: true,
-      render: (ev) => (
-        <Badge tone={ev.is_expired ? "critical" : STATUS_TONE[ev.status] || "neutral"}>
-          {ev.is_expired && ev.status !== "expired" ? "Expired" : cap(ev.status)}
-        </Badge>
-      ),
+      render: (ev) => statusBadge(ev),
     },
     { key: "control", header: "Control", render: (ev) => <span className="muted">{controlLabel(ev)}</span> },
-    { key: "collected_at", header: "Collected", sortable: true, render: (ev) => <span className="muted">{ev.collected_at || "—"}</span> },
+    { key: "control_audit", header: "Supports test", render: (ev) => testLink(ev), text: (ev) => (ev.control_audit ? testLabel(ev.control_audit) : "") },
+    { key: "collected_at", header: "Collected", sortable: true, render: (ev) => <span className="muted">{ev.collected_at ? formatDate(ev.collected_at) : "Not collected"}</span> },
     {
       key: "valid_until",
       header: "Valid until",
       sortable: true,
-      render: (ev) => (ev.valid_until ? (ev.is_expired ? <Badge tone="high">{ev.valid_until}</Badge> : <span className="muted">{ev.valid_until}</span>) : <span className="muted">—</span>),
+      render: (ev) => (ev.valid_until ? (ev.is_expired ? <Badge tone="high">{formatDate(ev.valid_until)}</Badge> : <span className="muted">{formatDate(ev.valid_until)}</span>) : <span className="muted">{ev.collected_at ? "No expiry set" : "—"}</span>),
     },
     {
       key: "actions",
@@ -273,7 +336,7 @@ function EvidenceInner() {
         <Field label="Type" help="A label for the artifact. Upload the file in the Files tab, or paste a link under Source & Validity.">
           <Select value={f.evidence_type} onChange={(v) => set("evidence_type", v)} options={TYPES} />
         </Field>
-        <Field label="Status" help="Expired evidence (or one past its valid-until date) is flagged in the list.">
+        <Field label="Status" help="Mark it valid once it has been collected (set the collected date under Source & Validity). Expired evidence, or evidence past its valid-until date, is flagged in the list.">
           <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
         </Field>
       </div>
@@ -341,7 +404,7 @@ function EvidenceInner() {
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? detail.title : "…"}
-        subtitle={detail ? cap(detail.evidence_type) + " · " + (detail.is_expired ? "Expired" : cap(detail.status)) : ""}
+        subtitle={detail ? cap(detail.evidence_type) + " · " + statusLabel(detail) : ""}
         width={640}
         actions={detail && (
           <>
@@ -353,13 +416,10 @@ function EvidenceInner() {
         {detail && (
           <>
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 16 }}>
-              {field("Control", <span className="chip">{controlLabel(detail)}</span>)}
+              {field("Control", controlLink(detail))}
+              {field("Supports test", testLink(detail))}
               {field("Type", <Badge tone="info" plain>{cap(detail.evidence_type)}</Badge>)}
-              {field("Status", (
-                <Badge tone={detail.is_expired ? "critical" : STATUS_TONE[detail.status] || "neutral"}>
-                  {detail.is_expired && detail.status !== "expired" ? "Expired" : cap(detail.status)}
-                </Badge>
-              ))}
+              {field("Status", statusBadge(detail))}
             </div>
 
             {detail.description && (
@@ -371,13 +431,15 @@ function EvidenceInner() {
 
             <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: 18 }}>
               {field("Reference", detail.reference ? (
-                <a href={detail.reference} target="_blank" rel="noreferrer">{detail.reference}</a>
+                safeLinkUrl(detail.reference)
+                  ? <a href={safeLinkUrl(detail.reference) ?? undefined} target="_blank" rel="noopener noreferrer">{detail.reference}</a>
+                  : detail.reference
               ) : "—")}
-              {field("Collected at", detail.collected_at || "—")}
+              {field("Collected at", detail.collected_at ? formatDate(detail.collected_at) : "Not collected")}
               {field("Valid until", detail.valid_until ? (
-                detail.is_expired ? <Badge tone="high">{detail.valid_until}</Badge> : detail.valid_until
-              ) : "—")}
-              {field("Created", detail.created_at ? detail.created_at.slice(0, 10) : "—")}
+                detail.is_expired ? <Badge tone="high">{formatDate(detail.valid_until)}</Badge> : formatDate(detail.valid_until)
+              ) : (detail.collected_at ? "No expiry set" : "—"))}
+              {field("Created", formatDateTime(detail.created_at))}
             </div>
 
             <div style={{ marginBottom: 8 }}>

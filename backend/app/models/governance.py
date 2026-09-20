@@ -13,7 +13,10 @@ import enum
 import uuid
 from datetime import date
 
-from sqlalchemy import Boolean, Date, ForeignKey, String, Text, Uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -76,6 +79,11 @@ class DecisionStatus(str, enum.Enum):
 # ============================================================= committees ===
 class Committee(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "committees"
+    # Phase 3: generate the board pack this many days before each meeting (None = by hand).
+    board_pack_days_before: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Phase 4: the sections this committee's packs carry, in the order it reads them
+    # (None = every section in the standard order). Scheduled packs use it too.
+    board_pack_sections: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     reference: Mapped[str] = mapped_column(String(32), default="", index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -99,9 +107,49 @@ class Committee(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
         order_by="Meeting.created_at.desc()",
     )
 
+    # Phase 4: members who are users, beside the free-text ``members`` (which keeps
+    # external members and the roll as the charter states it).
+    member_users: Mapped[list["CommitteeMember"]] = relationship(
+        back_populates="committee", cascade="all, delete-orphan", lazy="selectin",
+        order_by="CommitteeMember.created_at",
+    )
+
     @property
     def meeting_count(self) -> int:
         return len(self.meetings)
+
+
+class CommitteeMember(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 4: a user who sits on a committee (chair, secretary, member or in attendance).
+    Members receive released board packs and see their committee's decisions on the
+    board home."""
+
+    __tablename__ = "committee_members"
+    __table_args__ = (UniqueConstraint("committee_id", "user_id", name="uq_committee_member_user"),)
+
+    committee_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("committees.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: chair | secretary | member | attendee
+    role: Mapped[str] = mapped_column(String(16), default="member", nullable=False)
+
+    committee: Mapped[Committee] = relationship(back_populates="member_users")
+    user: Mapped["User"] = relationship("User", lazy="selectin")  # noqa: F821
+
+    @property
+    def full_name(self) -> str:
+        return getattr(self.user, "full_name", "") or ""
+
+    @property
+    def email(self) -> str:
+        return getattr(self.user, "email", "") or ""
+
+    @property
+    def is_active(self) -> bool:
+        return bool(getattr(self.user, "is_active", True))
 
 
 class Meeting(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
@@ -149,6 +197,11 @@ class MeetingDecision(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         SAEnum(DecisionType, name="gov_decision_type"), default=DecisionType.decision, nullable=False
     )
     owner: Mapped[str] = mapped_column(String(200), default="")
+    # Phase 4: the person the decision or action is assigned to (the free-text owner stays
+    # for people outside the system).
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[DecisionStatus] = mapped_column(
         SAEnum(DecisionStatus, name="gov_decision_status"), default=DecisionStatus.open, nullable=False
@@ -156,8 +209,88 @@ class MeetingDecision(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     completed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     meeting: Mapped[Meeting] = relationship(back_populates="decisions")
+    owner_user: Mapped["User | None"] = relationship("User", lazy="selectin")  # noqa: F821
+
+    @property
+    def owner_name(self) -> str:
+        u = self.owner_user
+        return (u.full_name or u.email) if u is not None else ""
 
     @property
     def is_overdue(self) -> bool:
         return (self.status in (DecisionStatus.open, DecisionStatus.in_progress)
                 and self.due_date is not None and self.due_date < date.today())
+
+
+class BoardPack(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 3: a generated committee pack — appetite, top risks, trend, assurance,
+    issues, incidents, KRIs — kept as a PDF (and XLSX) so the version the committee saw is
+    the version on file."""
+
+    __tablename__ = "board_packs"
+
+    committee_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("committees.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    meeting_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("committee_meetings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    sections: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="ready", nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    pdf_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("stored_files.id", ondelete="SET NULL"), nullable=True
+    )
+    xlsx_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("stored_files.id", ondelete="SET NULL"), nullable=True
+    )
+    generated_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- Phase 4: sign-off, commentary, the figures as printed, distribution ---------
+    #: draft -> reviewed -> released (``status`` stays the generation outcome).
+    review_state: Mapped[str] = mapped_column(String(16), default="draft", nullable=False)
+    #: Everyone who shaped the pack (generated it, wrote commentary): none of them may
+    #: review or release it while four-eyes applies.
+    contributor_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: section key -> narrative written for the committee.
+    commentary: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    #: The pack's figures exactly as first built, so adding commentary re-renders the same
+    #: numbers instead of today's.
+    content: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #: Where position figures came from: {"position": "live" | "snapshot", "snapshot_as_of": ...}.
+    basis: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    #: Who it was sent to on release: [{user_id, name, email, emailed}].
+    distribution: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+
+
+class BoardPackBranding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 4: how the organisation's board packs look — logo, colour, cover title and
+    the classification printed on every page. One row per organisation."""
+
+    __tablename__ = "board_pack_brandings"
+    __table_args__ = (UniqueConstraint("tenant_id", name="uq_board_pack_branding_tenant"),)
+
+    cover_title: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    #: ``#RRGGBB``; blank = the product colour.
+    primary_colour: Mapped[str] = mapped_column(String(7), default="", nullable=False)
+    classification: Mapped[str] = mapped_column(String(60), default="Confidential", nullable=False)
+    logo_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("stored_files.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )

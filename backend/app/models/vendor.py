@@ -6,7 +6,18 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import Boolean, Column, Date, Float, ForeignKey, String, Table, Text, Uuid
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    Float,
+    ForeignKey,
+    Numeric,
+    String,
+    Table,
+    Text,
+    Uuid,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -56,12 +67,55 @@ class VendorType(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     description: Mapped[str] = mapped_column(Text, default="")
 
 
+vendor_processes = Table(
+    "vendor_processes",
+    Base.metadata,
+    Column("vendor_id", Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), primary_key=True),
+    Column("process_id", Uuid, ForeignKey("processes.id", ondelete="CASCADE"), primary_key=True),
+)
+
+vendor_subcontractors = Table(
+    "vendor_subcontractors",
+    Base.metadata,
+    Column("vendor_id", Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), primary_key=True),
+    Column("subcontractor_id", Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), primary_key=True),
+)
+
+vendor_data_residency = Table(
+    "vendor_data_residency",
+    Base.metadata,
+    Column("vendor_id", Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), primary_key=True),
+    Column("country_id", Uuid, ForeignKey("lookups.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
 class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     __tablename__ = "vendors"
+    # Phase 2: due-diligence and outsourcing facts.
+    legal_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    registration_number: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    relationship_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # internal accountable owner
+    data_classification_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # highest data classification accessed
+    annual_spend: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
+    spend_currency: Mapped[str] = mapped_column(String(3), default="", nullable=False)
+    inherent_tier: Mapped[str | None] = mapped_column(String(16), nullable=True)  # derived from tiering answers
+    tier_override_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Phase 4E: the due-diligence questionnaire's band proposes ``risk_rating``; a different
+    # rating needs this reason. Dates of the last reviewed due diligence and the next one due.
+    risk_rating_override_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_due_diligence_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    next_due_diligence_on: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(100), default="", index=True)
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `category`
     type_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("vendor_types.id", ondelete="SET NULL"), nullable=True
     )
@@ -72,6 +126,9 @@ class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     contact_phone: Mapped[str] = mapped_column(String(60), default="")
     website: Mapped[str] = mapped_column(String(255), default="")
     location: Mapped[str] = mapped_column(String(200), default="")
+    country_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lookups.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 1: governed lookup value; replaces free-text `location`
 
     criticality: Mapped[Criticality] = mapped_column(
         SAEnum(Criticality, name="criticality"), default=Criticality.medium, nullable=False
@@ -126,6 +183,30 @@ class Vendor(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     controls: Mapped[list["Control"]] = relationship(  # noqa: F821
         "Control", secondary=vendor_controls, lazy="selectin",
     )
+    # Phase 2 due diligence: the business processes the third party supports, the
+    # countries its copy of our data sits in, and its own sub-contractors ("fourth
+    # parties"). Archived processes / vendors drop out of the lists.
+    processes: Mapped[list["Process"]] = relationship(  # noqa: F821
+        "Process", secondary=vendor_processes, lazy="selectin",
+        secondaryjoin="and_(vendor_processes.c.process_id == Process.id, Process.deleted == False)",
+    )
+    data_residency_countries: Mapped[list["Lookup"]] = relationship(  # noqa: F821
+        "Lookup", secondary=vendor_data_residency, lazy="selectin",
+    )
+    subcontractors: Mapped[list["Vendor"]] = relationship(
+        "Vendor", secondary=vendor_subcontractors, lazy="selectin",
+        primaryjoin="Vendor.id == vendor_subcontractors.c.vendor_id",
+        secondaryjoin="and_(vendor_subcontractors.c.subcontractor_id == Vendor.id, Vendor.deleted == False)",
+    )
+    subcontractor_of: Mapped[list["Vendor"]] = relationship(
+        "Vendor", secondary=vendor_subcontractors, lazy="selectin", viewonly=True,
+        primaryjoin="Vendor.id == vendor_subcontractors.c.subcontractor_id",
+        secondaryjoin="and_(vendor_subcontractors.c.vendor_id == Vendor.id, Vendor.deleted == False)",
+    )
+    certifications: Mapped[list["VendorCertification"]] = relationship(
+        back_populates="vendor", cascade="all, delete-orphan", lazy="selectin",
+        order_by="VendorCertification.expires_on",
+    )
 
     @property
     def contract_count(self) -> int:
@@ -140,6 +221,7 @@ class ServiceContract(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflow
     """A contract/SLA with a third party."""
 
     __tablename__ = "service_contracts"
+    currency: Mapped[str] = mapped_column(String(3), default="", nullable=False)  # Phase 2
 
     vendor_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False, index=True
@@ -155,3 +237,48 @@ class ServiceContract(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflow
     @property
     def is_expired(self) -> bool:
         return self.end_date is not None and self.end_date < date.today()
+
+
+class VendorCertification(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
+    """Phase 2: a third party's certification (ISO 27001, SOC 2, PCI DSS …) and when it
+    lapses; expiry raises an alert."""
+
+    __tablename__ = "vendor_certifications"
+
+    vendor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    cert_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    issuer: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    certificate_number: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    scope: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    issued_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expires_on: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    vendor: Mapped["Vendor"] = relationship(back_populates="certifications")
+
+    @property
+    def expiry_state(self) -> str:
+        return certification_expiry_state(self.expires_on, date.today())
+
+    @property
+    def days_to_expiry(self) -> int | None:
+        return None if self.expires_on is None else (self.expires_on - date.today()).days
+
+
+#: A certification starts warning this many days before it lapses (the notice a third
+#: party needs to renew an ISO 27001 / SOC 2 report before the old one runs out).
+CERT_EXPIRY_WARNING_DAYS = 60
+
+
+def certification_expiry_state(expires_on: date | None, today: date) -> str:
+    """``expired`` once the expiry date has passed, ``expiring`` from
+    :data:`CERT_EXPIRY_WARNING_DAYS` days before it (the expiry day itself included),
+    ``valid`` before that, ``no_expiry`` when no date is recorded."""
+    if expires_on is None:
+        return "no_expiry"
+    if expires_on < today:
+        return "expired"
+    if (expires_on - today).days <= CERT_EXPIRY_WARNING_DAYS:
+        return "expiring"
+    return "valid"

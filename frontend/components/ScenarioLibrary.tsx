@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type RiskScenario } from "@/lib/api";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { api, type AssetKind, type RiskScenario } from "@/lib/api";
 import { Badge } from "@/components/badges";
 import { confirmDialog, toast } from "@/lib/feedback";
 
@@ -28,6 +28,7 @@ type NewScenario = {
   title: string;
   category: string;
   asset_classes: string;
+  asset_kinds: string;
   threat: string;
   vulnerability: string;
   likelihood: number;
@@ -42,6 +43,7 @@ const EMPTY_SCENARIO: NewScenario = {
   title: "",
   category: "",
   asset_classes: "",
+  asset_kinds: "",
   threat: "",
   vulnerability: "",
   likelihood: 3,
@@ -58,6 +60,52 @@ function appliesTo(value: string): string {
   return parts.map((p) => CLASS_LABEL[p] ?? p).join(", ");
 }
 
+const splitKinds = (value: string) => value.split(",").map((v) => v.trim()).filter(Boolean);
+
+/** The kinds a scenario fits, as people read them; unknown values are shown as stored. */
+function kindsLabel(value: string, kinds: AssetKind[]): string {
+  const parts = splitKinds(value);
+  if (!parts.length) return "Every kind";
+  const labels = parts.map((p) => kinds.find((k) => k.value === p)?.label ?? p);
+  return labels.length > 3 ? `${labels.slice(0, 3).join(", ")} +${labels.length - 3}` : labels.join(", ");
+}
+
+/* Asset kinds narrow a scenario beyond information vs IT: internal fraud fits core banking,
+   payment systems, customer channels and customer data, not a firewall. None ticked means
+   the scenario fits every kind of asset in its class. */
+function KindPicker({ kinds, value, onChange }: { kinds: AssetKind[]; value: string; onChange: (next: string) => void }) {
+  const chosen = new Set(splitKinds(value));
+  const groups = [...new Set(kinds.map((k) => k.group))];
+  const toggle = (kind: string) => {
+    const next = new Set(chosen);
+    if (next.has(kind)) next.delete(kind);
+    else next.add(kind);
+    onChange(kinds.map((k) => k.value).filter((k) => next.has(k)).join(","));
+  };
+  return (
+    <div>
+      {groups.map((group) => (
+        <fieldset key={group} style={{ border: 0, padding: 0, margin: "0 0 8px" }}>
+          <legend className="label">{group}</legend>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {kinds.filter((k) => k.group === group).map((k) => (
+              <label key={k.value} className="chip" title={k.description} style={{ cursor: "pointer", gap: 6 }}>
+                <input type="checkbox" checked={chosen.has(k.value)} onChange={() => toggle(k.value)} />
+                {k.label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ))}
+      <div className="muted" style={{ fontSize: 12 }}>
+        {chosen.size
+          ? `Proposed only for assets of ${chosen.size === 1 ? "this kind" : `these ${chosen.size} kinds`}.`
+          : "Nothing ticked: proposed for every kind of asset in the class above."}
+      </div>
+    </div>
+  );
+}
+
 export default function ScenarioLibrary() {
   const [rows, setRows] = useState<RiskScenario[]>([]);
   const [loading, setLoading] = useState(true);
@@ -67,6 +115,8 @@ export default function ScenarioLibrary() {
   const [category, setCategory] = useState("");
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState<NewScenario>(EMPTY_SCENARIO);
+  const [kinds, setKinds] = useState<AssetKind[]>([]);
+  const [editingKinds, setEditingKinds] = useState<{ id: string; value: string } | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -78,6 +128,21 @@ export default function ScenarioLibrary() {
   }, []);
 
   useEffect(load, [load]);
+  useEffect(() => {
+    api.assetKinds().then(setKinds).catch(() => {});
+  }, []);
+
+  async function saveKinds(row: RiskScenario, value: string) {
+    setError(null);
+    try {
+      const saved = await api.updateRiskScenario(row.id, { asset_kinds: value });
+      setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, asset_kinds: saved.asset_kinds } : r)));
+      setEditingKinds(null);
+      toast(`${row.reference} now fits ${kindsLabel(saved.asset_kinds, kinds).toLowerCase()}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update the scenario");
+    }
+  }
 
   async function install() {
     setBusy(true);
@@ -230,6 +295,12 @@ export default function ScenarioLibrary() {
                 </select>
               </div>
             </div>
+            {kinds.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <label className="label">Kinds of asset it fits</label>
+                <KindPicker kinds={kinds} value={draft.asset_kinds} onChange={(v) => setDraft((p) => ({ ...p, asset_kinds: v }))} />
+              </div>
+            )}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
               <div style={{ flex: "1 1 200px" }}>
                 <label className="label">Threat</label>
@@ -305,7 +376,7 @@ export default function ScenarioLibrary() {
                 <tr>
                   <th style={{ width: 70 }}>Ref</th>
                   <th>Scenario</th>
-                  <th style={{ width: 140 }}>Applies to</th>
+                  <th style={{ width: 200 }}>Applies to</th>
                   <th style={{ width: 150 }}>Impact from</th>
                   <th style={{ width: 90 }}>Likelihood</th>
                   <th style={{ width: 80 }}>Active</th>
@@ -314,7 +385,8 @@ export default function ScenarioLibrary() {
               </thead>
               <tbody>
                 {shown.map((row) => (
-                  <tr key={row.id} style={{ opacity: row.enabled ? 1 : 0.55 }}>
+                  <Fragment key={row.id}>
+                  <tr style={{ opacity: row.enabled ? 1 : 0.55 }}>
                     <td className="ref">{row.reference}</td>
                     <td>
                       <div className="cell-title">{row.title}</div>
@@ -322,7 +394,18 @@ export default function ScenarioLibrary() {
                         {row.threat} → {row.vulnerability}
                       </div>
                     </td>
-                    <td className="muted" style={{ fontSize: 12.5 }}>{appliesTo(row.asset_classes)}</td>
+                    <td className="muted" style={{ fontSize: 12.5 }}>
+                      <div>{appliesTo(row.asset_classes)}</div>
+                      <button
+                        type="button"
+                        style={{ fontSize: 12, padding: 0, background: "none", border: 0, color: "var(--primary-text)", cursor: "pointer", textAlign: "left" }}
+                        title={splitKinds(row.asset_kinds ?? "").map((k) => kinds.find((x) => x.value === k)?.label ?? k).join(", ") || "Every kind of asset"}
+                        onClick={() => setEditingKinds(editingKinds?.id === row.id ? null : { id: row.id, value: row.asset_kinds ?? "" })}
+                        aria-expanded={editingKinds?.id === row.id}
+                      >
+                        {kindsLabel(row.asset_kinds ?? "", kinds)}
+                      </button>
+                    </td>
                     <td className="muted" style={{ fontSize: 12.5 }}>
                       {RULE_LABEL[row.impact_rule] ?? row.impact_rule}
                       {row.impact_rule === "from_property" && row.impact_property
@@ -359,6 +442,21 @@ export default function ScenarioLibrary() {
                       </button>
                     </td>
                   </tr>
+                  {editingKinds?.id === row.id && (
+                    <tr>
+                      <td />
+                      <td colSpan={6}>
+                        <div style={{ padding: "6px 0 10px" }}>
+                          <KindPicker kinds={kinds} value={editingKinds.value} onChange={(v) => setEditingKinds({ id: row.id, value: v })} />
+                          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                            <button type="button" className="btn sm" onClick={() => saveKinds(row, editingKinds.value)}>Save kinds</button>
+                            <button type="button" className="btn secondary sm" onClick={() => setEditingKinds(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

@@ -80,7 +80,6 @@ class RegulatoryChangeBase(BaseModel):
     owner: str = ""
     priority: Criticality = Criticality.medium
     department: str = ""
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class RegulatoryChangeCreate(RegulatoryChangeBase):
@@ -101,12 +100,13 @@ class RegulatoryChangeUpdate(BaseModel):
     owner: str | None = None
     priority: Criticality | None = None
     department: str | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class RegulatoryChangeRead(RegulatoryChangeBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    # Read-only: moved by Submit / Approve / Retire (services/record_workflow.py).
+    workflow_status: WorkflowState = WorkflowState.draft
     reference: str
     obligation_count: int
     days_to_effective: int | None = None
@@ -127,7 +127,6 @@ class RegulatoryReturnBase(BaseModel):
     next_due_date: date | None = None
     last_submitted_date: date | None = None
     status: ReturnStatus = ReturnStatus.upcoming
-    workflow_status: WorkflowState = WorkflowState.draft
 
 
 class RegulatoryReturnCreate(RegulatoryReturnBase):
@@ -145,12 +144,13 @@ class RegulatoryReturnUpdate(BaseModel):
     next_due_date: date | None = None
     last_submitted_date: date | None = None
     status: ReturnStatus | None = None
-    workflow_status: WorkflowState | None = None
 
 
 class RegulatoryReturnRead(RegulatoryReturnBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    # Read-only: moved by Submit / Approve / Retire (services/record_workflow.py).
+    workflow_status: WorkflowState = WorkflowState.draft
     reference: str
     is_overdue: bool
     days_to_due: int | None = None

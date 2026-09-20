@@ -1,6 +1,7 @@
 """Baseline lookup data every tenant needs from day one.
 
-Dropdowns like *Media type* and *Vendor type* read tenant-scoped lookup tables. Those
+Dropdowns like *Media type* and *Vendor type* read tenant-scoped lookup tables, and the
+governed lists (``app.db.lookup_seed``) feed every category/regulator/country picker. Those
 tables used to be filled only by the demo seeder, which runs for the very first org —
 every org registered afterwards (and every install with ``SEED_DATA=false``) got empty
 dropdowns with no way to fill them. This module owns the built-in vocabulary and two
@@ -65,15 +66,38 @@ DEFAULT_ASSET_LABELS: tuple[tuple[str, str], ...] = (
     ("Restricted", "#b91c1c"),
 )
 
-#: The default classification scheme: three CIA axes, each with the same graded values.
+#: The default classification scheme: three CIA axes, each graded 1..4 on its own terms.
+#: Confidentiality is about disclosure, integrity about unauthorised or accidental change,
+#: availability about how long the business can do without it — so each axis names its
+#: grades and criteria for what it measures. The numeric values line up (1 = least
+#: sensitive) so an asset's overall rating can still be the highest of the three.
 #: A tenant with its own methodology edits or replaces the axes under Settings → Lookups.
-DEFAULT_CLASSIFICATION_VALUES: tuple[tuple[str, float, str], ...] = (
+CONFIDENTIALITY_VALUES: tuple[tuple[str, float, str], ...] = (
     ("Public", 1.0, "Publicly shareable, no harm if disclosed"),
     ("Internal", 2.0, "Internal use only"),
     ("Confidential", 3.0, "Limited distribution, business impact if disclosed"),
     ("Restricted", 4.0, "Strictly need-to-know, severe impact if disclosed"),
 )
-DEFAULT_CLASSIFICATION_AXES: tuple[str, ...] = ("Confidentiality", "Integrity", "Availability")
+INTEGRITY_VALUES: tuple[tuple[str, float, str], ...] = (
+    ("Low", 1.0, "Errors or unauthorised changes would have little business effect"),
+    ("Moderate", 2.0, "Errors would cause rework or minor customer impact"),
+    ("High", 3.0, "Errors would cause financial loss, misreporting or customer harm"),
+    ("Critical", 4.0, "Errors would cause material loss, regulatory breach or fraud"),
+)
+AVAILABILITY_VALUES: tuple[tuple[str, float, str], ...] = (
+    ("Standard", 1.0, "Can be unavailable for several days (recovery time over 72 hours)"),
+    ("Important", 2.0, "Needed within a working day (recovery time up to 24 hours)"),
+    ("Business-critical", 3.0, "Needed within hours (recovery time up to 4 hours)"),
+    ("Mission-critical", 4.0, "Must stay up; any outage is immediately material (under 1 hour)"),
+)
+#: Kept for callers that predate per-axis values: the confidentiality grades.
+DEFAULT_CLASSIFICATION_VALUES = CONFIDENTIALITY_VALUES
+CLASSIFICATION_VALUES_BY_AXIS: dict[str, tuple[tuple[str, float, str], ...]] = {
+    "Confidentiality": CONFIDENTIALITY_VALUES,
+    "Integrity": INTEGRITY_VALUES,
+    "Availability": AVAILABILITY_VALUES,
+}
+DEFAULT_CLASSIFICATION_AXES: tuple[str, ...] = tuple(CLASSIFICATION_VALUES_BY_AXIS)
 
 
 async def ensure_reference_data(db: AsyncSession, tenant_id: UUID) -> int:
@@ -129,7 +153,7 @@ async def ensure_reference_data(db: AsyncSession, tenant_id: UUID) -> int:
         )
         db.add(ct)
         await db.flush()
-        for vname, value, criteria in DEFAULT_CLASSIFICATION_VALUES:
+        for vname, value, criteria in CLASSIFICATION_VALUES_BY_AXIS[axis]:
             db.add(
                 AssetClassification(
                     tenant_id=tenant_id, type_id=ct.id, name=vname, value=value, criteria=criteria
@@ -138,9 +162,81 @@ async def ensure_reference_data(db: AsyncSession, tenant_id: UUID) -> int:
             added += 1
         added += 1
 
+    # Governed lookup lists (risk category, regulator, country …): same insert-only
+    # contract, matched on value or label so text-derived rows are never duplicated.
+    from app.db.lookup_seed import ensure_lookup_defaults
+
+    added += await ensure_lookup_defaults(db, tenant_id)
+    added += await ensure_tiering_questionnaire(db, tenant_id)
+
     if added:
         await db.flush()
     return added
+
+
+async def ensure_tiering_questionnaire(db: AsyncSession, tenant_id: UUID) -> int:
+    """Seed the "Inherent risk tiering" questionnaire (services/vendor_tiering.py) if the
+    tenant has no tiering questionnaire (by purpose) and none by that name. Insert-only:
+    a tenant's edits to its questions or scores are never overwritten. The seed is
+    published version 1 with ``purpose = vendor_tiering``, the tier bands and mandatory
+    questions in one section. Returns rows added (the questionnaire counts as one)."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from app.models.assessment import (
+        VERSION_PUBLISHED,
+        Question,
+        QuestionnaireSection,
+        QuestionOption,
+        Questionnaire,
+    )
+    from app.services import questionnaire_logic as ql
+    from app.services.vendor_tiering import (
+        TIER_BANDS,
+        TIERING_PURPOSE,
+        TIERING_QUESTIONNAIRE_DESCRIPTION,
+        TIERING_QUESTIONNAIRE_NAME,
+        TIERING_QUESTIONS,
+    )
+
+    have = {
+        " ".join((n or "").split()).lower()
+        for n in (await db.scalars(select(Questionnaire.name))).all()
+    }
+    if TIERING_QUESTIONNAIRE_NAME.lower() in have:
+        return 0
+    purposes = set((await db.scalars(select(Questionnaire.purpose))).all())
+    if TIERING_PURPOSE in purposes:
+        return 0
+    qid, sid = _uuid.uuid4(), _uuid.uuid4()
+    q = Questionnaire(
+        id=qid, family_id=qid, version=1, status=VERSION_PUBLISHED, purpose=TIERING_PURPOSE,
+        tenant_id=tenant_id, name=TIERING_QUESTIONNAIRE_NAME, description=TIERING_QUESTIONNAIRE_DESCRIPTION,
+        bands=[{"label": tier.capitalize(), "min_pct": minimum, "rating": tier} for minimum, tier in TIER_BANDS],
+        published_at=datetime.now(timezone.utc),
+        change_note="Seeded with the platform.",
+    )
+    section = QuestionnaireSection(
+        id=sid, tenant_id=tenant_id, questionnaire_id=qid, key="tiering", title="Inherent risk",
+        description="Answer every question for the relationship as it stands, before the provider's own controls.",
+        order_index=0, conditions={},
+    )
+    q.sections = [section]
+    q.questions = [
+        Question(
+            tenant_id=tenant_id, text=text, guidance=guidance, order_index=i, section_id=sid,
+            key=f"tier_{i + 1}_{ql.slug(text)[:24]}", qtype="single_choice", mandatory=True, weight=1.0,
+            conditions={}, config={},
+            options=[
+                QuestionOption(tenant_id=tenant_id, label=label, score=score, order_index=j, value=f"s{int(score)}_{j}")
+                for j, (label, score) in enumerate(options)
+            ],
+        )
+        for i, (text, guidance, options) in enumerate(TIERING_QUESTIONS)
+    ]
+    db.add(q)
+    await db.flush()
+    return 1
 
 
 async def reconcile_reference_data() -> int:

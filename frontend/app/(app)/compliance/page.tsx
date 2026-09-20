@@ -1,10 +1,11 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
+import { trapTab, useDialogFocus, useEscapeLayer } from "@/lib/escapeLayer";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -12,16 +13,36 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RecordPanels from "@/components/RecordPanels";
+import RecordApproval from "@/components/RecordApproval";
 import RelatedChips from "@/components/RelatedChips";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, ComplianceBadge } from "@/components/badges";
 import { IconCompliance, IconPlus, IconCheck } from "@/components/icons";
+import { titleCase } from "@/lib/text";
+import { useFormat } from "@/lib/format";
+import StatementOfApplicability from "@/components/StatementOfApplicability";
+import FrameworkCrosswalk from "@/components/FrameworkCrosswalk";
+import { BulkSuggestMappings, PendingSuggestionsHint } from "@/components/SuggestedClauses";
+import { useHasPermission } from "@/lib/tenantSettings";
+import {
+  adoptCrosswalkMapping,
+  getViaCrosswalk,
+  ORIGIN_LABEL,
+  RELATIONSHIP_HELP,
+  RELATIONSHIP_LABEL,
+  type CrosswalkOrigin,
+  type CrosswalkRelationship,
+  type FrameworkPosture,
+  type ViaCrosswalk,
+} from "@/lib/compliance";
 
 /* ------------------------------------------------------------------ types */
 type Framework = {
   id: string;
   name: string;
+  /** compliance | maturity | guidance — only compliance frameworks carry a compliance %. */
+  kind: string;
   version: string;
   authority: string;
   regulator: string;
@@ -30,6 +51,8 @@ type Framework = {
   workflow_status: string;
   requirement_count: number;
   compliant_count: number;
+  /** Assessed compliant / mapped / tested (F-19); absent from an older API. */
+  posture?: FrameworkPosture | null;
   created_at: string;
 };
 
@@ -61,6 +84,8 @@ type Requirement = {
   owner: string;
   efficacy: number | null;
   implementation: string;
+  /** Statement of Applicability: why the clause is in or out of scope. */
+  applicability_justification?: string;
   legal_id: string | null;
   workflow_status: string;
   controls: Ref[];
@@ -89,6 +114,12 @@ type CrosswalkItem = {
   status: string;
   framework_id: string;
   framework_name: string;
+  /** Read from this requirement to the related one. */
+  relationship?: CrosswalkRelationship;
+  rationale?: string;
+  source?: string;
+  origin?: CrosswalkOrigin;
+  approved_by?: string;
 };
 
 type Evidence = {
@@ -107,6 +138,8 @@ type GapItem = {
   is_covered: boolean;
   coverage: string;
   reason: string;
+  /** "mapped via ISO/IEC 27001:2022 A.8.5" when a crosswalk covers it (still a gap). */
+  via_crosswalk?: string;
 };
 
 type GapAnalysis = {
@@ -121,11 +154,42 @@ type GapAnalysis = {
   failing: number;
   compliant_pct: number;
   gaps: GapItem[];
+  kind: string;
+  /** Clauses with a status other than not assessed (self-assessment progress). */
+  assessed: number;
+  posture?: FrameworkPosture | null;
 };
 
 /* ------------------------------------------------------------------ helpers */
-const cap = (s: string) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
+
+const FRAMEWORK_KIND: Option[] = [
+  { value: "compliance", label: "Compliance (obligations)" },
+  { value: "maturity", label: "Maturity self-assessment" },
+  { value: "guidance", label: "Guidance" },
+];
+const isSelfAssessed = (kind: string | undefined) => !!kind && kind !== "compliance";
+const pctText = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(1)}%`;
+
+/** The three numbers side by side, so mapping visibly counts without faking compliance:
+ *  only an assessment makes a clause compliant; a mapped control shows coverage; a tested,
+ *  working control shows assurance. */
+function PostureLine({ p, style }: { p: FrameworkPosture; style?: React.CSSProperties }) {
+  if (!p.applicable) return <span className="muted" style={style}>No applicable clauses</span>;
+  return (
+    <span className="muted" style={style} title={`Of ${p.applicable} applicable clauses: ${p.compliant} assessed compliant, ${p.mapped} mapped to a control, ${p.assured} backed by a tested, working control.`}>
+      <b style={{ color: "var(--text-strong)" }}>{pctText(p.compliant_pct)}</b> assessed compliant ·{" "}
+      <b style={{ color: "var(--text-strong)" }}>{pctText(p.mapped_pct)}</b> mapped ·{" "}
+      <b style={{ color: "var(--text-strong)" }}>{pctText(p.assured_pct)}</b> tested
+      {!!p.via_crosswalk && (
+        <>
+          {" "}· <b style={{ color: "var(--text-strong)" }}>{pctText(p.via_crosswalk_pct || 0)}</b> via crosswalk
+        </>
+      )}
+    </span>
+  );
+}
 
 const COMPLIANCE_STATUS = opts([
   "not_assessed",
@@ -135,7 +199,6 @@ const COMPLIANCE_STATUS = opts([
   "not_applicable",
 ]);
 const TREATMENT = opts(["implement", "improve", "accept", "transfer", "not_applicable"]);
-const WORKFLOW = opts(["draft", "in_review", "approved", "retired"]);
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 
 const SEVERITY_TONE: Record<string, "low" | "medium" | "high" | "critical"> = {
@@ -161,33 +224,33 @@ const legalToOpt = (l: Ref): AsyncOption => ({ value: l.id, label: l.name || l.r
 /* ------------------------------------------------------------------ framework form */
 type FwState = {
   name: string;
+  kind: string;
   version: string;
   authority: string;
   regulator: string;
   scope: string;
   description: string;
-  workflow_status: string;
 };
 
 const FW_BLANK: FwState = {
   name: "",
+  kind: "compliance",
   version: "",
   authority: "",
   regulator: "",
   scope: "",
   description: "",
-  workflow_status: "draft",
 };
 
 function fromFramework(f: Framework): FwState {
   return {
     name: f.name,
+    kind: f.kind || "compliance",
     version: f.version || "",
     authority: f.authority || "",
     regulator: f.regulator || "",
     scope: f.scope || "",
     description: f.description || "",
-    workflow_status: f.workflow_status || "draft",
   };
 }
 
@@ -198,11 +261,12 @@ type ReqState = {
   description: string;
   domain: string;
   status: string;
-  workflow_status: string;
   treatment: string;
   owner: string;
   efficacy: number | "";
   implementation: string;
+  /** Statement of Applicability: why the clause is in or out of scope. */
+  applicability_justification?: string;
   audit_questionnaire: string;
   legal: AsyncOption | null;
   control_ids: AsyncOption[];
@@ -216,11 +280,11 @@ const REQ_BLANK: ReqState = {
   description: "",
   domain: "",
   status: "not_assessed",
-  workflow_status: "draft",
   treatment: "",
   owner: "",
   efficacy: "",
   implementation: "",
+  applicability_justification: "",
   audit_questionnaire: "",
   legal: null,
   control_ids: [],
@@ -235,11 +299,11 @@ function fromRequirement(r: Requirement): ReqState {
     description: r.description || "",
     domain: r.domain || "",
     status: r.status,
-    workflow_status: r.workflow_status || "draft",
     treatment: r.treatment || "",
     owner: r.owner || "",
     efficacy: r.efficacy ?? "",
     implementation: r.implementation || "",
+    applicability_justification: r.applicability_justification || "",
     audit_questionnaire: r.audit_questionnaire || "",
     legal: r.legal ? legalToOpt(r.legal) : null,
     control_ids: r.controls.map(ctrlToOpt),
@@ -255,11 +319,11 @@ function reqPayload(s: ReqState) {
     description: s.description,
     domain: s.domain,
     status: s.status,
-    workflow_status: s.workflow_status,
     treatment: s.treatment || null,
     owner: s.owner,
     efficacy: s.efficacy === "" ? null : s.efficacy,
     implementation: s.implementation,
+    applicability_justification: s.applicability_justification || "",
     audit_questionnaire: s.audit_questionnaire,
     legal_id: s.legal?.value || null,
     control_ids: s.control_ids.map((o) => o.value),
@@ -298,6 +362,7 @@ function CoverageBadge({ value }: { value: string }) {
 /* ================================================================== page */
 function ComplianceInner() {
   const [openId, setOpenId] = useRecordParam("id"); // open requirement id (deep-linkable)
+  const { formatDate } = useFormat();
   // `?framework=<id>` lets other modules (the Framework Library, a risk's requirement chip)
   // land on a specific framework instead of whichever sorts first.
   const [frameworkParam] = useRecordParam("framework");
@@ -310,6 +375,10 @@ function ComplianceInner() {
   // requirement detail (drawer)
   const [detail, setDetail] = useState<Requirement | null>(null);
   const [crosswalks, setCrosswalks] = useState<CrosswalkItem[]>([]);
+  // Covered via crosswalk: not tested directly, but a tested control of an equivalent or
+  // containing clause in another framework covers it. Adopting makes the mapping direct.
+  const [viaCrosswalk, setViaCrosswalk] = useState<ViaCrosswalk | null>(null);
+  const [adopting, setAdopting] = useState(false);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
 
   // framework modal
@@ -319,8 +388,12 @@ function ComplianceInner() {
   const [savingFw, setSavingFw] = useState(false);
 
   // framework library
-  type FwTemplate = { key: string; name: string; version: string; authority: string; description: string; requirement_count: number };
+  type FwTemplate = { key: string; name: string; version: string; authority: string; description: string; requirement_count: number; kind?: string };
   const [showLib, setShowLib] = useState(false);
+  // The library dialog is a layer of the shared escape stack; focus moves in and comes back.
+  useEscapeLayer(showLib, () => setShowLib(false));
+  const libRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(showLib, libRef);
   const [templates, setTemplates] = useState<FwTemplate[]>([]);
   const [loadingTpl, setLoadingTpl] = useState<string | null>(null);
 
@@ -342,6 +415,9 @@ function ComplianceInner() {
   const setFi = <K extends keyof FindingState>(k: K, v: FindingState[K]) => setFd((p) => ({ ...p, [k]: v }));
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  // "Review all suggestions" for the selected framework (F-19): maps controls to its clauses.
+  const canMapControls = useHasPermission("control:write");
+  const [reviewSuggestions, setReviewSuggestions] = useState(false);
 
   /* ---------------------------------------------------------------- loaders */
   const loadFrameworks = useCallback(async (selectId?: string) => {
@@ -388,6 +464,9 @@ function ComplianceInner() {
      framework record, not to the requirements list — collapsed so they stop competing
      with the table for the top of the page. */
   const [showFrameworkPanels, setShowFrameworkPanels] = useState(false);
+  /* The framework view has tabs: the requirements register, for compliance frameworks
+     the Statement of Applicability, and the crosswalk with another framework. */
+  const [fwTab, setFwTab] = useState<"requirements" | "soa" | "crosswalk">("requirements");
 
   const fetchRequirements = useCallback(
     (qs: string): Promise<PagedList<Requirement>> => {
@@ -405,6 +484,11 @@ function ComplianceInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadFrameworks]);
 
+  // A mapping, test or assessment moves the framework cards' posture: refresh them.
+  useEffect(() => {
+    if (refreshKey) loadFrameworks().catch(() => {});
+  }, [refreshKey, loadFrameworks]);
+
   // gap analysis stat cards for the selected framework (server-computed)
   useEffect(() => {
     if (!selected) {
@@ -421,6 +505,7 @@ function ComplianceInner() {
     apiCall<Requirement>("GET", `/requirements/${id}`).then(setDetail).catch(() => setDetail(null));
     setCrosswalks([]);
     setEvidence([]);
+    setViaCrosswalk(null);
     Promise.all([
       apiCall<CrosswalkItem[]>("GET", `/requirements/${id}/crosswalks`),
       apiCall<Evidence[]>("GET", `/requirements/${id}/evidence`),
@@ -430,6 +515,7 @@ function ComplianceInner() {
         setEvidence(ev);
       })
       .catch(() => {});
+    getViaCrosswalk(id).then(setViaCrosswalk).catch(() => setViaCrosswalk(null));
   }, []);
   useEffect(() => {
     if (openId) loadDetail(openId);
@@ -631,10 +717,10 @@ function ComplianceInner() {
         <Field label="Version" help="Release/edition of the framework.">
           <TextInput value={fw.version} onChange={(v) => setF("version", v)} placeholder="2022" />
         </Field>
-        <Field label="Workflow">
-          <Select value={fw.workflow_status} onChange={(v) => setF("workflow_status", v)} options={WORKFLOW} />
-        </Field>
       </div>
+      <Field label="Kind" help="A compliance framework's clauses are obligations and count towards the compliance percentage. A maturity self-assessment (ISO 31000, ISO 27005) or guidance is tracked clause by clause but never scored as non-compliant.">
+        <Select value={fw.kind} onChange={(v) => setF("kind", v)} options={FRAMEWORK_KIND} />
+      </Field>
       <div className="field-row">
         <Field label="Authority" help="Body that publishes the standard (ISO, AICPA, NIST…).">
           <TextInput value={fw.authority} onChange={(v) => setF("authority", v)} placeholder="ISO" />
@@ -678,9 +764,6 @@ function ComplianceInner() {
         <Field label="Compliance Status">
           <Select value={rq.status} onChange={(v) => setR("status", v)} options={COMPLIANCE_STATUS} />
         </Field>
-        <Field label="Workflow">
-          <Select value={rq.workflow_status} onChange={(v) => setR("workflow_status", v)} options={WORKFLOW} />
-        </Field>
       </div>
     </>
   );
@@ -700,6 +783,18 @@ function ComplianceInner() {
       </Field>
       <Field label="How We Comply (Implementation)" help="Narrative of the controls/processes that satisfy this requirement.">
         <RichText value={rq.implementation} onChange={(v) => setR("implementation", v)} placeholder="Describe how the organization complies…" />
+      </Field>
+      <Field
+        label="Applicability justification"
+        required={rq.treatment === "not_applicable" || rq.status === "not_applicable"}
+        help="Statement of Applicability: why this clause is in or out of scope. Required when the treatment or status is Not Applicable."
+      >
+        <TextArea
+          value={rq.applicability_justification || ""}
+          onChange={(v) => setR("applicability_justification", v)}
+          rows={3}
+          placeholder="e.g. Excluded — no cardholder data is stored, processed or transmitted."
+        />
       </Field>
     </>
   );
@@ -724,7 +819,7 @@ function ComplianceInner() {
           placeholder="None"
         />
       </Field>
-      <Field label="Crosswalks" help="Equivalent requirements in other frameworks (e.g. ISO A.5.15 ≡ SOC2 CC6.1).">
+      <Field label="Crosswalks" help="Related clauses in other frameworks. New links are recorded as related; set how they relate in the framework's Crosswalk tab.">
         <AsyncMultiSelect search={searchCrosswalks} value={crosswalkSel} onChange={setCrosswalkSel} />
       </Field>
     </>
@@ -747,7 +842,7 @@ function ComplianceInner() {
                     <Badge tone={fnd.status === "open" ? "high" : "low"} plain>
                       {fnd.status}
                     </Badge>
-                    {fnd.deadline ? ` · due ${fnd.deadline}` : ""}
+                    {fnd.deadline ? ` · due ${formatDate(fnd.deadline)}` : ""}
                   </div>
                 </div>
               </div>
@@ -801,7 +896,7 @@ function ComplianceInner() {
           >
             {frameworks.map((f) => (
               <option key={f.id} value={f.id}>
-                {f.name} ({f.requirement_count})
+                {f.name} ({f.requirement_count}){isSelfAssessed(f.kind) ? " · self-assessment" : ""}
               </option>
             ))}
           </select>
@@ -816,6 +911,11 @@ function ComplianceInner() {
           <button className="btn secondary" onClick={openNewFw}>
             <IconPlus width={16} height={16} /> Framework
           </button>
+          {selectedFw && !isSelfAssessed(selectedFw.kind) && canMapControls && (
+            <button className="btn secondary" onClick={() => setReviewSuggestions(true)} title="Suggested controls for this framework's clauses, reviewed and accepted in one place">
+              Review suggested mappings
+            </button>
+          )}
           {selected && (
             <>
               <ImportExport resource="requirements" label="Requirements" onDone={reload} />
@@ -829,34 +929,149 @@ function ComplianceInner() {
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
+      {selectedFw && isSelfAssessed(selectedFw.kind) && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 12.5 }}>
+          <Badge tone="info">{selectedFw.kind === "guidance" ? "Guidance" : "Maturity self-assessment"}</Badge>
+          <span className="muted">
+            Good practice to measure against, not an obligation: it has no compliance percentage and stays out of the
+            organisation&apos;s compliance score.
+          </span>
+        </div>
+      )}
+
+      {frameworks.length > 1 && (
+        <div role="list" aria-label="Frameworks" style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4, marginBottom: 14 }}>
+          {frameworks.map((f) => {
+            const on = f.id === selected;
+            return (
+              <button
+                key={f.id}
+                role="listitem"
+                type="button"
+                className="card"
+                aria-current={on ? "true" : undefined}
+                onClick={() => setSelected(f.id)}
+                style={{
+                  flex: "0 0 auto", minWidth: 220, maxWidth: 300, textAlign: "left", padding: "10px 12px", cursor: "pointer",
+                  border: on ? "1px solid var(--primary)" : undefined, boxShadow: on ? "0 0 0 2px var(--ring)" : undefined,
+                  font: "inherit", color: "inherit",
+                }}
+              >
+                <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.name}</div>
+                <div style={{ fontSize: 11.5, marginTop: 3 }}>
+                  {isSelfAssessed(f.kind)
+                    ? <span className="muted">{f.requirement_count} clauses · self-assessment, not scored</span>
+                    : f.posture
+                      ? <PostureLine p={f.posture} />
+                      : <span className="muted">{f.requirement_count} requirements · {f.compliant_count} compliant</span>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {selectedFw && !isSelfAssessed(selectedFw.kind) && canMapControls && (
+        <PendingSuggestionsHint
+          frameworkId={selectedFw.id}
+          frameworkName={selectedFw.name}
+          refreshKey={refreshKey}
+          onReview={() => setReviewSuggestions(true)}
+        />
+      )}
+
       {gap && (
         <div className="grid stat-grid">
           <div className="card stat">
             <div className="stat-top"><span className="n">{gap.total_requirements}</span></div>
-            <span className="l">Requirements</span>
+            <span className="l">{isSelfAssessed(gap.kind) ? "Clauses" : "Requirements"}</span>
           </div>
-          <div className="card stat ok">
-            <div className="stat-top"><span className="n" style={{ color: "var(--green)" }}>{gap.compliant_pct}%</span></div>
-            <span className="l">Compliant</span>
-            <div className="progress" style={{ marginTop: 4 }}>
-              <span style={{ width: `${gap.compliant_pct}%` }} />
+          {isSelfAssessed(gap.kind) ? (
+            <div className="card stat">
+              <div className="stat-top"><span className="n">{gap.assessed}/{gap.total_requirements}</span></div>
+              <span className="l">Clauses self-assessed</span>
+              <div className="progress" style={{ marginTop: 4 }}>
+                <span style={{ width: `${gap.total_requirements ? Math.round((100 * gap.assessed) / gap.total_requirements) : 0}%`, background: "var(--muted)" }} />
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="card stat ok">
+              <div className="stat-top"><span className="n" style={{ color: "var(--green)" }}>{gap.compliant_pct}%</span></div>
+              <span className="l">Assessed compliant</span>
+              <div className="progress" style={{ marginTop: 4 }}>
+                <span style={{ width: `${gap.compliant_pct}%` }} />
+              </div>
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                Moves only when a clause is assessed; mapping a control does not.
+              </div>
+            </div>
+          )}
+          {gap.posture ? (
+            <div className="card stat">
+              <div className="stat-top"><span className="n">{pctText(gap.posture.mapped_pct)}</span></div>
+              <span className="l">Mapped to a control</span>
+              <div className="progress" style={{ marginTop: 4 }}>
+                <span style={{ width: `${gap.posture.mapped_pct}%`, background: "var(--amber)" }} />
+              </div>
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                {gap.posture.mapped} of {gap.posture.applicable} applicable clauses
+              </div>
+            </div>
+          ) : null}
           <div className="card stat">
-            <div className="stat-top"><span className="n">{gap.assured}/{gap.total_requirements}</span></div>
-            <span className="l">Assured by a working control</span>
+            <div className="stat-top">
+              <span className="n">{gap.posture ? pctText(gap.posture.assured_pct) : `${gap.assured}/${gap.total_requirements}`}</span>
+            </div>
+            <span className="l">Tested — backed by a working control</span>
+            {gap.posture && (
+              <div className="progress" style={{ marginTop: 4 }}>
+                <span style={{ width: `${gap.posture.assured_pct}%` }} />
+              </div>
+            )}
             <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
-              {gap.covered} mapped · {gap.unassessed} not yet tested · {gap.failing} failing
+              {gap.posture
+                ? `${gap.posture.assured} of ${gap.posture.applicable} applicable · ${gap.posture.unassessed} mapped but not tested · ${gap.posture.failing} failing`
+                : `${gap.covered} mapped · ${gap.unassessed} not yet tested · ${gap.failing} failing`}
             </div>
           </div>
+          {!!gap.posture?.via_crosswalk && (
+            <div className="card stat" title="Not direct mappings: open a clause to see which control covers it and adopt the mapping.">
+              <div className="stat-top"><span className="n">{pctText(gap.posture.via_crosswalk_pct || 0)}</span></div>
+              <span className="l">Covered via crosswalk</span>
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                {gap.posture.via_crosswalk} of {gap.posture.applicable} applicable clauses have no tested control of their own but an
+                equivalent clause elsewhere does. Not counted as mapped or tested.
+              </div>
+            </div>
+          )}
           <div className="card stat warn">
             <div className="stat-top"><span className="n" style={{ color: "var(--orange)" }}>{gap.gaps.length}</span></div>
-            <span className="l">Open gaps</span>
+            <span className="l">{isSelfAssessed(gap.kind) ? "Improvement areas" : "Open gaps"}</span>
           </div>
         </div>
       )}
 
-      {selected ? (
+      {selectedFw && (
+        <div className="seg" style={{ marginBottom: 12 }} role="tablist" aria-label="Framework view">
+          <button type="button" role="tab" aria-selected={fwTab === "requirements"} className={fwTab === "requirements" ? "on" : ""} onClick={() => setFwTab("requirements")}>
+            Requirements
+          </button>
+          {!isSelfAssessed(selectedFw.kind) && (
+            <button type="button" role="tab" aria-selected={fwTab === "soa"} className={fwTab === "soa" ? "on" : ""} onClick={() => setFwTab("soa")}>
+              Statement of Applicability
+            </button>
+          )}
+          <button type="button" role="tab" aria-selected={fwTab === "crosswalk"} className={fwTab === "crosswalk" ? "on" : ""} onClick={() => setFwTab("crosswalk")}>
+            Crosswalk
+          </button>
+        </div>
+      )}
+
+      {selectedFw && fwTab === "crosswalk" ? (
+        <FrameworkCrosswalk key={selectedFw.id} framework={selectedFw} frameworks={frameworks} />
+      ) : selectedFw && fwTab === "soa" && !isSelfAssessed(selectedFw.kind) ? (
+        <StatementOfApplicability key={selectedFw.id} frameworkId={selectedFw.id} frameworkName={selectedFw.name} onChanged={reload} />
+      ) : selected ? (
         <DataTable<Requirement>
           columns={columns}
           fetcher={fetchRequirements}
@@ -899,7 +1114,7 @@ function ComplianceInner() {
             type="button"
             onClick={() => setShowFrameworkPanels((v) => !v)}
           >
-            {showFrameworkPanels ? "Hide" : "Show"} framework details — review cadence, files and comments
+            {showFrameworkPanels ? "Hide" : "Show"} framework details — approval, review cadence, files and comments
           </button>
           {showFrameworkPanels && (
             <div style={{ marginTop: 12 }}>
@@ -908,14 +1123,30 @@ function ComplianceInner() {
                 the periodic attestation that its status is accurate, plus files, tags and
                 comments kept against the framework.
               </p>
+              <RecordApproval
+                entityType="framework"
+                entityId={selectedFw.id}
+                onChanged={() => { loadFrameworks(selectedFw.id).catch(() => {}); }}
+              />
               <RecordPanels model="framework" entityId={selectedFw.id} />
             </div>
           )}
         </div>
       )}
 
+      {reviewSuggestions && selectedFw && (
+        <BulkSuggestMappings
+          scope="unmapped"
+          frameworkId={selectedFw.id}
+          frameworkName={selectedFw.name}
+          onClose={() => setReviewSuggestions(false)}
+          onDone={reload}
+        />
+      )}
+
       {/* -------------------------------------------------- requirement detail drawer */}
       <RecordDrawer
+        aside={detail ? <RecordApproval entityType="requirement" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} /> : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference || detail.title : "…"}
@@ -955,15 +1186,64 @@ function ComplianceInner() {
               </div>
             )}
 
+            {viaCrosswalk && (
+              <div className="card" style={{ marginBottom: 14 }}>
+                <div className="card-head"><h3>Covered via crosswalk</h3><span className="sub">Not a direct mapping</span></div>
+                <div className="card-pad" style={{ fontSize: 13 }}>
+                  <p style={{ marginTop: 0, lineHeight: 1.55 }}>
+                    This clause has no tested control of its own, but it is{" "}
+                    {viaCrosswalk.relationship === "equivalent" ? "equivalent to" : "wholly contained in"}{" "}
+                    <span className="ref">{viaCrosswalk.via_reference}</span> {viaCrosswalk.via_title} ({viaCrosswalk.via_framework}),
+                    whose tested control{viaCrosswalk.controls.length === 1 ? "" : "s"} cover{viaCrosswalk.controls.length === 1 ? "s" : ""} it.
+                    It does not count as mapped or tested until you adopt the mapping.
+                  </p>
+                  <div style={{ display: "grid", gap: 4, marginBottom: 10 }}>
+                    {viaCrosswalk.controls.map((c) => (
+                      <div key={c.id}><span className="ref">{c.reference || "—"}</span> {c.name} <Badge tone="low" plain>{c.effectiveness.replace(/_/g, " ")}</Badge></div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={adopting}
+                    onClick={async () => {
+                      setAdopting(true);
+                      try {
+                        await adoptCrosswalkMapping(detail.id, viaCrosswalk.via_requirement_id);
+                        toast(`Mapped ${viaCrosswalk.controls.length} control${viaCrosswalk.controls.length === 1 ? "" : "s"} directly to ${detail.reference || detail.title}. The change is in the activity trail.`);
+                        reload();
+                        loadDetail(detail.id);
+                      } catch (e) {
+                        toast(e instanceof Error ? e.message : "Could not adopt the mapping", "error");
+                      } finally {
+                        setAdopting(false);
+                      }
+                    }}
+                  >
+                    {adopting ? "Adopting…" : "Adopt mapping"}
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-head"><h3>Crosswalks</h3><span className="sub">Equivalent requirements</span></div>
+              <div className="card-head"><h3>Crosswalks</h3><span className="sub">Related clauses in other frameworks</span></div>
               <div className="card-pad">
                 {crosswalks.length ? (
                   crosswalks.map((c) => (
                     <div key={c.id} className="activity-item">
                       <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 13 }}><span className="ref">{c.reference}</span> — {c.title}</div>
-                        <div className="when"><Badge tone="info" plain>{c.framework_name}</Badge> <ComplianceBadge value={c.status} /></div>
+                        <div style={{ fontSize: 13 }}>
+                          {c.relationship && (
+                            <span className="muted" title={RELATIONSHIP_HELP[c.relationship]}>{RELATIONSHIP_LABEL[c.relationship]}: </span>
+                          )}
+                          <span className="ref">{c.reference}</span> — {c.title}
+                        </div>
+                        <div className="when">
+                          <Badge tone="info" plain>{c.framework_name}</Badge> <ComplianceBadge value={c.status} />
+                          {c.origin && <span className="muted" style={{ fontSize: 11.5 }}> · {ORIGIN_LABEL[c.origin]}</span>}
+                          {c.rationale && <span className="muted" style={{ fontSize: 11.5 }}> · {c.rationale}</span>}
+                        </div>
                       </div>
                     </div>
                   ))
@@ -1006,7 +1286,7 @@ function ComplianceInner() {
                           <td className="cell-title">{fnd.title}</td>
                           <td><Badge tone={SEVERITY_TONE[fnd.severity] || "neutral"}>{fnd.severity}</Badge></td>
                           <td><Badge tone={fnd.status === "open" ? "high" : "low"}>{fnd.status}</Badge></td>
-                          <td className="muted">{fnd.deadline || "—"}</td>
+                          <td className="muted">{formatDate(fnd.deadline)}</td>
                           <td>
                             {fnd.status === "open" && (
                               <button className="btn secondary sm" onClick={() => closeFinding(fnd.id)}>
@@ -1027,7 +1307,7 @@ function ComplianceInner() {
 
       {showLib && (
         <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && setShowLib(false)}>
-          <div className="modal" role="dialog" aria-modal="true" aria-label="Framework library">
+          <div ref={libRef} tabIndex={-1} className="modal" role="dialog" aria-modal="true" aria-label="Framework library" onKeyDown={(e) => trapTab(e, libRef.current)}>
             <div className="modal-head">
               <h2>Framework Library</h2>
               <button className="x" onClick={() => setShowLib(false)} aria-label="Close">✕</button>
@@ -1046,6 +1326,7 @@ function ComplianceInner() {
                     <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
                       <Badge tone="info">{t.authority}</Badge>
                       <Badge tone="neutral" plain>{t.requirement_count} requirements</Badge>
+                      {isSelfAssessed(t.kind) && <Badge tone="info" plain>Maturity self-assessment</Badge>}
                     </div>
                   </div>
                   <button className="btn" disabled={loadingTpl === t.key} onClick={() => loadTemplate(t.key)}>

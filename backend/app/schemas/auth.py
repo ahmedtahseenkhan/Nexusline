@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.user import UserRead
@@ -36,6 +38,28 @@ class LoginResult(BaseModel):
     token_type: str = "bearer"
     expires_in: int | None = None
     user: UserRead | None = None
+    # MFA policy (see app/services/mfa_policy.py). ``mfa_enrolment_required``: the grace
+    # period is over and ``access_token`` can only be used to enrol. ``mfa_enrolment_due``:
+    # still inside the grace period — sign-in is normal, enrolment is due by this time.
+    mfa_enrolment_required: bool = False
+    mfa_enrolment_due: datetime | None = None
+
+
+class MeRead(UserRead):
+    """``/auth/me``: the user plus where their session stands against the MFA policy."""
+
+    #: This session is enrol-only — everything but MFA setup is refused until enrolment.
+    mfa_enrolment_required: bool = False
+    #: MFA is required for this user and not yet set up; full access ends at this time.
+    mfa_enrolment_due: datetime | None = None
+    #: Whether the MFA policy applies to this user (so they may not switch MFA off).
+    mfa_required_for_user: bool = False
+    #: The installation requires MFA for everyone who signs in with a password
+    #: (``MFA_REQUIRED``), rather than for this user's role.
+    mfa_required_for_everyone: bool = False
+    #: The user's last sign-in went through the organisation's single sign-on: their
+    #: identity provider enforces the second factor, not this policy.
+    mfa_via_identity_provider: bool = False
 
 
 class MfaVerifyRequest(BaseModel):

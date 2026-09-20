@@ -13,19 +13,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy import select
 
-from app.api.v1.risks import build_risk_query
+from app.api.v1.risks import RiskListFilters
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.asset import Asset
-from app.models.enums import RiskStatus
 from app.models.identity import User
+from app.models.lookup import Lookup
 from app.models.internal_audit import AuditEngagement
 from app.models.organization import BusinessUnit, Process
 from app.models.shariah import ShariahReview
 from app.models.risk import Risk
 from app.models.tenant import Tenant
 from app.services import pdf_report
+from app.services import fx
 from app.services.risk_scoring import max_score_for
-from app.services.risk_settings import get_or_create_settings
+from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
 router = APIRouter(prefix="/reports/pdf", tags=["reports"])
 
@@ -68,30 +69,20 @@ async def shariah_review_report(rid: uuid.UUID, db: DbSession, user: CurrentUser
 async def risk_register_report(
     db: DbSession,
     user: CurrentUser,
-    status_filter: Annotated[RiskStatus | None, Query(alias="status")] = None,
-    category: str | None = None,
-    business_unit_id: uuid.UUID | None = None,
-    process_id: uuid.UUID | None = None,
-    asset_id: uuid.UUID | None = None,
-    search: str | None = None,
+    filters: Annotated[RiskListFilters, Depends()],
     details: Annotated[bool, Query()] = True,
 ) -> Response:
     """The register report, narrowed to whatever the screen was showing.
 
-    The filter parameters are the register's own, resolved through the same query
-    builder the list endpoint uses, so "export what I am looking at" is literally true
-    rather than approximately true. Without that shared builder a report drifts from the
-    screen silently: nothing errors, the numbers are just wrong.
+    The filters are the register list's own dependency (``api.v1.risks.RiskListFilters``):
+    the same parameters, resolved through the same query builder, so "export what I am
+    looking at" is literally true — any filter the list gains, the PDF gains. Without that
+    shared builder a report drifts from the screen silently: nothing errors, the numbers
+    are just wrong.
     """
     settings = await get_or_create_settings(db, user.tenant_id)
-    stmt = build_risk_query(
-        status=status_filter,
-        category=category,
-        business_unit_id=business_unit_id,
-        process_id=process_id,
-        asset_id=asset_id,
-        search=search,
-    )
+    book = await load_appetite_book(db, user.tenant_id, settings)
+    stmt = filters.statement(book)
     risks = list((await db.scalars(stmt.order_by(Risk.reference))).all())
 
     context = pdf_report.RiskReportContext(
@@ -100,11 +91,12 @@ async def risk_register_report(
         tolerance=settings.tolerance_score,
         max_score=max_score_for(settings.matrix_size),
         matrix_size=settings.matrix_size,
-        scope=await _scope_label(
-            db, status_filter, category, business_unit_id, process_id, asset_id, search
-        ),
+        scope=await _scope_label(db, filters),
         owner_names=await _owner_names(db, risks),
+        currency=await fx.reporting_currency(db, user.tenant_id),
         include_details=details,
+        book=book,
+        scale=scale_for(settings),
     )
     return _pdf(pdf_report.risk_register_pdf(risks, context), "risk-report.pdf")
 
@@ -118,31 +110,76 @@ async def _owner_names(db, risks) -> dict[uuid.UUID, str]:
     return {u.id: (u.full_name or u.email) for u in rows}
 
 
-async def _scope_label(
-    db, status_filter, category, business_unit_id, process_id, asset_id, search
-) -> str:
-    """Describe the filter in the words the reader used to choose it.
+_LEVEL_WORDS = {"1": "enterprise (L1)", "2": "category (L2)", "3": "scenario (L3)", "none": "not placed"}
+_REVIEW_WORDS = {"overdue": "overdue", "due_30d": "due in 30 days"}
+_APPETITE_WORDS = {
+    "within": "within appetite", "within_appetite": "within appetite",
+    "elevated": "above appetite, within tolerance", "breach": "above tolerance",
+}
+
+
+def _yes_no(value: bool, yes: str, no: str) -> str:
+    return yes if value else no
+
+
+async def _scope_label(db, filters: RiskListFilters) -> str:
+    """Describe every active filter in the words the reader used to choose it.
 
     Printed on the cover: a filtered export circulating without this line is
     indistinguishable from the whole register, which is how a segment's report ends up
-    being read as the bank's total exposure.
+    being read as the bank's total exposure. Ids are shown as names.
     """
     parts: list[str] = []
-    if business_unit_id is not None:
-        unit = await db.get(BusinessUnit, business_unit_id)
-        parts.append(unit.name if unit else "Unknown business unit")
-    if process_id is not None:
-        process = await db.get(Process, process_id)
-        parts.append(process.name if process else "Unknown process")
-    if asset_id is not None:
-        asset = await db.get(Asset, asset_id)
-        parts.append(asset.name if asset else "Unknown asset")
-    if status_filter is not None:
-        parts.append(status_filter.value.replace("_", " ").title())
-    if category:
-        parts.append(category)
-    if search:
-        parts.append(f'matching "{search}"')
+    active = filters.active()
+
+    async def name_of(model, value, attr: str, missing: str) -> str:
+        row = await db.get(model, value)
+        return getattr(row, attr, None) or missing if row is not None else missing
+
+    for key, value in active.items():
+        label = RiskListFilters.LABELS[key]
+        if key == "business_unit_id":
+            parts.append(await name_of(BusinessUnit, value, "name", "Unknown business unit"))
+        elif key == "process_id":
+            parts.append(await name_of(Process, value, "name", "Unknown process"))
+        elif key == "asset_id":
+            parts.append(await name_of(Asset, value, "name", "Unknown asset"))
+        elif key in ("owner_id", "treatment_owner_id"):
+            person = await db.get(User, value)
+            parts.append(f"{label}: {(person.full_name or person.email) if person else 'unknown user'}")
+        elif key == "category_id":
+            parts.append(f"{label}: {await name_of(Lookup, value, 'label', 'unknown category')}")
+        elif key == "parent_id":
+            parent = await db.get(Risk, value)
+            parts.append(f"Below {parent.reference if parent else 'an unknown risk'}")
+        elif key == "status_filter":
+            parts.append(value.value.replace("_", " ").title())
+        elif key == "category":
+            parts.append(str(value))
+        elif key == "search":
+            parts.append(f'matching "{value}"')
+        elif key == "level":
+            parts.append(f"Level: {_LEVEL_WORDS.get(str(value), value)}")
+        elif key == "max_level":
+            parts.append(f"Levels 1–{value}")
+        elif key == "review":
+            parts.append(f"Review {_REVIEW_WORDS.get(value, value)}")
+        elif key == "appetite":
+            parts.append(_APPETITE_WORDS.get(value, str(value)))
+        elif key == "roots_only":
+            parts.append(_yes_no(value, "Top of the tree only", "Below another risk only"))
+        elif key == "needs_review":
+            parts.append(_yes_no(value, "Flagged for review", "Not flagged for review"))
+        elif key == "has_controls":
+            parts.append(_yes_no(value, "With controls", "Without controls"))
+        elif key == "treatment_overdue":
+            parts.append(_yes_no(value, "Treatment overdue", "Treatment not overdue"))
+        elif key == "pending_validation":
+            parts.append(_yes_no(value, "Pending validation (drafts)", "Out of Draft"))
+        elif key in ("risk_type", "source"):
+            parts.append(f"{label}: {str(value).replace('_', ' ')}")
+        else:  # a filter added to RiskListFilters without a wording here still prints
+            parts.append(f"{label}: {value}")
     return " · ".join(parts) if parts else "Whole register"
 
 

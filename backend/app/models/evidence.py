@@ -19,6 +19,9 @@ from app.models.enums import EvidenceStatus, EvidenceType
 
 class Evidence(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     __tablename__ = "evidence"
+    control_audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("control_audits.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # Phase 2: the test this evidence supports
 
     control_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("controls.id", ondelete="CASCADE"), nullable=False, index=True
@@ -31,7 +34,7 @@ class Evidence(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     reference: Mapped[str] = mapped_column(String(500), default="")  # URL or location
     status: Mapped[EvidenceStatus] = mapped_column(
         SAEnum(EvidenceStatus, name="evidence_status"),
-        default=EvidenceStatus.valid,
+        default=EvidenceStatus.pending,
         nullable=False,
     )
     collected_at: Mapped[date | None] = mapped_column(Date, nullable=True)

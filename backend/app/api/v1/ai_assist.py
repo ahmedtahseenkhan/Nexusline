@@ -69,39 +69,79 @@ _OBLIGATION_RE = re.compile(
 )
 _NUMDATE_RE = re.compile(r"\d")
 
-# ISO 27001-ish (Annex A) + AML keyword → control domain mapping for control_mapping.
+# Keyword → ISO/IEC 27001:2022 Annex A control, for the offline control-mapping
+# heuristic. 2022 numbering (A.5-A.8), not the retired 2013 A.9-A.18 domains, so the
+# output names clauses that exist in the installed framework; every reference here is
+# pinned to the library template by ``tests/test_clause_suggestions.py``. The synonym
+# table in ``services.clause_suggestions`` is consulted too; this list adds the
+# single-word cues it deliberately does not treat as a topic on their own.
 _ISO_KEYWORDS: dict[str, str] = {
-    "access control": "A.9 Access control",
-    "password": "A.9 Access control",
-    "authentication": "A.9 Access control",
-    "least privilege": "A.9 Access control",
-    "encryption": "A.10 Cryptography",
-    "cryptograph": "A.10 Cryptography",
-    "key management": "A.10 Cryptography",
-    "physical": "A.11 Physical & environmental security",
-    "backup": "A.12 Operations security",
-    "logging": "A.12 Operations security",
-    "malware": "A.12 Operations security",
-    "vulnerability": "A.12 Operations security",
-    "patch": "A.12 Operations security",
-    "network": "A.13 Communications security",
-    "transmission": "A.13 Communications security",
-    "supplier": "A.15 Supplier relationships",
-    "third party": "A.15 Supplier relationships",
-    "third-party": "A.15 Supplier relationships",
-    "outsourc": "A.15 Supplier relationships",
-    "incident": "A.16 Information security incident management",
-    "breach": "A.16 Information security incident management",
-    "continuity": "A.17 Business continuity",
-    "disaster recovery": "A.17 Business continuity",
-    "compliance": "A.18 Compliance",
-    "audit": "A.18 Compliance",
-    "retention": "A.18 Compliance",
+    "access control": "A.5.15",
+    "least privilege": "A.8.2",
+    "password": "A.5.17",
+    "authentication": "A.8.5",
+    "encryption": "A.8.24",
+    "cryptograph": "A.8.24",
+    "key management": "A.8.24",
+    "physical": "A.7.1",
+    "backup": "A.8.13",
+    "logging": "A.8.15",
+    "monitoring": "A.8.16",
+    "malware": "A.8.7",
+    "vulnerability": "A.8.8",
+    "patch": "A.8.8",
+    "network": "A.8.20",
+    "transmission": "A.5.14",
+    "supplier": "A.5.19",
+    "third party": "A.5.19",
+    "third-party": "A.5.19",
+    "outsourc": "A.5.19",
+    "cloud": "A.5.23",
+    "incident": "A.5.24",
+    "breach": "A.5.26",
+    "continuity": "A.5.30",
+    "disaster recovery": "A.5.30",
+    "compliance": "A.5.31",
+    "audit": "A.5.35",
+    "retention": "A.5.33",
+    "privacy": "A.5.34",
+    "personal data": "A.5.34",
+    "training": "A.6.3",
+    "awareness": "A.6.3",
+    "change management": "A.8.32",
+    "change control": "A.8.32",
+    "classification": "A.5.12",
+}
+#: AML/CFT programme elements — not ISO controls, reported alongside them.
+_AML_KEYWORDS: dict[str, str] = {
     "customer due diligence": "AML/CFT — customer due diligence",
     "kyc": "AML/CFT — customer due diligence",
     "aml": "AML/CFT programme",
     "suspicious transaction": "AML/CFT — STR/SAR reporting",
 }
+
+
+def _iso_title(ref: str) -> str:
+    from app.services.framework_library import TEMPLATES
+
+    for r in TEMPLATES["iso-27001-2022"]["requirements"]:
+        if r["reference"] == ref:
+            return r["title"]
+    return ""
+
+
+def iso_controls_for_text(text: str) -> list[tuple[str, str]]:
+    """ISO/IEC 27001:2022 Annex A (reference, title) pairs named or implied by ``text``:
+    the synonym table's topics first (in order of mention), then keyword cues."""
+    from app.services.clause_suggestions import iso_annex_a_for_text
+
+    out = list(iso_annex_a_for_text(text))
+    low = (text or "").lower()
+    for kw, ref in _ISO_KEYWORDS.items():
+        pair = (ref, _iso_title(ref))
+        if kw in low and pair not in out:
+            out.append(pair)
+    return out
 
 
 def _sentences(text: str) -> list[str]:
@@ -167,13 +207,13 @@ def _heuristic_risk_suggestions(text: str) -> str:
 
 def _heuristic_control_mapping(text: str) -> str:
     low = (text or "").lower()
-    matched: list[str] = []
-    for kw, ctrl in _ISO_KEYWORDS.items():
-        if kw in low and ctrl not in matched:
-            matched.append(ctrl)
+    matched = [f"{ref} {title}" for ref, title in iso_controls_for_text(text)]
+    for kw, element in _AML_KEYWORDS.items():
+        if kw in low and element not in matched:
+            matched.append(element)
     if not matched:
-        return ("No ISO 27001 / AML control domains detected from the source text. Map "
-                "controls manually.")
+        return ("No ISO/IEC 27001:2022 Annex A controls or AML programme elements detected "
+                "from the source text. Map controls manually.")
     return "\n".join(f"- {c}" for c in matched)
 
 
@@ -205,9 +245,10 @@ _SYSTEM_PROMPTS: dict[AiExtractionType, str] = {
         "numbered list."
     ),
     AiExtractionType.control_mapping: (
-        "You are an ISO 27001 practitioner. Identify which ISO 27001 Annex A control "
-        "domains (and AML/CFT programme elements, if relevant) the text relates to. "
-        "Return a short bulleted list of control domains, one per line."
+        "You are an ISO 27001 practitioner. Identify which ISO/IEC 27001:2022 Annex A "
+        "controls (A.5-A.8 numbering, e.g. 'A.8.5 Secure authentication'; never the "
+        "2013 A.9-A.18 numbering) and AML/CFT programme elements, if relevant, the text "
+        "relates to. Return a short bulleted list, one control per line, reference first."
     ),
 }
 
@@ -384,4 +425,86 @@ async def ai_summary(db: DbSession) -> AiSummary:
         total=sum(r.count for r in rows),
         ai_count=sum(r.ai_count for r in rows),
         heuristic_count=sum(r.heuristic_count for r in rows),
+    )
+
+
+# ============================================================ structured mapping ===
+class ControlMappingRequest(BaseModel):
+    """Either a control (its name, description and objective are used, and clauses it
+    already meets are left out) or free text to map."""
+
+    control_id: uuid.UUID | None = None
+    title: str = ""
+    text: str = ""
+    limit: int = 10
+
+
+class IsoControlRef(BaseModel):
+    reference: str
+    title: str
+
+
+class ControlMappingResult(BaseModel):
+    #: "control" when a control id was given, else "text".
+    source: str
+    control_id: uuid.UUID | None = None
+    #: Clauses of the installed compliance frameworks, ranked — the same engine and
+    #: shape as ``GET /controls/{id}/suggested-requirements``, so a UI can accept them.
+    suggestions: list[dict]
+    #: ISO/IEC 27001:2022 Annex A controls the text names, installed or not.
+    iso_controls: list[IsoControlRef]
+    #: The same as a readable list (what the stored heuristic extraction contains).
+    output_text: str
+
+
+@router.post(
+    "/ai-assist/control-mapping", response_model=ControlMappingResult, dependencies=[_READ],
+    summary="Structured control → requirement mapping (offline, deterministic)",
+)
+async def control_mapping_suggestions(
+    body: ControlMappingRequest, db: DbSession, user: CurrentUser,
+) -> ControlMappingResult:
+    """Map a control, or a piece of text, to framework clauses as **links**, not prose.
+
+    With ``control_id`` this is the clause-suggestion engine for that control
+    (requires ``control:read`` as well). With text, the text is scored as if it were a
+    control's description against the installed compliance frameworks. Nothing is
+    stored; accept suggestions through ``/controls/{id}/suggested-requirements/accept``.
+    """
+    from app.models.control import Control
+    from app.services import clause_suggestions as engine
+
+    limit = max(1, min(body.limit, 50))
+    if body.control_id is not None:
+        if "control:read" not in set(user.permission_codes):
+            raise HTTPException(status_code=403, detail="Requires permission(s): control:read")
+        control = await db.scalar(
+            select(Control).where(Control.id == body.control_id, Control.deleted.is_(False))
+        )
+        if control is None:
+            raise HTTPException(status_code=404, detail="Control not found")
+        found = (await engine.suggest_for_controls(db, [control], limit=limit, min_score=0.2))[control.id]
+        text = "\n".join(p for p in (control.name, control.description, control.objective) if p)
+        source = "control"
+    else:
+        text = f"{body.title}\n{body.text}".strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="Give a control_id or some text to map")
+        index = await engine.load_index(db)
+        found = engine.score_candidates(
+            engine.ControlText(name=body.title, description=body.text), index,
+            limit=limit, min_score=0.2,
+        )
+        source = "text"
+    iso = [IsoControlRef(reference=r, title=t) for r, t in iso_controls_for_text(text)]
+    return ControlMappingResult(
+        source=source,
+        control_id=body.control_id,
+        suggestions=[
+            {**s.as_dict(), "requirement_id": str(s.requirement_id),
+             "framework_id": str(s.framework_id) if s.framework_id else None}
+            for s in found
+        ],
+        iso_controls=iso,
+        output_text=_heuristic_control_mapping(text),
     )
