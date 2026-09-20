@@ -51,6 +51,7 @@ export default function MfaSetupPage() {
   return (
     <div className="login-wrap">
       <div style={{ width: "100%", maxWidth: 620, padding: "0 16px" }}>
+        <div className="login-intro">
         <div className="login-logo" style={{ marginBottom: 12 }}>
           <span className="logo"><IconNexus width={19} height={19} /></span>
           <span className="wordmark">Nexus<span style={{ color: "var(--primary-text)" }}>Line</span></span>
@@ -65,6 +66,7 @@ export default function MfaSetupPage() {
           finish set-up you can only use this page. Add NexusLine to an authenticator app, enter the
           6-digit code it shows, then sign in again with a code.
         </p>
+        </div>
         <SecuritySettings enrolOnly onEnabled={() => signOut("?mfa=enabled")} />
         <button type="button" className="btn secondary" style={{ marginTop: 14 }} onClick={() => signOut()}>
           Sign out

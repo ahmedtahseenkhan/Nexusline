@@ -486,6 +486,12 @@ tbody tr:hover td { background: var(--primary-weak-2); }
   box-shadow: 0 6px 18px -6px rgba(13,148,136,0.6);
 }
 .login-card h1 { font-size: 21px; letter-spacing: -0.03em; }
+/* Text placed directly on the dark sign-in backdrop (forced MFA enrolment), where the
+   page's own dark-on-light colours would be unreadable. */
+.login-intro { color: rgba(255, 255, 255, 0.78); }
+.login-intro h1 { color: #fff; }
+.login-intro p, .login-intro .muted { color: rgba(255, 255, 255, 0.74); }
+.login-intro .login-logo { color: #fff; }
 .login-card .sub { color: var(--muted); margin: 5px 0 8px; font-size: 13.5px; }
 .error { background: var(--red-bg); border: 1px solid #f1c9c9; color: var(--red); border-radius: var(--radius-sm); padding: 9px 12px; margin-top: 12px; font-size: 13px; }
 .error::before { content: "⚠"; margin-right: 7px; }
@@ -1245,11 +1251,12 @@ td .chips .chip { padding: 1px 7px; font-size: 12px; font-weight: 500; white-spa
 .rec-rule-cond { font-size: 12px; font-weight: 450; color: var(--muted); }
 
 /* Main column */
-.drawer.full.rec .drawer-main { padding: 18px var(--rec-gutter) 48px; }
+.drawer.full.rec .drawer-main { padding: 18px var(--rec-gutter) 48px; background: var(--bg-tint); }
 .drawer.full.rec .drawer-main-inner { max-width: 1040px; container: recmain / inline-size; }
 .rec-banner { display: flex; gap: 12px; align-items: flex-start; margin: 0 0 14px; padding: 10px 14px; font-size: 13px; line-height: 18px;
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--amber-bg); }
-.rec-headline-row { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; margin: 0 0 10px; }
+.rec-headline-row { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; margin: 0 0 10px;
+  padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .rec-headline { margin: 0; max-width: 100ch; font-size: 14px; line-height: 20px; color: var(--text); text-wrap: pretty; }
 .rec-headline b { font-weight: 620; color: var(--text-strong); }
 .rec-key { margin: 8px 0 0; font-size: 11.5px; line-height: 16px; color: var(--muted); }
@@ -1297,7 +1304,8 @@ a.rec-tile:hover { background: var(--surface-2); color: inherit; }
 .rec-scale-mk.target { top: 9px; width: 8px; height: 8px; transform: translateX(-4px); border-radius: 50%; background: var(--surface); border: 2px solid var(--text-strong); }
 
 /* Open points */
-.rec-op { margin: 14px 0 18px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.rec-op { margin: 14px 0 18px; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); border-left: 3px solid var(--amber); }
 .rec-op-head { display: flex; align-items: baseline; gap: 8px; }
 .rec-op-head h2 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 650; }
 .rec-op-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -1315,21 +1323,27 @@ a.rec-tile:hover { background: var(--surface-2); color: inherit; }
 }
 
 /* Section nav (sticky inside the main scroller) */
-.rec-nav { position: sticky; top: 0; z-index: 2; display: flex; gap: 2px; overflow-x: auto; margin: 0 0 4px; padding: 6px 0;
-  background: var(--surface); border-bottom: 1px solid var(--border); scrollbar-width: thin; }
+.rec-nav { position: sticky; top: 0; z-index: 6; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: thin;
+  /* Full-bleed across the main column: content scrolling underneath must never show
+     through the bar or beside it. */
+  margin: 0 calc(var(--rec-gutter) * -1) 10px; padding: 8px var(--rec-gutter);
+  background: var(--bg-tint); border-bottom: 1px solid var(--border);
+  box-shadow: 0 6px 12px -10px rgba(12, 18, 29, 0.5); }
 .rec-nav a { flex: none; padding: 5px 10px; border-radius: 6px; font-size: 12.5px; font-weight: 560; color: var(--muted); white-space: nowrap; }
 .rec-nav a:hover { color: var(--text-strong); background: var(--surface-2); }
 .rec-nav a[aria-current="true"] { color: var(--primary-text); background: var(--primary-weak-2); }
 .rec-nav .n { margin-left: 4px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
 
-/* Sections: rules, not boxes */
-.rec-sec { padding: 22px 0 8px; border-top: 1px solid var(--border); scroll-margin-top: 48px; }
-.rec-nav + .rec-sec { border-top: 0; }
-.rec-sec-head { display: flex; align-items: center; gap: 10px; min-height: 28px; margin-bottom: 12px; flex-wrap: wrap; }
+/* Sections: a card each, on the tinted column, so one section never bleeds into the next */
+.rec-sec { margin: 0 0 14px; padding: 18px 18px 14px; scroll-margin-top: 64px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.rec-sec-head { display: flex; align-items: center; gap: 10px; min-height: 28px; margin-bottom: 12px; flex-wrap: wrap;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.rec-sec-head h2::before { content: ""; width: 3px; align-self: stretch; margin-right: 2px; border-radius: 2px; background: var(--primary); }
 .rec-sec-head h2 { margin: 0; display: flex; align-items: baseline; gap: 8px; font-size: 14.5px; line-height: 20px; font-weight: 660; }
 .rec-sec-head .n, .rec-sec-head .sub { font-size: 12px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
 .rec-sec-head .acts { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
-.rec-sec.is-empty { padding: 12px 0; }
+.rec-sec.is-empty { padding: 12px 18px; }
 .rec-sec.is-empty .rec-sec-head { margin: 0; }
 .rec-empty { font-size: 13px; color: var(--muted); }
 .rec-prose { margin: 0 0 14px; max-width: 76ch; font-size: 14px; line-height: 22px; text-wrap: pretty; white-space: pre-wrap; }
