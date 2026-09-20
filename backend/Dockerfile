@@ -6,6 +6,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# pg_dump / pg_restore: `python -m app.tools.backup` shells out to them, and the
+# deployment guide calls that the supported backup path, so the client must ship
+# with them. postgresql-client only (no server).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
 # Release images enforce the license; pass --build-arg PRODUCTION_BUILD=false to
 # build an unenforced image for local development.
 ARG PRODUCTION_BUILD=true
