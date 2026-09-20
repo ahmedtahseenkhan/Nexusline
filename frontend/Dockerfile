@@ -9,7 +9,14 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
-RUN npm run build
+# Node sizes its heap from the container's memory, which on a small server is far
+# less than this build needs: it died with "heap out of memory" part-way through,
+# leaving no .next/standalone for the runner stage to copy. Give it a fixed heap
+# and skip telemetry. A 2 GB host still needs swap — see docs/deployment.md.
+ARG NODE_BUILD_HEAP_MB=2048
+ENV NODE_OPTIONS=--max-old-space-size=$NODE_BUILD_HEAP_MB
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build && test -d .next/standalone
 
 FROM node:20-alpine AS runner
 WORKDIR /app

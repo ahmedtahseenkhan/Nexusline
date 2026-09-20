@@ -27,6 +27,18 @@ docker compose -f docker-compose.prod.yml <command>
 - **Docker Engine 24+** and the **Docker Compose v2** plugin
   (`docker compose version`).
 - ~4 vCPU / 8 GB RAM / 50 GB disk for a pilot (scale up for production load).
+- **Building the web image needs ~2.5 GB of memory and ~6 GB of free disk.** On a
+  smaller host, add swap and build one service at a time:
+
+  ```bash
+  sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+  sudo mkswap /swapfile && sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab   # survives reboot
+  bash deploy/redeploy.sh api && bash deploy/redeploy.sh web
+  ```
+
+  Without it the Next.js build stops with "JavaScript heap out of memory" and the
+  image build fails on the missing `.next/standalone`.
 - A DNS name for the host (e.g. `grc.bank.local`) and TLS certificates for it.
 - **Either** outbound internet to pull/build images, **or** the offline bundle
   (see §8 Offline / Air-Gapped Install).

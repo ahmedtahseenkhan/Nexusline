@@ -107,12 +107,23 @@ say "5/7  Replacing containers"
 $COMPOSE up -d --force-recreate $SERVICES || { echo "up failed — read the error above."; exit 1; }
 
 say "6/7  Waiting for the API to become healthy"
+# Ask the API itself rather than reading `compose ps`: the health column is absent
+# under the podman compose shim, which reported a healthy API as never ready.
 for i in $(seq 1 40); do
-  state=$($COMPOSE ps api 2>/dev/null | tail -n +2)
-  case "$state" in
+  if $COMPOSE exec -T api python -c "
+import sys, urllib.request
+try:
+    sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)
+except Exception:
+    sys.exit(1)
+" >/dev/null 2>&1; then
+    echo "API is healthy."
+    break
+  fi
+  case "$($COMPOSE ps api 2>/dev/null | tail -n +2)" in
     *healthy*) echo "API is healthy."; break ;;
   esac
-  [ "$i" = 40 ] && { echo "API never became healthy. Logs:"; $COMPOSE logs --tail=60 api; exit 1; }
+  [ "$i" = 40 ] && { echo "API never answered /health. Logs:"; $COMPOSE logs --tail=60 api; exit 1; }
   sleep 5
 done
 $COMPOSE restart nginx
