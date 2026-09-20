@@ -70,6 +70,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Read-only mode after the licence grace period (decision 1). Added before CORS so CORS
+# stays the outer layer and a refused write still carries the CORS headers the browser
+# needs to read the message.
+from app.core.licence_guard import LicenceReadOnlyMiddleware  # noqa: E402
+
+app.add_middleware(LicenceReadOnlyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -79,7 +85,7 @@ app.add_middleware(
     # Exports name their file server-side (Content-Disposition). A browser on another
     # origin — the dev server, or a web tier on its own host — cannot read that header
     # unless it is exposed, and silently falls back to "download.pdf".
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "X-Error-Code"],
 )
 # Compress list/detail JSON payloads (nested-collection responses are large at scale).
 app.add_middleware(GZipMiddleware, minimum_size=1024)

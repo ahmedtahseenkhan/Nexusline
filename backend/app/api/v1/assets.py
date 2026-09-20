@@ -66,7 +66,7 @@ from app.schemas.asset import (
     RiskExposureRef,
 )
 from app.schemas.common import GraphRef, Page, exception_status
-from app.services import audit, risk_integrity
+from app.services import audit, fx, risk_integrity
 from app.services.risk_scoring import AppetiteBook, SeverityScale, effective_score, next_review_date
 from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
@@ -378,6 +378,22 @@ async def list_assets(
     return Page(items=[_serialize(r, can_read_risks=can_read_risks) for r in rows], total=total, limit=limit, offset=offset)
 
 
+async def replacement_value(db, filters) -> dict:
+    """Replacement cost of the matching assets in the reporting currency (``MoneyTotalRead``
+    shape): one grouped query, converted at today's rate; currencies with no rate are listed
+    in ``unconverted`` and left out of ``total``."""
+    groups = (await db.execute(
+        select(Asset.currency, func.coalesce(func.sum(Asset.replacement_cost), 0), func.count())
+        .where(*filters, Asset.replacement_cost > 0)
+        .group_by(Asset.currency)
+    )).all()
+    book = await fx.load_rate_book(db) if groups else fx.RateBook(await fx.reporting_currency(db))
+    total = fx.MoneyTotal(book)
+    for code, amount, count in groups:
+        total.add(amount, code, count=int(count or 0))
+    return total.as_dict()
+
+
 @router.get("/summary", dependencies=[Depends(require("asset:read"))])
 async def asset_summary(
     db: DbSession,
@@ -400,9 +416,9 @@ async def asset_summary(
     with_pii = await db.scalar(_count(Asset.data_categories.ilike("%pii%"))) or 0
     # --- IT-asset figures (server-computed so the stat cards are right at any scale) ---
     production = await db.scalar(_count(Asset.environment == AssetEnvironment.production)) or 0
-    total_value = await db.scalar(
-        select(func.coalesce(func.sum(Asset.replacement_cost), 0)).where(*filters)
-    ) or 0
+    # Decision 4: replacement cost is summed per currency, then converted to the reporting
+    # currency at today's rate (a stock figure: what replacing the estate costs now).
+    replacement = await replacement_value(db, filters)
     # effective criticality == critical iff cost band critical (>=10M) OR availability
     # critical OR it hosts an information asset whose business value is critical.
     info = aliased(Asset)
@@ -425,7 +441,8 @@ async def asset_summary(
         "self_assessed_pct": round(self_assessed / total * 100, 1) if total else 0.0,
         "with_pii": with_pii,
         "production": production,
-        "total_replacement_value": float(total_value),
+        "total_replacement_value": replacement["total"],
+        "replacement_value": replacement,
         "effective_critical": effective_critical,
     }
 

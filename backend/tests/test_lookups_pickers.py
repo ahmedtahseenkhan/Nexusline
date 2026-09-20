@@ -225,8 +225,14 @@ def test_seed_content():
             "United Kingdom", "United States", "China", "India", "Singapore", "Germany",
             "Ireland", "Netherlands"} <= countries
     assert {"sbp", "secp", "fmu", "pta", "fbr", "nacta"} == {d.value for d in DEFAULT_LOOKUPS["regulator"]}
-    # The four natures are the Nature field's, not classifications (record-page B10a).
-    assert [d.label for d in DEFAULT_LOOKUPS["control_classification"]] == []
+    # Decision 8: the ISO/IEC 27002:2022 themes. The four natures (Preventive …) are the
+    # Nature field's, not classifications, and are never seeded here (record-page B10a).
+    assert [d.label for d in DEFAULT_LOOKUPS["control_classification"]] == [
+        "Organizational", "People", "Physical", "Technological",
+    ]
+    from app.db.data_repairs import NATURE_CLASSIFICATIONS
+
+    assert not {d.value for d in DEFAULT_LOOKUPS["control_classification"]} & set(NATURE_CLASSIFICATIONS)
 
 
 def test_default_values_are_unique_within_each_list():

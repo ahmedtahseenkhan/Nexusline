@@ -542,6 +542,7 @@ def _soa_row(row: soa_export.SoaRow) -> SoaRowRead:
         controls=[SoaControlRead(**vars(c)) for c in row.controls],
         last_test_date=row.last_test_date,
         last_test_result=row.last_test_result,
+        pending_review_count=row.pending_review_count,
         via_crosswalk=_via_read(row.via_crosswalk),
     )
 

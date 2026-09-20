@@ -14,7 +14,8 @@ import { Field, TextInput, TextArea, Select, type Option } from "@/components/fi
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
-import { getFormatSettings, useFormat } from "@/lib/format";
+import Link from "next/link";
+import { getFormatSettings, unconvertedNote, useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 type ScenarioAnalysis = {
@@ -59,6 +60,9 @@ type CapitalCalculation = {
 type ScenarioSummary = {
   rows: { basel_event_type: string; count: number; expected_annual_loss: number }[];
   total_expected_annual_loss: number;
+  /** Decision 4: the currency the figures above are in, and what has no exchange rate. */
+  reporting_currency?: string;
+  unconverted?: { currency: string; count: number; amount: number }[];
   total_count: number;
   approved_count: number;
   latest_capital: {
@@ -524,7 +528,7 @@ function ScenarioAnalysisInner() {
         </div>
         <div className="card stat">
           <div className="stat-top">
-            <span className="n">{summary ? formatMoney(summary.total_expected_annual_loss, undefined, { compact: "auto" }) : "—"}</span>
+            <span className="n">{summary ? formatMoney(summary.total_expected_annual_loss, summary.reporting_currency, { compact: "auto" }) : "—"}</span>
           </div>
           <span className="l">Total expected annual loss</span>
         </div>
@@ -554,6 +558,14 @@ function ScenarioAnalysisInner() {
           </button>
         ))}
       </div>
+
+      {summary && unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_expected_annual_loss, unconverted: summary.unconverted }) && (
+        <div className="card card-pad" style={{ marginTop: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_expected_annual_loss, unconverted: summary.unconverted })}
+          {" — "}<Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
+
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 

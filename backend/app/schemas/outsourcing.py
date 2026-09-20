@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.schemas.common import LookupRef, UserRef
+from app.schemas.tenant_settings import validate_currency
 from app.models.outsourcing import (
     CloudModel,
     OutsourcingCategory,
@@ -88,6 +90,19 @@ def _concentration(value):
     return _choice(value, CONCENTRATION_LEVELS, "concentration_level")
 
 
+_CONTRACT_VALUE = (
+    "Total contract value in `contract_currency`. Totals convert it to the reporting currency "
+    "at today's exchange rate (Settings → Organisation → Exchange rates)."
+)
+_CONTRACT_CURRENCY = "ISO 4217 code of the contract value; blank = the organisation's reporting currency."
+
+
+def _contract_currency(value):
+    if value is None or not str(value).strip():
+        return value if value is None else ""
+    return validate_currency(value)
+
+
 class OutsourcingArrangementBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     service_provider: str = ""
@@ -106,6 +121,8 @@ class OutsourcingArrangementBase(BaseModel):
     sbp_approval_ref: str = ""
     contract_start: date | None = None
     contract_end: date | None = None
+    contract_value: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=2, description=_CONTRACT_VALUE)
+    contract_currency: str = Field(default="", description=_CONTRACT_CURRENCY)
     exit_plan: str = ""
     exit_plan_tested: bool = False
     concentration_note: str = ""
@@ -119,6 +136,7 @@ class OutsourcingArrangementBase(BaseModel):
 class OutsourcingArrangementCreate(OutsourcingArrangementBase):
     _sub = field_validator("substitutability")(_substitutability)
     _conc = field_validator("concentration_level")(_concentration)
+    _ccy = field_validator("contract_currency")(_contract_currency)
 
 
 class OutsourcingArrangementUpdate(BaseModel):
@@ -139,6 +157,8 @@ class OutsourcingArrangementUpdate(BaseModel):
     sbp_approval_ref: str | None = None
     contract_start: date | None = None
     contract_end: date | None = None
+    contract_value: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=2, description=_CONTRACT_VALUE)
+    contract_currency: str | None = Field(default=None, description=_CONTRACT_CURRENCY)
     exit_plan: str | None = None
     exit_plan_tested: bool | None = None
     concentration_note: str | None = None
@@ -150,6 +170,7 @@ class OutsourcingArrangementUpdate(BaseModel):
 
     _sub = field_validator("substitutability")(_substitutability)
     _conc = field_validator("concentration_level")(_concentration)
+    _ccy = field_validator("contract_currency")(_contract_currency)
 
 
 class OutsourcingArrangementRead(OutsourcingArrangementBase):
@@ -158,6 +179,8 @@ class OutsourcingArrangementRead(OutsourcingArrangementBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
+    #: A number in JSON (the write schemas take a Decimal).
+    contract_value: float | None = None
     review_count: int
     is_contract_expiring: bool
     created_at: datetime

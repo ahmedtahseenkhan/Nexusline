@@ -17,10 +17,12 @@
      approvalLine(gov, fmt)                 → { text, short, warn, note? }  (header meta + Sign-off)
      importedApprovalText("approved")       → "Imported as approved, no approver recorded"
      rowLabel("SRV-01", "Core banking host") → "SRV-01 Core banking host"
-     rowActionName("Unlink", "SRV-01 Core banking host") → "Unlink SRV-01 Core banking host" */
+     rowActionName("Unlink", "SRV-01 Core banking host") → "Unlink SRV-01 Core banking host"
+     attestFix(gov)                         → Attest… / Submit for review / See approval / none (decision 6)
+     awaitingConfirmationText(att, fmt)     → "Attested by a@b on 20 Sep 2026 — awaiting independent confirmation." */
 
 import { sentenceCase } from "@/lib/text";
-import type { Fmt, GovModel, Seg } from "./types";
+import type { Fmt, GovModel, OpenPoint, PointAction, Seg } from "./types";
 
 export { sentenceCase };
 
@@ -142,14 +144,22 @@ const STATE_WORD: Record<string, string> = {
   retired: "retired",
 };
 
-/** The one sentence for a record whose only approval step is an import backfill
- *  (a `workflow_import` audit row, B10b): "Imported as approved, no approver recorded".
- *  It never names a person and carries no date: the row's timestamp is when the repair
- *  ran, not when the record was imported. Used by the Sign-off card, the header meta and
- *  the trail. */
-export function importedApprovalText(state: string | null | undefined): string {
+/** `changes.via` on the B10c backfill: a record that was already in force before the
+ *  approval lifecycle existed, approved on upgrade so it can be attested (decision 6). */
+export const PREDATES_WORKFLOW = "predates_workflow";
+
+/** The one sentence for a record whose only approval step was written by the platform:
+ *  "Imported as approved, no approver recorded" (B10b), or "Approved on upgrade, no
+ *  approver recorded — it predates the approval workflow" (B10c). Neither names a person
+ *  or carries a date: the row's timestamp is when the repair ran, not when anyone
+ *  decided. Used by the Sign-off card, the header meta and the trail. */
+export function importedApprovalText(state: string | null | undefined, via?: string | null): string {
   const k = (state ?? "").trim().toLowerCase();
-  return `Imported as ${STATE_WORD[k] ?? (k.replace(/_/g, " ") || "approved")}, no approver recorded`;
+  const word = STATE_WORD[k] ?? (k.replace(/_/g, " ") || "approved");
+  if ((via ?? "") === PREDATES_WORKFLOW) {
+    return `Approved on upgrade, no approver recorded — it predates the approval workflow`;
+  }
+  return `Imported as ${word}, no approver recorded`;
 }
 
 /** The one-line approval status (record-page-spec §3.3.10), shared by the header meta
@@ -163,7 +173,7 @@ export function approvalLine(gov: GovModel, fmt: Fmt, opts: { routing?: boolean 
   if (gov.approvalSteps === 0 && last && last.action === "import") {
     // No date and no actor: the backfill row is dated when the repair ran and is
     // attributed to the platform, so neither says anything about the approval.
-    return { text: importedApprovalText(state), short: "", warn: true };
+    return { text: importedApprovalText(state, last.via), short: "", warn: true };
   }
 
   if (state !== "draft" && gov.approvalSteps === 0) {
@@ -255,7 +265,7 @@ export function uniqueLabels(labels: readonly string[], noun?: string): string[]
  *  backfill "Imported as approved, no approver recorded." — the header and Sign-off
  *  wording — else "Record approval shows {state} but no approval step is on file." */
 export function approvalWithoutStepText(gov: Pick<GovModel, "workflowState" | "lastStep">, stateLabel: string): string {
-  if (gov.lastStep?.action === "import") return `${importedApprovalText(gov.workflowState)}.`;
+  if (gov.lastStep?.action === "import") return `${importedApprovalText(gov.workflowState, gov.lastStep.via)}.`;
   return `Record approval shows ${stateLabel} but no approval step is on file.`;
 }
 
@@ -301,4 +311,104 @@ export function progressTone(done: number, total: number): "low" | "medium" | "n
  *  field is empty. */
 export function textOnlyPerson(id: string | null | undefined, text: string | null | undefined): boolean {
   return !id && !!(text ?? "").trim();
+}
+
+/* ------------------------------------------------------------ decision 6 (2026-09-17) */
+
+/** Whether the record's approval stops an attestation: only an approved record can be
+ *  attested (a retired one is final). `null` = no approval lifecycle, never blocks. The
+ *  server's `can_attest` says the same; this lets the page name the approval step. */
+export function approvalBlocksAttest(gov: Pick<GovModel, "workflowState">): boolean {
+  const ws = gov.workflowState;
+  return ws === "draft" || ws === "in_review" || ws === "retired";
+}
+
+const ATTEST: PointAction = { kind: "attest", target: "attest", label: "Attest…" };
+
+/** The fix an attestation point offers: Attest… when allowed; the approval step first
+ *  while the approval is draft or in review; none when retired or the server refuses. */
+export function attestFix(gov: Pick<GovModel, "workflowState" | "attestation">): PointAction | undefined {
+  const ws = gov.workflowState;
+  if (ws === "draft") return { kind: "focus", target: "rec-signoff", label: "Submit for review" };
+  if (ws === "in_review") return { kind: "focus", target: "rec-signoff", label: "See approval" };
+  if (ws === "retired" || gov.attestation?.canAttest === false) return undefined;
+  return ATTEST;
+}
+
+/** "Approve before attesting: its approval is in review." */
+export function approveBeforeAttestText(ws: "draft" | "in_review"): string {
+  return `Approve before attesting: its approval is ${ws === "draft" ? "draft" : "in review"}.`;
+}
+
+/** The note that replaces "Never attested" while the record is in review, or null. A
+ *  draft raises no attestation note (it is still being written; its approval card says
+ *  Draft), and a retired record owes none. */
+export function approveBeforeAttestPoint(prefix: string, gov: Pick<GovModel, "workflowState" | "attestation">): OpenPoint | null {
+  if (gov.workflowState !== "in_review" || gov.attestation?.status !== "never") return null;
+  return { id: `${prefix}.approve_before_attest`, level: "note", text: [approveBeforeAttestText("in_review")], action: attestFix(gov) };
+}
+
+/** "Never attested" for an approved record, "Approve before attesting…" for one in
+ *  review, nothing for draft, retired or no lifecycle. The server's `blockedReason` joins
+ *  the text when it refuses.
+ *
+ *  An attestation still waiting for its required second signature takes precedence: the
+ *  record has been certified but the certification does not count yet, which is a
+ *  different thing to say (decision 9, `awaitingConfirmationPoint`). */
+export function attestationNotePoint(
+  prefix: string,
+  gov: Pick<GovModel, "workflowState" | "attestation">,
+  opts: { withReason?: boolean; fmt?: Pick<Fmt, "date"> } = {},
+): OpenPoint | null {
+  const waiting = awaitingConfirmationPoint(prefix, gov, opts.fmt);
+  if (waiting) return waiting;
+  const ws = gov.workflowState;
+  const att = gov.attestation;
+  if (att?.status !== "never") return null;
+  if (ws === "in_review") return approveBeforeAttestPoint(prefix, gov);
+  if (ws !== "approved") return null;
+  const blocked = att.canAttest === false && opts.withReason === true;
+  const reason = (att.blockedReason ?? "").trim();
+  return {
+    id: `${prefix}.never_attested`, level: "note",
+    text: [blocked && reason ? `Never attested. ${reason}` : "Never attested"],
+    action: attestFix(gov),
+  };
+}
+
+/* ------------------------------------------------------------ decision 9 (2026-09-20) */
+
+/** "Attested by ayesha@bank.pk on 20 Sep 2026 — awaiting independent confirmation."
+ *  The signer's own words, without a date when the server did not send one. */
+export function awaitingConfirmationText(
+  att: NonNullable<GovModel["attestation"]>,
+  fmt?: Pick<Fmt, "date">,
+): string {
+  const by = (att.awaitingBy ?? "").trim() || "another user";
+  const on = att.awaitingAt && fmt ? ` on ${fmt.date(att.awaitingAt)}` : "";
+  return `Attested by ${by}${on} — awaiting independent confirmation.`;
+}
+
+/** The open point for a high-stakes record whose attestation is signed but not yet
+ *  confirmed (decision 9): until a second person signs it, the certification does not
+ *  count and the review cycle has not restarted. `null` when nothing is waiting.
+ *
+ *  `fmt` is optional so a page that has no formatter still gets the sentence; pass one
+ *  to date it in the tenant's own format. The fix points at the Sign-off card, where the
+ *  Confirm button lives — whoever may confirm sees it there. */
+export function awaitingConfirmationPoint(
+  prefix: string,
+  gov: Pick<GovModel, "attestation">,
+  fmt?: Pick<Fmt, "date">,
+): OpenPoint | null {
+  const att = gov.attestation;
+  if (!att?.awaitingConfirmation) return null;
+  return {
+    id: `${prefix}.awaiting_confirmation`,
+    level: "gap",
+    text: [
+      `${awaitingConfirmationText(att, fmt)} The review cycle restarts when it is confirmed.`,
+    ],
+    action: { kind: "focus", target: "rec-signoff", label: "See sign-off" },
+  };
 }

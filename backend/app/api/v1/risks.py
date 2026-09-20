@@ -1388,18 +1388,25 @@ def _record_assessment(risk: Risk, decision: risk_integrity.Assessment, user: Cu
     summary="Mark a risk reviewed; reschedules the next review",
 )
 async def review_risk(risk_id: uuid.UUID, db: DbSession, user: CurrentUser) -> RiskRead:
+    """Record the periodic review of a risk — as an attestation (D-05b, one clock).
+
+    A risk's review and its attestation are the same act, so this runs the attest call's
+    own gates (independent of the owner, not a draft, approval complete — decision 6 —
+    and four-eyes) and writes the attestation through
+    ``attestations.record_attestation``, which alone moves ``last_review_date`` /
+    ``next_review_date`` on the risk's effective cycle. One audit row, action ``review``.
+    """
+    from app.api.v1 import attestations
+    from app.services import entity_types
+
     risk = await _load_risk(db, risk_id)
-    today = date.today()
-    risk.last_review_date = today
-    risk.next_review_date = next_review_date(_effective_frequency(risk, await _review_policy(db, user)), today)
-    await db.flush()
-    await audit.record(
-        db,
-        actor=user,
-        action="review",
-        entity_type="risk",
-        entity_id=risk.id,
-        summary=f"Reviewed risk {risk.reference}",
+    found = entity_types.spec("risk")
+    await attestations.enforce_attestable(db, user, "risk", risk.id, risk, found)
+    await attestations.record_attestation(
+        db, user, "risk", risk.id, risk,
+        comment="Recorded from the risk review.",
+        audit_action="review",
+        audit_summary=f"Reviewed risk {risk.reference}",
     )
     return await _read(db, risk.id, user)
 

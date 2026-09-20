@@ -3,7 +3,8 @@
 Runs a periodic sweep across every tenant: lapses risk acceptances whose approval has
 run out, refreshes the cross-module alert set, emails each active user a digest of what
 is new *for them*, and purges records archived for longer than the tenant's retention
-window (``TenantSettings.retention_days``, default 90). Implemented as a plain asyncio
+window (``TenantSettings.retention_days``, default 3650 — ten years). The audit trail
+is never purged. Implemented as a plain asyncio
 task (no external scheduler dependency) started/stopped by the app lifespan. Each tenant
 is processed in its own RLS-scoped transaction, and one tenant's failure never aborts
 the sweep.
@@ -56,6 +57,15 @@ async def run_sweep() -> dict:
     snapshot_rows = 0
     ccm_runs = 0
     questionnaire_actions = 0
+    # --- phase5 decision 1: licence re-check (once a day) and administrator notices ---
+    # Before the tenant loop, so a notice raised now goes out in this sweep's digests.
+    licence_notices = 0
+    try:
+        from app.services import licence_state
+
+        licence_notices = await licence_state.run_daily(tenants)
+    except Exception:  # noqa: BLE001 - the licence check must never stop the sweep
+        logger.exception("Licence re-check failed")
     for tenant_id, tenant_name in tenants:
         # Housekeeping runs in its own transaction first, so a purge problem can never
         # hold back the alerts and digests below (and vice versa).
@@ -126,6 +136,7 @@ async def run_sweep() -> dict:
         "snapshot_rows": snapshot_rows,
         "ccm_runs": ccm_runs,
         "questionnaire_actions": questionnaire_actions,
+        "licence_notices": licence_notices,
     }
 
 
@@ -134,7 +145,9 @@ async def run_sweep() -> dict:
 RETENTION_ENTITY_TYPES: tuple[str, ...] = (
     "risk", "control", "asset", "issue", "policy", "incident", "vendor",
 )
-DEFAULT_RETENTION_DAYS = 90
+#: Decision 2: ten years unless the organisation chose 1–10 years. Nothing here ever
+#: touches the audit log (``AuditLog`` is not a retention register).
+DEFAULT_RETENTION_DAYS = 3650
 #: Rows purged per register per sweep — a large backlog drains over several sweeps
 #: rather than holding one long transaction.
 PURGE_BATCH = 500

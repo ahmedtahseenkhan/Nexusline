@@ -1469,6 +1469,9 @@ a.chip.rec-chip .ref { margin-right: 5px; font-family: var(--mono); font-size: 1
 .rec-approval-card { margin-bottom: 16px; }
 .rec-att-card .card-head { gap: 8px; }
 .rec-att-blocked { align-self: center; font-size: 12.5px; color: var(--muted); }
+/* Decision 9: signed, but the required second signature has not arrived, so the review
+   cycle has not restarted — stated, not coloured like a failure. */
+.rec-att-awaiting { color: var(--amber); }
 .rec-att-pending { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; color: var(--text); }
 .rec-att-pending li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .rec-att-history { display: grid; gap: 8px; margin-top: 4px; }

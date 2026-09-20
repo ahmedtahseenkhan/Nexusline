@@ -15,7 +15,8 @@ import { Field, TextInput, TextArea, Select, type Option } from "@/components/fi
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
-import { getFormatSettings, useFormat } from "@/lib/format";
+import Link from "next/link";
+import { getFormatSettings, unconvertedNote, useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ types
 type RiskQuant = {
@@ -55,6 +56,9 @@ type SimResult = {
 
 type QuantSummary = {
   total_mean_ale: number;
+  /** Decision 4: the currency the figures above are in, and what has no exchange rate. */
+  reporting_currency?: string;
+  unconverted?: { currency: string; count: number; amount: number }[];
   count_quantified: number;
   count_simulated: number;
   highest_p90: number;
@@ -440,11 +444,11 @@ function RiskQuantificationInner() {
           <span className="l">Quantified risks</span>
         </div>
         <div className="card stat">
-          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_mean_ale, undefined, { compact: "auto" }) : "—"}</span></div>
+          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_mean_ale, summary.reporting_currency, { compact: "auto" }) : "—"}</span></div>
           <span className="l">Total mean ALE</span>
         </div>
         <div className="card stat">
-          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.highest_p90, undefined, { compact: "auto" }) : "—"}</span></div>
+          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.highest_p90, summary.reporting_currency, { compact: "auto" }) : "—"}</span></div>
           <span className="l">Highest single P90</span>
         </div>
         <div className="card stat">
@@ -452,6 +456,13 @@ function RiskQuantificationInner() {
           <span className="l">Simulated</span>
         </div>
       </div>
+
+      {summary && unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_mean_ale, unconverted: summary.unconverted }) && (
+        <div className="card card-pad" style={{ marginTop: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_mean_ale, unconverted: summary.unconverted })}
+          {" — "}<Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
 
       <DataTable<RiskQuant>
         columns={columns}

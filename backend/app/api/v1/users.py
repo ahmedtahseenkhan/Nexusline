@@ -45,7 +45,7 @@ from app.schemas.user import (
     UserRead,
     UserUpdate,
 )
-from app.services import audit, password_policy
+from app.services import audit, licence_state, password_policy
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -325,6 +325,8 @@ async def create_user(body: UserCreate, db: DbSession, actor: CurrentUser) -> Us
             status_code=status.HTTP_409_CONFLICT, detail="Email already in use"
         )
     password_policy.validate_password(body.password)
+    if body.is_active:
+        await licence_state.ensure_seat_available()  # decision 1: licence seats (release builds)
     roles = await _roles_by_names(db, body.role_names)
     user = User(
         tenant_id=actor.tenant_id,
@@ -370,6 +372,9 @@ async def update_user(
             detail="You cannot deactivate your own account",
         )
 
+    if data.get("is_active") is True and not user.is_active and not user.is_platform_admin:
+        await licence_state.ensure_seat_available()  # decision 1: re-activation takes a seat
+
     for field, value in data.items():
         setattr(user, field, value)
 
@@ -390,6 +395,8 @@ async def _set_active(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="You cannot deactivate your own account",
         )
+    if active and not user.is_active and not user.is_platform_admin:
+        await licence_state.ensure_seat_available()  # decision 1: re-activation takes a seat
     user.is_active = active
     await db.flush()
     await audit.record(

@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
+from app.schemas.fx import UnconvertedAmount
 from app.models.enums import BaselEventType
 from app.models.scenario import CapitalStatus, ScenarioStatus
 
@@ -118,3 +119,7 @@ class ScenarioSummary(BaseModel):
     total_count: int
     approved_count: int
     latest_capital: CapitalSnapshot | None
+    #: Decision 4: the currency the expected losses above are in (converted at today's rate).
+    reporting_currency: str = "PKR"
+    #: Scenarios whose currency has no exchange rate; left out of the totals.
+    unconverted: list[UnconvertedAmount] = []

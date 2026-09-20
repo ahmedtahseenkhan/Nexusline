@@ -247,7 +247,7 @@
         "nativeReview": true,
         "nextDue": "2026-03-01",
         "canAttest": false,
-        "blockedReason": "You own this record, so someone independent must attest it."
+        "blockedReason": "Segregation of duties: the maker of this third party cannot approve it \u2014 an independent checker must decide."
       }
     },
     "canWrite": true

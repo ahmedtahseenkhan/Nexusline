@@ -38,10 +38,12 @@ def licensed_modules() -> set[str]:
         # A release build has no unlicensed mode — startup already refuses one, so
         # reaching here means the gate was tampered with. Grant nothing.
         return set() if lic.enforcement_enabled() else set(ALL_MODULE_KEYS)
-    if not info.valid:
-        # Expired/invalid license with enforcement off: platform stays up but
-        # optional modules lock until a valid license is installed.
+    if not lic.signature_ok(info):
+        # Forged/unreadable license: optional modules lock until a valid one is installed.
         return set()
+    # An expired licence keeps its modules (decision 1): grace, then read-only — the bank
+    # must still be able to read every record it holds. Writes are refused elsewhere
+    # (core/licence_guard.py).
     if info.modules is None:
         return set(ALL_MODULE_KEYS)
     return expand_modules(info.modules)

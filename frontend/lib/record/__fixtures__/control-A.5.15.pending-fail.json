@@ -222,7 +222,7 @@
       },
       {
         "key": "testing",
-        "because": "2 tests on file; next due 03 Jul 2027 (annual cycle). 1 awaiting independent review. Ratings and risk credit use the last reviewed test: Passed, 03 Jul 2026."
+        "because": "1 reviewed test; next due 03 Jul 2027 (annual cycle). 1 test awaiting review."
       },
       {
         "key": "maintenance"

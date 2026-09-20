@@ -316,6 +316,104 @@ class KriMeasurement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
 
 
 # ============================================================ loss events ===
+#: Basel II Annex 9 level-1 names, as the Accord prints them.
+BASEL_L1_LABELS: dict[str, str] = {
+    BaselEventType.internal_fraud.value: "Internal fraud",
+    BaselEventType.external_fraud.value: "External fraud",
+    BaselEventType.employment_practices.value: "Employment practices and workplace safety",
+    BaselEventType.clients_products_business_practices.value: "Clients, products & business practices",
+    BaselEventType.damage_to_physical_assets.value: "Damage to physical assets",
+    BaselEventType.business_disruption_system_failure.value: "Business disruption and system failures",
+    BaselEventType.execution_delivery_process_management.value: "Execution, delivery & process management",
+}
+
+#: Basel II Annex 9 level-2 event categories: (key, level-1 parent, name, level-3 examples).
+#: Fixed regulatory reference data — not a tenant lookup — so loss data stays comparable
+#: with Basel/ORX reporting. Twenty categories; "Theft and fraud" sits under both frauds,
+#: hence the prefixed keys.
+BASEL_EVENT_TYPES_L2: tuple[tuple[str, str, str, str], ...] = (
+    ("unauthorised_activity", "internal_fraud", "Unauthorised activity",
+     "Transactions not reported (intentional); transaction type unauthorised (with monetary loss); "
+     "mismarking of position (intentional)"),
+    ("internal_theft_and_fraud", "internal_fraud", "Theft and fraud",
+     "Fraud / credit fraud / worthless deposits; theft / extortion / embezzlement / robbery; "
+     "misappropriation of assets; forgery; cheque kiting; smuggling; account take-over / "
+     "impersonation; tax non-compliance / evasion (wilful); bribes / kickbacks; insider trading "
+     "(not on firm's account)"),
+    ("external_theft_and_fraud", "external_fraud", "Theft and fraud",
+     "Theft / robbery; forgery; cheque kiting"),
+    ("systems_security", "external_fraud", "Systems security",
+     "Hacking damage; theft of information (with monetary loss)"),
+    ("employee_relations", "employment_practices", "Employee relations",
+     "Compensation, benefit, termination issues; organised labour activity"),
+    ("safe_environment", "employment_practices", "Safe environment",
+     "General liability (slip and fall, etc.); employee health & safety rules events; "
+     "workers compensation"),
+    ("diversity_discrimination", "employment_practices", "Diversity & discrimination",
+     "All discrimination types"),
+    ("suitability_disclosure_fiduciary", "clients_products_business_practices",
+     "Suitability, disclosure & fiduciary",
+     "Fiduciary breaches / guideline violations; suitability / disclosure issues (KYC, etc.); "
+     "retail customer disclosure violations; breach of privacy; aggressive sales; account "
+     "churning; misuse of confidential information; lender liability"),
+    ("improper_business_market_practices", "clients_products_business_practices",
+     "Improper business or market practices",
+     "Antitrust; improper trade / market practices; market manipulation; insider trading (on "
+     "firm's account); unlicensed activity; money laundering"),
+    ("product_flaws", "clients_products_business_practices", "Product flaws",
+     "Product defects (unauthorised, etc.); model errors"),
+    ("selection_sponsorship_exposure", "clients_products_business_practices",
+     "Selection, sponsorship & exposure",
+     "Failure to investigate client per guidelines; exceeding client exposure limits"),
+    ("advisory_activities", "clients_products_business_practices", "Advisory activities",
+     "Disputes over performance of advisory activities"),
+    ("disasters_other_events", "damage_to_physical_assets", "Disasters and other events",
+     "Natural disaster losses; human losses from external sources (terrorism, vandalism)"),
+    ("systems", "business_disruption_system_failure", "Systems",
+     "Hardware; software; telecommunications; utility outage / disruptions"),
+    ("transaction_capture_execution_maintenance", "execution_delivery_process_management",
+     "Transaction capture, execution & maintenance",
+     "Miscommunication; data entry, maintenance or loading error; missed deadline or "
+     "responsibility; model / system misoperation; accounting error / entity attribution error; "
+     "other task misperformance; delivery failure; collateral management failure; reference data "
+     "maintenance"),
+    ("monitoring_reporting", "execution_delivery_process_management", "Monitoring and reporting",
+     "Failed mandatory reporting obligation; inaccurate external report (loss incurred)"),
+    ("customer_intake_documentation", "execution_delivery_process_management",
+     "Customer intake and documentation",
+     "Client permissions / disclaimers missing; legal documents missing / incomplete"),
+    ("customer_client_account_management", "execution_delivery_process_management",
+     "Customer/client account management",
+     "Unapproved access given to accounts; incorrect client records (loss incurred); negligent "
+     "loss or damage of client assets"),
+    ("trade_counterparties", "execution_delivery_process_management", "Trade counterparties",
+     "Non-client counterparty misperformance; misc. non-client counterparty disputes"),
+    ("vendors_suppliers", "execution_delivery_process_management", "Vendors & suppliers",
+     "Outsourcing; vendor disputes"),
+)
+
+#: level-2 key -> level-1 parent value.
+BASEL_L2_PARENT: dict[str, str] = {key: parent for key, parent, _n, _e in BASEL_EVENT_TYPES_L2}
+BASEL_L2_LABELS: dict[str, str] = {key: name for key, _p, name, _e in BASEL_EVENT_TYPES_L2}
+
+
+def basel_l2_error(l1, l2: str | None) -> str | None:
+    """Why ``l2`` cannot be recorded under ``l1``; None when it can (blank is allowed). Pure."""
+    key = (l2 or "").strip()
+    if not key:
+        return None
+    parent = BASEL_L2_PARENT.get(key)
+    l1_value = getattr(l1, "value", l1)
+    if parent is None:
+        return f"'{key}' is not a Basel II level-2 event category."
+    if parent != l1_value:
+        return (
+            f"{BASEL_L2_LABELS[key]} belongs under {BASEL_L1_LABELS[parent]}, not "
+            f"{BASEL_L1_LABELS.get(l1_value, l1_value)}. Choose a level-2 category of the chosen event type."
+        )
+    return None
+
+
 class LossEvent(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     """An operational-loss database entry (Basel event type categorized)."""
 
@@ -328,6 +426,9 @@ class LossEvent(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin,
         SAEnum(BaselEventType, name="basel_event_type"),
         default=BaselEventType.execution_delivery_process_management, nullable=False,
     )
+    # Decision 5: Basel II level-2 category (``BASEL_EVENT_TYPES_L2``); must sit under
+    # ``basel_event_type``. Blank = not yet categorised at level 2 (older events stay blank).
+    basel_event_type_l2: Mapped[str] = mapped_column(String(64), default="", nullable=False, index=True)
     business_line: Mapped[str] = mapped_column(String(200), default="")
     business_unit_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("business_units.id", ondelete="SET NULL"), nullable=True, index=True

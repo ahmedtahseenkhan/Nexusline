@@ -271,6 +271,9 @@ class RiskReportContext:
     #: banding (``risk_scoring.SeverityScale``). None falls back to the single values above.
     book: Any = None
     scale: Any = None
+    #: Decision 4: the reporting currency the money lines are written in (risk ALE and
+    #: treatment cost carry no currency of their own).
+    currency: str = "PKR"
 
     def thresholds(self, risk) -> tuple[int, int]:
         """(appetite, tolerance) for this risk: its category's, else the default."""
@@ -526,7 +529,7 @@ def _risk_detail(ss, risk, context: RiskReportContext) -> list:
                 for name in ("risk_type", "velocity", "source")
             )),
             ("Annual loss exposure",
-             f"{risk.annual_loss_expectancy:,.2f}" if risk.annual_loss_expectancy else "—"),
+             f"{context.currency} {risk.annual_loss_expectancy:,.2f}" if risk.annual_loss_expectancy else "—"),
             ("Next review", _d(risk.next_review_date)),
         ]),
     ]
@@ -571,7 +574,7 @@ def _risk_detail(ss, risk, context: RiskReportContext) -> list:
         ("Strategy", treatment),
         ("Owner", risk.treatment_owner),
         ("Deadline", _d(risk.treatment_deadline)),
-        ("Cost", f"{risk.treatment_cost:,.2f}" if risk.treatment_cost else "—"),
+        ("Cost", f"{context.currency} {risk.treatment_cost:,.2f}" if risk.treatment_cost else "—"),
     ])]
     if risk.treatment_description:
         flow += [_body(ss, risk.treatment_description)]
@@ -693,7 +696,8 @@ def executive_summary_pdf(stats: dict, org_name: str) -> bytes:
         ("Within appetite", stats.get("risks_within_appetite")),
         ("Elevated", stats.get("risks_elevated")),
         ("In breach", stats.get("risks_in_breach")),
-        ("Total annual loss exposure", f"{stats.get('total_exposure', 0):,.2f}"),
+        ("Total annual loss exposure",
+         f"{stats.get('exposure_currency') or 'PKR'} {stats.get('total_exposure', 0):,.2f}"),
         ("Pending risk acceptances", stats.get("pending_acceptances")),
     ])]
     by_status = stats.get("risks_by_status") or {}

@@ -1,3 +1,5 @@
+import type { MoneyTotal } from "@/lib/format";
+
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
@@ -220,6 +222,32 @@ export interface LicenseInfo {
   issued: string;
   expires: string;
   deployment: string;
+  message: string;
+  /** Lifecycle on today's date (decision 1): grace, read-only, seats. */
+  lifecycle?: LicenceLifecycle;
+}
+export type LicenceStateName = "active" | "expiring" | "grace" | "read_only" | "unlicensed" | "evaluation" | "invalid";
+export interface LicenceLifecycle {
+  state: LicenceStateName;
+  enforcing: boolean;
+  /** Writes are refused until a renewed licence is installed. */
+  read_only: boolean;
+  expires: string | null;
+  /** Last day of the 30-day grace period after expiry. */
+  grace_until: string | null;
+  days_to_expiry: number | null;
+  grace_days_left: number | null;
+  licensed_to?: string;
+  message: string;
+  /** 0 = no seat limit. Administrators only. */
+  seats_limit?: number;
+  seats_used: number | null;
+  seats_warning: boolean;
+  seats_full: boolean;
+}
+export interface LicenceBanner {
+  tone: "warning" | "critical";
+  state: LicenceStateName | "seats";
   message: string;
 }
 export interface ModuleState {
@@ -1100,6 +1128,8 @@ export interface Me {
   mfa_enrolment_due?: string | null;
   /** The MFA policy applies to this user (they cannot switch MFA off). */
   mfa_required_for_user?: boolean;
+  /** The installation requires MFA for everyone who signs in with a password. */
+  mfa_required_for_everyone?: boolean;
   /** Signs in through the organisation's SSO: the identity provider enforces MFA. */
   mfa_via_identity_provider?: boolean;
   /** Every permission code the user's roles grant (e.g. "org:write"). */
@@ -1112,6 +1142,10 @@ export interface SystemStatus {
   /** Dev/self-host build running without a licence — everything unlocked. */
   evaluation_build: boolean;
   enforce_license: boolean;
+  /** Licence lifecycle on today's date. */
+  licence?: LicenceLifecycle;
+  /** What the shell should show about the licence for this user, if anything. */
+  licence_banner?: LicenceBanner | null;
   app_version: string;
   deployment_mode: string;
 }
@@ -1551,6 +1585,8 @@ export interface LossEvent {
   title: string;
   description: string;
   basel_event_type: string;
+  /** Basel II level-2 category key; "" when the event has not been categorised. */
+  basel_event_type_l2: string;
   business_line: string;
   gross_loss: number;
   recovery: number;
@@ -1565,11 +1601,40 @@ export interface LossEvent {
   net_loss: number;
   created_at: string;
 }
+/** One Basel level-2 category in the loss roll-up ("" = not categorised at level 2). */
+export interface LossSummaryL2Row {
+  basel_event_type_l2: string;
+  label: string;
+  count: number;
+  gross_loss: number;
+  net_loss: number;
+}
 export interface LossSummary {
-  rows: { basel_event_type: string; count: number; gross_loss: number; net_loss: number }[];
+  rows: {
+    basel_event_type: string;
+    label: string;
+    count: number;
+    /** In `reporting_currency`; amounts with no exchange rate are left out. */
+    gross_loss: number;
+    net_loss: number;
+    unconverted_count: number;
+    level2: LossSummaryL2Row[];
+  }[];
   total_gross: number;
   total_net: number;
   total_count: number;
+  reporting_currency: string;
+  /** Which date each loss converts at, in words. */
+  conversion_basis: string;
+  unconverted: { currency: string; count: number; amount: number }[];
+  gross: MoneyTotal;
+  net: MoneyTotal;
+}
+/** Basel II event types: one level-1 type with its level-2 categories. */
+export interface BaselEventTypeNode {
+  value: string;
+  label: string;
+  level2: { value: string; label: string; examples: string }[];
 }
 export interface ScreeningCase {
   id: string;
@@ -1738,9 +1803,15 @@ export interface Attestation {
   confirmed_by_id: string | null;
   confirmed_by_email: string | null;
   confirmed_at: string | null;
+  /** Decision 9: this attestation only counts once a second person confirms it. */
+  confirmation_required?: boolean;
+  /** The owner it was signed for, when the signer was somebody else. */
+  on_behalf_of_id?: string | null;
+  on_behalf_of_name?: string;
   created_at: string;
 }
 export interface AttestationStatus {
+  /** Judged on the last COMPLETE attestation (decision 9). */
   status: string;
   last_attested_at: string | null;
   last_by: string | null;
@@ -2170,6 +2241,9 @@ export const api = {
   systemInfo: () => request<SystemInfo>("/system/info"),
   systemModules: () => request<ModuleState[]>("/system/modules"),
   systemStatus: () => request<SystemStatus>("/system/status"),
+  /** Install a renewed licence (the content of license.key); no restart needed. */
+  installLicence: (token: string) =>
+    request<LicenseInfo>("/system/license", { method: "POST", body: JSON.stringify({ token }) }),
   systemHealth: () => request<SystemHealth>("/system/health"),
   listBackups: () => request<BackupItem[]>("/system/backups"),
   createBackup: () => request<BackupItem>("/system/backups", { method: "POST" }),
@@ -2503,6 +2577,8 @@ export const api = {
     request<LossEvent>(`/loss-events/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
   deleteLossEvent: (id: string) => request<void>(`/loss-events/${id}`, { method: "DELETE" }),
   lossSummary: () => request<LossSummary>("/loss-events-summary"),
+  /** The Basel II taxonomy the loss form cascades through (7 types, 20 categories). */
+  baselTaxonomy: () => request<BaselEventTypeNode[]>("/loss-events-taxonomy"),
 
   // PDF reports (board / audit-committee / Shariah-board packs)
   /** Exports exactly the scope the register is showing, so the PDF and the screen can

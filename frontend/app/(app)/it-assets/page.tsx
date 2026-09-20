@@ -6,7 +6,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { apiCall } from "@/lib/api";
 import { assetDeleteMessage, linkedRiskCount } from "@/lib/assetImpact";
 import { confirmDialog, toast } from "@/lib/feedback";
-import { useFormat } from "@/lib/format";
+import { unconvertedNote, useFormat, type MoneyTotal } from "@/lib/format";
 import { confirmDeleteWithImpact, WORKFLOW_STATE_LABEL, type WorkflowStateKey } from "@/lib/records";
 import { deleteEach, deleteErrorText, toastDeleteSummary } from "@/lib/bulkDelete";
 import { useHasPermission } from "@/lib/tenantSettings";
@@ -131,7 +131,11 @@ type Asset = {
   vulnerabilities?: GraphRef[];
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
-type Summary = { total: number; production: number; total_replacement_value: number; effective_critical: number };
+type Summary = {
+  total: number; production: number; total_replacement_value: number; effective_critical: number;
+  /** Decision 4: the same figure with its currency and anything left out for want of a rate. */
+  replacement_value?: MoneyTotal;
+};
 
 /* ----------------------------------------------------------------- helpers */
 const cap = titleCase;
@@ -660,8 +664,14 @@ function ITAssetsInner() {
         <div className="card stat"><div className="stat-top"><span className="n">{(summary?.total ?? 0).toLocaleString()}</span></div><span className="l">IT assets</span></div>
         <div className="card stat"><div className="stat-top"><span className="n">{(summary?.effective_critical ?? 0).toLocaleString()}</span></div><span className="l">Effective-critical</span></div>
         <div className="card stat"><div className="stat-top"><span className="n">{(summary?.production ?? 0).toLocaleString()}</span></div><span className="l">Production assets</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{formatMoney(summary?.total_replacement_value ?? 0, null, { compact: "auto" })}</span></div><span className="l">Total replacement value</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{formatMoney(summary?.total_replacement_value ?? 0, summary?.replacement_value?.reporting_currency, { compact: "auto" })}</span></div><span className="l">Total replacement value</span></div>
       </div>
+
+      {unconvertedNote(summary?.replacement_value) && (
+        <div className="card card-pad" style={{ marginBottom: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {unconvertedNote(summary?.replacement_value)} — <Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
 
       <DataTable<Asset>
         toolbarRight={<ArchivedRecords entityType="asset" noun="assets" onRestored={() => { setRefreshKey((k) => k + 1); loadSummary(); }} refreshKey={refreshKey} />}

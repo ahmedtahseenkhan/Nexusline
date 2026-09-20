@@ -21,9 +21,18 @@ import { records, type RecordWorkflow } from "@/lib/records";
 import type { GovModel } from "@/lib/record/types";
 import type { StatusRuleVerdict, TrailFilter } from "@/components/record/types";
 
-/** `AttestationStatus` plus the B1 fields (`can_attest`, `blocked_reason`); both are
- *  undefined on an older backend. */
-export type AttestationStatusB1 = AttestationStatus & { can_attest?: boolean; blocked_reason?: string | null };
+/** `AttestationStatus` plus the B1 fields (`can_attest`, `blocked_reason`) and the
+ *  decision-9 second-signature fields; all are undefined on an older backend. */
+export type AttestationStatusB1 = AttestationStatus & {
+  can_attest?: boolean;
+  blocked_reason?: string | null;
+  confirmation_required?: boolean;
+  confirmation_reason?: string | null;
+  awaiting_confirmation?: boolean;
+  awaiting_by?: string | null;
+  awaiting_at?: string | null;
+  last_on_behalf_of?: string | null;
+};
 
 export type RecordGovernance = {
   entityType: string;
@@ -224,7 +233,13 @@ export function govModelFromParts(
     workflowState: lifecycle ? (workflow?.state ?? null) : null,
     approvalSteps: signOffSteps.length,
     lastStep: newest
-      ? { action: newest.action, at: newest.at, actor: newest.actor_email || "system", reason: newest.reason || "" }
+      ? {
+          action: newest.action,
+          at: newest.at,
+          actor: newest.actor_email || "system",
+          reason: newest.reason || "",
+          via: newest.via || "",
+        }
       : null,
     lastSubmitAt: lastSubmit ? lastSubmit.at : null,
     attestation: att
@@ -234,6 +249,11 @@ export function govModelFromParts(
           nextDue: att.next_due ?? null,
           canAttest: typeof att.can_attest === "boolean" ? att.can_attest : null,
           blockedReason: att.blocked_reason ?? null,
+          confirmationRequired: !!att.confirmation_required,
+          confirmationReason: att.confirmation_reason ?? null,
+          awaitingConfirmation: !!att.awaiting_confirmation,
+          awaitingBy: att.awaiting_by ?? null,
+          awaitingAt: att.awaiting_at ?? null,
         }
       : null,
     canWrite,

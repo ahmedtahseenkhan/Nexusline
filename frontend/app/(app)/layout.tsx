@@ -7,7 +7,7 @@ import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
 import CommandPalette from "@/components/CommandPalette";
 import TatReminder from "@/components/TatReminder";
-import { api, getToken, type Me, type ModuleState, type SystemStatus } from "@/lib/api";
+import { api, getToken, type LicenceBanner, type Me, type ModuleState, type SystemStatus } from "@/lib/api";
 import { ModulesProvider, buildModulesContext, moduleForRoute, routeDisabled } from "@/lib/modules";
 import { FeedbackHost } from "@/lib/feedback";
 import { TenantSettingsProvider } from "@/lib/tenantSettings";
@@ -45,6 +45,35 @@ function EvaluationBanner() {
   );
 }
 
+/** Licence lifecycle (decision 1). Administrators see the expiry countdown from 60 days
+ *  before, the grace period and the seat warning; everyone sees read-only mode. Not
+ *  dismissible: each is something to act on. */
+function LicenceBannerBar({ banner, isAdmin }: { banner: LicenceBanner; isAdmin: boolean }) {
+  const critical = banner.tone === "critical";
+  return (
+    <div
+      role={critical ? "alert" : "status"}
+      style={{
+        background: critical ? "var(--red-bg, #fdecec)" : "var(--amber-bg)",
+        color: critical ? "var(--red, #b42318)" : "var(--amber)",
+        borderBottom: "1px solid var(--border)",
+        padding: "6px 16px",
+        fontSize: 13,
+        fontWeight: 600,
+        textAlign: "center",
+      }}
+    >
+      {banner.message}{" "}
+      {isAdmin && (
+        <Link href="/settings#system" style={{ fontWeight: 700, color: "inherit", textDecoration: "underline" }}>
+          {banner.state === "seats" ? "Licence details" : "Install a renewed licence"}
+        </Link>
+      )}
+      {!isAdmin && banner.state === "read_only" && " Contact your administrator."}
+    </div>
+  );
+}
+
 /** Dismissible reminder while the MFA grace period runs. Dismissal is remembered per
  *  deadline in this browser only; the policy itself is enforced by the server. */
 function MfaDueBanner({ due }: { due: string }) {
@@ -71,7 +100,7 @@ function MfaDueBanner({ due }: { due: string }) {
       style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "center", flexWrap: "wrap", background: "var(--primary-weak)", color: "var(--primary-text)", borderBottom: "1px solid var(--border)", padding: "6px 16px", fontSize: 13 }}
     >
       <span>
-        Two-factor authentication is required for your role from {formatDate(due)}.{" "}
+        Two-factor authentication is required for your account from {formatDate(due)}.{" "}
         <Link href="/settings" style={{ fontWeight: 600 }}>Set it up now</Link>
       </span>
       <button type="button" className="btn secondary sm" onClick={dismiss} aria-label="Dismiss two-factor reminder">
@@ -197,6 +226,12 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         <div className="main">
           <Topbar user={user} />
           {status?.evaluation_build && <EvaluationBanner />}
+          {status?.licence_banner && (
+            <LicenceBannerBar
+              banner={status.licence_banner}
+              isAdmin={!!user?.permission_codes?.some((c) => c === "settings:manage" || c === "role:write")}
+            />
+          )}
           {user?.mfa_enrolment_due && !user.mfa_enabled && <MfaDueBanner due={user.mfa_enrolment_due} />}
           {user?.permission_codes?.includes("settings:manage") && <GovernanceBanner />}
           <main className="content">

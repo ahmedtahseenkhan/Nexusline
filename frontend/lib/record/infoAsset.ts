@@ -21,7 +21,7 @@
      `canAttest` (null) keeps the attest fix, false drops it; without native review the
      overdue-review fix edits the review cycle instead of attesting. */
 
-import { approvalWithoutStepText, critRank, exceptionStateText, joinList, missedReviewsText, plural, rowLabel, schemeRank, sentenceCase, truncate } from "./text";
+import { approvalWithoutStepText, attestFix, attestationNotePoint, critRank, exceptionStateText, joinList, missedReviewsText, plural, rowLabel, schemeRank, sentenceCase, truncate } from "./text";
 import type { Basis, Ctx, Fmt, GovModel, OpenPoint, PointAction, Seg, TileModel, TileValue } from "./types";
 
 /* ------------------------------------------------------------------ input types */
@@ -159,16 +159,17 @@ export function approvedWithoutStepPoint(prefix: string, gov: GovModel): OpenPoi
   };
 }
 
-/** The attest fix, unless the server said this viewer may not attest (B1). */
+/** The attest fix, unless the server said this viewer may not attest (B1) or the
+ *  approval must come first (decision 6: Submit for review / See approval). */
 function attestAction(gov: GovModel): PointAction | undefined {
-  return gov.attestation?.canAttest === false ? undefined : { kind: "attest", target: "attest", label: "Attest…" };
+  return attestFix(gov);
 }
 
-/** The note every asset shares: past Draft and never attested. */
-export function neverAttestedPoint(prefix: string, gov: GovModel): OpenPoint | null {
-  const ws = gov.workflowState;
-  if (!ws || ws === "draft" || gov.attestation?.status !== "never") return null;
-  return { id: `${prefix}.never_attested`, level: "note", text: ["Never attested"], action: attestAction(gov) };
+/** The note every asset shares: approved and never attested ("Never attested"), or in
+ *  review ("Approve before attesting…"). Draft and retired raise none. An attestation
+ *  awaiting its required second signature (decision 9) speaks before either. */
+export function neverAttestedPoint(prefix: string, gov: GovModel, fmt?: Pick<Fmt, "date">): OpenPoint | null {
+  return attestationNotePoint(prefix, gov, { fmt });
 }
 
 /** Overdue review: attest when attesting records the review (B4, `nativeReview`),
@@ -668,7 +669,7 @@ export function infoAssetOpenPoints(input: InfoAssetInput, ctx: Ctx): OpenPoint[
       action: { kind: "open", target: "link-it-asset", label: "Link IT asset" },
     });
   }
-  push(notes, neverAttestedPoint("asset", gov));
+  push(notes, neverAttestedPoint("asset", gov, ctx.fmt));
   if ((a.risks ?? []).length === 0) {
     notes.push({ id: "asset.no_risk", level: "note", text: ["No risk linked"] });
   }

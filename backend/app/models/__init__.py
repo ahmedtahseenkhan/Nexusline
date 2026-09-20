@@ -198,6 +198,8 @@ from app.models.computed_cache import TenantComputedCache
 # Phase 4B: workspaces, period snapshots, committee members and board-pack branding
 from app.models.governance import BoardPackBranding, CommitteeMember
 from app.models.workspace import MetricSnapshot, UserWorkspacePreference
+# Decision 4: exchange rates into the reporting currency
+from app.models.fx import FxRate
 
 __all__ = [
     "RiskProposal",
@@ -384,4 +386,6 @@ __all__ = [
     "QuestionnaireSection",
     "AssessmentLink",
     "AssessmentAccessLog",
+    # Decision 4: exchange rates
+    "FxRate",
 ]

@@ -1007,6 +1007,34 @@ async def _record_owners(
     return out
 
 
+async def attestation_blocked_records(
+    db: AsyncSession, pairs: Iterable[tuple[str, Any]]
+) -> set[tuple[str, Any]]:
+    """``(entity_type, id)`` pairs whose approval is incomplete (or retired), so an
+    attestation can't be taken on them now (decision 6, 2026-09-17). One query per type
+    that has an approval lifecycle; types without one are never blocked.
+
+    The overdue-attestation sweep leaves these out: a reminder to do something the
+    attest call refuses is noise. The record page's open point asks for the approval
+    instead (Submit for review / awaiting approval)."""
+    from app.services import record_registry
+    from app.services.record_workflow import approval_complete
+
+    by_type: dict[str, list[Any]] = {}
+    for etype, eid in pairs:
+        by_type.setdefault(etype, []).append(eid)
+    out: set[tuple[str, Any]] = set()
+    for etype, ids in by_type.items():
+        model = record_registry.model_for(etype)
+        if model is None or not record_registry.has_workflow(model):
+            continue
+        rows = (await db.execute(select(model.id, model.workflow_status).where(model.id.in_(ids)))).all()
+        for rid, state in rows:
+            if not approval_complete(state):
+                out.add((etype, rid))
+    return out
+
+
 async def _tat_context(db: AsyncSession, directory: Directory, records: Sequence[Any]) -> dict:
     """For each turnaround-time record: its owner (as recipients), deep link and the
     SLA policy's escalation role. One query per record type."""
@@ -1402,18 +1430,29 @@ async def scan_alerts(db: AsyncSession, tenant_id, directory: Directory | None =
             f"{pr.title} — deadline {pr.deadline}", _W, "project", pr.id, record_link(pr, "/projects"),
             named(pr.owner) or directory.first_active(pr.workflow_owner_id))
 
-    # Overdue attestations — DISTINCT ON keeps only the latest attestation per record
-    # (one row each instead of the full history), then alert if that latest is past due.
+    # Overdue attestations — DISTINCT ON keeps only the latest *complete* attestation per
+    # record (one row each instead of the full history), then alert if that latest is past
+    # due. Decision 9: one still awaiting its required second signature has certified
+    # nothing, so it does not silence the reminder; My Work asks the confirmer for that
+    # signature (``my_work.attestations_to_confirm``).
     # Records with a native review schedule (risk, policy, vendor, asset) are skipped: their
     # attestation writes the record's own next_review_date, which the sweeps above
     # already watch. One review clock per record, one alert — to the record's owner.
     _att_stmt = (
         select(Attestation)
-        .where(Attestation.entity_type.not_in(sorted(NATIVE_REVIEW_ENTITY_TYPES)))
+        .where(
+            Attestation.entity_type.not_in(sorted(NATIVE_REVIEW_ENTITY_TYPES)),
+            or_(Attestation.confirmation_required.is_(False), Attestation.confirmed_by_id.is_not(None)),
+        )
         .distinct(Attestation.entity_type, Attestation.entity_id)
         .order_by(Attestation.entity_type, Attestation.entity_id, Attestation.attested_at.desc())
     )
     _due_att = [att for att in (await db.scalars(_att_stmt)).all() if att.next_due and att.next_due < today]
+    # Decision 6: no reminder to attest a record whose approval is incomplete (the attest
+    # call refuses it); its record page asks for the approval instead.
+    if _due_att:
+        _blocked = await attestation_blocked_records(db, [(a.entity_type, a.entity_id) for a in _due_att])
+        _due_att = [a for a in _due_att if (a.entity_type, a.entity_id) not in _blocked]
     _att_owners = await _record_owners(db, directory, [(a.entity_type, a.entity_id) for a in _due_att]) if _due_att else {}
     for att in _due_att:
         to, link = _att_owners.get((att.entity_type, att.entity_id), ([], link_to(att.entity_type, att.entity_id)))

@@ -8,7 +8,7 @@
    Pure (record-page-spec §3.2): no React, no DOM, imports only `./text` and `./types`,
    so the fixture runner executes it under Node. */
 
-import { approvalWithoutStepText, exceptionStateText, joinList, missedReviewsText, plural, progressTone, sentenceCase, textOnlyPerson, truncate } from "./text";
+import { approvalBlocksAttest, approvalWithoutStepText, attestFix, awaitingConfirmationPoint, exceptionStateText, joinList, missedReviewsText, plural, progressTone, sentenceCase, textOnlyPerson, truncate } from "./text";
 import type { Basis, Ctx, Fmt, OpenPoint, Seg, TileModel, TileValue } from "./types";
 
 /* ------------------------------------------------------------------ input ----- */
@@ -359,15 +359,20 @@ export function policyOpenPoints({ policy: p, ack, primaryLabel }: PolicyInput, 
     // B1: the server says whether this viewer may attest (the review is native to the
     // attestation). Refused → point at the Sign-off card, which prints the reason; an
     // older API sends no verdict and the Attest… jump stays (the refusal shows inline).
+    // Decision 6: a policy whose approval is incomplete is approved before it is attested.
     const att = gov.attestation;
     gaps.push({
       id: "policy.review_overdue", level: "gap",
       text: [p.next_review_date ? `Review overdue since ${fmt.date(p.next_review_date)}.` : "Review overdue."],
-      action: att?.canAttest === false
-        ? { kind: "focus", target: "rec-signoff", label: "See sign-off" }
+      action: approvalBlocksAttest(gov) || att?.canAttest === false
+        ? attestFix(gov) ?? { kind: "focus", target: "rec-signoff", label: "See sign-off" }
         : { kind: "attest", target: "attest", label: "Attest…" },
     });
   }
+  // Decision 9: every policy attestation needs an independent second signature, so a
+  // policy certified but not yet confirmed has not completed its review.
+  const waiting = awaitingConfirmationPoint("policy", gov, fmt);
+  if (waiting) gaps.push(waiting);
   const ws = gov.workflowState;
   if ((ws === "approved" || ws === "in_review" || ws === "retired") && gov.approvalSteps === 0) {
     gaps.push({

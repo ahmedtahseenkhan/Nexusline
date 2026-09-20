@@ -25,7 +25,7 @@ from app.core.deps import CurrentUser, DbSession, require
 from app.models.saved_report import SavedReport
 from app.models.tenant import Tenant
 from app.schemas.common import Page
-from app.services import audit, pdf_report, report_export
+from app.services import audit, fx, pdf_report, report_export
 from app.services import report_builder as rb
 from app.services.risk_scoring import max_score_for
 from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
@@ -148,6 +148,7 @@ async def _context(db, user, subject: rb.Subject, filters: dict) -> rb.ReportCon
         today=date.today(),
         bands=scale_for(settings).bands,
         book=await load_appetite_book(db, user.tenant_id, settings),
+        currency=await fx.reporting_currency(db, user.tenant_id),
     )
     for _key, model, ident in rb.id_filter_models(subject, filters):
         obj = await db.get(model, ident)
@@ -276,6 +277,7 @@ async def _export(db, user, d: ReportDefinition, fmt: str) -> Response:
             max_score=ctx.max_score, matrix_size=ctx.matrix_size,
             scope=" · ".join(v for _, v in params) or "Whole register",
             owner_names={uuid.UUID(k): v for k, v in ctx.names.items() if _is_uuid(k)},
+            currency=ctx.currency,
         )
         detail = pdf_report.risk_detail_pages(rows, rctx)
     data = pdf_report.tabular_report_pdf(

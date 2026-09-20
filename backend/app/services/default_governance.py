@@ -151,13 +151,16 @@ def _delete_rule(entity: str, label: str) -> RuleSpec:
     )
 
 
-def _attest_rule(entity: str, label: str) -> RuleSpec:
-    return RuleSpec(
-        entity, "attest", "", "",
-        f"Attesting a {label}'s review: the person who entered it cannot certify it.",
-    )
-
-
+#: Decision 9 (2026-09-20): **no default attest rule.** An attestation is the record
+#: owner's own certification (ServiceNow IRM campaigns, Archer, SOX 302/404, ISO 27001
+#: A.5.36), and in a bank the first-line owner usually entered the record too — a
+#: maker-checker rule on ``(<type>, attest)`` would therefore leave nobody able to
+#: certify it now that decision 6 requires a complete approval first. Independence comes
+#: from that approval and from the required second signature
+#: (``api/v1/attestations.confirm``). Organisations seeded with the old
+#: ``(risk|control|policy|vendor, attest)`` rules keep them — they are in the
+#: administrator's register and are theirs to disable — and attesting honours a rule that
+#: is there; nothing re-creates one.
 DEFAULT_RULES: tuple[RuleSpec, ...] = (
     RuleSpec("risk", "accept", RISK_MANAGER, RISK_APPROVER,
              "Accepting a risk: whoever asked for the acceptance cannot approve it."),
@@ -168,7 +171,6 @@ DEFAULT_RULES: tuple[RuleSpec, ...] = (
              "while this rule requires dual control the bulk archive is refused; archive "
              "risks one at a time, or exempt this action to allow it."),
     _delete_rule("risk", "risk"),
-    _attest_rule("risk", "risk"),
     RuleSpec("exception", "approve", RISK_MANAGER, RISK_APPROVER,
              "Approving an exception: whoever requested it cannot approve it."),
     RuleSpec("control", "audit", "", COMPLIANCE_MANAGER,
@@ -176,13 +178,11 @@ DEFAULT_RULES: tuple[RuleSpec, ...] = (
     RuleSpec("control", "review_test", "", COMPLIANCE_MANAGER,
              "Reviewing a control test: not the tester, nor whoever recorded or edited the test."),
     _delete_rule("control", "control"),
-    _attest_rule("control", "control"),
     RuleSpec("policy", "publish", "", COMPLIANCE_MANAGER,
              "Publishing a policy: not whoever entered it."),
     RuleSpec("policy", "approve", "", COMPLIANCE_MANAGER,
              "Approving a policy submitted for review: not whoever entered or submitted it."),
     _delete_rule("policy", "policy"),
-    _attest_rule("policy", "policy"),
     RuleSpec("issue", "validate", "", "",
              "Validating an issue's remediation: not its owner, nor whoever raised it."),
     RuleSpec("issue", "close", "", "",
@@ -197,7 +197,6 @@ DEFAULT_RULES: tuple[RuleSpec, ...] = (
     _delete_rule("process", "process"),
     _delete_rule("incident", "incident"),
     _delete_rule("vendor", "third party"),
-    _attest_rule("vendor", "third party"),
     RuleSpec("assessment", "review", "", "",
              "Completing the review of a questionnaire assessment: not whoever sent it."),
     RuleSpec("aml", "file_sar", "", "",

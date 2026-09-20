@@ -105,13 +105,28 @@ _INCIDENT_TYPES = [
     SeedValue("data_breach", "Data breach", "Unauthorised disclosure of customer or bank data"),
 ]
 
+#: ISO/IEC 27002:2022 themes (decision 8) — the four kinds of control an ISO 27001 Annex A
+#: control belongs to. Values are the theme keys the ISO attributes use.
+_CONTROL_CLASSIFICATIONS = [
+    SeedValue("organizational", "Organizational",
+              "Policies, roles, governance and management arrangements (ISO/IEC 27002:2022 clause 5)"),
+    SeedValue("people", "People",
+              "Controls carried out by individuals: screening, terms, awareness, discipline (clause 6)"),
+    SeedValue("physical", "Physical",
+              "Premises, equipment, media and the physical environment (clause 7)"),
+    SeedValue("technological", "Technological",
+              "Controls built into systems, networks and software (clause 8)"),
+]
+
 DEFAULT_LOOKUPS: dict[str, list[SeedValue]] = {
     "risk_category": _RISK_L1 + _RISK_L2,
-    # No shipped values: Preventive / Detective / Corrective / Directive are a control's
-    # *nature* (its own field), and the start-up repair (``data_repairs`` B10a) retires
-    # them from this list. Seeding them would hand every new tenant four classifications
-    # the next restart takes away. A bank adds its own (Technical, Administrative, …).
-    "control_classification": [],
+    # Decision 8 (2026-09-17): the four ISO/IEC 27002:2022 themes. ISO 27001:2022 Annex A
+    # is the product's hub framework, and the themes map cleanly onto the NIST
+    # administrative / technical / physical split a bank's examiner expects. A control's
+    # *nature* (Preventive / Detective / Corrective / Directive) is a separate field, and
+    # the start-up repair (``data_repairs`` B10a) retires those from this list — seeding
+    # them here would hand every new tenant four classifications the next restart removes.
+    "control_classification": _CONTROL_CLASSIFICATIONS,
     "incident_type": _INCIDENT_TYPES,
     "incident_classification": _flat("Public", "Internal", "Confidential", "Restricted"),
     "issue_category": _flat("People", "Process", "Technology", "External"),
@@ -168,22 +183,51 @@ def missing_defaults(key: str, existing: Iterable[tuple[str, str]]) -> list[Seed
     return out
 
 
+async def deleted_values(db: AsyncSession) -> dict[str, set[str]]:
+    """``{list key: {value, …}}`` an administrator has *deleted* from a governed list.
+
+    Deactivating a default leaves its row in place, so the insert-only seed never brings
+    it back. Deleting one removes the row, and without this the next start would insert
+    it again — so the delete the lookup admin audited (``lookup`` / ``delete``, whose
+    ``changes`` carry the list key and the value) is honoured as a decision.
+    """
+    from app.models.audit import AuditLog
+
+    out: dict[str, set[str]] = {}
+    for (changes,) in (
+        await db.execute(
+            select(AuditLog.changes).where(AuditLog.entity_type == "lookup", AuditLog.action == "delete")
+        )
+    ).all():
+        if not isinstance(changes, dict):
+            continue
+        key, value = changes.get("key"), changes.get("value")
+        if isinstance(key, str) and isinstance(value, str) and value:
+            out.setdefault(key, set()).add(value)
+    return out
+
+
 async def ensure_lookup_defaults(db: AsyncSession, tenant_id: UUID) -> int:
     """Insert the defaults this tenant's lists are missing; returns rows added.
 
     One read of the tenant's lookup rows, then top-level values before children so a
     child can point at a parent inserted in the same pass. A child whose parent the
-    tenant no longer has is added at the top level rather than dropped.
+    tenant no longer has is added at the top level rather than dropped. Values the
+    tenant deleted are never re-inserted (:func:`deleted_values`).
     """
     rows = (await db.execute(select(Lookup.id, Lookup.key, Lookup.value, Lookup.label))).all()
     by_key: dict[str, list[tuple[object, str, str]]] = {}
     for rid, key, value, label in rows:
         by_key.setdefault(key, []).append((rid, value, label))
+    deleted = await deleted_values(db)
 
     added = 0
     for key, defaults in DEFAULT_LOOKUPS.items():
         existing = by_key.get(key, [])
-        missing = missing_defaults(key, [(v, lbl) for _rid, v, lbl in existing])
+        missing = missing_defaults(
+            key,
+            [(v, lbl) for _rid, v, lbl in existing] + [(v, "") for v in sorted(deleted.get(key, ()))],
+        )
         if not missing:
             continue
         order = {seed.value: (i + 1) * 10 for i, seed in enumerate(defaults)}

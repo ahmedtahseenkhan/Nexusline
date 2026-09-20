@@ -112,7 +112,7 @@ export default function SecuritySettings({
                   <>
                     {" · "}
                     <span style={{ fontWeight: 600 }}>
-                      Required for your role
+                      {me?.mfa_required_for_everyone ? "Required for everyone who signs in with a password" : "Required for your role"}
                       {!me?.mfa_enabled && me?.mfa_enrolment_due ? ` from ${formatDate(me.mfa_enrolment_due)}` : ""}
                     </span>
                   </>

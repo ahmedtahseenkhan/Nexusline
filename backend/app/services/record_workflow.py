@@ -66,6 +66,8 @@ logger = logging.getLogger("nexusline.record_workflow")
 
 __all__ = [
     "ACTIONS",
+    "approval_complete",
+    "attest_work_note",
     "LOCKED_DETAIL",
     "TRANSITIONS",
     "WorkflowStateLocked",
@@ -120,6 +122,29 @@ AUDIT_PREFIX = "workflow_"
 def state_value(state: Any) -> str:
     """``WorkflowState.draft`` / ``WorkflowStatus.draft`` / ``"draft"`` → ``"draft"``."""
     return str(getattr(state, "value", state) or DRAFT)
+
+
+def approval_complete(state: Any) -> bool:
+    """Decision 6: whether a record's approval is complete, so it may be attested. Pure.
+
+    ``None`` means the record type has no approval lifecycle, which never blocks."""
+    if state is None:
+        return True
+    return state_value(state) == APPROVED
+
+
+def attest_work_note(state: Any) -> str | None:
+    """What a review / attestation reminder says instead of "attest it" while the
+    record's approval is incomplete (decision 6), or None when attesting is open. Pure.
+    A retired record owes no attestation at all: callers skip it."""
+    if approval_complete(state):
+        return None
+    value = state_value(state)
+    if value == DRAFT:
+        return "Submit it for approval: it can't be attested until approved"
+    if value == IN_REVIEW:
+        return "Awaiting approval: it can't be attested until approved"
+    return None
 
 
 def allowed_actions(state: Any) -> list[str]:

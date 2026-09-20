@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
-import { useFormat } from "@/lib/format";
+import { unconvertedNote, useFormat, type MoneyTotal } from "@/lib/format";
 import { confirmDeleteWithImpact } from "@/lib/records";
 import { lookupValues, pickProcesses, type LookupRef, type UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
@@ -37,7 +37,7 @@ import { titleCase } from "@/lib/text";
 import { sentenceCase, uniqueLabels } from "@/lib/record/text";
 import { safeLinkUrl } from "@/lib/sanitize";
 import {
-  VENDOR_CLEAR_TEXT, vendorContractsSub, vendorDataTone, vendorHeadline, vendorOpenPoints, vendorOverrideNote, vendorOverrideText,
+  VENDOR_CLEAR_TEXT, contractValueText, vendorContractsSub, vendorDataTone, vendorHeadline, vendorOpenPoints, vendorOverrideNote, vendorOverrideText,
   vendorOutsourcingDiligence, vendorReviewOverdue, vendorSevTone, vendorTiles, VENDOR_SUBSTITUTABILITY,
   type VendorConcentrationFacts, type VendorInput,
   type VendorDueDiligenceFacts,
@@ -93,6 +93,8 @@ type Vendor = {
   relationship_owner_id?: string | null; relationship_owner_ref?: UserRef | null;
   data_classification_id?: string | null; data_classification_ref?: LookupRef | null;
   annual_spend?: number | null; spend_currency?: string;
+  /** Decision 4: live contract value converted to the reporting currency. */
+  active_contract_total?: MoneyTotal | null;
   data_residency_countries?: LookupRef[]; processes?: RefItem[]; subcontractors?: RefItem[]; subcontractor_of?: RefItem[];
   certifications?: Certification[];
   /** Derived from the "Inherent risk tiering" questionnaire; never typed. */
@@ -208,6 +210,14 @@ function toPayload(f: FormState, editing: boolean): Record<string, unknown> {
   if (editing) payload.risk_rating_override_reason = f.risk_rating_override_reason;
   return payload;
 }
+/** `GET /vendors/spend-summary` — both figures in the reporting currency. */
+type SpendSummary = {
+  vendors: number;
+  annual_spend: MoneyTotal;
+  active_contracts: MoneyTotal;
+  conversion_basis: string;
+};
+
 type ContractForm = { name: string; description: string; value: number | ""; currency: string; start_date: string; end_date: string };
 const BLANK_CONTRACT: ContractForm = { name: "", description: "", value: "", currency: "", start_date: "", end_date: "" };
 type CertForm = { id: string | null; cert_type: string; issuer: string; certificate_number: string; scope: string; issued_on: string; expires_on: string };
@@ -219,14 +229,16 @@ function VendorsInner() {
   const router = useRouter();
   /** Money in its own currency; a blank currency is the organisation's. */
   const money = (n: number, ccy?: string | null) => formatMoney(n, ccy || currency);
+  // Live contract value in the reporting currency, with the original currencies behind it.
   const totals = (v: Vendor) => {
-    const t = v.active_contract_totals;
-    if (t && Object.keys(t).length) return Object.entries(t).map(([c, n]) => money(n, c)).join(" + ");
+    const text = contractValueText(v, { money });
+    if (text) return text;
     return money(v.active_contract_value);
   };
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<Vendor | null>(null);
   const [types, setTypes] = useState<VendorType[]>([]);
+  const [spend, setSpend] = useState<SpendSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -270,6 +282,13 @@ function VendorsInner() {
     reload();
   };
   useEffect(() => { apiCall<VendorType[]>("GET", "/vendor-types").then(setTypes).catch(() => {}); }, []);
+  // Spend and live contract value across the register, converted to the reporting currency.
+  useEffect(() => {
+    apiCall<SpendSummary>("GET", "/vendors/spend-summary").then(setSpend).catch(() => {});
+  }, [refreshKey]);
+  const spendExcluded = spend
+    ? [unconvertedNote(spend.active_contracts), unconvertedNote(spend.annual_spend)].filter(Boolean)[0] || ""
+    : "";
 
   const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
   const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name })));
@@ -724,6 +743,33 @@ function VendorsInner() {
       </div>
 
       {error && !showForm && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
+
+      {spend && (
+        <div className="grid stat-grid">
+          <div className="card stat">
+            <div className="stat-top"><span className="n">{spend.vendors.toLocaleString()}</span></div>
+            <span className="l">Vendors</span>
+          </div>
+          <div className="card stat">
+            <div className="stat-top">
+              <span className="n">{money(spend.active_contracts.total, spend.active_contracts.reporting_currency)}</span>
+            </div>
+            <span className="l">Live contract value</span>
+          </div>
+          <div className="card stat">
+            <div className="stat-top">
+              <span className="n">{money(spend.annual_spend.total, spend.annual_spend.reporting_currency)}</span>
+            </div>
+            <span className="l">Annual spend</span>
+          </div>
+        </div>
+      )}
+
+      {spendExcluded && (
+        <div className="card card-pad" style={{ marginBottom: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {spendExcluded} — <Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
 
       <DataTable<Vendor>
         columns={columns}

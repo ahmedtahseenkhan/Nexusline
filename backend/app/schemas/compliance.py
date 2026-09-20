@@ -347,8 +347,10 @@ class SoaControlRead(BaseModel):
     name: str = ""
     effectiveness: str = "not_assessed"
     status: str = ""
+    #: The last reviewed test (decision 7); tests awaiting review are counted apart.
     last_test_date: date | None = None
     last_test_result: str | None = None
+    pending_review_count: int = 0
 
 
 class SoaRowRead(BaseModel):
@@ -365,9 +367,11 @@ class SoaRowRead(BaseModel):
     #: unmapped | unassessed | failing | assured.
     coverage: str = "unmapped"
     controls: list[SoaControlRead] = []
-    #: The most recent test across the implementing controls.
+    #: The most recent *reviewed* test across the implementing controls (decision 7).
     last_test_date: date | None = None
     last_test_result: str | None = None
+    #: Tests awaiting a reviewer across the implementing controls — not in the result.
+    pending_review_count: int = 0
     #: Phase 4C: covered via crosswalk (shown apart from the implementing controls).
     via_crosswalk: ViaCrosswalkRead | None = None
 

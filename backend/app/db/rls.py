@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 # Tables carrying a tenant_id that must be isolated.
 TENANT_SCOPED_TABLES: list[str] = [
+    # Decision 4: exchange rates into the reporting currency
+    "fx_rates",
     # Phase 4E: questionnaire engine
     "questionnaire_sections",
     "assessment_links",

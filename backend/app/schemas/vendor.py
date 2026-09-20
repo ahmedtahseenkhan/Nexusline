@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.common import GraphRef, LookupRef, UserRef
+from app.schemas.fx import MoneyTotalRead
 from app.schemas.tenant_settings import validate_currency
 
 from app.models.base import WorkflowState
@@ -368,6 +369,9 @@ class VendorRead(VendorBase):
     #: Live contract value per currency (a blank contract currency counts as the
     #: organisation's). ``active_contract_value`` sums across currencies; kept for old clients.
     active_contract_totals: dict[str, float] = {}
+    #: Decision 4: live contract value converted to the reporting currency at today's rate,
+    #: with the per-currency breakdown and any values that have no rate (``unconverted``).
+    active_contract_total: MoneyTotalRead | None = None
     created_at: datetime
     # Phase 2 due diligence (read side).
     relationship_owner_ref: UserRef | None = None

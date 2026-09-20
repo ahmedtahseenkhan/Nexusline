@@ -13,7 +13,8 @@ import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/compo
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
-import { useFormat } from "@/lib/format";
+import Link from "next/link";
+import { unconvertedNote, useFormat } from "@/lib/format";
 
 // ------------------------------------------------------------------ local types
 interface FraudRisk {
@@ -88,6 +89,10 @@ interface FraudSummary {
   checklist_pct: number;
   risks_by_band: Record<string, number>;
   high_residual_risks: number;
+  /** Decision 4: the currency the loss figures above are in. */
+  reporting_currency?: string;
+  /** Case amounts with no exchange rate, left out of the totals. */
+  unconverted?: { currency: string; count: number; amount: number }[];
 }
 
 // ------------------------------------------------------------------ helpers
@@ -842,7 +847,7 @@ function FraudInner() {
           <span className="l">Open fraud cases</span>
         </div>
         <div className="card stat">
-          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_net_loss) : "—"}</span></div>
+          <div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_net_loss, summary.reporting_currency) : "—"}</span></div>
           <span className="l">Total net fraud loss</span>
         </div>
         <div className="card stat">
@@ -854,6 +859,13 @@ function FraudInner() {
           <span className="l">High residual risks</span>
         </div>
       </div>
+
+      {summary && unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_net_loss, unconverted: summary.unconverted }) && (
+        <div className="card card-pad" style={{ marginBottom: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {unconvertedNote({ reporting_currency: summary.reporting_currency || currency, total: summary.total_net_loss, unconverted: summary.unconverted })}
+          {" — "}<Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
         {SECTIONS.map((s) => (

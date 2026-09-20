@@ -49,11 +49,13 @@ import {
   exceptionMeta,
   isRated,
   issueCapText,
+  lastTested,
   latestCounting,
   maintenanceEmptyText,
   maintenanceSectionSub,
   ratingWord,
   testFromText,
+  testedCount,
   testsEmptyText,
   testsSectionSub,
   type ControlExceptionRef,
@@ -142,6 +144,9 @@ type Control = {
   audit_frequency: string; audit_metric: string; audit_success_criteria: string; maintenance_frequency: string;
   next_audit_date: string | null; last_audit_date: string | null; next_maintenance_date: string | null;
   last_maintenance_date: string | null; audit_count: number; last_audit_result: string | null; is_audit_overdue: boolean;
+  /** Decision 7: reviewed tests only — what "tested" means everywhere but the Tests tab. */
+  tested_count?: number; reviewed_audit_count?: number;
+  last_reviewed_result?: string | null; last_reviewed_date?: string | null;
   maintenance_count: number; last_maintenance_result: string | null; is_maintenance_overdue: boolean;
   policies: LinkRef[]; requirements: RequirementRef[]; risks: LinkRef[];
   // reverse graph links (read-only, from GET /controls/{id})
@@ -719,10 +724,12 @@ function ControlsInner() {
     { key: "requirements", header: "Requirements", hidden: true, render: (c) => linkChips(c.requirements, "/compliance"), text: (c) => names(c.requirements) },
     { key: "assets", header: "Protected assets", hidden: true, render: (c) => linkChips(c.assets, "/information-assets"), text: (c) => names(c.assets) },
     { key: "audit_frequency", header: "Test cycle", hidden: true, render: (c) => <span className="muted">{cap(c.audit_frequency)}</span>, text: (c) => cap(c.audit_frequency) },
-    { key: "last_audit_date", header: "Last tested", hidden: true, sortable: true, render: (c) => <span className="muted">{formatDate(c.last_audit_date)}</span>, text: (c) => (c.last_audit_date ? formatDate(c.last_audit_date) : "") },
-    { key: "last_audit_result", header: "Last result", hidden: true, render: (c) => <span className="muted">{c.last_audit_result ? RESULT_LABEL[c.last_audit_result] ?? cap(c.last_audit_result) : "—"}</span>, text: (c) => c.last_audit_result ? RESULT_LABEL[c.last_audit_result] ?? cap(c.last_audit_result) : "" },
+    { key: "last_audit_date", header: "Last reviewed test", hidden: true, render: (c) => <span className="muted">{formatDate(lastTested(c).date)}</span>, text: (c) => (lastTested(c).date ? formatDate(lastTested(c).date) : "") },
+    { key: "last_audit_result", header: "Last reviewed result", hidden: true, render: (c) => { const r = lastTested(c).result; return <span className="muted">{r ? RESULT_LABEL[r] ?? cap(r) : "—"}</span>; }, text: (c) => { const r = lastTested(c).result; return r ? RESULT_LABEL[r] ?? cap(r) : ""; } },
     { key: "next_audit_date", header: "Next test", sortable: true, render: (c) => (c.is_audit_overdue ? <Badge tone="high">Overdue</Badge> : UNTESTABLE.has(c.status) ? <span className="muted" title={NO_CLOCK_NOTE[c.status]}>Not scheduled</span> : <span className="muted">{formatDate(c.next_audit_date)}</span>), text: (c) => (UNTESTABLE.has(c.status) ? "Not scheduled" : c.next_audit_date ? formatDate(c.next_audit_date) : "") },
-    { key: "audit_count", header: "Tests run", hidden: true, align: "center", render: (c) => <span className="muted">{c.audit_count || "—"}</span> },
+    // Decision 7: "Tested" counts reviewed tests; the log's size is "Tests recorded".
+    { key: "tested_count", header: "Tested", hidden: true, align: "center", render: (c) => <span className="muted">{testedCount(c) || "—"}</span>, text: (c) => String(testedCount(c) || "") },
+    { key: "audit_count", header: "Tests recorded", hidden: true, align: "center", render: (c) => <span className="muted">{c.audit_count || "—"}</span> },
     { key: "next_maintenance_date", header: "Next maintenance", hidden: true, render: (c) => (c.is_maintenance_overdue ? <Badge tone="high">Overdue</Badge> : UNTESTABLE.has(c.status) ? <span className="muted">Not scheduled</span> : <span className="muted">{formatDate(c.next_maintenance_date)}</span>), text: (c) => (UNTESTABLE.has(c.status) ? "Not scheduled" : c.next_maintenance_date ? formatDate(c.next_maintenance_date) : "") },
     { key: "opex", header: "Opex / yr", hidden: true, align: "right", render: (c) => <span className="muted">{formatMoney(c.opex)}</span>, text: (c) => c.opex != null ? formatMoney(c.opex) : "" },
     { key: "capex", header: "Capex", hidden: true, align: "right", render: (c) => <span className="muted">{formatMoney(c.capex)}</span>, text: (c) => c.capex != null ? formatMoney(c.capex) : "" },

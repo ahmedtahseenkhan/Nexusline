@@ -7,7 +7,7 @@
 
    Pure (record-page-spec §3.2): no React, no DOM, imports only `./text` and `./types`. */
 
-import { approvalWithoutStepText, joinList, plural, quote, sentenceCase, truncate } from "./text";
+import { approvalBlocksAttest, approvalWithoutStepText, attestFix, awaitingConfirmationPoint, joinList, plural, quote, sentenceCase, truncate } from "./text";
 import type { Ctx, OpenPoint, Seg, TileModel, TileValue } from "./types";
 
 /* ------------------------------------------------------------------ input ----- */
@@ -95,6 +95,8 @@ export type VendorFacts = {
   contracts: VendorContractFacts[];
   contract_count: number;
   active_contract_totals?: Record<string, number>;
+  /** Decision 4: the same value converted to the reporting currency (see `contractValueText`). */
+  active_contract_total?: { reporting_currency: string; total: number; unconverted?: { currency: string; count: number; amount: number }[] } | null;
   relationship_owner_ref?: { full_name?: string | null; email?: string | null } | null;
   data_classification_ref?: { label: string } | null;
   data_residency_countries?: { label: string }[];
@@ -171,14 +173,28 @@ export function vendorContractState(v: Pick<VendorFacts, "contracts" | "contract
 
 /** The Contracts section head's sub: "Active value USD 260,000" while a contract is in
  *  force, else "None in force · 1 expired" (never "Active value PKR 0"). */
-export function vendorContractsSub(v: Pick<VendorFacts, "contracts" | "contract_count" | "active_contract_totals">, fmt: Ctx["fmt"]): string | null {
+/** Live contract value: the reporting-currency total, and the original currencies behind
+ *  it when there is more than one ("PKR 3,800,000 — PKR 1,000,000 + USD 10,000"). Contracts
+ *  in a currency with no exchange rate are named rather than added in. */
+export function contractValueText(
+  v: Pick<VendorFacts, "active_contract_totals" | "active_contract_total">,
+  fmt: Pick<Ctx["fmt"], "money">,
+): string {
+  const per = Object.entries(v.active_contract_totals ?? {}).filter(([, n]) => n > 0);
+  const original = per.map(([c, n]) => fmt.money(n, c || null)).join(" + ");
+  const converted = v.active_contract_total;
+  if (!converted) return original;
+  const missing = (converted.unconverted ?? []).map((u) => `${u.count} ${u.currency}`).join(", ");
+  const head = fmt.money(converted.total, converted.reporting_currency);
+  const detail = per.length > 1 ? ` — ${original}` : "";
+  return `${head}${detail}${missing ? ` (excludes ${missing} with no exchange rate)` : ""}`;
+}
+
+export function vendorContractsSub(v: Pick<VendorFacts, "contracts" | "contract_count" | "active_contract_totals" | "active_contract_total">, fmt: Ctx["fmt"]): string | null {
   const st = vendorContractState(v);
   if (st.onFile === 0) return null;
   if (st.inForce === 0) return `None in force${st.expired ? ` · ${st.expired} expired` : ""}`;
-  const totals = Object.entries(v.active_contract_totals ?? {})
-    .filter(([, n]) => n > 0)
-    .map(([c, n]) => fmt.money(n, c || null))
-    .join(" + ");
+  const totals = contractValueText(v, fmt);
   return totals ? `Active value ${totals}` : `${st.inForce} in force`;
 }
 
@@ -357,10 +373,7 @@ export function vendorTiles({ vendor: v }: VendorInput, ctx: Ctx): TileModel[] {
   // cover ("None" + "1 contract." read as if the one on file were live).
   const cst = vendorContractState(v);
   const active = v.contracts.filter((c) => !c.is_expired);
-  const totals = Object.entries(v.active_contract_totals ?? {})
-    .filter(([, n]) => n > 0)
-    .map(([c, n]) => fmt.money(n, c || null))
-    .join(" + ");
+  const totals = contractValueText(v, fmt);
   const nextExpiry = active.map((c) => c.end_date).filter((d): d is string => !!d).sort()[0];
   const expiredOn = cst.latestExpiry ? ` on ${fmt.date(cst.latestExpiry)}` : "";
   const contracts: TileModel = {
@@ -457,11 +470,16 @@ export function vendorOpenPoints({ vendor: v }: VendorInput, ctx: Ctx): OpenPoin
     // older API sends no verdict and the Attest… jump stays (the refusal shows inline).
     gaps.push({
       id: "vendor.review_overdue", level: "gap", text: [`Review overdue since ${fmt.date(v.next_review_date)}.`],
-      action: gov.attestation?.canAttest === false
-        ? { kind: "focus", target: "rec-signoff", label: "See sign-off" }
+      // Decision 6: a third party whose approval is incomplete is approved first.
+      action: approvalBlocksAttest(gov) || gov.attestation?.canAttest === false
+        ? attestFix(gov) ?? { kind: "focus", target: "rec-signoff", label: "See sign-off" }
         : { kind: "attest", target: "attest", label: "Attest…" },
     });
   }
+  // Decision 9: a material outsourcing relationship needs a second signature on its
+  // attestation; until it arrives the review has not been completed.
+  const waitingConfirm = awaitingConfirmationPoint("vendor", gov, fmt);
+  if (waitingConfirm) gaps.push(waitingConfirm);
   const dd = v.due_diligence ?? null;
   if (dd && v.status !== "offboarded") {
     if (dd.overdue && dd.next_on) {

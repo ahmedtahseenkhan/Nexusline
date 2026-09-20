@@ -5,10 +5,12 @@
      <AttestationPanel entityType="risk" entityId={r.id} />                 // card (classic rail)
      <AttestationPanel entityType="risk" entityId={r.id} variant="row" />   // row in the Sign-off card
 
-   An attestation certifies a stated sentence, signed by someone independent of the
-   record; a second person may confirm it. Records that carry their own review cycle
-   (risk, policy, third party) take the cadence from that cycle, so there is one review
-   date.
+   An attestation certifies a stated sentence, signed by the record's owner (decision 9);
+   a second person confirms it — and on a high-stakes record (a key control, a critical or
+   high residual risk, a material outsourcing relationship, any policy) that confirmation
+   is REQUIRED: until it arrives the attestation is signed but not complete, and the
+   review cycle has not restarted. Records that carry their own review cycle (risk,
+   policy, third party) take the cadence from that cycle, so there is one review date.
 
    Record-page-spec §3.5 behaviour, in both variants:
    - A summary: status badge (Current / Overdue / hollow "Never attested"), who last
@@ -32,6 +34,7 @@ import { useEscapeLayer } from "@/lib/escapeLayer";
 import { toast } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
 import { cadenceNoun, sentenceCase } from "@/lib/record/text";
+import type { Attestation as AttestationRow } from "@/lib/api";
 import { useRecordGovernance, type AttestationStatusB1 } from "@/components/record/RecordGovernance";
 
 const FREQS = ["fortnightly", "monthly", "quarterly", "semiannual", "annual", "none"];
@@ -187,14 +190,17 @@ export default function AttestationPanel({ entityType, entityId, variant = "card
   }
 
   const status = d.status === "current" || d.status === "overdue" ? d.status : "never";
-  const badge =
-    status === "current" ? (
-      <Badge tone="low" asIs>Current</Badge>
-    ) : status === "overdue" ? (
-      <Badge tone="high" asIs>Overdue</Badge>
-    ) : (
-      <Badge hollow asIs>Never attested</Badge>
-    );
+  // The status is judged on the last COMPLETE attestation, so one awaiting its second
+  // signature is called what it is rather than counted as done.
+  const badge = d.awaiting_confirmation ? (
+    <Badge tone="medium" asIs>Awaiting confirmation</Badge>
+  ) : status === "current" ? (
+    <Badge tone="low" asIs>Current</Badge>
+  ) : status === "overdue" ? (
+    <Badge tone="high" asIs>Overdue</Badge>
+  ) : (
+    <Badge hollow asIs>Never attested</Badge>
+  );
 
   const freqWord = cadenceNoun(d.frequency);
   const dueLine = d.native_review ? (
@@ -211,6 +217,14 @@ export default function AttestationPanel({ entityType, entityId, variant = "card
 
   const blocked = d.can_attest === false;
   const pending = d.history.filter((h) => !h.confirmed_by_id && meId !== null && h.attested_by_id !== meId);
+  // Decision 9: the record's newest attestation is signed but still owes the second
+  // signature that completes it. The server decides; the panel only prints it.
+  const awaiting = d.awaiting_confirmation === true;
+  const awaitingLine = awaiting
+    ? `Attested by ${d.awaiting_by || "another user"}${d.awaiting_at ? ` on ${formatDate(d.awaiting_at)}` : ""} — awaiting independent confirmation`
+    : null;
+  const needsSecond = d.confirmation_required === true;
+  const behalf = (h: AttestationRow) => (h.on_behalf_of_name || "").trim();
   const title = `Attest — ${gov?.workflow?.label || sentenceCase(entityType)}`;
   const attestNoun = (() => {
     const t = (gov?.workflow?.label || sentenceCase(entityType)).trim();
@@ -223,6 +237,12 @@ export default function AttestationPanel({ entityType, entityId, variant = "card
         <div className="d">
           Last attested <b>{d.last_attested_at ? formatDate(d.last_attested_at) : "—"}</b>
           {d.last_by ? <> by <b>{d.last_by}</b></> : null}
+          {d.last_on_behalf_of ? <> on behalf of <b>{d.last_on_behalf_of}</b></> : null}
+        </div>
+      )}
+      {awaitingLine && (
+        <div className="d rec-att-awaiting">
+          {awaitingLine}. The review cycle restarts when it is confirmed.
         </div>
       )}
       <div className="d">{dueLine}</div>
@@ -248,7 +268,9 @@ export default function AttestationPanel({ entityType, entityId, variant = "card
         <ul className="rec-att-pending">
           {pending.map((h) => (
             <li key={h.id}>
-              {formatDate(h.attested_at)} by <b>{h.attested_by_email || "another user"}</b> · awaiting confirmation{" "}
+              {formatDate(h.attested_at)} by <b>{h.attested_by_email || "another user"}</b>
+              {behalf(h) ? <> on behalf of <b>{behalf(h)}</b></> : null} ·{" "}
+              {h.confirmation_required ? "needs your confirmation to count" : "awaiting confirmation"}{" "}
               <button type="button" className="btn secondary sm" aria-label={`Confirm the attestation of ${formatDate(h.attested_at)} by ${h.attested_by_email || "another user"}`} onClick={() => confirm(h.id)} disabled={confirming === h.id}>
                 {confirming === h.id ? "Confirming…" : "Confirm"}
               </button>
@@ -275,12 +297,15 @@ export default function AttestationPanel({ entityType, entityId, variant = "card
           {d.history.map((h) => (
             <div key={h.id} className="rec-att-item">
               <div>
-                <span className="muted">{formatDateTime(h.attested_at)}</span> · signed by <b>{h.attested_by_email || "—"}</b>{" "}
+                <span className="muted">{formatDateTime(h.attested_at)}</span> · signed by <b>{h.attested_by_email || "—"}</b>
+                {behalf(h) ? <> on behalf of <b>{behalf(h)}</b></> : null}{" "}
                 <span className="muted">({cadenceNoun(h.frequency)} · next {formatDate(h.next_due)})</span>
               </div>
               <div className="muted">
                 {h.confirmed_by_id ? (
                   <>Confirmed by <b>{h.confirmed_by_email || "another user"}</b>{h.confirmed_at ? ` on ${formatDateTime(h.confirmed_at)}` : ""}</>
+                ) : h.confirmation_required ? (
+                  "Not complete — a second signature is required"
                 ) : (
                   "Not yet confirmed"
                 )}
@@ -309,6 +334,13 @@ export default function AttestationPanel({ entityType, entityId, variant = "card
           label: "Attestation",
           content: (
             <div>
+              {needsSecond && (
+                <p className="muted" style={{ fontSize: 12.5, margin: "0 0 14px" }}>
+                  {d.confirmation_reason ? `${d.confirmation_reason}: ` : ""}
+                  someone other than you must confirm this attestation before it counts, and the
+                  review cycle restarts on that confirmation.
+                </p>
+              )}
               <div className="field">
                 <label htmlFor={`att-statement-${entityId}`}>Statement you are signing</label>
                 <textarea
@@ -334,7 +366,8 @@ export default function AttestationPanel({ entityType, entityId, variant = "card
               {d.native_review ? (
                 <p className="muted" style={{ fontSize: 12.5, margin: "0 0 18px" }}>
                   Next review: <b>{d.next_due ? formatDate(d.next_due) : "not scheduled"}</b>, from this record&apos;s review cycle
-                  {d.frequency ? ` (${cadenceNoun(d.frequency)})` : ""}. Attesting records the review and moves that date.
+                  {d.frequency ? ` (${cadenceNoun(d.frequency)})` : ""}. Attesting records the review and moves that date
+                  {needsSecond ? ", once your attestation is confirmed" : ""}.
                 </p>
               ) : (
                 <div className="field">

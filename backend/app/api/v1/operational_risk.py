@@ -22,6 +22,10 @@ from app.models.enums import KriDirection, KriStatus
 from app.models.identity import Role
 from app.models.risk import Risk, RiskAppetite
 from app.models.operational_risk import (
+    BASEL_EVENT_TYPES_L2,
+    BASEL_L1_LABELS,
+    BASEL_L2_LABELS,
+    basel_l2_error,
     KeyRiskIndicator,
     KriEscalation,
     KriMeasurement,
@@ -58,6 +62,8 @@ from app.services import audit as audit_log
 from app.services import master_data
 from app.services import notifications
 from app.services import ref_fields as rf
+from app.services import fx
+from app.schemas.fx import MoneyTotalRead, UnconvertedAmount
 from app.services.rate_limit import RateLimiter, too_many_requests
 
 router = APIRouter(tags=["operational risk"])
@@ -861,6 +867,7 @@ _LOSS_SORTABLE = {
     "reference": LossEvent.reference,
     "title": LossEvent.title,
     "basel_event_type": LossEvent.basel_event_type,
+    "basel_event_type_l2": LossEvent.basel_event_type_l2,
     "business_line": LossEvent.business_line,
     "gross_loss": LossEvent.gross_loss,
     "recovery": LossEvent.recovery,
@@ -897,9 +904,28 @@ async def list_loss_events(db: DbSession, search: str | None = None,
     return Page(items=await _reads(db, LossEventRead, rows, LOSS_REFS), total=total, limit=limit, offset=offset)
 
 
+def check_loss_taxonomy(record, patch: dict) -> None:
+    """Decision 5: the level-2 category must sit under the level-1 event type the record
+    will have after ``patch``. Changing the level-1 type without a fitting level-2 is
+    refused rather than silently clearing the category. Normalises ``patch`` in place."""
+    if patch.get("basel_event_type_l2") is None:
+        patch.pop("basel_event_type_l2", None)
+    else:
+        patch["basel_event_type_l2"] = patch["basel_event_type_l2"].strip()
+    if "basel_event_type" in patch and patch["basel_event_type"] is None:
+        patch.pop("basel_event_type")
+    l1 = patch.get("basel_event_type", getattr(record, "basel_event_type", None))
+    l2 = patch.get("basel_event_type_l2", getattr(record, "basel_event_type_l2", "") or "")
+    error = basel_l2_error(l1, l2)
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+
+
 @router.post("/loss-events", response_model=LossEventRead, status_code=201, dependencies=[_WRITE])
 async def create_loss_event(body: LossEventCreate, db: DbSession, user: CurrentUser) -> LossEventRead:
     data = body.model_dump(exclude={"risk_ids"})
+    if not data.get("currency"):  # decision 4: blank = the reporting currency, stored explicitly
+        data["currency"] = await fx.reporting_currency(db, user.tenant_id)
     await rf.apply_refs(db, LossEvent, data, LOSS_REFS)
     obj = LossEvent(tenant_id=user.tenant_id, **data)
     obj.risks = await _resolve(db, Risk, body.risk_ids)
@@ -915,6 +941,9 @@ async def create_loss_event(body: LossEventCreate, db: DbSession, user: CurrentU
 async def update_loss_event(lid: uuid.UUID, body: LossEventUpdate, db: DbSession) -> LossEventRead:
     obj = await _get(db, LossEvent, lid, "Loss event")
     data = body.model_dump(exclude_unset=True, exclude={"risk_ids"})
+    check_loss_taxonomy(obj, data)
+    if "currency" in data and not data["currency"]:
+        data["currency"] = await fx.reporting_currency(db, obj.tenant_id)
     await rf.apply_refs(db, LossEvent, data, LOSS_REFS, record=obj)
     for k, v in data.items():
         setattr(obj, k, v)
@@ -933,11 +962,61 @@ async def delete_loss_event(lid: uuid.UUID, db: DbSession, user: CurrentUser) ->
     await _audit_delete(db, user, "loss_event", obj, "loss event")
 
 
-class LossSummaryRow(BaseModel):
-    basel_event_type: str
+class BaselCategory(BaseModel):
+    value: str
+    label: str
+    examples: str = ""
+
+
+class BaselEventTypeNode(BaseModel):
+    value: str
+    label: str
+    level2: list[BaselCategory]
+
+
+@router.get("/loss-events-taxonomy", response_model=list[BaselEventTypeNode], dependencies=[_READ],
+            summary="Basel II event types: 7 level-1 types with their 20 level-2 categories")
+async def loss_taxonomy() -> list[BaselEventTypeNode]:
+    return basel_taxonomy()
+
+
+def basel_taxonomy() -> list[BaselEventTypeNode]:
+    """Basel II Annex 9, level 1 → level 2, in the Accord's order. Pure."""
+    return [
+        BaselEventTypeNode(
+            value=l1, label=label,
+            level2=[BaselCategory(value=k, label=n, examples=e) for k, p, n, e in BASEL_EVENT_TYPES_L2 if p == l1],
+        )
+        for l1, label in BASEL_L1_LABELS.items()
+    ]
+
+
+LOSS_CONVERSION_BASIS = (
+    "Each loss converts at the rate in force on its accounting date (the date it was booked), "
+    "else its discovery date, else its occurrence date; an event with none of these dates converts "
+    "at today's rate."
+)
+
+
+class LossSummaryL2Row(BaseModel):
+    #: "" = events not yet categorised at level 2.
+    basel_event_type_l2: str
+    label: str
     count: int
     gross_loss: float
     net_loss: float
+
+
+class LossSummaryRow(BaseModel):
+    basel_event_type: str
+    label: str = ""
+    count: int
+    #: Converted to the reporting currency; amounts with no rate are excluded (see
+    #: ``unconverted_count`` here and ``LossSummary.unconverted``).
+    gross_loss: float
+    net_loss: float
+    unconverted_count: int = 0
+    level2: list[LossSummaryL2Row] = []
 
 
 class LossSummary(BaseModel):
@@ -945,24 +1024,68 @@ class LossSummary(BaseModel):
     total_gross: float
     total_net: float
     total_count: int
+    #: Decision 4: every amount above is in this currency.
+    reporting_currency: str = "PKR"
+    #: Which date each event converts at.
+    conversion_basis: str = LOSS_CONVERSION_BASIS
+    #: Gross amounts with no exchange rate on or before their date, never added in.
+    unconverted: list[UnconvertedAmount] = []
+    gross: MoneyTotalRead = MoneyTotalRead()
+    net: MoneyTotalRead = MoneyTotalRead()
+
+
+def summarise_losses(events, book: fx.RateBook) -> LossSummary:
+    """Loss roll-up by Basel level 1 and level 2, in the reporting currency. Pure.
+
+    Every event is counted; only converted amounts are summed. An event whose currency has
+    no rate on or before its conversion date is listed in ``unconverted`` instead.
+    """
+    gross_all, net_all = fx.MoneyTotal(book), fx.MoneyTotal(book)
+    groups: dict[str, dict] = {}
+    for e in events:
+        l1 = getattr(e.basel_event_type, "value", e.basel_event_type)
+        l2 = (getattr(e, "basel_event_type_l2", "") or "").strip()
+        on = fx.loss_conversion_date(e)
+        g = groups.setdefault(l1, {"gross": fx.MoneyTotal(book), "net": fx.MoneyTotal(book), "l2": {}})
+        sub = g["l2"].setdefault(l2, {"gross": fx.MoneyTotal(book), "net": fx.MoneyTotal(book)})
+        gross = e.gross_loss or 0
+        net = float(gross) - float(e.recovery or 0)
+        for total in (gross_all, g["gross"], sub["gross"]):
+            total.add(gross, e.currency, on)
+        for total in (net_all, g["net"], sub["net"]):
+            total.add(net, e.currency, on)
+    order = list(BASEL_L1_LABELS)
+    rows = []
+    for l1 in sorted(groups, key=lambda k: order.index(k) if k in order else len(order)):
+        g = groups[l1]
+        l2_order = [k for k, p, _n, _e in BASEL_EVENT_TYPES_L2 if p == l1]
+        level2 = [
+            LossSummaryL2Row(
+                basel_event_type_l2=k, label=BASEL_L2_LABELS.get(k, "Not categorised at level 2"),
+                count=v["gross"].count, gross_loss=fx.money(v["gross"].total), net_loss=fx.money(v["net"].total),
+            )
+            for k, v in sorted(g["l2"].items(), key=lambda kv: l2_order.index(kv[0]) if kv[0] in l2_order else 99)
+        ]
+        rows.append(LossSummaryRow(
+            basel_event_type=l1, label=BASEL_L1_LABELS.get(l1, l1), count=g["gross"].count,
+            gross_loss=fx.money(g["gross"].total), net_loss=fx.money(g["net"].total),
+            unconverted_count=g["gross"].unconverted_count, level2=level2,
+        ))
+    gross_d = gross_all.as_dict()
+    return LossSummary(
+        rows=rows,
+        total_gross=gross_d["total"],
+        total_net=fx.money(net_all.total),
+        total_count=gross_all.count,
+        reporting_currency=book.reporting_currency,
+        unconverted=[UnconvertedAmount(**u) for u in gross_d["unconverted"]],
+        gross=MoneyTotalRead(**gross_d),
+        net=MoneyTotalRead(**net_all.as_dict()),
+    )
 
 
 @router.get("/loss-events-summary", response_model=LossSummary, dependencies=[_READ],
-            summary="Operational loss roll-up by Basel event type")
-async def loss_summary(db: DbSession) -> LossSummary:
+            summary="Operational loss roll-up by Basel event type (levels 1 and 2), in the reporting currency")
+async def loss_summary(db: DbSession, user: CurrentUser) -> LossSummary:
     events = (await db.scalars(select(LossEvent).where(LossEvent.deleted.is_(False)))).all()
-    groups: dict[str, dict] = defaultdict(lambda: {"count": 0, "gross": 0.0, "net": 0.0})
-    for e in events:
-        g = groups[e.basel_event_type.value]
-        g["count"] += 1
-        g["gross"] += float(e.gross_loss or 0)
-        g["net"] += e.net_loss
-    rows = [LossSummaryRow(basel_event_type=k, count=v["count"],
-                           gross_loss=round(v["gross"], 2), net_loss=round(v["net"], 2))
-            for k, v in sorted(groups.items())]
-    return LossSummary(
-        rows=rows,
-        total_gross=round(sum(r.gross_loss for r in rows), 2),
-        total_net=round(sum(r.net_loss for r in rows), 2),
-        total_count=sum(r.count for r in rows),
-    )
+    return summarise_losses(events, await fx.load_rate_book(db, user.tenant_id))

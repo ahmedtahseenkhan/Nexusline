@@ -3,10 +3,10 @@
 * ``GET  /settings/organisation`` — any signed-in user. Returns the organisation's
   currency, timezone, date format, fiscal-year start month, phone country and retention
   window, creating the row with defaults (PKR, Asia/Karachi, DD/MM/YYYY, July, PK,
-  90 days) the first time anyone asks. Every page formats dates and money from this.
+  3650 days) the first time anyone asks. Every page formats dates and money from this.
 * ``PATCH /settings/organisation`` — ``settings:manage`` (Admin). Partial update; each
   field is validated (ISO 4217 currency from the shipped list, IANA timezone, a known
-  date format, month 1–12, two-letter phone country, retention 30–3650 days) and every
+  date format, month 1–12, two-letter phone country, retention 365–3650 days) and every
   change is written to the activity log with before/after values.
 * ``GET  /settings/organisation/options`` — any signed-in user. The currencies, date
   formats and timezones the form offers.

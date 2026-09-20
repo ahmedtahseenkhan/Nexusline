@@ -16,7 +16,9 @@ with its count, its items overdue first, and a deep link per item. The kinds:
   treatment actions, issue actions and issues you own; incidents assigned to you;
   control tests on controls you own or operate; tests a reviewer returned to you; risk
   reviews; periodic reviews and attestations of records you own (policies, third
-  parties, and every record type the attestation panel covers); KRI readings you supply
+  parties, and every record type the attestation panel covers); attestations of
+  high-stakes records awaiting your independent second signature (decision 9, which is
+  what completes them); KRI readings you supply
   (the next reading is due one ``frequency`` after the last one, within
   :data:`KRI_HORIZON_DAYS`); actions on open RCSAs you own.
 * **Policies to acknowledge** — published policies whose roles include one of yours (or
@@ -36,7 +38,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import String, Uuid, and_, cast, exists, false, literal, or_, select, union_all
+from sqlalchemy import String, Uuid, and_, cast, exists, false, literal, null, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.my_work import MyWorkItem, MyWorkRead, MyWorkSection, TreatmentActionDone
@@ -45,6 +47,9 @@ from app.schemas.my_work import MyWorkItem, MyWorkRead, MyWorkSection, Treatment
 HORIZON_DAYS = 14
 #: KRI readings fall due every cycle; only the next few days are "due".
 KRI_HORIZON_DAYS = 3
+#: Decision 9: a required second signature is owed within a week of the certification —
+#: until it is given the attestation is incomplete and the review clock has not restarted.
+CONFIRM_DAYS = 7
 #: Items shown per section.
 MAX_ITEMS = 50
 #: Rows read per kind (a section's count stops here).
@@ -76,6 +81,9 @@ KINDS: tuple[tuple[str, str, str], ...] = (
     ("risk_review", "Risk reviews due", "Risks you own whose review date is near or past."),
     ("attestation", "Reviews and attestations due",
      "Records you own whose periodic review or attestation is due."),
+    ("attestation_confirm", "Attestations to confirm",
+     "High-stakes records someone has certified; your independent signature is what "
+     "completes the attestation and restarts the review cycle."),
     ("kri_measurement", "KRI readings due", "KRIs you supply data for whose next reading is due."),
     ("rcsa_action", "RCSA actions assigned to you", "Actions on open RCSAs where you are the action owner."),
     ("policy_ack", "Policies to acknowledge",
@@ -679,10 +687,26 @@ async def my_risk_reviews(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     ]
 
 
+def complete_attestation():
+    """SQL for "this attestation counts": signed, and confirmed where decision 9 requires
+    a second signature. One still awaiting that signature has certified nothing, so it
+    does not hold off the review it was meant to record."""
+    from app.models.attestation import Attestation
+
+    return or_(
+        Attestation.confirmation_required.is_(False), Attestation.confirmed_by_id.is_not(None)
+    )
+
+
 async def my_attestations(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     """Periodic reviews of records I own: policies, third parties and assets by their own
-    review date, every other attested record type by its latest attestation's next due
-    date."""
+    review date, every other attested record type by its latest *complete* attestation's
+    next due date.
+
+    Decision 6: only an approved record can be attested. A record whose approval is
+    incomplete still appears (its review is still owed) but asks for the approval first
+    (``record_workflow.attest_work_note``); a retired record owes nothing and is left out.
+    """
     from app.models.asset import Asset
     from app.models.attestation import Attestation
     from app.models.enums import VendorStatus
@@ -690,51 +714,61 @@ async def my_attestations(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     from app.models.vendor import Vendor
     from app.services import record_registry
     from app.services.notifications import NATIVE_REVIEW_ENTITY_TYPES, link_to, owner_column
+    from app.services.record_workflow import RETIRED, attest_work_note, state_value
+
+    def retired(state: Any) -> bool:
+        return state is not None and state_value(state) == RETIRED
 
     out: list[MyWorkItem] = []
-    for pid, ref, title, due in (
+    for pid, ref, title, due, wf in (
         await db.execute(
-            select(Policy.id, Policy.reference, Policy.title, Policy.next_review_date)
+            select(Policy.id, Policy.reference, Policy.title, Policy.next_review_date, Policy.workflow_status)
             .where(Policy.owner_id == ctx.user_id, Policy.deleted.is_(False),
                    Policy.next_review_date.is_not(None), Policy.next_review_date <= ctx.horizon)
             .limit(ROW_CAP)
         )
     ).all():
+        if retired(wf):
+            continue
         out.append(ctx.mk("attestation", due=due, id=pid, title=title, reference=ref or "",
-                          subtitle="Policy review", link=_link("/policies", pid),
+                          subtitle=attest_work_note(wf) or "Policy review", link=_link("/policies", pid),
                           entity_type="policy", entity_id=pid))
-    for vid, name, due in (
+    for vid, name, due, wf in (
         await db.execute(
-            select(Vendor.id, Vendor.name, Vendor.next_review_date)
+            select(Vendor.id, Vendor.name, Vendor.next_review_date, Vendor.workflow_status)
             .where(Vendor.relationship_owner_id == ctx.user_id, Vendor.deleted.is_(False),
                    Vendor.status != VendorStatus.offboarded,  # nothing left to review
                    Vendor.next_review_date.is_not(None), Vendor.next_review_date <= ctx.horizon)
             .limit(ROW_CAP)
         )
     ).all():
-        out.append(ctx.mk("attestation", due=due, id=vid, title=name, subtitle="Third-party review",
+        if retired(wf):
+            continue
+        out.append(ctx.mk("attestation", due=due, id=vid, title=name,
+                          subtitle=attest_work_note(wf) or "Third-party review",
                           link=_link("/vendors", vid), entity_type="vendor", entity_id=vid))
     # Assets by their own review date (record-page B4), for their approval owner (an
     # asset's owner is a business unit, not a person).
     # Assets carry that owner as free text, so match it like the other text owners.
-    for aid, name, aclass, due, approver in (
+    for aid, name, aclass, due, approver, wf in (
         await db.execute(
-            select(Asset.id, Asset.name, Asset.asset_class, Asset.next_review_date, Asset.workflow_owner)
+            select(Asset.id, Asset.name, Asset.asset_class, Asset.next_review_date, Asset.workflow_owner,
+                   Asset.workflow_status)
             .where(Asset.workflow_owner != "", Asset.deleted.is_(False),
                    Asset.next_review_date.is_not(None), Asset.next_review_date <= ctx.horizon)
             .limit(ROW_CAP)
         )
     ).all():
-        if not names_me(ctx, approver):
+        if not names_me(ctx, approver) or retired(wf):
             continue
         it = getattr(aclass, "value", aclass) == "it_asset"
         out.append(ctx.mk("attestation", due=due, id=aid, title=name,
-                          subtitle="IT asset review" if it else "Information asset review",
+                          subtitle=attest_work_note(wf) or ("IT asset review" if it else "Information asset review"),
                           link=link_to("asset", aid, asset_class=aclass), entity_type="asset", entity_id=aid))
 
     latest = (
         select(Attestation.entity_type, Attestation.entity_id, Attestation.next_due)
-        .where(Attestation.entity_type.not_in(sorted(NATIVE_REVIEW_ENTITY_TYPES)))
+        .where(Attestation.entity_type.not_in(sorted(NATIVE_REVIEW_ENTITY_TYPES)), complete_attestation())
         .distinct(Attestation.entity_type, Attestation.entity_id)
         .order_by(Attestation.entity_type, Attestation.entity_id, Attestation.attested_at.desc())
     ).subquery()
@@ -756,7 +790,9 @@ async def my_attestations(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
         cols = model.__table__.columns
         title = next((cols[a] for a in record_registry.TITLE_ATTRIBUTES if a in cols), None)
         ref = cols.get("reference")
-        wanted = [cols["id"], ref if ref is not None else literal(""), title if title is not None else literal("")]
+        wf_col = cols.get("workflow_status")
+        wanted = [cols["id"], ref if ref is not None else literal(""), title if title is not None else literal(""),
+                  wf_col if wf_col is not None else null()]
         if model is Asset:
             wanted.append(cols["asset_class"])
         stmt = select(*wanted).where(cols["id"].in_(list(dues)), owner == ctx.user_id)
@@ -764,11 +800,117 @@ async def my_attestations(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
             stmt = stmt.where(cols["deleted"].is_(False))
         label = record_registry.type_label(etype, model)
         for row in (await db.execute(stmt)).all():
-            rid = row[0]
+            rid, wf = row[0], row[3]
+            if retired(wf):
+                continue
             out.append(ctx.mk(
                 "attestation", due=dues[rid], id=rid, title=str(row[2] or row[1] or label),
-                reference=str(row[1] or ""), subtitle=f"{label} attestation",
-                link=link_to(etype, rid, asset_class=row[3] if model is Asset else None),
+                reference=str(row[1] or ""), subtitle=attest_work_note(wf) or f"{label} attestation",
+                link=link_to(etype, rid, asset_class=row[4] if model is Asset else None),
+                entity_type=etype, entity_id=rid,
+            ))
+    # Decision 9: a record the owner has already certified is still listed — its review is
+    # not complete until someone else confirms it — but it says so instead of asking for
+    # an attestation that has been made.
+    waiting = await awaiting_confirmation(db, out)
+    for item in out:
+        if (item.entity_type, item.entity_id) in waiting:
+            item.subtitle = "Attested — awaiting independent confirmation"
+    return out
+
+
+async def awaiting_confirmation(db: AsyncSession, items: Sequence[MyWorkItem]) -> set[tuple[str, Any]]:
+    """``(entity_type, id)`` of the listed records whose newest attestation is signed but
+    still owes its required second signature. One query."""
+    from app.models.attestation import Attestation
+
+    pairs = [(i.entity_type, i.entity_id) for i in items if i.entity_type and i.entity_id]
+    if not pairs:
+        return set()
+    rows = (
+        await db.execute(
+            select(Attestation.entity_type, Attestation.entity_id)
+            .where(
+                Attestation.confirmation_required.is_(True),
+                Attestation.confirmed_by_id.is_(None),
+                Attestation.entity_id.in_([eid for _t, eid in pairs]),
+            )
+            .limit(ROW_CAP)
+        )
+    ).all()
+    found = {(etype, eid) for etype, eid in rows}
+    return {p for p in pairs if p in found}
+
+
+async def attestations_to_confirm(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    """Attestations waiting for my independent second signature (decision 9).
+
+    A high-stakes record — a key control, a critical or high residual risk, a material
+    outsourcing arrangement or third party, any policy — is certified by its owner, and
+    that certification only counts once somebody else confirms it: until then the review
+    clock has not restarted. Nobody is named as the confirmer, so it is offered to
+    everyone who may write that record and did not sign it, exactly as an approval
+    addressed to no one in particular is. Owed within :data:`CONFIRM_DAYS` of signing.
+    """
+    from app.models.asset import Asset
+    from app.models.attestation import Attestation
+    from app.services import entity_types, record_registry
+    from app.services.notifications import link_to
+    from app.services.record_workflow import RETIRED, state_value
+
+    rows = (
+        await db.execute(
+            select(Attestation.id, Attestation.entity_type, Attestation.entity_id,
+                   Attestation.attested_at, Attestation.attested_by_email)
+            .where(
+                Attestation.confirmation_required.is_(True),
+                Attestation.confirmed_by_id.is_(None),
+                or_(Attestation.attested_by_id.is_(None), Attestation.attested_by_id != ctx.user_id),
+            )
+            .order_by(Attestation.attested_at.desc())
+            .limit(ROW_CAP)
+        )
+    ).all()
+    # Newest pending attestation per record; only types this user may write.
+    pending: dict[tuple[str, Any], Any] = {}
+    for row in rows:
+        spec = entity_types.ENTITY_TYPES.get(row.entity_type)
+        if spec is None or not ctx.holds(spec.write_perm):
+            continue
+        pending.setdefault((row.entity_type, row.entity_id), row)
+
+    by_type: dict[str, dict[Any, Any]] = {}
+    for (etype, eid), row in pending.items():
+        by_type.setdefault(etype, {})[eid] = row
+    out: list[MyWorkItem] = []
+    for etype, wanted in by_type.items():
+        model = record_registry.model_for(etype)
+        if model is None:
+            continue
+        cols = model.__table__.columns
+        title = next((cols[a] for a in record_registry.TITLE_ATTRIBUTES if a in cols), None)
+        ref = cols.get("reference")
+        wf_col = cols.get("workflow_status")
+        select_cols = [cols["id"], ref if ref is not None else literal(""),
+                       title if title is not None else literal(""),
+                       wf_col if wf_col is not None else null()]
+        if model is Asset:
+            select_cols.append(cols["asset_class"])
+        stmt = select(*select_cols).where(cols["id"].in_(list(wanted)))
+        if "deleted" in cols:
+            stmt = stmt.where(cols["deleted"].is_(False))
+        label = record_registry.type_label(etype, model)
+        for record in (await db.execute(stmt)).all():
+            rid, wf = record[0], record[3]
+            if wf is not None and state_value(wf) == RETIRED:
+                continue  # a retired record owes no review, so its attestation owes none either
+            row = wanted[rid]
+            out.append(ctx.mk(
+                "attestation_confirm", due=row.attested_at + timedelta(days=CONFIRM_DAYS),
+                id=row.id, title=str(record[2] or record[1] or label), reference=str(record[1] or ""),
+                subtitle=f"Certified {row.attested_at} by {row.attested_by_email or 'another user'} — "
+                         "confirm it to complete the attestation",
+                link=link_to(etype, rid, asset_class=record[4] if model is Asset else None),
                 entity_type=etype, entity_id=rid,
             ))
     return out
@@ -1211,6 +1353,7 @@ BUILDERS = {
     "test_returned": my_returned_tests,
     "risk_review": my_risk_reviews,
     "attestation": my_attestations,
+    "attestation_confirm": attestations_to_confirm,
     "kri_measurement": my_kri_readings,
     "rcsa_action": my_rcsa_actions,
     "policy_ack": policies_to_acknowledge,

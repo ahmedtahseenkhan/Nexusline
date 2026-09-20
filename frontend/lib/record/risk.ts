@@ -28,7 +28,7 @@
          within, ≤ tolerance elevated, else breach). */
 
 import type { Basis, Ctx, Fmt, OpenPoint, ScaleModel, Seg, TileModel, TileValue, Tone } from "./types";
-import { approvalWithoutStepText, exceptionStateText, joinList, missedReviewsText, plural, quote, segsText, sentenceCase, truncate } from "./text";
+import { approvalWithoutStepText, attestFix, attestationNotePoint, exceptionStateText, joinList, missedReviewsText, plural, quote, segsText, sentenceCase, truncate } from "./text";
 
 // ------------------------------------------------------------------ input types
 
@@ -824,7 +824,6 @@ export function riskOpenPoints(input: RiskInput, ctx: Ctx): OpenPoint[] {
   const notes: OpenPoint[] = [];
   const verdict = appetiteVerdict(r);
   const acc = acceptanceView(r, now);
-  const canAttest = gov.attestation?.canAttest !== false;
   const why = trimmed(r.assessment_rationale);
 
   // F-21: a risk leaves Draft only with an owner and a business unit; both points say so.
@@ -877,7 +876,8 @@ export function riskOpenPoints(input: RiskInput, ctx: Ctx): OpenPoint[] {
     gaps.push({
       id: "risk.review_overdue", level: "gap",
       text: [`Review overdue since ${fmt.date(r.next_review_date)}.`],
-      action: canAttest ? { kind: "attest", target: "attest", label: "Attest…" } : undefined,
+      // Decision 6: a draft or in-review risk is approved first; the fix says so.
+      action: attestFix(gov),
     });
 
   if (acc.inForce?.expires_at) {
@@ -911,8 +911,8 @@ export function riskOpenPoints(input: RiskInput, ctx: Ctx): OpenPoint[] {
       text: [`${sentenceCase(r.status)} but not submitted for approval`],
       action: { kind: "focus", target: "rec-primary", label: "Submit for review" },
     });
-  if (state !== null && state !== "draft" && gov.attestation?.status === "never")
-    notes.push({ id: "risk.never_attested", level: "note", text: ["Never attested"], action: canAttest ? { kind: "attest", target: "attest", label: "Attest…" } : undefined });
+  const attPoint = attestationNotePoint("risk", gov, { fmt });
+  if (attPoint) notes.push(attPoint);
   if (r.treatment_strategy === "mitigate" && (r.treatment_progress?.total ?? 0) === 0)
     notes.push({ id: "risk.mitigate_no_actions", level: "note", text: ["Mitigate with no actions"], action: { kind: "open", target: "add-action", label: "Add action" } });
   if (r.target_score == null)

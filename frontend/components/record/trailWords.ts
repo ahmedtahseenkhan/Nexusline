@@ -67,8 +67,9 @@ export function trailRowWords(row: {
   // Only the audit action `workflow_import` is the backfill; a bare "import" row (a bulk
   // import of the register) is an ordinary change by the person who ran it.
   const to = row.changes && typeof row.changes.to === "string" ? row.changes.to : null;
+  const via = row.changes && typeof row.changes.via === "string" ? row.changes.via : null;
   const step = row.action.startsWith("workflow_") ? row.action : "workflow_change";
-  const w = workflowStepWords({ action: step, actor_email: row.actor_email, to_state: to, summary: row.summary });
+  const w = workflowStepWords({ action: step, actor_email: row.actor_email, to_state: to, summary: row.summary, via });
   if (row.action === "workflow_import" && w.sentence) return { actor: null, verb: actionWord(row.action), sentence: w.sentence };
   return { actor: w.actor, verb: actionWord(row.action), sentence: null };
 }

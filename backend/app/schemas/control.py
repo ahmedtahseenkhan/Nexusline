@@ -295,10 +295,14 @@ class ControlRead(ControlBase):
     last_audit_date: date | None = None
     next_maintenance_date: date | None = None
     last_maintenance_date: date | None = None
-    #: The test log: every test on file, and the result of the newest one recorded
-    #: (reviewed or not).
+    #: The test log: every test on file ("tests recorded"), and the result of the newest
+    #: one recorded (reviewed or not). For the Tests tab only — never a count of assurance.
     audit_count: int = 0
     last_audit_result: TestResult | None = None
+    #: Decision 7 (2026-09-17): "tested" means reviewed. The count every rating, page
+    #: headline, list column and export reads (= ``reviewed_audit_count``); tests awaiting
+    #: a reviewer are ``pending_review_count``, shown beside it.
+    tested_count: int = 0
     #: What ratings and reliance read (``control_assurance.latest_counting_test``): tests
     #: that decide a rating — conclusive, and reviewed or recorded before reviews existed.
     #: The same count, result and date a risk sees on this control (``ControlAssuranceRef``)

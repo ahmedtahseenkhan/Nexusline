@@ -86,19 +86,19 @@ def test_fiscal_month_out_of_range(month):
         validate_month(month)
 
 
-@pytest.mark.parametrize("days", [RETENTION_MIN_DAYS, 90, 365, RETENTION_MAX_DAYS])
+@pytest.mark.parametrize("days", [RETENTION_MIN_DAYS, 730, 3650, RETENTION_MAX_DAYS])
 def test_retention_within_bounds(days):
     assert validate_retention_days(days) == days
 
 
-@pytest.mark.parametrize("days", [0, 29, RETENTION_MAX_DAYS + 1, -90])
+@pytest.mark.parametrize("days", [0, 29, 90, 364, RETENTION_MAX_DAYS + 1, -90])
 def test_retention_outside_bounds(days):
     with pytest.raises(ValueError, match="Retention"):
         validate_retention_days(days)
 
 
-def test_retention_bounds_are_30_days_to_ten_years():
-    assert (RETENTION_MIN_DAYS, RETENTION_MAX_DAYS) == (30, 3650)
+def test_retention_bounds_are_one_to_ten_years():
+    assert (RETENTION_MIN_DAYS, RETENTION_MAX_DAYS) == (365, 3650)
 
 
 @pytest.mark.parametrize("code,expected", [("pk", "PK"), ("AE", "AE"), (" gb ", "GB")])
@@ -129,8 +129,8 @@ def test_update_schema_runs_the_validators():
 
 
 def test_partial_update_leaves_other_fields_unset():
-    body = TenantSettingsUpdate(retention_days=120)
-    assert body.model_dump(exclude_unset=True) == {"retention_days": 120}
+    body = TenantSettingsUpdate(retention_days=1825)
+    assert body.model_dump(exclude_unset=True) == {"retention_days": 1825}
 
 
 def test_defaults_are_themselves_valid():
@@ -139,7 +139,7 @@ def test_defaults_are_themselves_valid():
     assert validate_date_format(DEFAULTS["date_format"]) in DATE_FORMATS
     assert validate_month(DEFAULTS["fiscal_year_start_month"]) == 1  # calendar year
     assert validate_phone_country(DEFAULTS["phone_country"]) == "PK"
-    assert validate_retention_days(DEFAULTS["retention_days"]) == 90
+    assert validate_retention_days(DEFAULTS["retention_days"]) == 3650
 
 
 # ------------------------------------------------------------------- audit ---

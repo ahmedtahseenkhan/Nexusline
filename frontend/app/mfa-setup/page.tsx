@@ -57,11 +57,13 @@ export default function MfaSetupPage() {
         </div>
         <h1 style={{ marginBottom: 6 }}>Set up two-factor authentication</h1>
         <p className="muted" style={{ fontSize: 14, lineHeight: 1.6 }}>
-          Your role can approve or administer records, so your organisation requires a second
-          factor for {me.email}. The grace period
-          {me.mfa_enrolment_due ? ` ended on ${formatDate(me.mfa_enrolment_due)}` : " has ended"}
-          ; until you enrol, this session can do nothing else. Add NexusLine to an
-          authenticator app, confirm a code, then sign in again with it.
+          {me.mfa_required_for_everyone
+            ? "Everyone who signs in with a password must use two-factor authentication"
+            : "Your role can approve or administer records, so your organisation requires two-factor authentication for it"}
+          {" "}({me.email}). The grace period
+          {me.mfa_enrolment_due ? ` ended on ${formatDate(me.mfa_enrolment_due)}` : " has ended"}. Until you
+          finish set-up you can only use this page. Add NexusLine to an authenticator app, enter the
+          6-digit code it shows, then sign in again with a code.
         </p>
         <SecuritySettings enrolOnly onEnabled={() => signOut("?mfa=enabled")} />
         <button type="button" className="btn secondary" style={{ marginTop: 14 }} onClick={() => signOut()}>

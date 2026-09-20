@@ -44,6 +44,8 @@ from app.schemas.outsourcing import (
 from app.services.refs import next_reference
 from app.services import audit as audit_log
 from app.services import ref_fields as rf
+from app.services import fx
+from app.schemas.fx import MoneyTotalRead
 
 router = APIRouter(tags=["outsourcing"])
 
@@ -314,6 +316,9 @@ class OutsourcingSummary(BaseModel):
     #: Material arrangements that are live (active / under review) without the
     #: materiality rationale, exit plan and substitutability on file.
     live_missing_facts: int = 0
+    #: Decision 4: contract value of arrangements that are not terminated, in the reporting
+    #: currency at today's rates; values with no rate are listed in ``unconverted``.
+    contract_value: MoneyTotalRead = MoneyTotalRead()
 
 
 @router.get("/outsourcing-summary", response_model=OutsourcingSummary, dependencies=[_READ],
@@ -328,6 +333,11 @@ async def outsourcing_summary(db: DbSession) -> OutsourcingSummary:
     contracts_expiring_90d = 0
     exit_plans_untested = 0
     hard = hard_untested = unassessed = high_conc = live_missing = 0
+    valued = [a for a in rows if getattr(a, "contract_value", None) is not None
+              and a.status != OutsourcingStatus.terminated]
+    contract_value = fx.MoneyTotal(await fx.load_rate_book(db) if valued else fx.RateBook(None))
+    for a in valued:
+        contract_value.add(a.contract_value, a.contract_currency)  # stock figure: today's rate
     for a in rows:
         by_materiality[a.materiality.value] += 1
         is_material = a.materiality == OutsourcingMateriality.material
@@ -369,4 +379,6 @@ async def outsourcing_summary(db: DbSession) -> OutsourcingSummary:
         substitutability_unassessed=unassessed,
         high_concentration=high_conc,
         live_missing_facts=live_missing,
+        # Nothing valued: no rate lookup, and no reporting currency claimed ("" = the organisation's).
+        contract_value=MoneyTotalRead(**{**contract_value.as_dict(), **({} if valued else {"reporting_currency": ""})}),
     )

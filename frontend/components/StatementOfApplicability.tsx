@@ -188,7 +188,7 @@ export default function StatementOfApplicability({ frameworkId, frameworkName, o
               <th style={{ width: "26%" }}>Justification</th>
               <th style={{ width: "24%" }}>Implementing controls</th>
               <th style={{ width: 120 }}>Status</th>
-              <th style={{ width: 110 }}>Last test</th>
+              <th style={{ width: 120 }} title="Only tests a reviewer has signed off count; tests awaiting review are shown beneath.">Last reviewed test</th>
             </tr>
           </thead>
           <tbody>
@@ -305,6 +305,11 @@ export default function StatementOfApplicability({ frameworkId, frameworkName, o
                         <div className="muted" style={{ fontSize: 11.5 }}>{words(r.last_test_result)}</div>
                       </>
                     ) : <span className="muted">Never</span>}
+                    {(r.pending_review_count ?? 0) > 0 && (
+                      <div className="muted" style={{ fontSize: 11.5 }}>
+                        {r.pending_review_count} {r.pending_review_count === 1 ? "test" : "tests"} awaiting review
+                      </div>
+                    )}
                   </td>
                 </tr>
               );

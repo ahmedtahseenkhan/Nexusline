@@ -24,10 +24,17 @@
      note offers Attest only when the server allows it and says why not otherwise.
      Absent → the action stays and the attest call's refusal shows inline.
    - B10b import backfill (`ctx.gov.lastStep.action === "import"`): the approval gap says
-     "Imported as approved, no approver recorded" — nobody is named. */
+     "Imported as approved, no approver recorded" — nobody is named.
+   - Decision 7 (2026-09-17) `tested_count` / `reviewed_audit_count` / `last_reviewed_*`:
+     "tested" means signed off by a reviewer. The headline, the Testing tile and the
+     untested gap read reviewed tests only and show tests awaiting review beside them
+     ("1 test awaiting review"). Absent (older API) → the test log's count and result,
+     worded "on file", never "reviewed".
+   - Decision 6 (2026-09-17): attesting needs a complete approval. While the approval is
+     draft or in review the note asks for the approval instead of offering Attest. */
 
 import { htmlToText } from "@/lib/sanitize";
-import { cadenceNoun, exceptionStateText, importedApprovalText, joinList, plural, quote, segsText, sentenceCase, textOnlyPerson, truncate } from "./text";
+import { attestationNotePoint, cadenceNoun, exceptionStateText, importedApprovalText, joinList, plural, quote, segsText, sentenceCase, textOnlyPerson, truncate } from "./text";
 import type { Basis, Ctx, Fmt, OpenPoint, Seg, TileModel, TileValue } from "./types";
 
 /* ------------------------------------------------------------------ input types */
@@ -75,8 +82,11 @@ export type ControlRecord = {
   last_audit_date: string | null;
   next_maintenance_date: string | null;
   last_maintenance_date: string | null;
-  /** The test log: every test on file, and the newest one's result (reviewed or not). */
+  /** The test log: every test on file ("tests recorded"), and the newest one's result
+   *  (reviewed or not). The Tests tab only — never read as assurance. */
   audit_count: number;
+  /** Decision 7: reviewed tests (= `reviewed_audit_count`). Optional: older API. */
+  tested_count?: number;
   last_audit_result: string | null;
   /** What ratings and risk credit read: tests that count (reviewed, or recorded before
    *  reviews existed). The same view a risk sees on this control (B2). Optional: older API. */
@@ -186,7 +196,7 @@ export const CONTROL_OPERATOR_HINT = "Runs the control day to day.";
 export const CONTROL_SOURCE_HINT = "Where this control comes from. Its classification is not recorded.";
 /** OpenPoints `clearText`. */
 export const CONTROL_CLEAR_TEXT = "No open points: owner, operator, procedure, tests and approval are on file.";
-export const TESTS_REVIEW_NOTE = "A test changes the rating only once someone other than its tester approves it.";
+export const TESTS_REVIEW_NOTE = "A test counts as a test — and changes the rating — only once someone other than its tester approves it. Tests awaiting review are listed here and counted apart.";
 
 /** How the combined rating came about, in one sentence (the effectiveness line and the register tooltip). */
 export const EFFECTIVENESS_BASIS_NOTE: Readonly<Record<string, string>> = {
@@ -478,6 +488,31 @@ export function monitoringTestLine(t: ControlMonitoringTest, fmt: Pick<Fmt, "dat
   return `Passed ${fmt.date(t.last_run)}${rate}${t.overdue ? " · overdue" : ""}${check}`;
 }
 
+/* ------------------------------------------------------------------ tested (decision 7) */
+
+/** Whether the API sent the reviewed-only view (decision 7); an older API sends only the log. */
+function hasReviewedView(c: ControlRecord): boolean {
+  return c.tested_count !== undefined || c.reviewed_audit_count !== undefined;
+}
+
+/** How many tests count as "tested": signed off by a reviewer (or recorded before reviews
+ *  existed). An older API gives the log's count. */
+export function testedCount(c: ControlRecord): number {
+  return c.tested_count ?? c.reviewed_audit_count ?? c.audit_count ?? 0;
+}
+
+/** The last reviewed test's result and date (older API: the newest recorded). */
+export function lastTested(c: ControlRecord): { result: string; date: string | null } {
+  return hasReviewedView(c)
+    ? { result: c.last_reviewed_result ?? "", date: c.last_reviewed_date ?? null }
+    : { result: c.last_audit_result ?? "", date: c.last_audit_date ?? null };
+}
+
+/** "1 test awaiting review" / "" when none. */
+export function awaitingReviewText(n: number | null | undefined): string {
+  return n && n > 0 ? `${plural(n, "test")} awaiting review` : "";
+}
+
 /* ------------------------------------------------------------------ headline */
 
 /** "{E}{basisClause}; {clock}; {reliedOn}." (spec §4.2) */
@@ -487,8 +522,8 @@ export function controlHeadline({ control: c }: ControlInput, { fmt }: Ctx): Seg
   if (c.status === "planned") clock = ["planned, so no test clock yet"];
   else if (c.status === "retired") clock = ["retired"];
   else if (c.is_audit_overdue) clock = ["test overdue since ", { b: fmt.date(c.next_audit_date) }];
-  else if (c.audit_count === 0) clock = ["never tested"];
-  else if (c.last_audit_date) clock = ["last tested ", { b: fmt.date(c.last_audit_date) }];
+  else if (testedCount(c) === 0) clock = [c.pending_review_count ? `never tested (${awaitingReviewText(c.pending_review_count)})` : "never tested"];
+  else if (lastTested(c).date) clock = ["last tested ", { b: fmt.date(lastTested(c).date) }];
   else clock = ["tested, with no test date on file"];
   const risks = (c.risks ?? []).length;
   const reliedOn: Seg[] = risks === 0 ? ["relied on by no risk"] : ["relied on by ", { b: plural(risks, "risk") }];
@@ -574,14 +609,15 @@ function capClause(c: ControlRecord, issues: ControlLink[]): { withRefs: string;
 
 function testingTile({ control: c, tests }: ControlInput, { fmt }: Ctx): TileModel {
   const k = c.pending_review_count || 0;
-  const result = c.last_audit_result ?? "";
+  const tested = testedCount(c);
+  const { result, date: testedOn } = lastTested(c);
   let value: TileValue;
   if (c.is_audit_overdue) value = { text: "Overdue", tone: "high", badge: true };
   else if (c.status === "planned") value = { text: "No test clock", tone: "hollow" };
   else if (c.status === "retired") value = { text: "Retired", tone: "neutral", badge: true };
-  else if (c.audit_count === 0) value = { text: "Never tested", tone: "hollow" };
+  else if (tested === 0) value = { text: "Never tested", tone: "hollow" };
   else if (RESULT_TONE[result])
-    value = { text: sentenceCase(result), tone: RESULT_TONE[result], badge: true, unit: c.last_audit_date ? fmt.date(c.last_audit_date) : undefined };
+    value = { text: sentenceCase(result), tone: RESULT_TONE[result], badge: true, unit: testedOn ? fmt.date(testedOn) : undefined };
   else value = { text: "Not recorded", tone: "hollow" };
 
   let because: Seg[];
@@ -598,19 +634,17 @@ function testingTile({ control: c, tests }: ControlInput, { fmt }: Ctx): TileMod
       ? ["no next test is scheduled"]
       : [c.is_audit_overdue ? "the next test was due " : "next due ", { b: fmt.date(c.next_audit_date) }];
     const cycle = c.next_audit_date && hasCycle(c.audit_frequency) ? ` (${cadenceNoun(c.audit_frequency)} cycle)` : "";
-    // When the newest test is not yet one that counts, say which one the rating and
-    // every risk relying on this control read (spec §5: no unreconciled pair).
-    const lastReviewed = c.last_reviewed_result ?? null;
-    const differs = c.reviewed_audit_count !== undefined && (lastReviewed ?? "") !== result;
-    const reviewedClause: Seg[] = !differs
-      ? []
-      : lastReviewed
-        ? [" Ratings and risk credit use the last reviewed test: ", { b: sentenceCase(lastReviewed) }, c.last_reviewed_date ? `, ${fmt.date(c.last_reviewed_date)}.` : "."]
-        : [" No reviewed test yet, so ratings and risk credit use none."];
+    // Decision 7: the value and the count are reviewed tests only; tests awaiting a
+    // reviewer are named beside them, never inside (spec §5: no unreconciled pair).
+    const reviewed = hasReviewedView(c);
+    const count = reviewed
+      ? (tested === 0 ? "No reviewed test" : plural(tested, "reviewed test"))
+      : `${plural(tested, "test")} on file`;
+    const waiting = k ? ` ${sentenceCase(awaitingReviewText(k))}.` : "";
     because = fit([
-      [`${plural(c.audit_count, "test")} on file; `, ...next, `${cycle}.`, k ? ` ${k} awaiting independent review.` : "", ...reviewedClause],
-      [`${plural(c.audit_count, "test")} on file; `, ...next, ".", k ? ` ${k} awaiting review.` : "", ...reviewedClause],
-      [`${plural(c.audit_count, "test")} on file.`, k ? ` ${k} awaiting review.` : "", ...reviewedClause],
+      [`${count}; `, ...next, `${cycle}.`, waiting],
+      [`${count}; `, ...next, ".", waiting],
+      [`${count}.`, waiting],
     ]);
   }
 
@@ -774,12 +808,14 @@ export function controlOpenPoints({ control: c, suggestionCount, monitoring }: C
       text: ["No operator named"],
       action: { kind: "edit", target: "general", label: "Name operator" },
     });
-  if (live && c.audit_count === 0)
+  if (live && testedCount(c) === 0)
     out.push({
       id: "control.untested_in_operation",
       level: "gap",
-      text: ["In operation but never tested."],
-      action: { kind: "open", target: "record-test", label: "Record test" },
+      text: [pending ? `In operation but never tested: ${awaitingReviewText(pending)}.` : "In operation but never tested."],
+      action: pending
+        ? { kind: "section", target: "tests", label: "Open tests" }
+        : { kind: "open", target: "record-test", label: "Record test" },
     });
   if ((c.effectiveness_basis === "manual" || c.effectiveness_basis === "override") && risks > 0)
     out.push({
@@ -823,14 +859,14 @@ export function controlOpenPoints({ control: c, suggestionCount, monitoring }: C
     });
   const state = gov.workflowState;
   if (state && state !== "draft" && gov.approvalSteps === 0) {
-    // B10b: an import backfill names nobody, and says so.
+    // B10b / B10c: a backfill names nobody, and says so.
     const imported = gov.lastStep?.action === "import";
     out.push({
       id: "control.approved_without_step",
       level: "gap",
       text: [
         imported
-          ? `${importedApprovalText(state)}.`
+          ? `${importedApprovalText(state, gov.lastStep?.via)}.`
           : `Record approval shows ${APPROVAL_STATE_WORD[state] ?? state} but no approval step is on file.`,
       ],
       action: { kind: "focus", target: "rec-signoff", label: "See sign-off" },
@@ -858,7 +894,8 @@ export function controlOpenPoints({ control: c, suggestionCount, monitoring }: C
       text: [monitoringStatusText(mon, fmt)],
       action: { kind: "section", target: "monitoring", label: "Open monitoring" },
     });
-  if (pending > 0)
+  // Named in the untested gap already when nothing reviewed is on file.
+  if (pending > 0 && !(live && testedCount(c) === 0))
     out.push({
       id: "control.pending_review",
       level: "note",
@@ -881,17 +918,9 @@ export function controlOpenPoints({ control: c, suggestionCount, monitoring }: C
       text: [`${plural(suggestionCount, "suggested clause")} to review`],
       action: { kind: "open", target: "suggest-clauses", label: "Review" },
     });
-  const att = gov.attestation;
-  if (state && state !== "draft" && att?.status === "never") {
-    // B1: the server decides whether this viewer may attest; say why not instead of offering it.
-    const blocked = att.canAttest === false;
-    const reason = trimmed(att.blockedReason);
-    out.push({
-      id: "control.never_attested",
-      level: "note",
-      text: [blocked && reason ? `Never attested. ${reason}` : "Never attested"],
-      action: blocked ? undefined : { kind: "attest", target: "attest", label: "Attest…" },
-    });
-  }
+  // B1: the server decides whether this viewer may attest; say why not instead of
+  // offering it. Decision 6: in review asks for the approval; draft and retired say nothing.
+  const attPoint = attestationNotePoint("control", gov, { withReason: true, fmt });
+  if (attPoint) out.push(attPoint);
   return [...out.filter((p) => p.level === "gap"), ...out.filter((p) => p.level === "note")];
 }

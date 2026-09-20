@@ -50,7 +50,7 @@ export const DEFAULT_TENANT_SETTINGS: TenantSettings = {
   date_format: "DD/MM/YYYY",
   fiscal_year_start_month: 1,
   phone_country: "PK",
-  retention_days: 90,
+  retention_days: 3650,
 };
 
 /** ISO 4217 codes offered by every currency select — the same list the API accepts
@@ -244,6 +244,38 @@ export function formatMoney(
         maximumFractionDigits: options.decimals ?? 2,
       }).format(n);
   return `${code} ${number}`;
+}
+
+/* --------------------------------------------------------- converted totals -- */
+
+/** One currency's share of a total (`CurrencyAmount` on the API). */
+export type CurrencyAmount = {
+  currency: string;
+  count: number;
+  /** Sum in the original currency. */
+  amount: number;
+  /** The part of it that was converted, in the reporting currency. */
+  converted?: number;
+  latest_rate_date?: string | null;
+};
+
+/** A total in the organisation's reporting currency (`MoneyTotalRead` on the API).
+ *  Amounts with no exchange rate are in `unconverted` and are *not* in `total`. */
+export type MoneyTotal = {
+  reporting_currency: string;
+  total: number;
+  count?: number;
+  by_currency?: CurrencyAmount[];
+  unconverted?: { currency: string; count: number; amount: number }[];
+};
+
+/** "Excludes 3 USD amounts with no exchange rate", or "" when nothing was left out. */
+export function unconvertedNote(total?: MoneyTotal | null): string {
+  const missing = total?.unconverted ?? [];
+  if (!missing.length) return "";
+  const parts = missing.map((m) => `${m.count} ${m.currency} amount${m.count === 1 ? "" : "s"}`);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  return `Excludes ${list} with no exchange rate`;
 }
 
 /* ---------------------------------------------------------------------- React -- */

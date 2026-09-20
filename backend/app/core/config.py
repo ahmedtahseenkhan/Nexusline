@@ -22,6 +22,13 @@ def _string_list(value: object) -> object:
     return value
 
 
+def _release_build() -> bool:
+    """``core/build.PRODUCTION_BUILD`` — true in a release image. Read at settings load."""
+    from app.core import build
+
+    return bool(build.PRODUCTION_BUILD)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -91,8 +98,12 @@ class Settings(BaseSettings):
     # from their first such login; after that the session can only enrol. SSO sign-ins
     # are exempt (the identity provider owns the second factor); LDAP/AD password
     # sign-ins are not. See app/services/mfa_policy.py.
+    #
+    # Decision 3 (2026-09-17): a release image requires MFA for every password user unless
+    # ``MFA_REQUIRED`` is set explicitly; a dev/test checkout defaults to off so local
+    # sign-in and the test suite need no authenticator.
     mfa_issuer: str = "NexusLine GRC"
-    mfa_required: bool = False
+    mfa_required: bool = Field(default_factory=lambda: _release_build())
     mfa_required_roles: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["admin"])
     mfa_grace_days: int = 7
     # Approve / Reject links in e-mail (phase 3). Deciding from an e-mail skips two-factor

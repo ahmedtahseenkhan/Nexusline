@@ -183,7 +183,7 @@
         "nativeReview": true,
         "nextDue": "2026-09-01",
         "canAttest": false,
-        "blockedReason": "Segregation of duties: you own this policy, so someone else must attest it."
+        "blockedReason": "Segregation of duties: the maker of this policy cannot approve it \u2014 an independent checker must decide."
       }
     },
     "canWrite": true

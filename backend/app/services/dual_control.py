@@ -39,8 +39,12 @@ issue                extend_due_date     approving a later due date on a regulat
 risk                 bulk_archive        archiving risks with no live links (an
                                          immediate action: refused while dual control
                                          applies — configure a rule to allow it)
-<entity type>        attest              attesting a record's review (the person who
-                                         entered the record may not certify it)
+<entity type>        attest              attesting a record's review. Decision 9: this key
+                                         is honoured only where an organisation has
+                                         configured a rule for it — the attest call does
+                                         not fall back to the global switch, because the
+                                         attestation is the record owner's own
+                                         certification (``api/v1/attestations.py``)
 risk, control,       delete              archiving a core record (the person who entered
 policy, business_unit,                   it may not also delete it)
 process, issue,
@@ -53,7 +57,7 @@ With the global switch on and no rule configured, each of these refuses when the
 and the checker are the same person. Single-operator installs (demos, evaluations)
 should either add a second user or set ``ENFORCE_SEGREGATION_OF_DUTIES=false``.
 
-Every organisation now starts with a rule for each of these keys
+Every organisation now starts with a rule for each of these keys **except** ``attest``
 (``services/default_governance.py``: on provisioning, at the end of onboarding, and once
 for older organisations at start-up). They are created enabled when the global switch is
 on — which refuses exactly what the switch alone refused — and disabled when it is off,

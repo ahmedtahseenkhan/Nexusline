@@ -220,6 +220,19 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
         return sum(1 for t in self.audits if control_assurance.counts_towards_rating(t))
 
     @property
+    def tested_count(self) -> int:
+        """Decision 7 (2026-09-17): the number a person reads as "tested" — reviewed tests
+        only (``reviewed_audit_count``). ``audit_count`` is the test log's size."""
+        return self.reviewed_audit_count
+
+    @property
+    def pending_review_count(self) -> int:
+        """Tests awaiting a reviewer: shown beside ``tested_count``, never inside it."""
+        from app.services import control_assurance
+
+        return control_assurance.pending_review_count(self.audits)
+
+    @property
     def last_reviewed_result(self) -> TestResult | None:
         from app.services import control_assurance
 

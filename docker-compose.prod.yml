@@ -95,9 +95,12 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       # --- identity / governance controls (banking baseline) ---
       LDAP_ENABLED: ${LDAP_ENABLED:-false}
-      MFA_REQUIRED: ${MFA_REQUIRED:-false}
-      # Default roles that must use MFA until an organisation sets its own list under
-      # Settings -> Organisation -> Security. Admin and anyone who can approve always must.
+      # Everyone who signs in with a password (local or LDAP/AD) must enrol in MFA
+      # (decision 3). SSO users are exempt: the identity provider owns their second factor.
+      MFA_REQUIRED: ${MFA_REQUIRED:-true}
+      # Only used when MFA_REQUIRED=false: default roles that must use MFA until an
+      # organisation sets its own list under Settings -> Organisation -> Security. Admin
+      # and anyone who can approve always must.
       MFA_REQUIRED_ROLES: ${MFA_REQUIRED_ROLES:-admin}
       MFA_GRACE_DAYS: ${MFA_GRACE_DAYS:-7}
       # Approve / Reject links in e-mail skip two-factor authentication (the link is the

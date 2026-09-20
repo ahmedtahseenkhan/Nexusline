@@ -13,8 +13,11 @@ export interface SoaControl {
   name: string;
   effectiveness: string;
   status: string;
+  /** The last reviewed test (decision 7). */
   last_test_date: string | null;
   last_test_result: string | null;
+  /** Tests awaiting a reviewer (optional: older API). */
+  pending_review_count?: number;
 }
 
 export interface SoaRow {
@@ -30,8 +33,11 @@ export interface SoaRow {
   treatment: string | null;
   coverage: string;
   controls: SoaControl[];
+  /** The newest reviewed test across the implementing controls (decision 7). */
   last_test_date: string | null;
   last_test_result: string | null;
+  /** Tests awaiting a reviewer across the implementing controls — not in the result. */
+  pending_review_count?: number;
   /** Covered via crosswalk: not tested directly, but an equivalent or containing clause of
    *  another framework has a tested control. Never a direct mapping. */
   via_crosswalk?: ViaCrosswalk | null;

@@ -14,6 +14,7 @@ from app.models.enums import AcceptanceStatus
 from app.models.risk import Risk, RiskAcceptance
 from app.core.deps import CurrentUser
 from app.schemas.dashboard import DashboardStats
+from app.services import fx
 from app.services.risk_query import board_register_clause, on_board_register
 from app.services.risk_scoring import effective_score, is_scored
 from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
@@ -37,6 +38,10 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
         )
         or 0
     )
+    # Decision 4: a risk's annual loss expectancy carries no currency of its own — it is
+    # entered in the organisation's reporting currency, so the total is labelled with it
+    # rather than converted.
+    exposure_currency = await fx.reporting_currency(db, user.tenant_id)
     overdue = (
         await db.scalar(
             select(func.count()).select_from(Risk).where(live, Risk.next_review_date < today)
@@ -106,6 +111,7 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
         risks_elevated=appetite_counts["elevated"],
         risks_in_breach=appetite_counts["breach"],
         total_exposure=round(total_exposure, 2),
+        exposure_currency=exposure_currency,
     )
 
 

@@ -19,7 +19,7 @@ from app.services import soa_export as soa
 
 def control(ref, name, eff=ControlEffectiveness.effective, tested=None, result=None):
     return NS(id=uuid.uuid4(), reference=ref, name=name, effectiveness=eff, status=ControlStatus.operational,
-              last_audit_date=tested, last_audit_result=result, deleted=False)
+              last_reviewed_date=tested, last_reviewed_result=result, pending_review_count=0, deleted=False)
 
 
 def req(ref, title="Clause", *, treatment=None, status=ComplianceStatus.not_assessed, controls=(),
@@ -86,7 +86,7 @@ def test_a_row_carries_controls_and_the_latest_test():
     assert [c.reference for c in row.controls] == ["A.8.5", "CTL-2"]
     assert row.last_test_date == date(2026, 8, 1) and row.last_test_result == "passed"
     assert row.controls[0].effectiveness == "effective"
-    assert "last tested 2026-08-01 (passed)" in row.controls[0].label()
+    assert "last reviewed test 2026-08-01 (passed)" in row.controls[0].label()
 
 
 def test_summary_and_filters():

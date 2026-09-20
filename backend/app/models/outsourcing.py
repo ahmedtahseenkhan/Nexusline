@@ -17,7 +17,9 @@ import enum
 import uuid
 from datetime import date
 
-from sqlalchemy import Boolean, Date, ForeignKey, String, Text, Uuid
+from decimal import Decimal
+
+from sqlalchemy import Boolean, Date, ForeignKey, Numeric, String, Text, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -156,6 +158,10 @@ class OutsourcingArrangement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, W
     sbp_approval_ref: Mapped[str] = mapped_column(String(120), default="")
     contract_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     contract_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Decision 4: the arrangement's contract value in its own currency ("" = the
+    # organisation's reporting currency, as on vendor contracts).
+    contract_value: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    contract_currency: Mapped[str] = mapped_column(String(3), default="", nullable=False)
     exit_plan: Mapped[str] = mapped_column(Text, default="")
     exit_plan_tested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     concentration_note: Mapped[str] = mapped_column(Text, default="")

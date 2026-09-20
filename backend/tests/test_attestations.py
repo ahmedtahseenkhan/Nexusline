@@ -22,14 +22,20 @@ OTHER = uuid.uuid4()
 
 
 # -------------------------------------------------------- independence ---
-def test_the_owner_cannot_attest_their_own_record():
-    assert att.attest_refusal(attester_id=ME, owner_id=ME, workflow_status=WorkflowState.approved) == (
-        403, att.OWNER_REFUSAL,
-    )
+def test_the_owner_attests_their_own_record():
+    """Decision 9: the owner is the expected signer — independence comes from the
+    approval (decision 6) and the second signature, not from barring the owner."""
+    assert att.attest_refusal(attester_id=ME, owner_id=ME, workflow_status=WorkflowState.approved) is None
 
 
 def test_someone_else_can_attest_an_approved_record():
     assert att.attest_refusal(attester_id=ME, owner_id=OTHER, workflow_status=WorkflowState.approved) is None
+
+
+def test_an_attestation_by_anyone_but_the_owner_stands_in_for_the_owner():
+    assert att.on_behalf_of(ME, OTHER) == OTHER
+    assert att.on_behalf_of(ME, ME) is None
+    assert att.on_behalf_of(ME, None) is None
 
 
 def test_a_record_with_no_owner_fk_is_judged_on_state_alone():
@@ -50,9 +56,12 @@ def test_draft_is_recognised_as_a_plain_string_and_other_enums():
     assert att.attest_refusal(attester_id=ME, owner_id=None, workflow_status=None) is None
 
 
-def test_ownership_is_reported_before_state():
-    """The owner of a draft is told the reason that still applies after it is submitted."""
-    assert att.attest_refusal(attester_id=ME, owner_id=ME, workflow_status=WorkflowState.draft)[0] == 403
+def test_a_draft_is_refused_to_the_owner_too():
+    """Decision 9 removed the owner refusal, not the draft one: a record still being
+    written certifies nothing, whoever signs it."""
+    assert att.attest_refusal(attester_id=ME, owner_id=ME, workflow_status=WorkflowState.draft) == (
+        409, att.DRAFT_REFUSAL,
+    )
 
 
 # ---------------------------------------------------------- second signature ---
@@ -168,9 +177,12 @@ def test_a_record_s_own_status_decides_whether_it_is_a_draft():
 
     # The reviewer's case: a risk still in Draft can't be attested...
     assert att.lifecycle_state(_Rec(status=RiskStatus.draft, workflow_status=WorkflowState.approved)) == RiskStatus.draft
-    # ...but an assessed risk can, even though nothing has moved its workflow field yet.
-    state = att.lifecycle_state(_Rec(status=RiskStatus.assessed, workflow_status=WorkflowState.draft))
+    # ...an assessed risk passes the draft rule; its approval is judged separately
+    # (decision 6, ``approval_state``), which an unmapped stand-in doesn't have.
+    rec = _Rec(status=RiskStatus.assessed, workflow_status=WorkflowState.draft)
+    state = att.lifecycle_state(rec)
     assert att.attest_refusal(attester_id=ME, owner_id=OTHER, workflow_status=state) is None
+    assert att.approval_state(rec) is None
 
 
 def test_records_without_a_business_status_fall_back_to_the_workflow_field():

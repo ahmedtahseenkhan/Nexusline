@@ -22,7 +22,7 @@ import {
   type TransitionResult,
   type WorkflowActionKey,
 } from "@/lib/records";
-import { importedApprovalText } from "@/lib/record/text";
+import { PREDATES_WORKFLOW, importedApprovalText } from "@/lib/record/text";
 
 /** Past-tense word per approval step, keyed by the history action (`workflow_` prefix
  *  removed): lib/records' map plus `import: "Imported"` — the backfill row the server
@@ -34,9 +34,11 @@ export const WORKFLOW_ACTION_DONE: Readonly<Record<string, string>> = { ...RECOR
 export const SYSTEM_ACTOR_EMAIL = "system@nexusline";
 
 /** How one approval step reads, from a `records.workflow().history` item or a
- *  `workflow_*` audit row. `actor` is null for an import backfill (it never names a
+ *  `workflow_*` audit row. `actor` is null for a platform backfill (it never names a
  *  person) and "System" for other platform rows; `sentence` replaces verb + actor for
- *  the import: "Imported as approved, no approver recorded".
+ *  the backfill: "Imported as approved, no approver recorded", or — where the record was
+ *  already in force before the approval lifecycle existed (`via` `predates_workflow`,
+ *  B10c) — "Approved on upgrade, no approver recorded — it predates the approval workflow".
  *
  *    workflowStepWords({ action: "approve", actor_email: "a@b.com" })   → { verb: "Approved", actor: "a@b.com", sentence: null }
  *    workflowStepWords({ action: "workflow_import", to_state: "approved" }) → { verb: "Imported", actor: null, sentence: "Imported as approved, no approver recorded" } */
@@ -45,12 +47,18 @@ export function workflowStepWords(step: {
   actor_email?: string | null;
   to_state?: string | null;
   summary?: string | null;
+  via?: string | null;
 }): { verb: string; actor: string | null; sentence: string | null } {
   const key = step.action.startsWith("workflow_") ? step.action.slice("workflow_".length) : step.action;
-  const verb = WORKFLOW_ACTION_DONE[key] ?? key.replace(/_/g, " ");
+  const predates = (step.via ?? "") === PREDATES_WORKFLOW;
+  const verb = predates ? "Approved on upgrade" : WORKFLOW_ACTION_DONE[key] ?? key.replace(/_/g, " ");
   if (key === "import") {
     const fromSummary = /^Imported as ([a-z_ ]+?)(?::|,|\s*\(|$)/i.exec((step.summary ?? "").trim())?.[1];
-    return { verb, actor: null, sentence: importedApprovalText(step.to_state || fromSummary || "approved") };
+    return {
+      verb,
+      actor: null,
+      sentence: importedApprovalText(step.to_state || fromSummary || "approved", step.via),
+    };
   }
   const email = (step.actor_email ?? "").trim();
   const actor = !email || email === SYSTEM_ACTOR_EMAIL || email === "system" ? "System" : email;

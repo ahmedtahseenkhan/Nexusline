@@ -56,6 +56,8 @@ const DECISIONS = new Set([
   "approval", "record_review", "test_review", "issue_validation", "due_date_change",
   // Phase 4B: submitted vendor assessments and audit findings whose agreed date has come.
   "assessment_review", "finding_follow_up",
+  // Decision 9: the second signature that completes someone else's attestation.
+  "attestation_confirm",
 ]);
 
 function StatusBadge({ item }: { item: MyWorkItem }) {

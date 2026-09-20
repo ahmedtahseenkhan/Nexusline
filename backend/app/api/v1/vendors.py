@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import selectinload
 
@@ -25,7 +26,7 @@ from app.models.asset import Asset
 from app.models.assessment import Questionnaire
 from app.models.compliance import Requirement
 from app.models.control import Control
-from app.models.enums import Criticality
+from app.models.enums import Criticality, VendorStatus
 from app.models.lookup import Lookup
 from app.models.organization import Process
 from app.models.risk import Risk
@@ -48,7 +49,8 @@ from app.schemas.vendor import (
     VendorTypeUpdate,
     VendorUpdate,
 )
-from app.services import audit, delete_guard, drill_through, master_data
+from app.services import audit, delete_guard, drill_through, fx, master_data
+from app.schemas.fx import MoneyTotalRead
 from app.services import ref_fields as rf
 from app.services import vendor_tiering as vt
 
@@ -98,6 +100,27 @@ def contract_totals(contracts, org_currency: str) -> dict[str, float]:
         code = (c.currency or org_currency or "PKR").upper()
         totals[code] = round(totals.get(code, 0.0) + float(c.value), 2)
     return totals
+
+
+def contract_total(contracts, book: fx.RateBook) -> dict:
+    """Live contract value in the reporting currency at today's rate (``MoneyTotalRead``
+    shape); a blank contract currency is the reporting currency, and values with no rate
+    are listed in ``unconverted`` rather than added. Pure."""
+    total = fx.MoneyTotal(book)
+    for c in contracts:
+        if c.is_expired or c.value is None:
+            continue
+        total.add(c.value, c.currency)
+    return total.as_dict()
+
+
+async def _rate_book_for(db, org_currency: str, codes) -> fx.RateBook:
+    """The rate book, loaded only when some amount is in a currency other than the
+    organisation's (so an all-PKR register costs no extra query)."""
+    foreign = {str(c or "").strip().upper() for c in codes} - {"", org_currency}
+    if not foreign:
+        return fx.RateBook(org_currency)
+    return await fx.load_rate_book(db, reporting=org_currency)
 
 
 def outsourcing_facts(arrangements, country_labels: dict) -> list[VendorOutsourcingFacts]:
@@ -234,8 +257,10 @@ async def _reads(db, rows) -> list[VendorRead]:
     arrangements = [a for r in rows for a in (getattr(r, "outsourcing_arrangements", None) or [])]
     labels = await master_data.lookups_by_id(db, (a.country_id for a in arrangements))
     qid = await _tiering_questionnaire_id(db)
+    book = await _rate_book_for(db, org_ccy, (c.currency for r in rows for c in (r.contracts or [])))
     for row, item in zip(rows, items):
         item.active_contract_totals = contract_totals(row.contracts, org_ccy)
+        item.active_contract_total = MoneyTotalRead(**contract_total(row.contracts, book))
         item.outsourcing = outsourcing_facts(getattr(row, "outsourcing_arrangements", None) or [], labels)
         item.concentration = concentration_view(row)
         item.tiering = tiering_view(row, qid)
@@ -410,6 +435,50 @@ async def create_vendor(body: VendorCreate, db: DbSession, user: CurrentUser) ->
         summary=f"Registered vendor {obj.name}",
     )
     return await _read(db, obj.id)
+
+
+class VendorSpendSummary(BaseModel):
+    #: Live (not archived) vendors counted.
+    vendors: int
+    #: Annual spend of vendors that have not been offboarded, at today's rates.
+    annual_spend: MoneyTotalRead
+    #: Unexpired contract value, at today's rates.
+    active_contracts: MoneyTotalRead
+    conversion_basis: str = (
+        "Spend and contract values are stock figures: each converts at the latest exchange rate "
+        "on or before today."
+    )
+
+
+def spend_summary(vendors, book: fx.RateBook) -> VendorSpendSummary:
+    """Vendor spend and live contract value in the reporting currency. Pure.
+
+    Spend is counted for every vendor still in the relationship (an offboarded one is no
+    longer a cost); contract value counts every contract that has not expired.
+    """
+    spend, contracts = fx.MoneyTotal(book), fx.MoneyTotal(book)
+    for v in vendors:
+        offboarded = str(getattr(v.status, "value", getattr(v, "status", ""))) == VendorStatus.offboarded.value
+        if getattr(v, "annual_spend", None) is not None and not offboarded:
+            spend.add(v.annual_spend, v.spend_currency)
+        for c in getattr(v, "contracts", None) or []:
+            if not c.is_expired and c.value is not None:
+                contracts.add(c.value, c.currency)
+    return VendorSpendSummary(
+        vendors=len(vendors),
+        annual_spend=MoneyTotalRead(**spend.as_dict()),
+        active_contracts=MoneyTotalRead(**contracts.as_dict()),
+    )
+
+
+@router.get("/spend-summary", response_model=VendorSpendSummary,
+            dependencies=[Depends(require("vendor:read"))],
+            summary="Vendor annual spend and live contract value, in the reporting currency")
+async def vendor_spend_summary(db: DbSession, user: CurrentUser) -> VendorSpendSummary:
+    vendors = (await db.scalars(
+        select(Vendor).where(Vendor.deleted.is_(False)).options(selectinload(Vendor.contracts))
+    )).all()
+    return spend_summary(list(vendors), await fx.load_rate_book(db, user.tenant_id))
 
 
 @router.get("/{vendor_id}", response_model=VendorRead, dependencies=[Depends(require("vendor:read"))])

@@ -21,8 +21,8 @@ def test_the_cutoff_is_the_window_before_now():
 
 
 def test_no_setting_means_the_default_window():
-    assert scheduler.DEFAULT_RETENTION_DAYS == 90
-    assert scheduler.retention_cutoff(NOW, None) == NOW - timedelta(days=90)
+    assert scheduler.DEFAULT_RETENTION_DAYS == 3650
+    assert scheduler.retention_cutoff(NOW, None) == NOW - timedelta(days=3650)
 
 
 def test_a_zero_or_negative_window_never_purges_on_archive():
@@ -162,8 +162,8 @@ async def test_purge_with_no_settings_row_uses_the_default_window(monkeypatch):
     monkeypatch.setattr(audit, "record_system", _record_system)
     db = _FakeDb(None, [Risk(id=uuid.uuid4(), title="Old", deleted=True)])
     await scheduler.purge_archived(db, uuid.uuid4(), now=NOW)
-    assert entries[0]["changes"]["retention_days"] == 90
-    assert entries[0]["changes"]["cutoff"] == (NOW - timedelta(days=90)).isoformat()
+    assert entries[0]["changes"]["retention_days"] == 3650
+    assert entries[0]["changes"]["cutoff"] == (NOW - timedelta(days=3650)).isoformat()
 
 
 async def test_nothing_due_writes_no_audit(monkeypatch):

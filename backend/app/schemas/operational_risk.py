@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Literal
 
 from app.schemas.common import GraphRef, LookupRef, UnitRef, UserRef
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.base import WorkflowState
 from app.models.enums import (
@@ -346,15 +346,37 @@ class KriRead(KriBase):
 
 
 # ------------------------------------------------------------------ loss events ---
+_BASEL_L2 = (
+    "Basel II level-2 event category (GET /loss-events-taxonomy); must belong to "
+    "`basel_event_type`. Blank = not categorised at level 2."
+)
+_LOSS_CURRENCY = (
+    "ISO 4217 code of the amounts; blank = the organisation's reporting currency. Totals convert "
+    "at the accounting date (else discovery, else occurrence)."
+)
+
+
+def _loss_currency(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return ""
+    from app.schemas.tenant_settings import validate_currency
+
+    return validate_currency(text)
+
+
 class LossEventBase(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     description: str = ""
     basel_event_type: BaselEventType = BaselEventType.execution_delivery_process_management
+    basel_event_type_l2: str = Field(default="", max_length=64, description=_BASEL_L2)
     business_line: str = ""
     business_unit_id: uuid.UUID | None = Field(default=None, description=_LOSS_UNIT)
     gross_loss: float = 0
     recovery: float = 0
-    currency: str = "PKR"
+    currency: str = Field(default="", description=_LOSS_CURRENCY)
     status: LossEventStatus = LossEventStatus.open
     occurrence_date: date | None = None
     discovery_date: date | None = None
@@ -369,16 +391,29 @@ class LossEventCreate(LossEventBase):
     incident_id: uuid.UUID | None = None
     risk_ids: list[uuid.UUID] = []
 
+    _ccy = field_validator("currency")(_loss_currency)
+
+    @model_validator(mode="after")
+    def _l2_under_l1(self):
+        from app.models.operational_risk import basel_l2_error
+
+        self.basel_event_type_l2 = (self.basel_event_type_l2 or "").strip()
+        error = basel_l2_error(self.basel_event_type, self.basel_event_type_l2)
+        if error:
+            raise ValueError(error)
+        return self
+
 
 class LossEventUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     basel_event_type: BaselEventType | None = None
+    basel_event_type_l2: str | None = Field(default=None, max_length=64, description=_BASEL_L2)
     business_line: str | None = None
     business_unit_id: uuid.UUID | None = Field(default=None, description=_LOSS_UNIT)
     gross_loss: float | None = None
     recovery: float | None = None
-    currency: str | None = None
+    currency: str | None = Field(default=None, description=_LOSS_CURRENCY)
     status: LossEventStatus | None = None
     occurrence_date: date | None = None
     discovery_date: date | None = None
@@ -389,6 +424,8 @@ class LossEventUpdate(BaseModel):
     workflow_owner_id: uuid.UUID | None = Field(default=None, description=_WF_OWNER)
     incident_id: uuid.UUID | None = None
     risk_ids: list[uuid.UUID] | None = None
+
+    _ccy = field_validator("currency")(_loss_currency)
 
 
 class LossEventRead(LossEventBase):

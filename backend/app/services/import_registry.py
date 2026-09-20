@@ -33,7 +33,7 @@ from app.models.incident import Incident
 from app.models.internal_audit import AuditEngagement, AuditFinding, AuditableUnit
 from app.models.issue import Issue, IssueSource, IssueStatus2
 from app.models.model_risk import ModelInventory, ModelStatus, ModelType
-from app.models.operational_risk import KeyRiskIndicator, LossEvent, RcsaAssessment
+from app.models.operational_risk import BASEL_EVENT_TYPES_L2, KeyRiskIndicator, LossEvent, RcsaAssessment
 from app.models.organization import BusinessUnit, Legal, Process
 from app.models.outsourcing import (
     CloudModel,
@@ -1164,10 +1164,13 @@ _register(ResourceIO(
         text("title", required=True),
         text("description"),
         enum_col("basel_event_type", BaselEventType),
+        Column(header="basel_event_type_l2", field="basel_event_type_l2", kind="enum",
+               enum_values=[k for k, *_ in BASEL_EVENT_TYPES_L2],
+               help="Basel II level-2 category; must belong to basel_event_type. Blank = not categorised"),
         text("business_line", help=_UNIT_HELP),
         number("gross_loss"),
         number("recovery"),
-        text("currency"),
+        text("currency", help="ISO 4217 code such as USD; blank = the organisation's reporting currency"),
         enum_col("status", LossEventStatus),
         date_col("occurrence_date"),
         date_col("discovery_date"),
@@ -1315,6 +1318,8 @@ _register(ResourceIO(
         text("sbp_approval_ref"),
         date_col("contract_start"),
         date_col("contract_end"),
+        number("contract_value", help="Total contract value, in contract_currency"),
+        text("contract_currency", help="ISO 4217 code such as USD; blank = the organisation's reporting currency"),
         text("exit_plan"),
         boolean("exit_plan_tested"),
         text("concentration_note"),
@@ -1361,5 +1366,28 @@ _register(ResourceIO(
         date_col("next_review_date"),
         enum_col("workflow_status", WorkflowState),
         link_col("process", "process_id", Process, "process", match_field="name", multi=False),
+    ],
+))
+
+
+# ----- decision 4: exchange rates into the reporting currency ------------------
+# Banks keep rates in a treasury spreadsheet (or copy the SBP weighted-average customer
+# rates); importing the same file again updates the rates in place (upsert on currency +
+# effective date) instead of failing row by row.
+from app.api.v1.fx_rates import upsert_rate  # noqa: E402
+from app.models.fx import FxRate  # noqa: E402
+from app.schemas.fx import FxRateCreate  # noqa: E402
+
+_register(ResourceIO(
+    resource="fx-rates", label="Exchange Rates", model=FxRate,
+    create_schema=FxRateCreate, create_func=upsert_rate,
+    read_perm="settings:manage", write_perm="settings:manage", importable=True,
+    columns=[
+        text("currency", required=True, help="ISO 4217 code of the foreign currency, e.g. USD"),
+        Column(header="rate", field="rate_to_reporting", required=True, kind="float",
+               help="Units of the reporting currency for 1 unit of the currency, e.g. 278.45"),
+        Column(header="effective_date", field="effective_date", required=True, kind="date",
+               help="YYYY-MM-DD; the rate applies to amounts dated on or after it"),
+        text("source", help="e.g. SBP weighted-average customer rate"),
     ],
 ))

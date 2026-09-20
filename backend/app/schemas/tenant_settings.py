@@ -63,8 +63,11 @@ CURRENCIES: dict[str, str] = {
     "MXN": "Mexican Peso",
 }
 
-RETENTION_MIN_DAYS = 30
+#: Decision 2 (2026-09-17): archived records stay restorable for 1–10 years; 10 years by
+#: default (SBP record-keeping expectation). The audit trail is never purged.
+RETENTION_MIN_DAYS = 365
 RETENTION_MAX_DAYS = 3650
+DEFAULT_RETENTION_DAYS = 3650
 
 #: Shown while nothing has been saved yet, and used to create the row on first read.
 DEFAULTS: dict[str, object] = {
@@ -73,7 +76,7 @@ DEFAULTS: dict[str, object] = {
     "date_format": "DD/MM/YYYY",
     "fiscal_year_start_month": 1,
     "phone_country": "PK",
-    "retention_days": 90,
+    "retention_days": DEFAULT_RETENTION_DAYS,
 }
 
 
@@ -130,7 +133,9 @@ def validate_retention_days(days: int) -> int:
         RETENTION_MIN_DAYS <= days <= RETENTION_MAX_DAYS
     ):
         raise ValueError(
-            f"Retention must be between {RETENTION_MIN_DAYS} and {RETENTION_MAX_DAYS} days."
+            f"Retention must be between {RETENTION_MIN_DAYS} days (1 year) and "
+            f"{RETENTION_MAX_DAYS} days (10 years). Archived records stay restorable for that "
+            "long; the audit trail is never deleted."
         )
     return days
 

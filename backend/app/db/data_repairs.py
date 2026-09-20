@@ -20,13 +20,28 @@ retried on the next start instead of stopping the start-up.
   copied into an empty ``nature``; and those values are deactivated in the
   ``control_classification`` list — once each, so an administrator who brings one back
   is not overruled on the next start.
+* **Decision 8 (2026-09-17)** A control with no classification at all is classified by
+  its ISO/IEC 27002:2022 theme (Organizational / People / Physical / Technological) when
+  the control itself says which one: its ISO 27002 attributes, its own Annex A reference,
+  or the single theme of the clauses it implements. Once per control — clearing it again
+  is a decision the next start respects.
 * **B10b** A record that is approved or retired with no approval step on file (seeded,
   imported, or set before approvals were tracked) gets one ``workflow_import`` row:
   "Imported as approved: no approver recorded". It never names a person.
+* **B10c (decision 6)** A record written before the approval lifecycle existed sits at
+  ``workflow_status = draft`` however live it is, and decision 6 would leave it
+  permanently un-attestable. Where its own business status says it is in force (a
+  published policy, an operational control, an assessed risk, an active third party, a
+  closed incident or issue — :data:`LIVE_BUSINESS_STATUSES`) and it has no approval
+  history at all, the approval is recorded as ``approved`` with one ``system`` row
+  saying it was recorded on upgrade. Never a record in review, one a reviewer sent back,
+  or one at a draft-equivalent status.
 """
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from sqlalchemy import func, or_, select, text, update
@@ -88,6 +103,13 @@ class RepairReport:
     requirement_sort_keys_filled: int = 0
     #: Phase 4C: shipped crosswalks materialised / retyped / withdrawn between installed frameworks.
     crosswalks_synced: int = 0
+    #: Phase 5 decision 2: organisations moved from the old 90-day retention default to 10 years.
+    retention_defaults_upgraded: int = 0
+    #: Phase 5 decision 8: controls classified by their ISO/IEC 27002:2022 theme.
+    control_themes_classified: int = 0
+    #: B10c (decision 6): records already in force before the approval lifecycle existed,
+    #: whose approval was recorded on upgrade so they can be attested again.
+    predated_approvals_recorded: int = 0
     indexes_skipped: list[str] = field(default_factory=list)
     repairs_failed: list[str] = field(default_factory=list)
 
@@ -100,7 +122,9 @@ class RepairReport:
             or self.control_classifications_cleared or self.control_natures_set
             or self.classification_values_retired or self.approvals_backfilled
             or self.scenario_kinds_set or self.title_asset_flags_set or self.title_asset_flags_cleared
-            or self.governance_defaults_added
+            or self.governance_defaults_added or self.control_themes_classified
+            or self.requirement_sort_keys_filled or self.crosswalks_synced
+            or self.retention_defaults_upgraded or self.predated_approvals_recorded
             or self.indexes_skipped or self.repairs_failed
         )
 
@@ -628,6 +652,132 @@ async def backfill_imported_approvals(db, tenant_id) -> int:
     return written
 
 
+# ------------------- B10c: records that predate the approval lifecycle (decision 6) ---
+#: ``changes.via`` on a B10c row, telling it apart from B10b's plain ``import``.
+PREDATES_VIA = "predates_workflow"
+#: The *business* statuses that mean "this record is in force", per record type. Only
+#: these grandfather a record whose approval was never recorded: a draft-equivalent
+#: (planned, prospective, open, in progress, under review, proposed) never does, and
+#: neither does a terminal state that was never live (a retired policy or control).
+#: Decision 6 refuses to attest anything that is not approved, so without this a bank's
+#: whole pre-upgrade register — every live policy, operating control and assessed risk —
+#: could never be certified again.
+LIVE_BUSINESS_STATUSES: dict[str, tuple[str, ...]] = {
+    # PolicyStatus: draft, under_review, approved, published, retired
+    "policy": ("approved", "published"),
+    # ControlStatus: planned, implemented, operational, retired
+    "control": ("implemented", "operational"),
+    # RiskStatus: draft, assessed, treatment_planned, treatment_in_progress, accepted, closed
+    "risk": ("assessed", "treatment_planned", "treatment_in_progress", "accepted", "closed"),
+    # VendorStatus: prospective, active, suspended, offboarded — a suspended or offboarded
+    # third party was live, but only an active one is in force today.
+    "vendor": ("active",),
+    # IncidentStatus: open, triage, investigating, contained, resolved, closed
+    "incident": ("closed",),
+    # IssueStatus2: open, in_progress, remediated, closed, risk_accepted
+    "issue": ("closed", "risk_accepted"),
+}
+
+
+def predated_approval_audit(label: str, business_state: str) -> dict:
+    """The one audit row B10c writes. It names no person — nobody approved the record —
+    and says plainly why the platform recorded the approval."""
+    return {
+        "action": IMPORT_ACTION,
+        "summary": (
+            f"Approval recorded on upgrade: this {label} was already {business_state.replace('_', ' ')} "
+            "before the approval workflow existed, so it had no approval to complete"
+        ),
+        "changes": {"from": "draft", "to": "approved", "via": PREDATES_VIA,
+                    "business_status": business_state},
+    }
+
+
+def _enum_values(column, wanted: Iterable[str]) -> list:
+    """``wanted`` as the column's own enum members, dropping any the enum doesn't have."""
+    enum_class = getattr(column.type, "enum_class", None)
+    if enum_class is None:
+        return list(wanted)
+    return [enum_class(v) for v in wanted if v in enum_class._value2member_map_]
+
+
+def predated_approvals_query(model, entity_type: str):
+    """Live records of ``model`` whose *business* status says they are in force, whose
+    approval is still ``draft``, and which have no approval history at all — the B10c
+    candidates. ``None`` when the type has no such status or no lifecycle.
+
+    A record in review, or one a reviewer rejected back to draft, is excluded: the
+    rejection is itself an approval step, so the "no history" test leaves it out.
+    """
+    from app.models.audit import AuditLog
+    from app.services import record_registry
+
+    wanted = LIVE_BUSINESS_STATUSES.get(entity_type)
+    if not wanted or not record_registry.has_workflow(model):
+        return None
+    columns = model.__table__.c
+    business = columns.get("status")
+    if business is None:
+        return None
+    states = _enum_values(business, wanted)
+    draft = _enum_values(columns.workflow_status, ("draft",))
+    if not states or not draft:
+        return None
+    step = (
+        select(AuditLog.id)
+        .where(AuditLog.entity_type == entity_type, AuditLog.entity_id == model.id, *workflow_step_actions())
+        .exists()
+    )
+    stmt = select(model.id, business).where(
+        columns.workflow_status == draft[0], business.in_(states), ~step
+    )
+    if "deleted" in columns:
+        stmt = stmt.where(model.deleted.is_(False))
+    return stmt
+
+
+async def approve_predated_records(db, tenant_id) -> int:
+    """B10c. A record written before the approval lifecycle existed sits at
+    ``workflow_status = draft`` however live it is, and decision 6 would leave it
+    permanently un-attestable. Where its own business status says it is in force
+    (:data:`LIVE_BUSINESS_STATUSES`) and nobody has ever taken an approval step on it,
+    the approval is recorded as ``approved`` with one ``system`` audit row saying why.
+
+    Once per record: that row is itself an approval step, so the record stops being a
+    candidate. It never touches a record with any approval history (a rejection
+    included), one in review, or one whose business status is a draft equivalent.
+    Returns the number of records approved.
+    """
+    from app.services import record_registry
+    from app.services.entity_types import ENTITY_TYPES
+
+    approved = 0
+    for entity_type in LIVE_BUSINESS_STATUSES:
+        if entity_type not in ENTITY_TYPES:
+            continue
+        model = record_registry.model_for(entity_type)
+        stmt = predated_approvals_query(model, entity_type) if model is not None else None
+        if stmt is None:
+            continue
+        label = record_registry.type_label(entity_type, model).lower()
+        live = _enum_values(model.__table__.c.workflow_status, ("approved",))
+        if not live:
+            continue
+        for rid, business in (await db.execute(stmt)).all():
+            await db.execute(
+                update(model).where(model.id == rid)
+                # Recording history is not an edit: keep the record's last-updated time.
+                .values(workflow_status=live[0], updated_at=model.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+            system_audit(
+                db, tenant_id, entity_type=entity_type, entity_id=rid,
+                **predated_approval_audit(label, str(getattr(business, "value", business))),
+            )
+            approved += 1
+    return approved
+
+
 # ------------------------------------ re-check F-04: scenario kinds, title vs asset ---
 #: ``changes`` key on the audit row written when a template takes the library's kinds.
 SCENARIO_KINDS_CHANGE = "asset_kinds"
@@ -765,6 +915,12 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
         report.approvals_backfilled += await _guarded(
             db, report, "imported_approvals", lambda: backfill_imported_approvals(db, tenant_id),
         ) or 0
+        # B10c: a record already in force before the approval lifecycle existed is
+        # approved, so decision 6 does not leave it permanently un-attestable. After
+        # B10b, which is about records already approved.
+        report.predated_approvals_recorded += await _guarded(
+            db, report, "predated_approvals", lambda: approve_predated_records(db, tenant_id),
+        ) or 0
         # Re-check F-04: scenarios fit asset kinds; a generated title naming an asset
         # the risk does not link is flagged for review (and the flag cleared once fixed).
         report.scenario_kinds_set += await _guarded(
@@ -789,7 +945,66 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
         report.crosswalks_synced += await _guarded(
             db, report, "phase4c_crosswalk_content", lambda: _sync_crosswalk_content(db),
         ) or 0
+        # --- phase5 decision 8: ISO 27002 theme as the control's classification ---
+        # After B10a (which clears framework names) and after the lookup seed, so the four
+        # themes exist and a cleared classification can take one.
+        report.control_themes_classified += await _guarded(
+            db, report, "phase5_control_themes",
+            lambda: backfill_control_classification_themes(db, tenant_id),
+        ) or 0
+        # --- phase5 decision 2: retention default 90 days -> 10 years, once, audited ---
+        report.retention_defaults_upgraded += int(bool(await _guarded(
+            db, report, "phase5_retention_default", lambda: upgrade_retention_default(db, tenant_id),
+        )))
     await db.flush()
+
+
+# ------------------------------- phase5 decision 2: retention default upgrade ---
+#: The window organisations had by default before decision 2, and the new one.
+OLD_RETENTION_DEFAULT_DAYS = 90
+NEW_RETENTION_DEFAULT_DAYS = 3650
+#: Audit marker: the upgrade runs once per organisation, even if an admin later sets 90
+#: again deliberately (below the new minimum, so only through the database).
+RETENTION_UPGRADE_ENTITY = "tenant_settings"
+RETENTION_UPGRADE_ACTION = "retention_default_upgrade"
+
+
+async def upgrade_retention_default(db, tenant_id) -> bool:
+    """Move an organisation still on exactly the old 90-day default to ten years.
+
+    Decision 2 (2026-09-17): archived records stay restorable for ten years by default. An
+    organisation that chose any other window keeps it. Runs once per organisation (the
+    audit row is the marker) and returns whether it changed anything.
+    """
+    from app.models.audit import AuditLog
+    from app.models.settings import TenantSettings
+
+    done = await db.scalar(
+        select(AuditLog.id).where(
+            AuditLog.entity_type == RETENTION_UPGRADE_ENTITY,
+            AuditLog.action == RETENTION_UPGRADE_ACTION,
+        ).limit(1)
+    )
+    if done is not None:
+        return False
+    row = await db.scalar(select(TenantSettings).where(TenantSettings.tenant_id == tenant_id))
+    changed = row is not None and row.retention_days == OLD_RETENTION_DEFAULT_DAYS
+    if changed:
+        row.retention_days = NEW_RETENTION_DEFAULT_DAYS
+    system_audit(
+        db, tenant_id, action=RETENTION_UPGRADE_ACTION, entity_type=RETENTION_UPGRADE_ENTITY,
+        entity_id=row.id if row is not None else None,
+        summary=(
+            f"Retention for archived records moved from {OLD_RETENTION_DEFAULT_DAYS} days to "
+            f"{NEW_RETENTION_DEFAULT_DAYS} days (10 years), the new default. The audit trail is never deleted."
+            if changed else "Retention default check: organisation's own retention window kept"
+        ),
+        changes={
+            "retention_days": [OLD_RETENTION_DEFAULT_DAYS, NEW_RETENTION_DEFAULT_DAYS] if changed else None,
+            "kept": None if changed or row is None else row.retention_days,
+        },
+    )
+    return changed
 
 
 async def _sync_crosswalk_content(db) -> int:
@@ -839,12 +1054,175 @@ async def repair_data() -> RepairReport:
     return report
 
 
+# ------------- phase5 decision 8: ISO 27002 theme classification backfill ---------
+#: ISO 27001:2022 Annex A clause -> the ISO/IEC 27002:2022 theme it belongs to, which is
+#: the ``control_classification`` value seeded by decision 8 (``db.lookup_seed``).
+ANNEX_A_THEMES: dict[str, str] = {
+    "5": "organizational",
+    "6": "people",
+    "7": "physical",
+    "8": "technological",
+}
+#: Themes, for reading an explicit theme out of stored ISO 27002 attributes.
+ISO27002_THEMES: tuple[str, ...] = ("organizational", "people", "physical", "technological")
+#: Audit action for the backfill (one row per control it classifies).
+THEME_BACKFILL_ACTION = "classification_backfill"
+
+
+def theme_of_reference(reference: str | None) -> str | None:
+    """The ISO 27002 theme an ISO 27001 Annex A clause belongs to, or None. Pure.
+
+    ``"A.8.13"`` / ``"a 8.13"`` -> ``"technological"``. Only A.5 – A.8 of the 2022 edition
+    count; a 2013-edition reference (A.9 …) or anything else answers None.
+    """
+    text_ = (reference or "").strip().lower()
+    match = re.match(r"^a[\s._-]*([0-9]+)", text_)
+    if match is None:
+        return None
+    return ANNEX_A_THEMES.get(match.group(1))
+
+
+def theme_of_attributes(attributes: object) -> str | None:
+    """The theme named in a control's stored ISO 27002 attributes, or None. Pure.
+
+    The 2022 attribute vocabulary has no theme attribute, but imported content often
+    carries one (``{"theme": ["Technological"]}`` / ``{"themes": "#Physical"}``); it is
+    read when it is there and ignored otherwise. Two different themes mean nothing
+    certain, so nothing is written.
+    """
+    if not isinstance(attributes, dict):
+        return None
+    found: set[str] = set()
+    for key, raw in attributes.items():
+        if str(key).strip().lower().lstrip("#") not in ("theme", "themes"):
+            continue
+        values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+        for value in values:
+            token = str(value).strip().lstrip("#").lower().replace("-", "_").replace(" ", "_")
+            if token in ISO27002_THEMES:
+                found.add(token)
+    return found.pop() if len(found) == 1 else None
+
+
+def theme_for_control(
+    *, reference: str | None, attributes: object, clause_references: Iterable[str] = ()
+) -> str | None:
+    """The theme a control belongs to, or None. Pure.
+
+    In order: a theme stated in its ISO 27002 attributes; its own reference when that is
+    an Annex A clause; otherwise the clauses it implements, but only when they all point
+    at one theme (a control implementing A.5 and A.8 is neither).
+    """
+    stated = theme_of_attributes(attributes)
+    if stated:
+        return stated
+    own = theme_of_reference(reference)
+    if own:
+        return own
+    themes = {t for t in (theme_of_reference(r) for r in clause_references) if t}
+    return themes.pop() if len(themes) == 1 else None
+
+
+async def backfill_control_classification_themes(db, tenant_id) -> int:
+    """Decision 8 (2026-09-17): classify by ISO/IEC 27002:2022 theme where the control
+    already says which one it is, and only where nothing is classified yet.
+
+    An empty ``classification_id`` is filled from the control's ISO 27002 attributes, its
+    own Annex A reference, or the single theme of the clauses it implements — matching the
+    seeded ``control_classification`` value. A control that carries any classification
+    (linked or free text) is left alone, as is one this repair has already classified and
+    somebody has since cleared: the audit row is the marker, so the next start does not
+    undo their decision. One audit row per control, attributed to the platform.
+    """
+    from app.models.audit import AuditLog
+    from app.models.compliance import Requirement, requirement_controls
+    from app.models.lookup import Lookup
+
+    values = {
+        (value or "").strip().lower(): lid
+        for lid, value in (
+            await db.execute(
+                select(Lookup.id, Lookup.value).where(
+                    Lookup.key == CLASSIFICATION_LIST, Lookup.active.is_(True)
+                )
+            )
+        ).all()
+    }
+    if not values:
+        return 0
+    rows = (
+        await db.execute(
+            select(Control.id, Control.reference, Control.iso27002_attributes).where(
+                Control.classification_id.is_(None),
+                or_(Control.classification.is_(None), func.trim(Control.classification) == ""),
+                Control.deleted.is_(False),
+            )
+        )
+    ).all()
+    if not rows:
+        return 0
+    done = {
+        cid
+        for (cid,) in (
+            await db.execute(
+                select(AuditLog.entity_id).where(
+                    AuditLog.entity_type == "control", AuditLog.action == THEME_BACKFILL_ACTION
+                )
+            )
+        ).all()
+    }
+    clauses: dict[object, list[str]] = {}
+    ids = [r[0] for r in rows if r[0] not in done]
+    if not ids:
+        return 0
+    for cid, reference in (
+        await db.execute(
+            select(requirement_controls.c.control_id, Requirement.reference)
+            .join(Requirement, Requirement.id == requirement_controls.c.requirement_id)
+            .where(requirement_controls.c.control_id.in_(ids), Requirement.deleted.is_(False))
+        )
+    ).all():
+        clauses.setdefault(cid, []).append(reference or "")
+
+    filled = 0
+    for cid, reference, attributes in rows:
+        if cid in done:
+            continue
+        theme = theme_for_control(
+            reference=reference, attributes=attributes, clause_references=clauses.get(cid, ())
+        )
+        lookup_id = values.get(theme or "")
+        if lookup_id is None:
+            continue
+        await db.execute(
+            update(Control).where(Control.id == cid)
+            # A derived classification is not an edit: keep the control's last-updated time.
+            .values(classification_id=lookup_id, updated_at=Control.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        system_audit(
+            db, tenant_id, action=THEME_BACKFILL_ACTION, entity_type="control", entity_id=cid,
+            summary=(
+                f"Classification set to {theme.capitalize()} from the control's ISO/IEC 27002 theme "
+                "(data repair)"
+            ),
+            changes={"classification_id": {"from": None, "to": str(lookup_id)}, "via": REPAIR_VIA},
+        )
+        filled += 1
+    return filled
+
+
 __all__ = [
+    "ANNEX_A_THEMES",
+    "LIVE_BUSINESS_STATUSES",
     "NATURE_CLASSIFICATIONS",
     "RESIDUAL_REVIEW_REASON",
     "UNTESTABLE_CONTROL_STATUSES",
     "RepairReport",
+    "approve_predated_records",
+    "predated_approvals_query",
     "repair_data",
     "repair_tenant",
     "regrade_plan",
+    "theme_for_control",
 ]

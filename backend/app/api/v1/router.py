@@ -15,6 +15,7 @@ from app.api.v1 import (
     pickers,
     records,
     tenant_settings,
+    fx_rates,
     access_reviews,
     ai_assist,
     aml,
@@ -97,6 +98,7 @@ api_router.include_router(auth.router)
 # Phase 1 (structured data): organisation settings, governed lookups, pickers, the
 # generic record lifecycle (archive/restore/impact/workflow) and clause suggestions.
 api_router.include_router(tenant_settings.router)
+api_router.include_router(fx_rates.router)  # decision 4: exchange rates
 api_router.include_router(lookups.router)
 api_router.include_router(pickers.router)
 api_router.include_router(records.router)

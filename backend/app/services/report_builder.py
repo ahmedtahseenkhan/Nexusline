@@ -72,6 +72,10 @@ class ReportContext:
     #: per-category appetite (``risk_scoring.AppetiteBook``; None = the values above).
     bands: tuple[int, int, int] | None = None
     book: Any = None
+    #: Decision 4: the reporting currency money columns are written in. These amounts
+    #: (risk ALE, control opex/capex, incident cost) carry no currency of their own, so
+    #: they are labelled with it rather than converted.
+    currency: str = "PKR"
 
 
 @dataclass(frozen=True)
@@ -205,8 +209,12 @@ def _words(value: str | None) -> str:
     return (value or "").replace("_", " ").title()
 
 
-def _money(value) -> str:
-    return f"{value:,.2f}" if value not in (None, "") else ""
+def _money(value, ctx: ReportContext | None = None) -> str:
+    """An amount with its currency code, e.g. "PKR 1,250,000.00"; blank when not set."""
+    if value in (None, ""):
+        return ""
+    code = (ctx.currency if ctx else "") or ""
+    return f"{code} {value:,.2f}".strip()
 
 
 def _score_bands(score_col, chosen: list[str], max_score: int, bands=None):
@@ -427,7 +435,7 @@ RISKS = Subject(
         ColumnSpec("treatment_owner", "Treatment owner", False, 12, lambda r, c: r.treatment_owner),
         ColumnSpec("treatment_deadline", "Deadline", False, 9, lambda r, c: _d(r.treatment_deadline),
                    Risk.treatment_deadline),
-        ColumnSpec("annual_loss_expectancy", "ALE", False, 10, lambda r, c: _money(r.annual_loss_expectancy),
+        ColumnSpec("annual_loss_expectancy", "ALE", False, 10, lambda r, c: _money(r.annual_loss_expectancy, c),
                    Risk.annual_loss_expectancy),
         ColumnSpec("next_review_date", "Next review", True, 9, lambda r, c: _d(r.next_review_date),
                    Risk.next_review_date),
@@ -580,14 +588,21 @@ CONTROLS = Subject(
         ColumnSpec("assets", "Protected assets", False, 16, lambda c, x: _names(c.assets)),
         ColumnSpec("policies", "Policies", False, 14, lambda c, x: _names(c.policies, "title")),
         ColumnSpec("audit_frequency", "Test cycle", False, 8, lambda c, x: _enum(c.audit_frequency)),
-        ColumnSpec("last_audit_date", "Last tested", True, 9, lambda c, x: _d(c.last_audit_date),
+        # Decision 7: "tested" means reviewed. The stored column is the test log's newest
+        # entry, so it is named for what it is; the reviewed view sits beside it.
+        ColumnSpec("last_audit_date", "Last test recorded", False, 9, lambda c, x: _d(c.last_audit_date),
                    Control.last_audit_date),
+        ColumnSpec("last_reviewed_date", "Last reviewed test", True, 9,
+                   lambda c, x: _d(c.last_reviewed_date)),
+        ColumnSpec("tested_count", "Reviewed tests", False, 7, lambda c, x: c.tested_count),
+        ColumnSpec("pending_review_count", "Tests awaiting review", False, 8,
+                   lambda c, x: c.pending_review_count),
         ColumnSpec("next_audit_date", "Next test", True, 9, lambda c, x: _d(c.next_audit_date),
                    Control.next_audit_date),
         ColumnSpec("next_maintenance_date", "Next maintenance", False, 9,
                    lambda c, x: _d(c.next_maintenance_date), Control.next_maintenance_date),
-        ColumnSpec("opex", "Opex / yr", False, 9, lambda c, x: _money(c.opex), Control.opex),
-        ColumnSpec("capex", "Capex", False, 9, lambda c, x: _money(c.capex), Control.capex),
+        ColumnSpec("opex", "Opex / yr", False, 9, lambda c, x: _money(c.opex, x), Control.opex),
+        ColumnSpec("capex", "Capex", False, 9, lambda c, x: _money(c.capex, x), Control.capex),
         ColumnSpec("created_at", "Created", False, 9,
                    lambda c, x: _d(c.created_at.date() if c.created_at else None), Control.created_at),
         ColumnSpec("objective", "Objective", False, 30, lambda c, x: c.objective),
@@ -731,7 +746,7 @@ INCIDENTS = Subject(
         ColumnSpec("records_affected", "Records affected", False, 8, lambda i, x: _incident_num(i.records_affected),
                    Incident.records_affected),
         ColumnSpec("regulator", "Regulator", False, 10, lambda i, x: i.regulator),
-        ColumnSpec("cost", "Cost", False, 9, lambda i, x: _money(i.cost), Incident.cost),
+        ColumnSpec("cost", "Cost", False, 9, lambda i, x: _money(i.cost, x), Incident.cost),
         ColumnSpec("assets", "Assets", False, 16, lambda i, x: _names(i.assets)),
         ColumnSpec("risks", "Risks", False, 14, lambda i, x: _names(i.risks, "reference")),
         ColumnSpec("controls", "Controls", False, 16, lambda i, x: _names(i.controls)),

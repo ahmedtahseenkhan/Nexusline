@@ -24,6 +24,7 @@ from app.models.shariah import ShariahReview
 from app.models.risk import Risk
 from app.models.tenant import Tenant
 from app.services import pdf_report
+from app.services import fx
 from app.services.risk_scoring import max_score_for
 from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
@@ -92,6 +93,7 @@ async def risk_register_report(
         matrix_size=settings.matrix_size,
         scope=await _scope_label(db, filters),
         owner_names=await _owner_names(db, risks),
+        currency=await fx.reporting_currency(db, user.tenant_id),
         include_details=details,
         book=book,
         scale=scale_for(settings),

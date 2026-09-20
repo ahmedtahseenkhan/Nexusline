@@ -160,10 +160,21 @@ async def test_a_missing_record_cannot_be_attested(sod_on):
     assert (ok, why) == (False, "Risk not found")
 
 
-async def test_the_owner_is_told_why_before_the_draft_rule(sod_on):
+async def test_the_owner_of_a_draft_hears_the_draft_rule(sod_on):
+    """Decision 9: owning the record is no longer a refusal, so the owner of a draft is
+    told the reason that really applies — it is still being written."""
     mine = _risk(owner_id=ME, status=RiskStatus.draft)
     ok, why = await att.attest_eligibility(AttestDB(), _user("risk:write"), "risk", mine.id, mine)
-    assert (ok, why) == (False, att.OWNER_REFUSAL)
+    assert (ok, why) == (False, att.DRAFT_REFUSAL)
+
+
+async def test_the_owner_may_attest_their_own_approved_record(sod_on):
+    """The first-line owner usually entered the record too; with the approval complete
+    (decision 6) nothing else stands in the way."""
+    mine = _risk(owner_id=ME)
+    assert await att.attest_eligibility(
+        AttestDB(maker=ME), _user("risk:write"), "risk", mine.id, mine
+    ) == (True, None)
 
 
 async def test_a_draft_is_refused_on_its_business_status(sod_on):
@@ -172,25 +183,47 @@ async def test_a_draft_is_refused_on_its_business_status(sod_on):
     assert (ok, why) == (False, att.DRAFT_REFUSAL)
 
 
-async def test_the_lifecycle_rule_is_the_attest_calls_own_no_b1b(sod_on):
-    """B1b is a pending product decision: an Assessed risk whose approval is still Draft
-    can be attested today, so the page must not be told otherwise."""
+async def test_the_lifecycle_rule_is_the_attest_calls_own_b1b_refuses(sod_on):
+    """B1b, decided 2026-09-17 (decision 6): an Assessed risk whose approval is still Draft
+    can't be attested, and the page is told so in the attest call's own words."""
     risk = _risk(status=RiskStatus.assessed, workflow_status=WorkflowState.draft)
     ok, why = await att.attest_eligibility(AttestDB(maker=OTHER), _user("risk:write"), "risk", risk.id, risk)
-    assert (ok, why) == (True, None)
+    assert (ok, why) == (False, "Approve this risk before attesting it — its approval is draft.")
+
+
+def _attest_rule(**kw):
+    """A configured, active "<type>/attest" dual-control rule."""
+    from app.models.authority import DualControlStatus
+
+    base = dict(enabled=True, status=DualControlStatus.active, requires_dual_control=True,
+                threshold_amount=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
 
 
 async def test_whoever_entered_the_record_hears_the_four_eyes_refusal(sod_on):
+    """Only where an administrator configured it: decision 9 stopped attesting falling
+    back to the global switch, which would refuse the owner who also entered the record."""
     risk = _risk()
-    ok, why = await att.attest_eligibility(AttestDB(maker=ME), _user("risk:write"), "risk", risk.id, risk)
+    ok, why = await att.attest_eligibility(
+        AttestDB(maker=ME, rule=_attest_rule()), _user("risk:write"), "risk", risk.id, risk
+    )
     assert ok is False
     assert why == dual_control.maker_checker_message("risk")
+
+
+async def test_without_a_configured_rule_the_maker_may_attest(sod_on):
+    """The global segregation-of-duties switch no longer governs attesting (decision 9)."""
+    risk = _risk()
+    assert await att.attest_eligibility(
+        AttestDB(maker=ME), _user("risk:write"), "risk", risk.id, risk
+    ) == (True, None)
 
 
 async def test_an_independent_writer_may_attest(sod_on):
     risk = _risk()
     assert await att.attest_eligibility(
-        AttestDB(maker=OTHER), _user("risk:write"), "risk", risk.id, risk
+        AttestDB(maker=OTHER, rule=_attest_rule()), _user("risk:write"), "risk", risk.id, risk
     ) == (True, None)
 
 
@@ -200,6 +233,14 @@ async def test_with_segregation_off_the_maker_may_attest(monkeypatch):
     assert await att.attest_eligibility(
         AttestDB(maker=ME), _user("risk:write"), "risk", risk.id, risk
     ) == (True, None)
+
+
+async def test_a_disabled_or_exempting_rule_does_not_gate_attesting(sod_on):
+    risk = _risk()
+    for rule in (_attest_rule(enabled=False), _attest_rule(requires_dual_control=False)):
+        assert await att.attest_eligibility(
+            AttestDB(maker=ME, rule=rule), _user("risk:write"), "risk", risk.id, risk
+        ) == (True, None)
 
 
 # ---------------------------------------------- the non-raising maker-checker ---
@@ -244,7 +285,9 @@ async def test_the_read_carries_can_attest_and_blocked_reason(sod_on):
     risk = _risk()
     body = await att.get_status("risk", risk.id, AttestDB(record=risk, maker=OTHER), _user("risk:read", "risk:write"))
     assert body.can_attest is True and body.blocked_reason is None
-    body = await att.get_status("risk", risk.id, AttestDB(record=risk, maker=ME), _user("risk:read", "risk:write"))
+    body = await att.get_status(
+        "risk", risk.id, AttestDB(record=risk, maker=ME, rule=_attest_rule()), _user("risk:read", "risk:write")
+    )
     assert body.can_attest is False
     assert body.blocked_reason == dual_control.maker_checker_message("risk")
     body = await att.get_status("risk", risk.id, AttestDB(record=risk), _user("risk:read"))
@@ -267,11 +310,6 @@ def test_the_read_schema_defaults_to_not_allowed():
 
 
 async def test_the_attest_call_still_raises_its_refusals(sod_on, audited):
-    mine = _risk(owner_id=ME)
-    with pytest.raises(HTTPException) as exc:
-        await att.attest("risk", mine.id, AttestationCreate(), AttestDB(record=mine), _user("risk:write"))
-    assert (exc.value.status_code, exc.value.detail) == (403, att.OWNER_REFUSAL)
-
     draft = _risk(status=RiskStatus.draft)
     with pytest.raises(HTTPException) as exc:
         await att.attest("risk", draft.id, AttestationCreate(), AttestDB(record=draft), _user("risk:write"))
@@ -279,7 +317,10 @@ async def test_the_attest_call_still_raises_its_refusals(sod_on, audited):
 
     risk = _risk()
     with pytest.raises(HTTPException) as exc:
-        await att.attest("risk", risk.id, AttestationCreate(), AttestDB(record=risk, maker=ME), _user("risk:write"))
+        await att.attest(
+            "risk", risk.id, AttestationCreate(),
+            AttestDB(record=risk, maker=ME, rule=_attest_rule()), _user("risk:write"),
+        )
     assert (exc.value.status_code, exc.value.detail) == (403, dual_control.maker_checker_message("risk"))
 
     with pytest.raises(HTTPException) as exc:

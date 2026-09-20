@@ -80,16 +80,28 @@ export type GovModel = {
   workflowState: "draft" | "in_review" | "approved" | "retired" | null;
   /** Approval steps on file: history minus `import` backfills (and minus owner changes, see toGovModel). */
   approvalSteps: number;
-  /** Newest state-changing history item. */
-  lastStep: { action: string; at: string; actor: string; reason: string } | null;
+  /** Newest state-changing history item. `via` distinguishes the two platform-written
+   *  backfills: "import" (B10b, already approved) and "predates_workflow" (B10c, in
+   *  force before the approval lifecycle existed). */
+  lastStep: { action: string; at: string; actor: string; reason: string; via?: string } | null;
   /** Newest "submit" step (for "in review since"). */
   lastSubmitAt: string | null;
   attestation: {
+    /** Judged on the last COMPLETE attestation: one awaiting its second signature has
+     *  certified nothing, so it leaves the status where it was. */
     status: "current" | "overdue" | "never";
     nativeReview: boolean;
     nextDue: string | null;
     canAttest: boolean | null;
     blockedReason: string | null;
+    /** Decision 9: this record's attestation needs an independent second signature. */
+    confirmationRequired?: boolean;
+    /** Why it does ("Key control"), when it does. */
+    confirmationReason?: string | null;
+    /** The newest attestation is signed but still waiting for that signature. */
+    awaitingConfirmation?: boolean;
+    awaitingBy?: string | null;
+    awaitingAt?: string | null;
   } | null;
   /** useHasPermission("<module>:write") */
   canWrite: boolean;

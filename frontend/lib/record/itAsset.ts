@@ -336,6 +336,6 @@ export function itAssetOpenPoints({ asset: a }: ItAssetInput, ctx: Ctx): OpenPoi
       action: { kind: "edit", target: "cost", label: "Add cost" },
     });
   }
-  push(notes, neverAttestedPoint("itasset", gov));
+  push(notes, neverAttestedPoint("itasset", gov, ctx.fmt));
   return [...gaps, ...notes];
 }

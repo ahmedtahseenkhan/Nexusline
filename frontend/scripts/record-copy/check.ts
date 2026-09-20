@@ -36,7 +36,7 @@ import { readdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Ctx, Fmt, GovModel, OpenPoint, Seg, TileModel } from "../../lib/record/types";
-import { approvalLine, approvalWithoutStepText, exceptionStateText, importedApprovalText, rowActionName, rowLabel, uniqueLabels } from "../../lib/record/text";
+import { approvalLine, approvalWithoutStepText, awaitingConfirmationPoint, awaitingConfirmationText, exceptionStateText, importedApprovalText, rowActionName, rowLabel, uniqueLabels } from "../../lib/record/text";
 import { orderMeta } from "../../components/record/metaOrder";
 import { creditedControlLines, type RiskInput } from "../../lib/record/risk";
 import { incidentDurationNote } from "../../lib/record/incident";
@@ -126,6 +126,32 @@ function kitChecks(): string[] {
     assert.equal(importedApprovalText("retired"), "Imported as retired, no approver recorded");
   });
   check("no approval step on file", () => assert.equal(approvalLine(gov, fmt).text, "No approval step on file"));
+  check("B10c a record that predates the approval workflow says so", () => {
+    const step = { action: "import", at: "2026-09-20T01:00:00Z", actor: "system@nexusline", reason: "", via: "predates_workflow" };
+    const expected = "Approved on upgrade, no approver recorded — it predates the approval workflow";
+    assert.equal(approvalLine({ ...gov, lastStep: step }, fmt).text, expected);
+    assert.equal(approvalWithoutStepText({ workflowState: "approved", lastStep: step }, "Approved"), `${expected}.`);
+  });
+  check("decision 9 an attestation awaiting its second signature", () => {
+    const att = {
+      status: "never" as const, nativeReview: false, nextDue: null, canAttest: true, blockedReason: null,
+      confirmationRequired: true, confirmationReason: "Key control",
+      awaitingConfirmation: true, awaitingBy: "ayesha@bank.pk", awaitingAt: "2026-09-10",
+    };
+    assert.equal(
+      awaitingConfirmationText(att, fmt),
+      "Attested by ayesha@bank.pk on 10 Sep 2026 — awaiting independent confirmation.",
+    );
+    // No date from an older server, and no signer name: still a complete sentence.
+    assert.equal(
+      awaitingConfirmationText({ ...att, awaitingAt: null, awaitingBy: null }),
+      "Attested by another user — awaiting independent confirmation.",
+    );
+    const point = awaitingConfirmationPoint("control", { attestation: att }, fmt);
+    assert.equal(point?.id, "control.awaiting_confirmation");
+    assert.equal(point?.level, "gap");
+    assert.equal(awaitingConfirmationPoint("control", { attestation: { ...att, awaitingConfirmation: false } }, fmt), null);
+  });
   check("D3 row action names", () => {
     assert.equal(rowActionName("Unlink", rowLabel("SRV-01", "Core banking host")), "Unlink SRV-01 Core banking host");
     assert.equal(rowActionName("Edit", null), "Edit");

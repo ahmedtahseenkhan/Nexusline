@@ -98,15 +98,20 @@ class SoaControl:
     name: str
     effectiveness: str
     status: str
+    #: Decision 7 (2026-09-17): the last *reviewed* test (``Control.last_reviewed_*``) —
+    #: tests awaiting a reviewer are ``pending_review_count``, never the result shown.
     last_test_date: date | None = None
     last_test_result: str | None = None
+    pending_review_count: int = 0
 
     def label(self) -> str:
         ref = f"{self.reference} " if self.reference else ""
         test = (
-            f", last tested {self.last_test_date.isoformat()} ({_words(self.last_test_result)})"
+            f", last reviewed test {self.last_test_date.isoformat()} ({_words(self.last_test_result)})"
             if self.last_test_date else ", never tested"
         )
+        if self.pending_review_count:
+            test += f", {_awaiting(self.pending_review_count)}"
         return f"{ref}{self.name} — {_words(self.effectiveness)}{test}"
 
 
@@ -122,8 +127,11 @@ class SoaRow:
     treatment: str | None
     coverage: str
     controls: list[SoaControl] = field(default_factory=list)
+    #: The newest reviewed test across the implementing controls (decision 7).
     last_test_date: date | None = None
     last_test_result: str | None = None
+    #: Tests awaiting review across the implementing controls — shown, never counted.
+    pending_review_count: int = 0
     #: Phase 4C: not tested directly but covered by a tested control of an equivalent or
     #: containing clause (``crosswalks.ViaCrosswalk``). Never a direct mapping.
     via_crosswalk: object = None
@@ -142,6 +150,10 @@ class SoaRow:
         )
 
 
+def _awaiting(n: int) -> str:
+    return f"{n} test{'s' if n != 1 else ''} awaiting review"
+
+
 def _words(value) -> str:
     v = _plain(value)
     return str(v).replace("_", " ") if v not in (None, "") else "—"
@@ -154,8 +166,10 @@ def control_row(c) -> SoaControl:
         name=c.name or "",
         effectiveness=_plain(c.effectiveness) or "not_assessed",
         status=_plain(c.status) or "",
-        last_test_date=getattr(c, "last_audit_date", None),
-        last_test_result=_plain(getattr(c, "last_audit_result", None)),
+        # Decision 7: an examiner's SoA shows tests a reviewer signed off, not the log.
+        last_test_date=getattr(c, "last_reviewed_date", None),
+        last_test_result=_plain(getattr(c, "last_reviewed_result", None)),
+        pending_review_count=int(getattr(c, "pending_review_count", 0) or 0),
     )
 
 
@@ -180,6 +194,7 @@ def build_row(r, via=None) -> SoaRow:
         controls=controls,
         last_test_date=latest.last_test_date if latest else None,
         last_test_result=latest.last_test_result if latest else None,
+        pending_review_count=sum(c.pending_review_count for c in controls),
         via_crosswalk=via if getattr(r, "coverage", "unmapped") in ("unmapped", "unassessed") else None,
     )
 
@@ -264,7 +279,8 @@ class SoaDocument:
 
 HEADERS = [
     "Reference", "Clause", "Domain", "Applicable", "Justification",
-    "Implementing controls", "Implementation status", "Last test date", "Last test result",
+    "Implementing controls", "Implementation status", "Last reviewed test date",
+    "Last reviewed test result", "Tests awaiting review",
 ]
 
 
@@ -276,6 +292,7 @@ def table_rows(rows: list[SoaRow]) -> list[list]:
             _words(r.implementation_status),
             r.last_test_date.isoformat() if r.last_test_date else "",
             _words(r.last_test_result) if r.last_test_result else "",
+            r.pending_review_count or "",
         ]
         for r in rows
     ]
@@ -330,7 +347,7 @@ def to_xlsx(doc: SoaDocument) -> bytes:
     ws.freeze_panes = ws.cell(row=first + 1, column=1)
     if body:
         ws.auto_filter.ref = f"A{first}:{get_column_letter(len(HEADERS))}{first + len(body)}"
-    for index, width in enumerate((12, 40, 24, 11, 45, 55, 20, 14, 14), start=1):
+    for index, width in enumerate((12, 40, 24, 11, 45, 55, 20, 14, 14, 12), start=1):
         ws.column_dimensions[get_column_letter(index)].width = width
     buf = io.BytesIO()
     wb.save(buf)
@@ -377,13 +394,14 @@ def to_pdf(doc: SoaDocument) -> bytes:
                  or ("None" if r.applicable else "—")),
             cell(_words(r.implementation_status).capitalize()),
             cell(
-                f"{r.last_test_date.isoformat()} ({_words(r.last_test_result)})" if r.last_test_date else "Never"
+                (f"{r.last_test_date.isoformat()} ({_words(r.last_test_result)})" if r.last_test_date else "Never")
+                + (f"\n{_awaiting(r.pending_review_count)}" if r.pending_review_count else "")
             ),
         ]
         for r in doc.rows
     ]
     story.append(pr._table(
-        ss, ["Ref", "Clause", "Applicable", "Justification", "Implementing controls", "Status", "Last test"],
+        ss, ["Ref", "Clause", "Applicable", "Justification", "Implementing controls", "Status", "Last reviewed test"],
         rows, col_widths=[50, 140, 55, 170, 180, 70, 75],
     ))
     return pr._render(story, doc.org_name, landscape=True)

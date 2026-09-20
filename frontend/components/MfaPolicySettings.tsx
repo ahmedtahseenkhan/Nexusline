@@ -126,15 +126,23 @@ export default function MfaPolicySettings({ canEdit }: { canEdit: boolean }) {
           !error && <p className="muted">Loading…</p>
         ) : (
           <>
-            <p style={{ marginTop: 0, fontSize: 13.5 }}>
+            {policy.mfa_required_for_everyone ? (
+              <div className="card card-pad" style={{ margin: "0 0 12px", fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+                <strong>Required for everyone who signs in with a password</strong> (local accounts and Active
+                Directory). This installation sets it (MFA_REQUIRED), so the role list does not apply. People who sign
+                in through single sign-on use your identity provider&apos;s MFA instead.
+              </div>
+            ) : (
+              <p style={{ marginTop: 0, fontSize: 13.5 }}>
               People in the roles switched on below must set up an authenticator app. Anyone who can approve
               something must use it too, whatever their role, because approving is the step segregation of duties
               protects. The Admin role can&apos;t be switched off.
             </p>
+            )}
             <ul className="muted" style={{ fontSize: 12.5, margin: "0 0 14px", paddingLeft: 18, lineHeight: 1.7 }}>
               <li>
                 Grace period: {policy.grace_days} day{policy.grace_days === 1 ? "" : "s"} from the first sign-in after MFA
-                becomes required. After that the person can only set up MFA until they do.
+                becomes required. After that, signing in only opens the MFA set-up page until the person finishes it.
               </li>
               {policy.sso_enabled && (
                 <li>
@@ -148,17 +156,13 @@ export default function MfaPolicySettings({ canEdit }: { canEdit: boolean }) {
                   ? "on. They let a checker decide without signing in, so without MFA — your installation has chosen to allow this."
                   : "off, so checkers sign in (with MFA) to decide."}
               </li>
-              {policy.organisation_roles === null && (
+              {!policy.mfa_required_for_everyone && policy.organisation_roles === null && (
                 <li>Using this installation&apos;s default list ({policy.deployment_roles.join(", ") || "none"}).</li>
               )}
             </ul>
 
-            {policy.mfa_required_for_everyone && (
-              <div className="card card-pad" style={{ marginBottom: 12, fontSize: 13, background: "var(--primary-weak-2)" }}>
-                This installation requires MFA for everyone who signs in with a password, so every role is required.
-              </div>
-            )}
-
+            {!policy.mfa_required_for_everyone && (
+              <>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -227,6 +231,8 @@ export default function MfaPolicySettings({ canEdit }: { canEdit: boolean }) {
                 )}
                 <span className="muted" style={{ fontSize: 12.5 }}>Every change is written to the activity log.</span>
               </div>
+            )}
+              </>
             )}
 
             <h4 style={{ margin: "20px 0 8px" }}>Required but not enrolled</h4>

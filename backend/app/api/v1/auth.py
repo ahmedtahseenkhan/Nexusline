@@ -51,7 +51,7 @@ from app.schemas.auth import (
 )
 from app.schemas.user import UserRead
 from app.services import audit as audit_log
-from app.services import ldap_auth, mfa_policy, password_policy, totp
+from app.services import ldap_auth, licence_state, mfa_policy, password_policy, totp
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -173,10 +173,13 @@ def _reset_lockout(user: User) -> None:
 
 async def _jit_upsert(db, tenant_id, profile: ldap_auth.LdapProfile, default_role: str, existing: User | None) -> User:
     if existing is not None:
+        if not existing.is_active and not existing.is_platform_admin:
+            await licence_state.ensure_seat_available()  # decision 1: re-activation takes a seat
         existing.full_name = profile.full_name or existing.full_name
         existing.auth_source = "ldap"
         existing.is_active = True
         return existing
+    await licence_state.ensure_seat_available()  # decision 1: a new directory user takes a seat
     user = User(
         tenant_id=tenant_id,
         email=profile.email,
@@ -257,7 +260,11 @@ async def _do_login(db, body: LoginRequest) -> _Outcome:
                 _register_failed(user)
             await _audit("login_failed", f"Failed directory login for {body.email}", reason="rejected", method="ldap")
             return _Outcome(error=_INVALID)
-        authed = await _jit_upsert(db, tenant.id, profile, ldap_cfg.default_role, existing=user)
+        try:
+            authed = await _jit_upsert(db, tenant.id, profile, ldap_cfg.default_role, existing=user)
+        except HTTPException as exc:  # licence seats exhausted (decision 1)
+            await _audit("login_failed", f"Directory login refused for {body.email}: no licence seat", reason="seat_limit", method="ldap")
+            return _Outcome(error=exc)
     else:
         await _audit("login_failed", f"Failed login for {body.email}: unknown account", reason="unknown_account")
         return _Outcome(error=_INVALID)
@@ -457,6 +464,7 @@ async def me(
             "mfa_enrolment_required": enrol_only,
             "mfa_enrolment_due": due,
             "mfa_required_for_user": required,
+            "mfa_required_for_everyone": bool(settings.mfa_required),
             "mfa_via_identity_provider": bool(
                 await mfa_policy.sso_enabled(db) and user.id in await mfa_policy.sso_signers(db, [user.id])
             ),

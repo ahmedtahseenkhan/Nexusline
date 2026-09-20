@@ -1,10 +1,11 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { apiCall } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
-import { useFormat } from "@/lib/format";
+import { unconvertedNote, useFormat, type MoneyTotal } from "@/lib/format";
 import { confirmDeleteWithImpact } from "@/lib/records";
 import { useRecordParam } from "@/lib/useRecordParam";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -58,6 +59,9 @@ interface OutsourcingArrangement {
   sbp_approval_ref: string;
   contract_start: string | null;
   contract_end: string | null;
+  /** Decision 4: total contract value in `contract_currency` ("" = reporting currency). */
+  contract_value: number | null;
+  contract_currency: string;
   exit_plan: string;
   exit_plan_tested: boolean;
   concentration_note: string;
@@ -93,6 +97,8 @@ interface OutsourcingSummary {
   substitutability_unassessed?: number;
   high_concentration?: number;
   live_missing_facts?: number;
+  /** Contract value of arrangements that are not terminated, in the reporting currency. */
+  contract_value?: MoneyTotal;
 }
 interface VendorOption {
   id: string;
@@ -191,6 +197,8 @@ type ArrForm = {
   sbp_approval_ref: string;
   contract_start: string;
   contract_end: string;
+  contract_value: string;
+  contract_currency: string;
   exit_plan: string;
   exit_plan_tested: boolean;
   concentration_note: string;
@@ -216,6 +224,8 @@ const BLANK_ARR: ArrForm = {
   sbp_approval_ref: "",
   contract_start: "",
   contract_end: "",
+  contract_value: "",
+  contract_currency: "",
   exit_plan: "",
   exit_plan_tested: false,
   concentration_note: "",
@@ -242,6 +252,8 @@ function fromArr(a: OutsourcingArrangement): ArrForm {
     sbp_approval_ref: a.sbp_approval_ref || "",
     contract_start: a.contract_start || "",
     contract_end: a.contract_end || "",
+    contract_value: a.contract_value != null ? String(a.contract_value) : "",
+    contract_currency: a.contract_currency || "",
     exit_plan: a.exit_plan || "",
     exit_plan_tested: !!a.exit_plan_tested,
     concentration_note: a.concentration_note || "",
@@ -269,6 +281,8 @@ function arrPayload(f: ArrForm): Record<string, unknown> {
     sbp_approval_ref: f.sbp_approval_ref,
     contract_start: f.contract_start || null,
     contract_end: f.contract_end || null,
+    contract_value: f.contract_value === "" ? null : Number(f.contract_value),
+    contract_currency: f.contract_currency,
     exit_plan: f.exit_plan,
     exit_plan_tested: f.exit_plan_tested,
     concentration_note: f.concentration_note,
@@ -300,7 +314,7 @@ const BLANK_REVIEW: ReviewDraft = {
 };
 
 function OutsourcingInner() {
-  const { formatDate } = useFormat();
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const [openId, setOpenId] = useRecordParam("id");
   const [detail, setDetail] = useState<OutsourcingArrangement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -566,6 +580,19 @@ function OutsourcingInner() {
           <TextInput type="date" value={af.contract_end} onChange={(v) => setA("contract_end", v)} />
         </Field>
       </div>
+      <div className="field-row">
+        <Field label="Contract value" help="Total value of the arrangement over its term.">
+          <TextInput type="number" value={af.contract_value} onChange={(v) => setA("contract_value", v)} placeholder="0" />
+        </Field>
+        <Field label="Currency" help={`The currency the value is in. Blank means ${currency}, and totals convert at the exchange rates in Settings → Organisation.`}>
+          <Select
+            value={af.contract_currency}
+            onChange={(v) => setA("contract_currency", v)}
+            options={currencyOptions}
+            placeholder={`Organisation default (${currency})`}
+          />
+        </Field>
+      </div>
     </>
   );
   const exitTab = (
@@ -694,7 +721,23 @@ function OutsourcingInner() {
           <div className="stat-top"><span className="n">{summary ? summary.contracts_expiring_90d.toLocaleString() : "—"}</span></div>
           <span className="l">Contracts expiring ≤90d</span>
         </div>
+        <div className="card stat">
+          <div className="stat-top">
+            <span className="n">
+              {summary?.contract_value
+                ? formatMoney(summary.contract_value.total, summary.contract_value.reporting_currency || currency, { compact: "auto" })
+                : "—"}
+            </span>
+          </div>
+          <span className="l">Contract value</span>
+        </div>
       </div>
+
+      {unconvertedNote(summary?.contract_value) && (
+        <div className="card card-pad" style={{ marginBottom: 16, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+          {unconvertedNote(summary?.contract_value)} — <Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+        </div>
+      )}
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
       {summary && (summary.exit_plans_untested > 0 || !!summary.hard_to_substitute_untested || !!summary.live_missing_facts
@@ -814,6 +857,9 @@ function OutsourcingInner() {
               <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
                 {detail.sbp_approval_ref ? `NOC ref ${detail.sbp_approval_ref} · ` : ""}
                 Contract {formatDate(detail.contract_start)} → {formatDate(detail.contract_end)}
+                {detail.contract_value != null
+                  ? ` · value ${formatMoney(detail.contract_value, detail.contract_currency || currency)}`
+                  : ""}
                 {detail.vendor_id ? ` · linked vendor ${vendorName(detail.vendor_id)}` : ""}
                 {ownerName(detail) ? ` · owner ${ownerName(detail)}` : ""}
               </div>

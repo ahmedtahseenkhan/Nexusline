@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
+import ExchangeRates from "@/components/ExchangeRates";
 import MfaPolicySettings from "@/components/MfaPolicySettings";
 import SegregationOfDutiesSettings from "@/components/SegregationOfDutiesSettings";
 import { Field, NumberInput, Select } from "@/components/fields";
@@ -42,12 +43,19 @@ const FIELDS = [
 
 const MONTH_OPTIONS = MONTHS.map((m, i) => ({ value: String(i + 1), label: m }));
 
+/** "10 years", "2.5 years", "400 days" — how long an archived record stays restorable. */
+function yearsLabel(days: number): string {
+  if (!days || days < 365) return `${days || 0} days`;
+  const years = Math.round((days / 365) * 10) / 10;
+  return `${years} ${years === 1 ? "year" : "years"}`;
+}
+
 export default function OrganisationSettingsPage() {
   const { settings, loading, reload } = useTenantSettings();
   const canEdit = useHasPermission(SETTINGS_MANAGE_PERMISSION);
   const [form, setForm] = useState<TenantSettings>(settings);
   const [timezones, setTimezones] = useState<string[]>([]);
-  const [bounds, setBounds] = useState({ min: 30, max: 3650 });
+  const [bounds, setBounds] = useState({ min: 365, max: 3650 });
   const [countries, setCountries] = useState<{ value: string; label: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -151,7 +159,7 @@ export default function OrganisationSettingsPage() {
               <fieldset disabled={!canEdit || busy} style={{ border: 0, padding: 0, margin: 0 }}>
                 <Field
                   label="Currency"
-                  help="Money is shown in this currency unless a record carries its own (a contract in USD, say). New records default to it."
+                  help="The reporting currency. Money is shown in it unless a record carries its own (a contract in USD, say), and totals convert to it using the exchange rates below. New records default to it."
                 >
                   <Select value={form.currency} onChange={(v) => v && set("currency", v)} options={currencyOptions} />
                 </Field>
@@ -204,7 +212,7 @@ export default function OrganisationSettingsPage() {
                 </Field>
                 <Field
                   label="Keep archived records for (days)"
-                  help={`Archived (deleted) risks, controls, issues and other records can be restored during this window, then are purged for good. Between ${bounds.min} and ${bounds.max} days; check your record-retention policy before shortening it.`}
+                  help={`Archived records stay restorable for ${yearsLabel(form.retention_days)}, then are permanently deleted. The audit trail is never deleted. Between ${bounds.min} days (1 year) and ${bounds.max} days (10 years); the default is 3650 days. Check your record-retention policy before shortening it.`}
                 >
                   <NumberInput
                     value={form.retention_days}
@@ -215,7 +223,7 @@ export default function OrganisationSettingsPage() {
                   />
                   {!retentionOk && (
                     <div className="error" style={{ fontSize: 12, marginTop: 4 }}>
-                      Must be between {bounds.min} and {bounds.max} days.
+                      Must be between {bounds.min} days (1 year) and {bounds.max} days (10 years).
                     </div>
                   )}
                 </Field>
@@ -263,6 +271,14 @@ export default function OrganisationSettingsPage() {
           </div>
         )}
       </form>
+
+      <section id="exchange-rates" style={{ marginTop: 28 }}>
+        <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>Money in more than one currency</h2>
+        <p className="muted" style={{ fontSize: 13.5, margin: "0 0 12px" }}>
+          What a USD contract or an AED loss counts as when a total is added up in {settings.currency}.
+        </p>
+        <ExchangeRates canEdit={canEdit} />
+      </section>
 
       {canEdit && (
         <section id="security" style={{ marginTop: 28 }}>

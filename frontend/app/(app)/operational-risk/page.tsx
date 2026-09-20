@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
   api,
@@ -10,11 +10,12 @@ import {
   type KeyRiskIndicator,
   type LossEvent,
   type LossSummary,
+  type BaselEventTypeNode,
   type RiskAppetite,
 } from "@/lib/api";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
-import { useFormat } from "@/lib/format";
+import { unconvertedNote, useFormat } from "@/lib/format";
 import { confirmDeleteWithImpact } from "@/lib/records";
 import type { LookupRef, UnitRef, UserRef } from "@/lib/masterData";
 import { useRecordParam } from "@/lib/useRecordParam";
@@ -378,6 +379,7 @@ const BLANK_MEASURE: MeasureDraft = { value: "", as_of_date: "", notes: "" };
 type LossForm = {
   title: string;
   basel_event_type: string;
+  basel_event_type_l2: string;
   business_unit_id: string | null;
   gross_loss: string;
   recovery: string;
@@ -396,6 +398,7 @@ type LossForm = {
 const blankLoss = (currency: string): LossForm => ({
   title: "",
   basel_event_type: "internal_fraud",
+  basel_event_type_l2: "",
   business_unit_id: null,
   gross_loss: "",
   recovery: "",
@@ -415,6 +418,7 @@ function fromLoss(l: LossEventExt, tenantCurrency: string): LossForm {
   return {
     title: l.title,
     basel_event_type: l.basel_event_type || "internal_fraud",
+    basel_event_type_l2: l.basel_event_type_l2 || "",
     business_unit_id: l.business_unit_id ?? null,
     gross_loss: l.gross_loss != null ? String(l.gross_loss) : "",
     recovery: l.recovery != null ? String(l.recovery) : "",
@@ -434,6 +438,7 @@ function lossPayload(f: LossForm): Record<string, unknown> {
   return {
     title: f.title,
     basel_event_type: f.basel_event_type,
+    basel_event_type_l2: f.basel_event_type_l2,
     business_unit_id: f.business_unit_id,
     gross_loss: f.gross_loss === "" ? 0 : Number(f.gross_loss),
     recovery: f.recovery === "" ? 0 : Number(f.recovery),
@@ -464,6 +469,8 @@ function OperationalRiskInner() {
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const [summary, setSummary] = useState<LossSummary | null>(null);
+  // Basel II Annex 9: the 7 level-1 types and their 20 level-2 categories, from the server.
+  const [taxonomy, setTaxonomy] = useState<BaselEventTypeNode[]>([]);
 
   // ---- URL-driven open record (RCSA detail / KRI detail live in the drawer) ----
   const [openId, setOpenId] = useRecordParam("id");
@@ -498,6 +505,28 @@ function OperationalRiskInner() {
   const [lf, setLf] = useState<LossForm>(() => blankLoss(currency));
   const setL = <K extends keyof LossForm>(k: K, v: LossForm[K]) => setLf((p) => ({ ...p, [k]: v }));
 
+  // ---- Basel II taxonomy: level 2 always belongs to the chosen level 1 -------
+  const baselLabel = (value: string) => taxonomy.find((t) => t.value === value)?.label || cap(value);
+  const basel2Label = (value: string) =>
+    taxonomy.flatMap((t) => t.level2).find((c) => c.value === value)?.label || (value ? cap(value) : "");
+  const level2Options = (taxonomy.find((t) => t.value === lf.basel_event_type)?.level2 ?? []).map((c) => ({
+    value: c.value,
+    label: c.label,
+  }));
+  const l2Help = taxonomy
+    .find((t) => t.value === lf.basel_event_type)
+    ?.level2.find((c) => c.value === lf.basel_event_type_l2)?.examples;
+  // Loss totals are in the organisation's reporting currency; amounts with no exchange
+  // rate are left out and said so (decision 4).
+  const lossCurrency = summary?.reporting_currency || currency;
+  const excludedLosses = summary ? unconvertedNote({ reporting_currency: lossCurrency, total: summary.total_gross, unconverted: summary.unconverted }) : "";
+
+  /** Changing the event type clears a level-2 category that no longer belongs to it. */
+  function setLossEventType(value: string) {
+    const kept = taxonomy.find((t) => t.value === value)?.level2.some((c) => c.value === lf.basel_event_type_l2);
+    setLf((p) => ({ ...p, basel_event_type: value, basel_event_type_l2: kept ? p.basel_event_type_l2 : "" }));
+  }
+
   // ------------------------------------------------------------- fetchers
   const fetchRcsa = useCallback((qs: string) => apiCall<PagedList<RcsaExt>>("GET", `/rcsa?${qs}`), []);
   const fetchKris = useCallback((qs: string) => apiCall<PagedList<KriExt>>("GET", `/kris?${qs}`), []);
@@ -518,6 +547,7 @@ function OperationalRiskInner() {
   }
   useEffect(() => {
     loadSummary();
+    api.baselTaxonomy().then(setTaxonomy).catch(() => {});
   }, []);
 
   // Load the open record's detail based on which section is active.
@@ -778,7 +808,8 @@ function OperationalRiskInner() {
   const lossColumns: Column<LossEventExt>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (l) => <span className="ref">{l.reference || "—"}</span> },
     { key: "title", header: "Title", sortable: true, render: (l) => <span className="cell-title">{l.title}</span> },
-    { key: "basel_event_type", header: "Basel event type", sortable: true, render: (l) => <Badge tone="info">{cap(l.basel_event_type)}</Badge> },
+    { key: "basel_event_type", header: "Basel event type", sortable: true, render: (l) => <Badge tone="info">{baselLabel(l.basel_event_type)}</Badge> },
+    { key: "basel_event_type_l2", header: "Level 2", sortable: true, render: (l) => <span className="muted">{basel2Label(l.basel_event_type_l2) || "Not categorised"}</span>, text: (l) => basel2Label(l.basel_event_type_l2) },
     { key: "business_line", header: "Business unit", sortable: true, render: (l) => <span className="muted"><UnitName unit={l.business_unit_ref} fallback={l.business_line} /></span>, text: (l) => l.business_unit_ref?.name || l.business_line || "" },
     { key: "action_owner", header: "Action owner", hidden: true, render: (l) => <span className="muted"><UserName user={l.action_owner_ref} fallback={l.action_owner} /></span>, text: (l) => l.action_owner_ref?.full_name || l.action_owner || "" },
     { key: "gross_loss", header: "Gross", sortable: true, align: "right", render: (l) => <span className="muted">{formatMoney(l.gross_loss, l.currency)}</span>, text: (l) => formatMoney(l.gross_loss, l.currency) },
@@ -1012,7 +1043,22 @@ function OperationalRiskInner() {
       </Field>
       <div className="field-row">
         <Field label="Basel event type" help="Basel II level-1 loss category.">
-          <Select value={lf.basel_event_type} onChange={(v) => setL("basel_event_type", v)} options={BASEL_TYPES} />
+          <Select
+            value={lf.basel_event_type}
+            onChange={(v) => setLossEventType(v)}
+            options={taxonomy.length ? taxonomy.map((t) => ({ value: t.value, label: t.label })) : BASEL_TYPES}
+          />
+        </Field>
+        <Field
+          label="Level-2 category"
+          help={l2Help || "Basel II Annex 9 category within the event type above. Leave blank if it is not yet known."}
+        >
+          <Select
+            value={lf.basel_event_type_l2}
+            onChange={(v) => setL("basel_event_type_l2", v)}
+            options={level2Options}
+            placeholder="Not categorised"
+          />
         </Field>
         <Field label="Business unit" help="The business line / unit that suffered the loss.">
           <BusinessUnitSelect
@@ -1188,17 +1234,64 @@ function OperationalRiskInner() {
             </div>
             <div className="card stat">
               <div className="stat-top">
-                <span className="n">{summary ? formatMoney(summary.total_gross, currency, { compact: "auto" }) : "—"}</span>
+                <span className="n">{summary ? formatMoney(summary.total_gross, lossCurrency, { compact: "auto" }) : "—"}</span>
               </div>
               <span className="l">Total gross loss</span>
             </div>
             <div className="card stat">
               <div className="stat-top">
-                <span className="n">{summary ? formatMoney(summary.total_net, currency, { compact: "auto" }) : "—"}</span>
+                <span className="n">{summary ? formatMoney(summary.total_net, lossCurrency, { compact: "auto" }) : "—"}</span>
               </div>
               <span className="l">Total net loss</span>
             </div>
           </div>
+
+          {excludedLosses && (
+            <div className="card card-pad" style={{ marginBottom: 12, fontSize: 13.5, background: "var(--primary-weak-2)" }}>
+              {excludedLosses} — <Link href="/organisation-settings#exchange-rates">add a rate</Link>.
+            </div>
+          )}
+
+          {summary && summary.rows.length > 0 && (
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="card-head"><h3>Losses by Basel event type</h3></div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Event type</th>
+                      <th style={{ textAlign: "right" }}>Events</th>
+                      <th style={{ textAlign: "right" }}>Gross</th>
+                      <th style={{ textAlign: "right" }}>Net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.rows.map((row) => (
+                      <Fragment key={row.basel_event_type}>
+                        <tr>
+                          <td><strong>{row.label || cap(row.basel_event_type)}</strong></td>
+                          <td style={{ textAlign: "right" }}>{row.count.toLocaleString()}</td>
+                          <td style={{ textAlign: "right" }}>{formatMoney(row.gross_loss, lossCurrency)}</td>
+                          <td style={{ textAlign: "right" }}>{formatMoney(row.net_loss, lossCurrency)}</td>
+                        </tr>
+                        {row.level2.map((sub) => (
+                          <tr key={`${row.basel_event_type}-${sub.basel_event_type_l2 || "none"}`}>
+                            <td className="muted" style={{ paddingLeft: 28 }}>{sub.label}</td>
+                            <td className="muted" style={{ textAlign: "right" }}>{sub.count.toLocaleString()}</td>
+                            <td className="muted" style={{ textAlign: "right" }}>{formatMoney(sub.gross_loss, lossCurrency)}</td>
+                            <td className="muted" style={{ textAlign: "right" }}>{formatMoney(sub.net_loss, lossCurrency)}</td>
+                          </tr>
+                        ))}
+                      </Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="card-pad muted" style={{ fontSize: 12.5, paddingTop: 0 }}>
+                Amounts are in {lossCurrency}. {summary.conversion_basis}
+              </div>
+            </div>
+          )}
 
           <DataTable<LossEventExt>
             columns={lossColumns}

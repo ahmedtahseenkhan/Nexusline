@@ -354,5 +354,5 @@ def test_importable_resources_derive_a_known_custom_field_model():
         }
     )
     # ``risk_scenario_template`` is configuration rather than a record users annotate,
-    # so it deliberately has no custom fields.
-    assert missing == ["evidence", "obligation", "risk_scenario_template"]
+    # so it deliberately has no custom fields; nor do exchange rates (``fx_rate``).
+    assert missing == ["evidence", "fx_rate", "obligation", "risk_scenario_template"]

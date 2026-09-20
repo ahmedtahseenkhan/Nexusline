@@ -29,8 +29,9 @@ class TenantSettings(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     # Pakistani banks report on the calendar year (financial statements to 31 December).
     fiscal_year_start_month: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     phone_country: Mapped[str] = mapped_column(String(2), default="PK", nullable=False)
-    # Days an archived record is kept before the scheduler purges it for good.
-    retention_days: Mapped[int] = mapped_column(Integer, default=90, nullable=False)
+    # Days an archived record is kept before the scheduler purges it for good: 365–3650,
+    # default 3650 (ten years; decision 2). The audit trail is never purged.
+    retention_days: Mapped[int] = mapped_column(Integer, default=3650, nullable=False)
     # Phase 3: the modules this organisation has switched on, within its licence. NULL =
     # every licensed module (organisations that predate the choice keep everything).
     enabled_modules: Mapped[list | None] = mapped_column(JSONB, nullable=True)

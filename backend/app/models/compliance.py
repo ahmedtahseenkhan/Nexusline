@@ -200,16 +200,29 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
     @property
     def control_health(self) -> str:
         """Live rollup: is the evidence (mitigating controls) behind this requirement
-        healthy? A failing/overdue control audit flips this to ``issues`` on read — so a
-        control failure automatically puts the requirement at risk (the compliance loop).
-        ``none`` = no controls mapped · ``ok`` · ``issues``."""
-        from app.models.enums import TestResult
+        healthy? ``none`` = no controls mapped · ``ok`` · ``issues``.
 
+        ``issues`` when any mapped control can't be relied on today — the same rule the
+        risk rollup and the residual engine read (``control_assurance.reliance_note``):
+        its latest *reviewed* test failed, its monitoring is failing, its test is
+        overdue, or an audit finding against it is open — or when an audit finding
+        raised against this requirement itself is still open. Decided 2026-09-17
+        (record-page spec "Not done" 6): open findings reduce assurance, as IIA practice
+        and the risk rollup already treat them. A test awaiting review changes nothing
+        until it is decided (decision 7)."""
+        from app.models.enums import AuditFindingStatus
+        from app.services import control_assurance
+
+        done = (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)
+        own_open = any(
+            getattr(f, "status", None) not in done for f in (getattr(self, "audit_findings", None) or ())
+        )
         if not self.controls:
             return "none"
+        if own_open:
+            return "issues"
         for c in self.controls:
-            # The latest *reviewed* test, as ratings and the residual engine read it.
-            if c.last_reviewed_result == TestResult.failed or c.is_audit_overdue:
+            if control_assurance.reliance_note(c, getattr(c, "audits", None) or ()):
                 return "issues"
         return "ok"
 

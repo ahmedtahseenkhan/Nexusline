@@ -21,6 +21,8 @@ class DashboardStats(BaseModel):
     risks_elevated: int
     risks_in_breach: int
     total_exposure: float
+    #: The currency ``total_exposure`` is in (risk ALE is entered in the reporting currency).
+    exposure_currency: str = "PKR"
 
 
 # --------------------------------------------------------------------------- overview
