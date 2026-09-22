@@ -8,6 +8,9 @@ mint a perpetual license. Run it from a source checkout on a vendor machine.
   python -m app.tools.license sign    --key vendor-keys/license_signing_key.pem \
         --to "Habib Bank Ltd" --plan enterprise --seats 250 --days 365 \
         --modules financial_crime,enterprise_risk,islamic_banking --out deploy/license.key
+  python -m app.tools.license sign    --key vendor-keys/license_signing_key.pem \
+        --to "NexusLine Cloud" --plan saas --organisations 0 --deployment saas \
+        --seats 0 --days 365 --out deploy/license.key      # our own multi-tenant host
   python -m app.tools.license verify  deploy/license.key
   python -m app.tools.license modules   # list module keys and edition bundles
 
@@ -22,6 +25,12 @@ so a signing key parked there would ship straight to the client.
 
 `sign` mints a signed license token to hand to one client. `verify` checks a
 token against the currently embedded public key.
+
+`--organisations` caps how many organisations (tenants) the installation may hold.
+The default, 1, is what every on-premise bank gets: the organisation created at
+first start and no more, so the Organisations console cannot turn a single-tenant
+licence into a hosting platform. Only the vendor's own SaaS host gets a larger
+number or 0 (unlimited).
 
 `--modules` takes edition names and/or individual module keys (see the `modules`
 command), or "all". Omitting it unlocks every module — use "core" to license the
@@ -115,6 +124,7 @@ def _sign(args: argparse.Namespace) -> int:
         "licensed_to": args.to,
         "plan": args.plan,
         "seats": args.seats,
+        "organisations": args.organisations,
         "features": [f.strip() for f in args.features.split(",") if f.strip()],
         "issued": date.today().isoformat(),
         "expires": (date.today() + timedelta(days=args.days)).isoformat(),
@@ -132,7 +142,9 @@ def _sign(args: argparse.Namespace) -> int:
     token = sign_payload(payload, Path(args.key).read_bytes())
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(token)
-    print(f"Signed license for '{args.to}' ({args.plan}, {args.seats} seats), "
+    orgs = "unlimited organisations" if args.organisations == 0 else (
+        f"{args.organisations} organisation{'s' if args.organisations != 1 else ''}")
+    print(f"Signed license for '{args.to}' ({args.plan}, {args.seats} seats, {orgs}), "
           f"expires {payload['expires']}")
     if args.modules:
         expanded = sorted(expand_modules(payload["modules"]))
@@ -179,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
     sg.add_argument("--to", required=True, help="Licensed organization name")
     sg.add_argument("--plan", default="enterprise")
     sg.add_argument("--seats", type=int, default=100)
+    sg.add_argument("--organisations", type=int, default=1,
+                    help="Organisations the installation may hold: 1 (default) for an "
+                         "on-premise bank, 0 for unlimited (the vendor's own SaaS host)")
     sg.add_argument("--days", type=int, default=365)
     sg.add_argument("--features", default="", help="Comma-separated feature flags")
     sg.add_argument("--modules", default="",

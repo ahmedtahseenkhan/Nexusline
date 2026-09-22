@@ -57,6 +57,9 @@ class MeRead(UserRead):
     #: The installation requires MFA for everyone who signs in with a password
     #: (``MFA_REQUIRED``), rather than for this user's role.
     mfa_required_for_everyone: bool = False
+    #: The organisation's effective enforcement level: ``off`` (MFA is optional here),
+    #: ``privileged`` or ``everyone``.
+    mfa_enforcement: str = "privileged"
     #: The user's last sign-in went through the organisation's single sign-on: their
     #: identity provider enforces the second factor, not this policy.
     mfa_via_identity_provider: bool = False

@@ -38,3 +38,6 @@ class TenantSettings(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Role names that must use MFA here. NULL = the deployment default (MFA_REQUIRED_ROLES).
     mfa_required_roles: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # How strictly MFA is enforced here: off / privileged / everyone. NULL = the deployment
+    # default (MFA_ENFORCEMENT). Ignored when the deployment locks the level.
+    mfa_enforcement: Mapped[str | None] = mapped_column(String(16), nullable=True)

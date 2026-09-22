@@ -104,6 +104,16 @@ class Settings(BaseSettings):
     # sign-in and the test suite need no authenticator.
     mfa_issuer: str = "NexusLine GRC"
     mfa_required: bool = Field(default_factory=lambda: _release_build())
+    # The enforcement level every organisation on this deployment starts at: ``off``
+    # (nobody is made to enrol; people who enrolled keep using it), ``privileged`` (the
+    # Admin role, anyone who can approve, and the listed roles) or ``everyone`` (every
+    # password sign-in). Unset → ``everyone`` when ``mfa_required`` is true, else
+    # ``privileged``; so ``MFA_REQUIRED`` keeps working for installs that set it. An
+    # organisation may choose its own level under Settings → Organisation → Security
+    # unless ``mfa_enforcement_locked`` is true — set that where the bank's IT security
+    # policy, not its GRC team, decides. ``off`` is for evaluation and UAT installs.
+    mfa_enforcement: str | None = None
+    mfa_enforcement_locked: bool = False
     mfa_required_roles: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["admin"])
     mfa_grace_days: int = 7
     # Approve / Reject links in e-mail (phase 3). Deciding from an e-mail skips two-factor
@@ -114,6 +124,12 @@ class Settings(BaseSettings):
     email_actions_enabled: bool = False
     # LDAP / Active Directory (per-tenant config in DB; this only gates the feature)
     ldap_enabled: bool = False
+
+    # Public self-service sign-up (POST /auth/register-org): anyone reaching the API can
+    # create an organisation and become its administrator. A hosted-trial feature; a
+    # bank's installation must not expose it. Operators create organisations from
+    # Settings → Organisations, and the licence's organisation cap applies either way.
+    allow_self_registration: bool = False
 
     # --- On-prem productionization ---
     app_version: str = "1.0.0"
@@ -188,6 +204,20 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_string_list(cls, value: object) -> object:
         return _string_list(value)
+
+    @field_validator("mfa_enforcement", mode="before")
+    @classmethod
+    def _parse_mfa_enforcement(cls, value: object) -> object:
+        """``off`` / ``privileged`` / ``everyone`` (a few aliases accepted); empty = unset.
+        A misspelling is refused at start-up rather than quietly weakening the policy."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        from app.services.mfa_policy import normalise_mode
+
+        level = normalise_mode(value)
+        if level is None:
+            raise ValueError("MFA_ENFORCEMENT must be one of: off, privileged, everyone")
+        return level
 
     def _url(self, user: str, password: str) -> str:
         return (

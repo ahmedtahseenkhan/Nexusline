@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.config import settings
-from app.services import license as lic
+from app.services import license as lic, mfa_policy
 
 _SECRET_HINTS = ("password", "secret", "key", "token", "bind_password")
 
@@ -57,6 +57,8 @@ def build_bundle(extra: dict | None = None) -> tuple[str, bytes]:
             "scheduler_enabled": settings.scheduler_enabled,
             "ldap_enabled": settings.ldap_enabled,
             "mfa_required": settings.mfa_required,
+            "mfa_enforcement": mfa_policy.deployment_mode(settings),
+            "mfa_enforcement_locked": settings.mfa_enforcement_locked,
             "enforce_segregation_of_duties": settings.enforce_segregation_of_duties,
             "enforce_license": lic.enforcement_enabled(),
             "smtp_configured": bool(settings.smtp_host),

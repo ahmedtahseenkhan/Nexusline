@@ -158,6 +158,9 @@ class TenantSettingsRead(BaseModel):
     # Roles that must use MFA here; None = the deployment default. Changed only through
     # PUT /settings/organisation/security/mfa-roles, which validates the role names.
     mfa_required_roles: list[str] | None = None
+    # Enforcement level here (off / privileged / everyone); None = the deployment default.
+    # Changed only through PUT /settings/organisation/security/mfa-enforcement.
+    mfa_enforcement: str | None = None
 
 
 class TenantSettingsUpdate(BaseModel):

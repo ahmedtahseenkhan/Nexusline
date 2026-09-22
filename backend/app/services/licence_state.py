@@ -52,6 +52,8 @@ SEAT_WARN_RATIO = 0.9
 READ_ONLY_CODE = "licence_read_only"
 #: ``X-Error-Code`` of a user creation / re-activation refused for want of seats.
 SEAT_LIMIT_CODE = "licence_seat_limit"
+#: ``X-Error-Code`` of an organisation creation refused by the licence's organisation cap.
+ORG_LIMIT_CODE = "licence_organisation_limit"
 #: HTTP status of a refused write: 423 Locked — the records exist and can be read.
 READ_ONLY_STATUS = 423
 
@@ -246,6 +248,61 @@ async def ensure_seat_available(adding: int = 1) -> None:
     if problem:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=problem, headers={"X-Error-Code": SEAT_LIMIT_CODE},
+        )
+
+
+# ---------------------------------------------------------------------- organisations ---
+def organisation_refusal(*, limit: int, used: int, enforcing: bool) -> str | None:
+    """The message refusing one more organisation, or ``None``. Pure.
+
+    A single-tenant licence (``limit`` 1, the default for an on-premise bank) allows the
+    one organisation created at first start and nothing more; ``0`` is unlimited (the
+    vendor's own hosted installation). Dev builds never refuse."""
+    if not enforcing or not limit or used + 1 <= limit:
+        return None
+    if limit == 1:
+        return (
+            "This installation is licensed for one organisation. Hosting several organisations "
+            "on one installation needs a multi-organisation licence from the vendor."
+        )
+    return (
+        f"The licence allows {limit} organisations and {used} exist. Install a licence with a "
+        "higher organisation count before adding another. Existing organisations are not affected."
+    )
+
+
+def organisations_limit() -> int:
+    """The licence's organisation cap as it applies here: ``0`` = unlimited, which is
+    also what a dev build reports."""
+    if not lic.enforcement_enabled():
+        return 0
+    return max(0, int(lic.load_current().organisations or 0))
+
+
+async def organisations_used() -> int:
+    """Organisations on this installation, active or suspended (a suspended organisation
+    still holds a licensed slot: its data is kept, and restore needs no new slot)."""
+    from sqlalchemy import func, select
+
+    from app.db.init_db import admin_engine
+    from app.models.tenant import Tenant
+
+    async with admin_engine.connect() as conn:
+        return int(await conn.scalar(select(func.count()).select_from(Tenant)) or 0)
+
+
+async def ensure_organisation_available() -> None:
+    """Raise 403 when one more organisation would exceed the licence's cap. A no-op in a
+    dev build or under an unlimited licence (no database call then)."""
+    from fastapi import HTTPException, status
+
+    limit = organisations_limit()
+    if not limit:
+        return
+    problem = organisation_refusal(limit=limit, used=await organisations_used(), enforcing=True)
+    if problem:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=problem, headers={"X-Error-Code": ORG_LIMIT_CODE},
         )
 
 

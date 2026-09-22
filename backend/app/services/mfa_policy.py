@@ -4,9 +4,19 @@
 bank that switched it on got nothing. This module is the policy; the login flow
 (``api/v1/auth.py``) and the token dependency (``core/deps.py``) apply it.
 
+**Enforcement level** (:func:`effective_mode`). Each organisation runs at one of three
+levels: ``off`` (nobody is made to enrol; people who enrolled keep being asked for their
+code, and may switch it off themselves), ``privileged`` (the rules below) or ``everyone``
+(every password sign-in). The deployment sets the default (``MFA_ENFORCEMENT``, else
+``everyone`` when the legacy ``MFA_REQUIRED`` is true, else ``privileged``); an
+organisation may pick its own under Settings → Organisation → Security
+(``TenantSettings.mfa_enforcement``) unless the deployment locks it
+(``MFA_ENFORCEMENT_LOCKED``), which a bank does when its IT security policy, not its GRC
+team, owns the decision.
+
 **Who must enrol** (:func:`mfa_required_for`), first match wins:
 
-1. ``settings.mfa_required`` is true → every user who signs in with a password.
+1. The level is ``everyone`` → every user who signs in with a password.
 2. The user holds a role named in the organisation's required roles (compared
    case-insensitively). An organisation sets that list itself under Settings →
    Organisation → Security (``TenantSettings.mfa_required_roles``); until it does
@@ -36,7 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Literal, NamedTuple
 
 #: JWT claim marking a session that may do nothing but enrol in MFA.
 ENROL_ONLY_CLAIM = "mfa_enrol_only"
@@ -58,6 +68,50 @@ PRIVILEGED_PERMISSION_SUFFIX = ":approve"
 
 EnrolmentState = Literal["not_required", "enrolled", "grace", "enrol_only"]
 
+#: Enforcement levels, weakest first.
+Mode = Literal["off", "privileged", "everyone"]
+MODES: tuple[Mode, ...] = ("off", "privileged", "everyone")
+#: Spellings accepted from ``.env`` and the API, mapped to the canonical level.
+_MODE_ALIASES: dict[str, Mode] = {
+    "off": "off", "none": "off", "disabled": "off", "optional": "off",
+    "privileged": "privileged", "roles": "privileged",
+    "everyone": "everyone", "all": "everyone", "everybody": "everyone", "required": "everyone",
+}
+
+
+def normalise_mode(value: object) -> Mode | None:
+    """The canonical enforcement level for a stored or typed value, or ``None`` when it
+    is empty or unknown (an unknown value never makes the policy stricter or looser: the
+    deployment default applies instead)."""
+    if not isinstance(value, str):
+        return None
+    return _MODE_ALIASES.get(value.strip().lower())
+
+
+def deployment_mode(settings) -> Mode:
+    """The level this deployment defaults every organisation to: ``MFA_ENFORCEMENT``
+    when set, else ``everyone`` if the legacy ``MFA_REQUIRED`` is true, else
+    ``privileged``."""
+    explicit = normalise_mode(getattr(settings, "mfa_enforcement", None))
+    if explicit is not None:
+        return explicit
+    return "everyone" if getattr(settings, "mfa_required", False) else "privileged"
+
+
+def effective_mode(tenant_mode: object, settings) -> Mode:
+    """The level one organisation actually runs at: its own choice, unless it made none
+    or the deployment locks the level (``MFA_ENFORCEMENT_LOCKED``)."""
+    base = deployment_mode(settings)
+    if getattr(settings, "mfa_enforcement_locked", False):
+        return base
+    return normalise_mode(tenant_mode) or base
+
+
+def _mode_from(global_required: bool, mode: Mode | None) -> Mode:
+    if mode is not None:
+        return mode
+    return "everyone" if global_required else "privileged"
+
 
 def is_privileged(
     role_names: Iterable[str],
@@ -78,9 +132,17 @@ def mfa_required_for(
     permission_codes: Iterable[str],
     global_required: bool,
     required_roles: Iterable[str],
+    mode: Mode | None = None,
 ) -> bool:
-    """Whether a password sign-in by this user must be backed by MFA."""
-    if global_required:
+    """Whether a password sign-in by this user must be backed by MFA.
+
+    ``mode`` is the organisation's effective level; when omitted, ``global_required``
+    stands in for it (``everyone`` when true, else ``privileged``).
+    """
+    level = _mode_from(global_required, mode)
+    if level == "off":
+        return False
+    if level == "everyone":
         return True
     return is_privileged(role_names, permission_codes, required_roles)
 
@@ -151,15 +213,20 @@ def role_requirement(
     permission_codes: Iterable[str],
     required_roles: Iterable[str],
     global_required: bool,
+    mode: Mode | None = None,
 ) -> RoleReason:
     """Why holders of this role must (or need not) use MFA, for the settings screen.
 
-    ``everyone`` — the deployment requires MFA for all; ``protected`` — the administrator
+    ``everyone`` — the level requires MFA for all; ``protected`` — the administrator
     role, which cannot be taken off; ``listed`` — the organisation (or deployment default)
     names it; ``approves`` — it is not listed but holds an ``:approve`` permission, so
-    its holders are checkers and must use MFA anyway; ``not_required``.
+    its holders are checkers and must use MFA anyway; ``not_required`` (always, when the
+    level is ``off``).
     """
-    if global_required:
+    level = _mode_from(global_required, mode)
+    if level == "off":
+        return "not_required"
+    if level == "everyone":
         return "everyone"
     if is_protected_role(role_name):
         return "protected"
@@ -170,14 +237,18 @@ def role_requirement(
     return "not_required"
 
 
-def user_requires_mfa(user, settings, tenant_roles: Iterable[str] | None = None) -> bool:
+def user_requires_mfa(
+    user, settings, tenant_roles: Iterable[str] | None = None, tenant_mode: object = None
+) -> bool:
     """:func:`mfa_required_for` applied to a ``User``, the app settings and the
-    organisation's own role list (``None`` = the deployment default)."""
+    organisation's own role list and enforcement level (``None`` = the deployment
+    default for each)."""
     return mfa_required_for(
         role_names=user.role_names,
         permission_codes=user.permission_codes,
-        global_required=settings.mfa_required,
+        global_required=getattr(settings, "mfa_required", False),
         required_roles=effective_required_roles(tenant_roles, settings.mfa_required_roles),
+        mode=effective_mode(tenant_mode, settings),
     )
 
 
@@ -252,6 +323,38 @@ def enrol_only_path_allowed(path: str) -> bool:
 
 
 # ------------------------------------------------------------------ database helpers ---
+class TenantPolicy(NamedTuple):
+    """An organisation's own MFA choices; ``None`` = the deployment default applies."""
+
+    mode: Mode | None
+    roles: list[str] | None
+
+
+async def tenant_policy(db, tenant_id=None) -> TenantPolicy:
+    """The organisation's enforcement level and MFA role list, in one read.
+
+    Reads through the session's tenant scope (RLS) when ``tenant_id`` is omitted; pass it
+    from a tenant-less session (the login flow). Never raises for a missing row or a
+    database that predates the columns — the deployment default applies then.
+    """
+    from sqlalchemy import select
+
+    from app.models.settings import TenantSettings
+
+    stmt = select(TenantSettings.mfa_enforcement, TenantSettings.mfa_required_roles)
+    if tenant_id is not None:
+        stmt = stmt.where(TenantSettings.tenant_id == tenant_id)
+    try:
+        async with db.begin_nested():
+            row = (await db.execute(stmt.limit(1))).first()
+    except Exception:  # noqa: BLE001 - an unpatched schema must not stop sign-in
+        return TenantPolicy(None, None)
+    if row is None:
+        return TenantPolicy(None, None)
+    mode, roles = row
+    return TenantPolicy(normalise_mode(mode), list(roles) if isinstance(roles, list) else None)
+
+
 async def tenant_required_roles(db, tenant_id=None) -> list[str] | None:
     """The organisation's own MFA role list, or ``None`` when it has not set one.
 
@@ -318,11 +421,11 @@ async def statuses_for(db, users, settings, *, now: datetime | None = None) -> d
     """``{user_id: (status, deadline)}`` for the Users list's MFA column
     (:func:`user_mfa_status`), reading the organisation's role list once."""
     now = now or datetime.now(timezone.utc)
-    roles = await tenant_required_roles(db)
+    policy = await tenant_policy(db)
     sso = await sso_signers(db, [u.id for u in users]) if await sso_enabled(db) else set()
     return {
         u.id: user_mfa_status(
-            required=user_requires_mfa(u, settings, roles),
+            required=user_requires_mfa(u, settings, policy.roles, policy.mode),
             mfa_enabled=u.mfa_enabled,
             grace_until=u.mfa_grace_until,
             now=now,

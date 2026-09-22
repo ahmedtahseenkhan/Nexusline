@@ -152,11 +152,34 @@ export default function OrganizationsPage() {
             sign in with their own identifier and can reach nothing outside it.
           </p>
         </div>
-        <button className="btn" onClick={openNew}>
+        <button
+          className="btn"
+          onClick={openNew}
+          disabled={summary?.can_add_organization === false}
+          title={
+            summary?.can_add_organization === false
+              ? summary.organizations_limit === 1
+                ? "This installation is licensed for one organisation"
+                : `This installation is licensed for ${summary.organizations_limit} organisations`
+              : undefined
+          }
+        >
           <IconPlus width={16} height={16} />
           Add organisation
         </button>
       </div>
+
+      {summary?.can_add_organization === false && (
+        <div className="card card-pad" style={{ marginBottom: 16, fontSize: 13.5 }}>
+          <b>
+            {summary.organizations_limit === 1
+              ? "Licensed for one organisation."
+              : `Licensed for ${summary.organizations_limit} organisations.`}
+          </b>{" "}
+          Hosting more on this installation needs a licence with a higher organisation count from the vendor.
+          Existing organisations are unaffected.
+        </div>
+      )}
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
@@ -166,7 +189,10 @@ export default function OrganizationsPage() {
             <div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>Organisations</div>
             <div style={{ fontSize: 20, fontWeight: 700 }}>
               {summary.active_organizations}
-              <span className="muted" style={{ fontSize: 13, fontWeight: 400 }}> active of {summary.organizations}</span>
+              <span className="muted" style={{ fontSize: 13, fontWeight: 400 }}>
+                {" "}active of {summary.organizations}
+                {summary.organizations_limit ? ` · licensed for ${summary.organizations_limit}` : ""}
+              </span>
             </div>
           </div>
           <div>

@@ -13,6 +13,10 @@
 * ``GET  /settings/organisation/security`` — ``settings:manage``. The MFA policy: which
   roles must use MFA and why (listed, administrator, approves, everyone), the grace
   period, SSO and e-mail approval links, and the users required but not yet enrolled.
+* ``PUT  /settings/organisation/security/mfa-enforcement`` — ``settings:manage``. The
+  enforcement level (off / privileged / everyone, or null for the deployment default);
+  refused when the deployment locks it. Clears every user's grace stamp so a fresh grace
+  period starts if the level is raised again later; audited.
 * ``PUT  /settings/organisation/security/mfa-roles`` — ``settings:manage``. The roles
   that must use MFA (validated against the organisation's roles; the administrator
   role is always kept; ``null`` = the deployment default). Audited.
@@ -283,6 +287,14 @@ class MfaPendingUser(BaseModel):
 
 
 class SecurityPolicyRead(BaseModel):
+    #: The level this organisation runs at: ``off`` / ``privileged`` / ``everyone``.
+    enforcement: str
+    #: The organisation's own choice; ``None`` = the deployment default applies.
+    organisation_enforcement: str | None
+    deployment_enforcement: str
+    #: The deployment decides the level (``MFA_ENFORCEMENT_LOCKED``); the choice is read-only.
+    enforcement_locked: bool
+    #: ``enforcement == "everyone"``, kept for older clients.
     mfa_required_for_everyone: bool
     grace_days: int
     deployment_roles: list[str]
@@ -302,6 +314,12 @@ class MfaRolesUpdate(BaseModel):
     """The roles that must use MFA. ``None`` = go back to the deployment default."""
 
     required_roles: list[str] | None
+
+
+class MfaEnforcementUpdate(BaseModel):
+    """``off`` / ``privileged`` / ``everyone``; ``None`` = go back to the deployment default."""
+
+    enforcement: str | None
 
 
 class GovernanceStage(BaseModel):
@@ -340,9 +358,11 @@ async def _security_policy(db) -> SecurityPolicyRead:
 
     from app.models.identity import Role, User
 
-    row_roles = await mfa_policy.tenant_required_roles(db)
+    own = await mfa_policy.tenant_policy(db)
+    row_roles = own.roles
     effective = mfa_policy.effective_required_roles(row_roles, app_settings.mfa_required_roles)
-    everyone = bool(app_settings.mfa_required)
+    mode = mfa_policy.effective_mode(own.mode, app_settings)
+    everyone = mode == "everyone"
     roles = (await db.scalars(select(Role).order_by(Role.name))).all()
     users = (await db.scalars(
         select(User).where(User.is_active.is_(True))
@@ -360,10 +380,10 @@ async def _security_policy(db) -> SecurityPolicyRead:
             is_system=role.is_system,
             requirement=mfa_policy.role_requirement(
                 role_name=role.name, permission_codes=codes,
-                required_roles=effective, global_required=everyone,
+                required_roles=effective, global_required=everyone, mode=mode,
             ),
             listed=role.name.strip().lower() in effective_keys,
-            locked=everyone or mfa_policy.is_protected_role(role.name),
+            locked=mode != "privileged" or mfa_policy.is_protected_role(role.name),
             approve_permissions=[c for c in codes if c.endswith(mfa_policy.PRIVILEGED_PERMISSION_SUFFIX)],
             active_users=len(holders),
             not_enrolled=sum(1 for u in holders if statuses[u.id][0] in ("required", "overdue")),
@@ -377,6 +397,10 @@ async def _security_policy(db) -> SecurityPolicyRead:
     ]
     pending.sort(key=lambda p: (p.status != "overdue", p.due is None, p.due or datetime.max.replace(tzinfo=timezone.utc)))
     return SecurityPolicyRead(
+        enforcement=mode,
+        organisation_enforcement=own.mode,
+        deployment_enforcement=mfa_policy.deployment_mode(app_settings),
+        enforcement_locked=bool(app_settings.mfa_enforcement_locked),
         mfa_required_for_everyone=everyone,
         grace_days=app_settings.mfa_grace_days,
         deployment_roles=list(app_settings.mfa_required_roles),
@@ -389,9 +413,58 @@ async def _security_policy(db) -> SecurityPolicyRead:
         pending_users=pending,
         enrolled_users=sum(1 for u in users if u.mfa_enabled),
         required_users=sum(
-            1 for u in users if mfa_policy.user_requires_mfa(u, app_settings, row_roles)
+            1 for u in users if mfa_policy.user_requires_mfa(u, app_settings, row_roles, own.mode)
         ),
     )
+
+
+@router.put(
+    "/organisation/security/mfa-enforcement",
+    response_model=SecurityPolicyRead,
+    dependencies=[Depends(require("settings:manage"))],
+)
+async def update_mfa_enforcement(
+    body: MfaEnforcementUpdate, db: DbSession, user: CurrentUser
+) -> SecurityPolicyRead:
+    """Choose how strictly MFA is enforced here: ``off``, ``privileged`` or ``everyone``;
+    ``null`` returns to the deployment default. Refused (409) when the deployment locks
+    the level. Every user's grace stamp is cleared, so if the level is raised again later
+    everyone gets a full grace period rather than being locked out on the spot. Requires
+    ``settings:manage``; audited."""
+    from sqlalchemy import update as sql_update
+
+    from app.models.identity import User
+
+    if app_settings.mfa_enforcement_locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This installation fixes the MFA enforcement level (MFA_ENFORCEMENT_LOCKED); "
+                   "ask whoever operates it to change it.",
+        )
+    if body.enforcement is None:
+        after = None
+    else:
+        after = mfa_policy.normalise_mode(body.enforcement)
+        if after is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The enforcement level must be one of: off, privileged, everyone.",
+            )
+    row = await get_or_create_settings(db, user.tenant_id)
+    before = mfa_policy.normalise_mode(row.mfa_enforcement)
+    if after != before:
+        row.mfa_enforcement = after
+        await db.execute(
+            sql_update(User).where(User.mfa_grace_until.is_not(None)).values(mfa_grace_until=None)
+        )
+        await db.flush()
+        shown = lambda v: v if v is not None else "deployment default"  # noqa: E731
+        await audit.record(
+            db, actor=user, action="update", entity_type="tenant_settings", entity_id=row.id,
+            summary=f"Changed MFA enforcement: {shown(before)} → {shown(after)}",
+            changes={"mfa_enforcement": {"from": before, "to": after}, "grace_stamps_cleared": True},
+        )
+    return await _security_policy(db)
 
 
 @router.get(

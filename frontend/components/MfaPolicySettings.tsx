@@ -1,14 +1,15 @@
 "use client";
 
-/* Settings → Organisation → Security: which roles must use two-factor authentication.
-   The server decides (services/mfa_policy.py); this card shows why each role is or isn't
-   required, lets an administrator add or remove roles (never Admin), and lists the people
-   who must enrol and haven't. */
+/* Settings → Organisation → Security: how strictly two-factor authentication is enforced
+   (off / privileged roles / everyone) and, at the privileged level, which roles must use
+   it. The server decides (services/mfa_policy.py); this card shows why each role is or
+   isn't required, lets an administrator pick the level and add or remove roles (never
+   Admin), and lists the people who must enrol and haven't. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { apiCall } from "@/lib/api";
-import { toast } from "@/lib/feedback";
+import { confirmDialog, toast } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
 import { Badge } from "@/components/badges";
 
@@ -34,7 +35,13 @@ type PendingUser = {
   due: string | null;
 };
 
+export type Level = "off" | "privileged" | "everyone";
+
 export type SecurityPolicy = {
+  enforcement: Level;
+  organisation_enforcement: Level | null;
+  deployment_enforcement: Level;
+  enforcement_locked: boolean;
   mfa_required_for_everyone: boolean;
   grace_days: number;
   deployment_roles: string[];
@@ -50,6 +57,29 @@ export type SecurityPolicy = {
 };
 
 const key = (s: string) => s.trim().toLowerCase();
+
+const LEVELS: { value: Level; label: string; blurb: string }[] = [
+  {
+    value: "off",
+    label: "Off",
+    blurb:
+      "Nobody is made to set up an authenticator. People who already have one keep using it and may switch it off themselves. For evaluation and testing, not for a bank in production.",
+  },
+  {
+    value: "privileged",
+    label: "Privileged roles",
+    blurb:
+      "Administrators, anyone who can approve, and the roles you switch on below. The usual choice for a bank going live.",
+  },
+  {
+    value: "everyone",
+    label: "Everyone",
+    blurb:
+      "Everyone who signs in with a password, including Active Directory accounts. What PCI DSS 8.4.2 and SBP guidance expect.",
+  },
+];
+
+const levelLabel = (l: Level) => LEVELS.find((x) => x.value === l)?.label ?? l;
 
 function reasonText(row: RoleRow, toggledOn: boolean): string {
   if (row.requirement === "everyone") return "Required for everyone on this installation";
@@ -110,6 +140,92 @@ export default function MfaPolicySettings({ canEdit }: { canEdit: boolean }) {
 
   const chosenNames = () => (policy?.roles ?? []).filter((r) => chosen.has(key(r.name))).map((r) => r.name);
 
+  async function setLevel(level: Level | null) {
+    if (!policy || busy) return;
+    if (level === "off") {
+      const ok = await confirmDialog({
+        title: "Switch two-factor authentication off?",
+        message:
+          "Nobody in this organisation will be required to use an authenticator app, including administrators and approvers. People who already set one up keep using it. This is recorded in the activity log.",
+        confirmLabel: "Switch off",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      apply(await apiCall<SecurityPolicy>("PUT", "/settings/organisation/security/mfa-enforcement", { enforcement: level }));
+      toast(level === null ? "MFA enforcement reset to the installation default" : `MFA enforcement: ${levelLabel(level)}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not change the MFA enforcement level");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const levelPicker = policy && (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }} role="radiogroup" aria-label="MFA enforcement level">
+        {LEVELS.map((l) => {
+          const on = policy.enforcement === l.value;
+          const disabled = !canEdit || policy.enforcement_locked || busy;
+          return (
+            <label
+              key={l.value}
+              className="card card-pad"
+              style={{
+                margin: 0,
+                cursor: disabled ? "not-allowed" : "pointer",
+                borderColor: on ? "var(--primary)" : undefined,
+                background: on ? "var(--primary-weak-2)" : undefined,
+                opacity: disabled && !on ? 0.7 : 1,
+                display: "flex",
+                gap: 10,
+                alignItems: "flex-start",
+              }}
+            >
+              <input
+                type="radio"
+                name="mfa-enforcement"
+                value={l.value}
+                checked={on}
+                disabled={disabled}
+                onChange={() => setLevel(l.value)}
+                style={{ marginTop: 3 }}
+              />
+              <span>
+                <b style={{ fontSize: 13.5 }}>{l.label}</b>
+                <span className="muted" style={{ display: "block", fontSize: 12.5, lineHeight: 1.5, marginTop: 2 }}>{l.blurb}</span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+      <div className="muted" style={{ fontSize: 12.5, marginTop: 8, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        {policy.enforcement_locked ? (
+          <span>
+            This installation fixes the level at <b>{levelLabel(policy.deployment_enforcement)}</b> (MFA_ENFORCEMENT_LOCKED); whoever
+            operates it changes it.
+          </span>
+        ) : policy.organisation_enforcement === null ? (
+          <span>Using this installation&apos;s default (<b>{levelLabel(policy.deployment_enforcement)}</b>).</span>
+        ) : (
+          <>
+            <span>
+              Chosen by your organisation; the installation default is <b>{levelLabel(policy.deployment_enforcement)}</b>.
+            </span>
+            {canEdit && (
+              <button className="btn secondary sm" disabled={busy} onClick={() => setLevel(null)}>
+                Use installation default
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="card" id="mfa">
       <div className="card-head">
@@ -126,11 +242,18 @@ export default function MfaPolicySettings({ canEdit }: { canEdit: boolean }) {
           !error && <p className="muted">Loading…</p>
         ) : (
           <>
-            {policy.mfa_required_for_everyone ? (
+            {levelPicker}
+            {policy.enforcement === "off" ? (
+              <div className="card card-pad" style={{ margin: "0 0 12px", fontSize: 13.5, background: "var(--warning-bg, #fff7e6)" }}>
+                <strong>Two-factor authentication is switched off.</strong> Nobody is required to use it, including
+                administrators and approvers. Anyone may still set it up under General Settings → Account security,
+                and people who already have keep being asked for their code when they sign in.
+              </div>
+            ) : policy.enforcement === "everyone" ? (
               <div className="card card-pad" style={{ margin: "0 0 12px", fontSize: 13.5, background: "var(--primary-weak-2)" }}>
                 <strong>Required for everyone who signs in with a password</strong> (local accounts and Active
-                Directory). This installation sets it (MFA_REQUIRED), so the role list does not apply. People who sign
-                in through single sign-on use your identity provider&apos;s MFA instead.
+                Directory), so the role list does not apply. People who sign in through single sign-on use your
+                identity provider&apos;s MFA instead.
               </div>
             ) : (
               <p style={{ marginTop: 0, fontSize: 13.5 }}>
@@ -140,10 +263,12 @@ export default function MfaPolicySettings({ canEdit }: { canEdit: boolean }) {
             </p>
             )}
             <ul className="muted" style={{ fontSize: 12.5, margin: "0 0 14px", paddingLeft: 18, lineHeight: 1.7 }}>
+              {policy.enforcement !== "off" && (
               <li>
                 Grace period: {policy.grace_days} day{policy.grace_days === 1 ? "" : "s"} from the first sign-in after MFA
                 becomes required. After that, signing in only opens the MFA set-up page until the person finishes it.
               </li>
+              )}
               {policy.sso_enabled && (
                 <li>
                   Single sign-on: people who sign in through your identity provider aren&apos;t asked again here —
@@ -156,12 +281,12 @@ export default function MfaPolicySettings({ canEdit }: { canEdit: boolean }) {
                   ? "on. They let a checker decide without signing in, so without MFA — your installation has chosen to allow this."
                   : "off, so checkers sign in (with MFA) to decide."}
               </li>
-              {!policy.mfa_required_for_everyone && policy.organisation_roles === null && (
+              {policy.enforcement === "privileged" && policy.organisation_roles === null && (
                 <li>Using this installation&apos;s default list ({policy.deployment_roles.join(", ") || "none"}).</li>
               )}
             </ul>
 
-            {!policy.mfa_required_for_everyone && (
+            {policy.enforcement === "privileged" && (
               <>
             <div className="table-wrap">
               <table>
@@ -236,7 +361,11 @@ export default function MfaPolicySettings({ canEdit }: { canEdit: boolean }) {
             )}
 
             <h4 style={{ margin: "20px 0 8px" }}>Required but not enrolled</h4>
-            {policy.pending_users.length === 0 ? (
+            {policy.enforcement === "off" ? (
+              <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                Nobody is required while enforcement is off. {policy.enrolled_users} {policy.enrolled_users === 1 ? "person has" : "people have"} set it up voluntarily.
+              </p>
+            ) : policy.pending_users.length === 0 ? (
               <p className="muted" style={{ margin: 0, fontSize: 13 }}>Everyone who must use MFA has set it up.</p>
             ) : (
               <div className="table-wrap">

@@ -1132,6 +1132,8 @@ export interface Me {
   mfa_required_for_everyone?: boolean;
   /** Signs in through the organisation's SSO: the identity provider enforces MFA. */
   mfa_via_identity_provider?: boolean;
+  /** The organisation's MFA enforcement level: off (optional), privileged or everyone. */
+  mfa_enforcement?: "off" | "privileged" | "everyone";
   /** Every permission code the user's roles grant (e.g. "org:write"). */
   permission_codes?: string[];
 }
@@ -1170,6 +1172,10 @@ export interface PlatformSummary {
   users: number;
   deployment: string;
   license: Record<string, unknown>;
+  /** Organisations the licence allows on this installation; 0 = unlimited. */
+  organizations_limit?: number;
+  /** One more organisation may be created under the licence. */
+  can_add_organization?: boolean;
 }
 
 export interface Notification {

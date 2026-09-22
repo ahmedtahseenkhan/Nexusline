@@ -13,4 +13,7 @@ TABLES: tuple[str, ...] = ()
 def ddl_statements() -> list[str]:
     return [
         "ALTER TABLE IF EXISTS tenant_settings ALTER COLUMN retention_days SET DEFAULT 3650",
+        # Per-organisation MFA enforcement level (off / privileged / everyone); NULL = the
+        # deployment default. Added 2026-09-22 so an evaluation install can switch MFA off.
+        "ALTER TABLE IF EXISTS tenant_settings ADD COLUMN IF NOT EXISTS mfa_enforcement VARCHAR(16)",
     ]
