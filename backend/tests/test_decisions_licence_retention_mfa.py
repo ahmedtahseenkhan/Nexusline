@@ -552,8 +552,12 @@ def test_mfa_required_by_default_only_in_a_release_build(monkeypatch):
 
 
 def test_production_config_requires_mfa_for_everyone():
-    assert re.search(r"MFA_REQUIRED:\s*\$\{MFA_REQUIRED:-true\}", (REPO / "docker-compose.prod.yml").read_text())
-    assert re.search(r"^MFA_REQUIRED=true$", (REPO / ".env.example").read_text(), re.M)
+    compose = (REPO / "docker-compose.prod.yml").read_text()
+    assert re.search(r"MFA_ENFORCEMENT:\s*\$\{MFA_ENFORCEMENT:-everyone\}", compose)
+    assert re.search(r"MFA_REQUIRED:\s*\$\{MFA_REQUIRED:-true\}", compose)
+    example = (REPO / ".env.example").read_text()
+    assert re.search(r"^MFA_ENFORCEMENT=everyone$", example, re.M)
+    assert re.search(r"^MFA_REQUIRED=true$", example, re.M)
 
 
 def test_mfa_for_everyone_covers_ldap_but_not_sso():

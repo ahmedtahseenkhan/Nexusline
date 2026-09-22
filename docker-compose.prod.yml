@@ -95,10 +95,22 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       # --- identity / governance controls (banking baseline) ---
       LDAP_ENABLED: ${LDAP_ENABLED:-false}
-      # Everyone who signs in with a password (local or LDAP/AD) must enrol in MFA
-      # (decision 3). SSO users are exempt: the identity provider owns their second factor.
+      # Public self-service sign-up (POST /auth/register-org). Off: operators create
+      # organisations from Settings -> Organisations, within the licence's organisation
+      # cap. Only a hosted trial environment sets this true.
+      ALLOW_SELF_REGISTRATION: ${ALLOW_SELF_REGISTRATION:-false}
+      # How strictly MFA is enforced, and the default for every organisation here:
+      # "everyone" (every password sign-in, local or LDAP/AD — decision 3, the production
+      # default), "privileged" (Admin, anyone who can approve, and the roles below) or
+      # "off" (nobody is made to enrol — evaluation and UAT installs only). SSO users are
+      # exempt at every level: the identity provider owns their second factor. An
+      # organisation can pick its own level under Settings -> Organisation -> Security
+      # unless MFA_ENFORCEMENT_LOCKED=true. MFA_REQUIRED is the older switch and still
+      # works (true = everyone) when MFA_ENFORCEMENT is unset.
+      MFA_ENFORCEMENT: ${MFA_ENFORCEMENT:-everyone}
+      MFA_ENFORCEMENT_LOCKED: ${MFA_ENFORCEMENT_LOCKED:-false}
       MFA_REQUIRED: ${MFA_REQUIRED:-true}
-      # Only used when MFA_REQUIRED=false: default roles that must use MFA until an
+      # Only used at the "privileged" level: default roles that must use MFA until an
       # organisation sets its own list under Settings -> Organisation -> Security. Admin
       # and anyone who can approve always must.
       MFA_REQUIRED_ROLES: ${MFA_REQUIRED_ROLES:-admin}

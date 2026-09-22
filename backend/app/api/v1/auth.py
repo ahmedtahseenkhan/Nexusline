@@ -117,7 +117,19 @@ def _enrol_only_result(user: User, tenant_id) -> LoginResult:
     summary="Register a new organization and its first admin",
 )
 async def register_org(body: RegisterOrgRequest) -> TokenResponse:
+    """Self-service sign-up: anyone who can reach the API creates an organisation and
+    becomes its administrator. That is a hosted-trial feature, not something a bank's
+    on-premise installation should expose, so it is off unless the operator sets
+    ``ALLOW_SELF_REGISTRATION=true``; and even then the licence's organisation cap
+    applies. Operators create organisations from Settings → Organisations instead."""
+    if not settings.allow_self_registration:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Self-service registration is not enabled on this installation. "
+                   "Ask whoever operates it to create the organisation.",
+        )
     password_policy.validate_password(body.admin_password)
+    await licence_state.ensure_organisation_available()
     async with tenant_session(None) as db:
         if await db.scalar(select(Tenant).where(Tenant.slug == body.slug)):
             raise HTTPException(
@@ -292,10 +304,9 @@ async def _do_login(db, body: LoginRequest) -> _Outcome:
 
     # Not enrolled. If the policy requires MFA for this user, start (or apply) the grace
     # period; past it, the session may only enrol.
+    policy = await mfa_policy.tenant_policy(db, tenant.id)
     state, deadline = mfa_policy.enrolment_state(
-        required=mfa_policy.user_requires_mfa(
-            authed, settings, await mfa_policy.tenant_required_roles(db, tenant.id)
-        ),
+        required=mfa_policy.user_requires_mfa(authed, settings, policy.roles, policy.mode),
         mfa_enabled=authed.mfa_enabled,
         grace_until=authed.mfa_grace_until,
         now=now,
@@ -415,9 +426,8 @@ async def mfa_activate(body: MfaActivateRequest, db: DbSession, user: CurrentUse
 
 @router.post("/mfa/disable", response_model=UserRead, summary="Disable MFA for the current user")
 async def mfa_disable(body: MfaDisableRequest, db: DbSession, user: CurrentUser) -> UserRead:
-    if user.mfa_enabled and mfa_policy.user_requires_mfa(
-        user, settings, await mfa_policy.tenant_required_roles(db)
-    ):
+    policy = await mfa_policy.tenant_policy(db)
+    if user.mfa_enabled and mfa_policy.user_requires_mfa(user, settings, policy.roles, policy.mode):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Two-factor authentication is required for your role and cannot be turned off.",
@@ -454,9 +464,9 @@ async def me(
     db: DbSession,
     payload: Annotated[dict[str, Any], Depends(get_token_payload)],
 ) -> MeRead:
-    required = mfa_policy.user_requires_mfa(
-        user, settings, await mfa_policy.tenant_required_roles(db)
-    )
+    policy = await mfa_policy.tenant_policy(db)
+    mode = mfa_policy.effective_mode(policy.mode, settings)
+    required = mfa_policy.user_requires_mfa(user, settings, policy.roles, policy.mode)
     enrol_only = bool(payload.get(mfa_policy.ENROL_ONLY_CLAIM))
     due = user.mfa_grace_until if (required and not user.mfa_enabled) else None
     return MeRead.model_validate(user).model_copy(
@@ -464,7 +474,8 @@ async def me(
             "mfa_enrolment_required": enrol_only,
             "mfa_enrolment_due": due,
             "mfa_required_for_user": required,
-            "mfa_required_for_everyone": bool(settings.mfa_required),
+            "mfa_required_for_everyone": mode == "everyone",
+            "mfa_enforcement": mode,
             "mfa_via_identity_provider": bool(
                 await mfa_policy.sso_enabled(db) and user.id in await mfa_policy.sso_signers(db, [user.id])
             ),

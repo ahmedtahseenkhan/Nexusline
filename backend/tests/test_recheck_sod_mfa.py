@@ -155,7 +155,7 @@ def test_login_me_and_disable_read_the_organisation_list():
     from app.api.v1 import auth
 
     source = inspect.getsource(auth)
-    assert source.count("mfa_policy.tenant_required_roles(") >= 3
+    assert source.count("mfa_policy.tenant_policy(") >= 3
 
 
 def test_mfa_role_list_endpoint_validates_audits_and_needs_settings_manage():

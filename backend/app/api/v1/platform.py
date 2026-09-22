@@ -35,7 +35,7 @@ from app.models.control import Control
 from app.models.identity import User
 from app.models.risk import Risk
 from app.models.tenant import Tenant
-from app.services import audit, license, password_policy
+from app.services import audit, licence_state, license, password_policy
 
 router = APIRouter(
     prefix="/platform",
@@ -93,6 +93,10 @@ class PlatformSummary(BaseModel):
     users: int
     deployment: str
     license: dict
+    #: Organisations the licence allows on this installation; ``0`` = unlimited.
+    organizations_limit: int = 0
+    #: One more organisation may be created under the licence.
+    can_add_organization: bool = True
 
 
 async def _counts(tenant_id: uuid.UUID) -> dict[str, int]:
@@ -134,9 +138,12 @@ async def create_org(body: OrganizationCreate, user: CurrentUser) -> Organizatio
     """Provision a new organisation with its first admin.
 
     The same call ``POST /auth/register-org`` makes, minus the self-service: this one is
-    made by the operator, and it is the path a bank onboarding actually takes.
+    made by the operator, and it is the path a bank onboarding actually takes. Refused
+    (403, ``licence_organisation_limit``) once the licence's organisation cap is reached:
+    an on-premise bank's licence allows one organisation, the vendor's hosted install many.
     """
     password_policy.validate_password(body.admin_password)
+    await licence_state.ensure_organisation_available()
     async with system_session() as db:
         if await db.scalar(select(Tenant).where(Tenant.slug == body.slug)):
             raise HTTPException(
@@ -243,12 +250,17 @@ async def summary() -> PlatformSummary:
         users += (await _counts(tenant.id))["users"]
 
     info = license.load_current()
+    limit = licence_state.organisations_limit()
     return PlatformSummary(
         organizations=len(tenants),
         active_organizations=sum(1 for t in tenants if t.is_active),
         users=users,
         deployment=info.deployment or "on-premise",
         license=info.to_public(),
+        organizations_limit=limit,
+        can_add_organization=licence_state.organisation_refusal(
+            limit=limit, used=len(tenants), enforcing=license.enforcement_enabled()
+        ) is None,
     )
 
 

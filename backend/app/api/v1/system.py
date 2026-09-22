@@ -20,7 +20,7 @@ from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.identity import User
 from app.models.risk import Risk
-from app.services import backup, license as lic, licence_state, modules as module_service, storage, support_bundle
+from app.services import backup, license as lic, licence_state, mfa_policy, modules as module_service, storage, support_bundle
 
 logger = logging.getLogger("nexusline.system")
 
@@ -32,6 +32,8 @@ def _feature_flags() -> dict:
         "scheduler_enabled": settings.scheduler_enabled,
         "ldap_enabled": settings.ldap_enabled,
         "mfa_required": settings.mfa_required,
+        "mfa_enforcement": mfa_policy.deployment_mode(settings),
+        "mfa_enforcement_locked": settings.mfa_enforcement_locked,
         "mfa_required_roles": settings.mfa_required_roles,
         "mfa_grace_days": settings.mfa_grace_days,
         "enforce_segregation_of_duties": settings.enforce_segregation_of_duties,

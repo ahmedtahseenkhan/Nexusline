@@ -39,6 +39,9 @@ class LicenseInfo:
     licensed_to: str = ""
     plan: str = ""
     seats: int = 0
+    # How many organisations (tenants) the installation may hold. Absent from the payload
+    # = 1: an on-premise bank is single-tenant. 0 = unlimited (the vendor's own SaaS host).
+    organisations: int = 1
     features: list[str] = field(default_factory=list)
     # Licensed module entitlements: edition names and/or module keys (see
     # app/core/modules.py). None (field absent from the payload) means the
@@ -56,6 +59,7 @@ class LicenseInfo:
             "licensed_to": self.licensed_to,
             "plan": self.plan,
             "seats": self.seats,
+            "organisations": self.organisations,
             "features": self.features,
             "modules": self.modules,
             "issued": self.issued,
@@ -133,6 +137,7 @@ def verify_token(token: str) -> LicenseInfo:
         licensed_to=str(payload.get("licensed_to", "")),
         plan=str(payload.get("plan", "")),
         seats=int(payload.get("seats", 0) or 0),
+        organisations=organisations_from_payload(payload),
         features=list(payload.get("features", []) or []),
         modules=list(payload["modules"]) if payload.get("modules") is not None else None,
         issued=str(payload.get("issued", "")),
@@ -155,6 +160,19 @@ def verify_token(token: str) -> LicenseInfo:
     info.status = "valid"
     info.message = "license verified"
     return info
+
+
+def organisations_from_payload(payload: dict) -> int:
+    """The organisation cap a payload carries: absent or unreadable → 1 (single-tenant),
+    ``0`` → unlimited, negative → 1. Pure."""
+    raw = payload.get("organisations")
+    if raw is None:
+        return 1
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return value if value >= 0 else 1
 
 
 def signature_ok(info: LicenseInfo) -> bool:
