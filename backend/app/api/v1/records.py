@@ -36,6 +36,7 @@ from app.services import (
     bulk_edit,
     dual_control,
     entity_types,
+    lifecycle_gates,
     master_data,
     record_impact,
     record_registry,
@@ -186,14 +187,16 @@ def _title_column(model: type):
 
 async def _self_decision_block(db: DbSession, user: Any, entity_type: str, record: Any) -> str | None:
     """Why four-eyes stops this user deciding the record, or None."""
-    required, _ = await dual_control.dual_control_required(db, entity_type, "approve")
+    required, rule = await dual_control.dual_control_required(db, entity_type, "approve")
     if not required:
         return None
     if await record_workflow.last_submitter(db, entity_type, record.id) == user.id:
         return "You submitted this record, so someone independent must approve or reject it."
-    if await dual_control.maker_of(db, entity_type, record.id, record=record) == user.id:
+    maker = await dual_control.maker_of(db, entity_type, record.id, record=record)
+    if maker == user.id:
         return "You entered this record, so someone independent must approve or reject it."
-    return None
+    return await dual_control.checker_role_refusal(db, rule, module=entity_type, action="approve",
+                                                   checker_id=user.id, maker_id=maker)
 
 
 async def _actions_for(
@@ -207,6 +210,12 @@ async def _actions_for(
         blocked = await _self_decision_block(db, user, entity_type, record)
         if blocked:
             actions = [a for a in actions if a not in record_workflow.DECISIONS]
+    if not blocked and not routing and "approve" in actions:
+        # Not ready yet, or above this user's delegated authority: the server would
+        # refuse the approval, so don't offer it. Rejecting needs neither.
+        blocked = await lifecycle_gates.approve_refusal(db, entity_type, record, user)
+        if blocked:
+            actions = [a for a in actions if a != "approve"]
     return actions, blocked
 
 

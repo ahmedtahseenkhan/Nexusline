@@ -40,6 +40,10 @@ assessment           review              completing the review of a questionnair
                                          assessment (not whoever sent it)
 board_pack           release             reviewing and releasing a board pack (none of
                                          its preparers)
+capital_calculation  reopen              reopening a final regulatory capital figure
+                                         (not whoever marked it final)
+vuln_finding         accept_risk         accepting a vulnerability's risk instead of
+                                         fixing it (not whoever asked for it)
 risk                 bulk_archive        archiving risks with no live links (an
                                          immediate action: refused while dual control
                                          applies — configure a rule to allow it)
@@ -77,6 +81,11 @@ for older organisations at start-up). They are created enabled when the global s
 on — which refuses exactly what the switch alone refused — and disabled when it is off,
 so the switch keeps deciding until an administrator turns an individual rule on. A key
 whose rule is deleted falls back to the switch again; the defaults never re-create it.
+
+A rule's ``checker_role`` and ``maker_role`` narrow who may check and who may ask
+(see "maker and checker roles" below); each binds only while another active user holds
+the role, so a vacated role never locks a decision out. Decisions that carry an amount
+are also held to the delegation-of-authority matrix (``services/authority_limits.py``).
 
 Who the maker of an existing record is — :func:`maker_of`, first answer wins:
 
@@ -291,6 +300,8 @@ async def enforce_maker_checker(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=maker_checker_message(subject, message),
         )
+    await enforce_checker_role(db, rule, module=module, action=action,
+                               checker_id=checker_id, maker_id=maker_id)
     return rule
 
 
@@ -324,13 +335,159 @@ async def record_maker_checker_refusal(
     Same resolution as the gate: the rule from :func:`dual_control_required`, the maker
     from :func:`maker_of` (only looked up when the rule applies).
     """
-    required, _rule = await dual_control_required(db, module, action, amount)
+    required, rule = await dual_control_required(db, module, action, amount)
     if not required or checker_id is None:
         return None
     maker_id = await maker_of(db, entity_type, entity_id, record=record)
     if maker_id is not None and maker_id == checker_id:
         return maker_checker_message(subject, message)
+    return await checker_role_refusal(db, rule, module=module, action=action,
+                                      checker_id=checker_id, maker_id=maker_id)
+
+
+# ------------------------------------------------- maker and checker roles ---
+# A rule's ``maker_role`` / ``checker_role`` say who may make and who may check. They
+# narrow four-eyes, never replace it: the checker is still never the maker.
+#
+# * ``checker_role`` is enforced wherever the rule's decision is checked (every
+#   caller of :func:`enforce_maker_checker`, :func:`record_maker_checker_refusal` and
+#   the sites that call :func:`checker_role_refusal` themselves).
+# * ``maker_role`` is enforced where a maker *asks* for the decision — requesting a risk
+#   acceptance, raising an exception, asking for a later issue due date, submitting a
+#   record for review (:func:`enforce_maker_role`). Decisions whose maker is simply
+#   "whoever entered the record" have no request step; there the rule's checker role
+#   and the four-eyes check apply, and the maker role is not checked after the fact
+#   (a record entered before the rule existed would otherwise become undecidable).
+#
+# Fallback, as approval routes do for a stage role nobody can decide
+# (``default_governance.stage_decision_refusal``): the role binds only while some
+# *other* active user holds it — and, for the checker, also holds the permission the
+# decision needs. With nobody there, anyone who may take the step may take it, so a
+# mis-configured or vacated role never locks an organisation out of a decision; the
+# refusal text, the Delegation of Authority page and the activity trail make the gap
+# visible instead.
+
+#: The permission a checker of each fixed decision needs (holders without it could not
+#: decide, so they do not count as available checkers). ``<type>/approve`` keys use the
+#: record lifecycle's approve permission; keys not listed count role holders only.
+CHECKER_PERMISSIONS: dict[tuple[str, str], str] = {
+    ("risk", "accept"): "risk:accept",
+    ("risk", "bulk_archive"): "risk:write",
+    ("exception", "approve"): "exception:approve",
+    ("control", "audit"): "control:test",
+    ("control", "review_test"): "control:test",
+    ("policy", "publish"): "policy:write",
+    ("issue", "validate"): "issue:write",
+    ("issue", "close"): "issue:write",
+    ("authority", "update"): "authority:write",
+    ("assessment", "review"): "assessment:write",
+    ("board_pack", "release"): "boardpack:release",
+    ("capital_calculation", "reopen"): "scenario:write",
+    ("aml", "file_sar"): "aml:write",
+    ("shariah", "charity_approved"): "shariah:write",
+    ("shariah", "charity_disbursed"): "shariah:write",
+    ("vuln_finding", "accept_risk"): "workflow:approve",
+}
+
+
+def checker_permission(module: str, action: str) -> str | None:
+    """The permission an available checker of (module, action) must hold, or None."""
+    if (module, action) in CHECKER_PERMISSIONS:
+        return CHECKER_PERMISSIONS[(module, action)]
+    if action == "approve":
+        from app.services import record_workflow
+
+        try:
+            return record_workflow.required_permissions(module, "approve")[-1]
+        except Exception:  # noqa: BLE001 - not a record type with a lifecycle
+            return None
     return None
+
+
+def role_gate_refusal(
+    role: str | None, held_roles: Iterable[str], available: int, *, step: str, reference: str = "",
+) -> str | None:
+    """Why someone holding ``held_roles`` may not take ``step`` under a rule that
+    reserves it for ``role``, or None. Pure.
+
+    ``available`` counts the *other* active users who hold the role (and can take the
+    step); with none the role does not bind (the fallback above)."""
+    wanted = _norm(role)
+    if not wanted or available <= 0:
+        return None
+    if wanted in {_norm(r) for r in held_roles if r}:
+        return None
+    rule = f" ({reference})" if reference else ""
+    return (
+        f"Maker-checker rule{rule}: {step} is reserved for the {' '.join((role or '').split())} role. "
+        "Ask someone who holds it."
+    )
+
+
+async def _role_facts(
+    db: AsyncSession, role: str, user_id: Any, exclude: set, permission: str | None, directory: Any = None,
+) -> tuple[tuple[str, ...], int]:
+    """``(roles user_id holds, other active holders of role able to act)``. Pass the
+    ``notifications.Directory`` already loaded to skip loading it again (My Work checks
+    many items against one directory)."""
+    from app.services.notifications import load_directory
+
+    if directory is None:
+        directory = await load_directory(db)
+    canonical = directory.role(role)
+    held = directory.roles_of(user_id) if user_id is not None else ()
+    if canonical is None:
+        return held, 0
+    available = sum(
+        1 for uid in directory.members(canonical)
+        if uid not in exclude and uid != user_id
+        and (permission is None or permission in directory.permissions_of(uid))
+    )
+    return held, available
+
+
+async def checker_role_refusal(
+    db: AsyncSession, rule: DualControlRule | None, *, module: str, action: str,
+    checker_id: uuid.UUID | None, maker_id: uuid.UUID | None, directory: Any = None,
+) -> str | None:
+    """Why ``checker_id`` may not check under ``rule``'s checker role, or None.
+    ``directory``: an already-loaded ``notifications.Directory``, to reuse."""
+    role = (getattr(rule, "checker_role", "") or "").strip() if rule is not None else ""
+    if not role or checker_id is None:
+        return None
+    exclude = {maker_id} if maker_id is not None else set()
+    held, available = await _role_facts(db, role, checker_id, exclude, checker_permission(module, action),
+                                        directory)
+    return role_gate_refusal(role, held, available, step="checking this decision",
+                             reference=getattr(rule, "reference", "") or "")
+
+
+async def enforce_checker_role(
+    db: AsyncSession, rule: DualControlRule | None, *, module: str, action: str,
+    checker_id: uuid.UUID | None, maker_id: uuid.UUID | None,
+) -> None:
+    refusal = await checker_role_refusal(db, rule, module=module, action=action,
+                                         checker_id=checker_id, maker_id=maker_id)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+
+
+async def enforce_maker_role(
+    db: AsyncSession, *, module: str, action: str, maker_id: uuid.UUID | None,
+    amount: float | None = None,
+) -> None:
+    """403 when an active rule for (module, action) names a maker role the requester
+    does not hold, while someone else does (the fallback above). Called where the maker
+    asks for the decision; a no-op when four-eyes does not apply."""
+    required, rule = await dual_control_required(db, module, action, amount)
+    role = (getattr(rule, "maker_role", "") or "").strip() if rule is not None else ""
+    if not required or not role or maker_id is None:
+        return
+    held, available = await _role_facts(db, role, maker_id, set(), None)
+    refusal = role_gate_refusal(role, held, available, step="asking for this decision",
+                                reference=getattr(rule, "reference", "") or "")
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
 
 
 # ------------------------------------------------------------- enforced keys ---
@@ -358,9 +515,11 @@ FIXED_KEYS: tuple[EnforcedKey, ...] = (
     EnforcedKey("authority", "update", "Amending a delegation-of-authority line", "Decisions"),
     EnforcedKey("assessment", "review", "Completing a questionnaire assessment review", "Decisions"),
     EnforcedKey("board_pack", "release", "Reviewing and releasing a board pack", "Decisions"),
+    EnforcedKey("capital_calculation", "reopen", "Reopening a final capital calculation", "Decisions"),
     EnforcedKey("aml", "file_sar", "Marking an STR / SAR as filed with the FMU", "Decisions"),
     EnforcedKey("shariah", "charity_approved", "Approving a purification disbursement", "Decisions"),
     EnforcedKey("shariah", "charity_disbursed", "Releasing a purification disbursement", "Decisions"),
+    EnforcedKey("vuln_finding", "accept_risk", "Accepting a vulnerability's risk", "Decisions"),
 )
 
 #: Registers whose archive goes through ``services/delete_guard.py``.
@@ -415,6 +574,11 @@ def _field(rule: Any, name: str) -> Any:
     return rule.get(name) if isinstance(rule, Mapping) else getattr(rule, name, None)
 
 
+def _role(rule: Any, name: str) -> str:
+    """A rule's maker / checker role, normalised for comparison ("" when none)."""
+    return " ".join(str(_field(rule, name) or "").lower().split())
+
+
 def rule_effect(rule: Any, *, action: str, global_switch: bool) -> Effect:
     """The effect of ``rule`` (an ORM row, a dict of its fields, or None for "no rule")
     — the same resolution as :func:`dual_control_required`. Attestation keys do not
@@ -467,6 +631,8 @@ def relaxations(
     if after is None:  # delete
         if loosens(old_effect, rule_effect(None, action=old_key[1], global_switch=global_switch)):
             out.append(f"deleting it hands {old_key[0]} / {old_key[1]} to a weaker default")
+        elif old_effect.required and any(_role(before, r) for r in ("maker_role", "checker_role")):
+            out.append("deleting it drops the maker / checker roles it names")
         return out
     new_key = (_field(after, "module"), _field(after, "action"))
     if new_key != old_key:
@@ -482,6 +648,12 @@ def relaxations(
             out.append("it switches four-eyes off for this action")
         else:
             out.append("it lets more decisions through without a second person (threshold)")
+    # The roles are enforced (maker_role / checker_role): removing or replacing one widens
+    # who may ask or decide; naming one where there was none only narrows it.
+    for name, what in (("maker_role", "maker"), ("checker_role", "checker")):
+        was = _role(before, name)
+        if was and _role(after, name) != was:
+            out.append(f"it changes the {what} role from {_field(before, name).strip()}")
     return out
 
 
@@ -551,12 +723,13 @@ def mandate_refusal(
         return None
     able = sorted({ln.role_title for ln in lines if covers(ln) and ln.role_title},
                   key=lambda t: min(ln.approval_level for ln in lines if ln.role_title == t))
-    who = (", ".join(able) if able else "no role in the delegation-of-authority matrix")
     shown = f"{currency + ' ' if currency else ''}{amount:,.0f}"
-    return (
-        f"Delegation of authority: {activity} for {shown} is above your mandate. "
-        f"It needs {who}."
+    needs = (
+        f"It needs {', '.join(able)}." if able else
+        "No line in the delegation-of-authority matrix covers that amount, so it needs a "
+        "line added (or an existing band raised) before anyone can approve it."
     )
+    return f"Delegation of authority: {activity} for {shown} is above your mandate. {needs}"
 
 
 async def authority_lines(db: AsyncSession, category: str) -> list[MandateLine]:

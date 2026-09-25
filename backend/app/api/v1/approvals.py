@@ -124,18 +124,84 @@ async def _decision_context(db, rows) -> tuple[object, dict]:
     return directory, await notifications.load_stage_gates(db, rows, directory)
 
 
+async def finishing_approvals(db, rows) -> set[uuid.UUID]:
+    """The pending requests among ``rows`` on which one more approval finishes the
+    record's review — the approval ``record_workflow.write_back`` then writes onto the
+    record, and the one its precondition and the delegation of authority govern: the
+    last vote a request needs, on a request that is not a route stage or is its route's
+    last pending stage."""
+    from app.models.workflow import (
+        StageStatus2,
+        WorkflowInstance,
+        WorkflowInstanceStage,
+        WorkflowInstanceStatus,
+    )
+
+    last_vote = [
+        r for r in rows
+        if r.status == ApprovalStatus.pending and r.entity_id is not None
+        and r.approvals_received + 1 >= (r.required_approvals or 1)
+    ]
+    if not last_vote:
+        return set()
+    stage_of = dict((await db.execute(
+        select(WorkflowInstanceStage.approval_request_id, WorkflowInstanceStage.instance_id)
+        .where(WorkflowInstanceStage.approval_request_id.in_([r.id for r in last_vote]))
+    )).all())
+    open_stages: dict = {}
+    if stage_of:
+        open_stages = dict((await db.execute(
+            select(WorkflowInstanceStage.instance_id, func.count())
+            .join(WorkflowInstance, WorkflowInstance.id == WorkflowInstanceStage.instance_id)
+            .where(
+                WorkflowInstanceStage.instance_id.in_(set(stage_of.values())),
+                WorkflowInstanceStage.status.in_((StageStatus2.pending, StageStatus2.in_progress)),
+                WorkflowInstance.status == WorkflowInstanceStatus.in_progress,
+            )
+            .group_by(WorkflowInstanceStage.instance_id)
+        )).all())
+    return {
+        r.id for r in last_vote
+        if r.id not in stage_of or open_stages.get(stage_of[r.id], 0) <= 1
+    }
+
+
+async def approve_blocks(db, rows, user) -> dict[uuid.UUID, str]:
+    """``{request id: why this user's approval would be refused}`` for the requests in
+    ``rows`` whose approval would finish a record that is not ready for it or whose
+    amount is above the user's mandate (``lifecycle_gates.write_back_refusal`` — the
+    check ``write_back`` makes). Loads only the records of checked types."""
+    from app.services import lifecycle_gates
+
+    candidates = [r for r in rows if lifecycle_gates.approval_is_checked(r.entity_type)]
+    if not candidates or user is None:
+        return {}
+    finishing = await finishing_approvals(db, candidates)
+    out: dict[uuid.UUID, str] = {}
+    for r in candidates:
+        if r.id not in finishing:
+            continue
+        refusal = await lifecycle_gates.write_back_refusal(db, r.entity_type, r.entity_id, user)
+        if refusal:
+            out[r.id] = refusal
+    return out
+
+
 async def _annotate(db, rows, user) -> list[ApprovalRead]:
     """``ApprovalRead`` for each request, with what this user may do and — for a route
     stage assigned to a role — how many people other than the maker could decide it.
 
     ``can_decide`` / ``decide_blocked_reason`` come from ``notifications.decision_refusal``,
     the rule the decide endpoint, My Work, the alert recipients and the e-mail links use,
-    so a request offered anywhere can be decided and vice versa."""
+    so a request offered anywhere can be decided and vice versa. ``can_approve`` /
+    ``approve_blocked_reason`` add what the approval itself would be refused for
+    (:func:`approve_blocks`); a user who can decide but not approve may still reject."""
     from app.services import default_governance as governance
     from app.services import notifications
 
     _directory, gates = await _decision_context(db, rows)
     codes = set(user.permission_codes) if user is not None else set()
+    blocks = await approve_blocks(db, rows, user)
     out = []
     for r in rows:
         read = ApprovalRead.model_validate(r)
@@ -162,6 +228,8 @@ async def _annotate(db, rows, user) -> list[ApprovalRead]:
                 )
             extra["can_decide"] = r.status == ApprovalStatus.pending and blocked is None
             extra["decide_blocked_reason"] = blocked
+            extra["approve_blocked_reason"] = blocks.get(r.id) if extra["can_decide"] else None
+            extra["can_approve"] = extra["can_decide"] and r.id not in blocks
         out.append(read.model_copy(update=extra))
     return out
 
@@ -507,8 +575,12 @@ async def preview_email_action(token: str) -> EmailActionPreview:
             ctx.row, ctx.user, ctx.approval, datetime.now(timezone.utc), stage=ctx.stage
         )
         locale = (await db.execute(select(TenantSettings.date_format, TenantSettings.timezone))).first()
+        blocked = ""
+        if state == action_tokens.READY:
+            blocked = (await approve_blocks(db, [ctx.approval], ctx.user)).get(ctx.approval.id, "")
         return EmailActionPreview(
             state=state, message=message, organisation=ctx.organisation,
+            approve_blocked_reason=blocked,
             user_name=(ctx.user.full_name or ctx.user.email) if ctx.user is not None else "",
             expires_at=ctx.row.expires_at, approval=_email_summary(ctx.approval),
             **({"date_format": locale[0], "timezone": locale[1]} if locale else {}),
@@ -532,6 +604,11 @@ async def confirm_email_action(token: str, body: EmailActionConfirm) -> EmailAct
         state, message = action_tokens.token_state(ctx.row, ctx.user, ctx.approval, now, stage=ctx.stage)
         if state != action_tokens.READY:
             raise HTTPException(status_code=_TOKEN_STATE_STATUS.get(state, 403), detail=message)
+        if body.decision == "approve":
+            # Refuse before claiming the link, so a refused Approve leaves it usable to reject.
+            blocked = (await approve_blocks(db, [ctx.approval], ctx.user)).get(ctx.approval.id)
+            if blocked:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=blocked)
         if not await action_tokens.claim(db, ctx.row, now):
             raise HTTPException(status_code=status.HTTP_410_GONE, detail="This link has already been used.")
         approve = body.decision == "approve"

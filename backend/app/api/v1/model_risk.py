@@ -38,6 +38,7 @@ from app.schemas.model_risk import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import lifecycle_gates
 from app.services.risk_scoring import add_months
 
 router = APIRouter(tags=["model risk"])
@@ -128,6 +129,9 @@ async def list_models(
 
 @router.post("/model-risk", response_model=ModelRead, status_code=201, dependencies=[_WRITE])
 async def create_model(body: ModelCreate, db: DbSession, user: CurrentUser) -> ModelRead:
+    # Validated is the sign-off after independent validation, given through the approval
+    # lifecycle; production use needs it (lifecycle_gates.MODEL_STATUS / APPROVED_FIRST).
+    lifecycle_gates.enforce_create("model_inventory", body.model_dump())
     obj = ModelInventory(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db, ModelInventory, "MDL")
     db.add(obj)
@@ -145,7 +149,9 @@ async def get_model(mid: uuid.UUID, db: DbSession) -> ModelRead:
 @router.patch("/model-risk/{mid}", response_model=ModelRead, dependencies=[_WRITE])
 async def update_model(mid: uuid.UUID, body: ModelUpdate, db: DbSession) -> ModelRead:
     obj = await _load_model(db, mid)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    lifecycle_gates.enforce_edit("model_inventory", obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
     return ModelRead.model_validate(await _load_model(db, mid))

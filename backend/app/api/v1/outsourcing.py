@@ -43,6 +43,7 @@ from app.schemas.outsourcing import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import lifecycle_gates
 from app.services import ref_fields as rf
 from app.services import fx
 from app.schemas.fx import MoneyTotalRead
@@ -97,11 +98,20 @@ def activation_error(before: dict | None, after: dict) -> str | None:
     status_after = _status(after.get("status"))
     if status_after not in LIVE_STATUSES:
         return None
+    status_before = _status(before.get("status")) if before is not None else None
+    if _awaits_sbp(after) and not (status_before in LIVE_STATUSES and _awaits_sbp(before)):
+        # SBP's outsourcing framework: where its approval (NOC) is required, the service
+        # does not start before it is granted.
+        return (
+            f"This arrangement needs SBP's approval (NOC), which is "
+            f"{_plain(after.get('sbp_approval_status')) or 'not recorded'}; it can't be "
+            f"{status_after.value.replace('_', ' ')} until SBP has approved it. Record the "
+            "approval and its reference first."
+        )
     missing = missing_for_activation(after["materiality"], after)
     if not missing:
         return None
     if before is not None:
-        status_before = _status(before.get("status"))
         was_missing = set(missing_for_activation(before["materiality"], before))
         if status_before in LIVE_STATUSES and set(missing) <= was_missing:
             return None
@@ -114,8 +124,20 @@ def activation_error(before: dict | None, after: dict) -> str | None:
     )
 
 
+def _plain(value) -> str:
+    return str(getattr(value, "value", value) or "").replace("_", " ")
+
+
+def _awaits_sbp(facts: dict | None) -> bool:
+    """SBP approval is required and not (yet) granted."""
+    if not facts or not facts.get("sbp_approval_required"):
+        return False
+    return _plain(facts.get("sbp_approval_status")) != SbpApprovalStatus.approved.value
+
+
 def _facts(obj_or_data) -> dict:
-    keys = ("status", "materiality") + tuple(name for name, _ in ACTIVATION_FIELDS)
+    keys = ("status", "materiality", "sbp_approval_required", "sbp_approval_status") + tuple(
+        name for name, _ in ACTIVATION_FIELDS)
     if isinstance(obj_or_data, dict):
         return {k: obj_or_data.get(k) for k in keys}
     return {k: getattr(obj_or_data, k, None) for k in keys}
@@ -201,6 +223,9 @@ async def list_arrangements(
 async def create_arrangement(body: OutsourcingArrangementCreate, db: DbSession, user: CurrentUser) -> OutsourcingArrangementRead:
     await _check_vendor(db, body.vendor_id)
     data = body.model_dump()
+    # Going live needs the arrangement's approval first (lifecycle_gates.APPROVED_FIRST):
+    # a new arrangement is proposed and approved through its lifecycle.
+    lifecycle_gates.enforce_create("outsourcing_arrangement", data)
     error = activation_error(None, _facts(data))
     if error:
         raise HTTPException(status_code=422, detail=error)
@@ -235,6 +260,7 @@ async def update_arrangement(
     for k in ("substitutability", "concentration_level"):
         if k in data and data[k] is None:
             data.pop(k)
+    lifecycle_gates.enforce_edit("outsourcing_arrangement", obj, data)
     before = _facts(obj)
     error = activation_error(before, {**before, **{k: v for k, v in data.items() if k in before}})
     if error:

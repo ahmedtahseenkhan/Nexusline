@@ -19,6 +19,7 @@ from sqlalchemy.orm import aliased, selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.core.schema_loading import options_for, serialize_all
 from app.models.enums import Criticality
 from app.models.asset import (
     Asset,
@@ -115,6 +116,12 @@ def _loads():
         selectinload(Asset.bia_assessments),
         selectinload(Asset.vuln_findings),
     )
+
+
+#: Relationships ``_serialize`` reads beyond the ones ``AssetRead`` names.
+_SERIALIZE_ALSO = (
+    "classifications.type", "hosted_dependencies.information_asset", "hosting_dependencies.it_asset",
+)
 
 
 def _ref(obj) -> LinkRef | None:
@@ -419,9 +426,13 @@ async def list_assets(
     params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = apply_sort(stmt, params, _ASSET_SORTABLE, default=Asset.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))).all()
+    # ``_serialize`` reads the links ``AssetRead`` names (``schema_loading``) and the
+    # dependencies' assets and classifications' types — not the links' own links.
+    loads = (*_loads(), *options_for(Asset, AssetRead, _SERIALIZE_ALSO))
+    rows = (await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all()
     can_read_risks = _can_read_risks(user)
-    return Page(items=[_serialize(r, can_read_risks=can_read_risks) for r in rows], total=total, limit=limit, offset=offset)
+    items = await serialize_all(db, rows, lambda r: _serialize(r, can_read_risks=can_read_risks))
+    return Page(items=items, total=total, limit=limit, offset=offset)
 
 
 async def replacement_value(db, filters) -> dict:

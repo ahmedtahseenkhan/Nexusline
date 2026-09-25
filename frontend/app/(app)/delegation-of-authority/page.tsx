@@ -75,14 +75,26 @@ const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
-const CATEGORIES = opts(["credit", "expenditure", "procurement", "hr", "it_change", "risk_acceptance", "treasury", "general"]);
+const CATEGORIES = opts([
+  "credit", "expenditure", "procurement", "hr", "it_change", "risk_acceptance", "exception",
+  "operational_loss", "outsourcing", "treasury", "general",
+]);
+/** Categories the system checks at the moment of approval (services/authority_limits.py):
+ *  once a category has an active line, only a role whose band covers the amount may approve. */
+const CHECKED_CATEGORIES: Record<string, string> = {
+  risk_acceptance: "approving a risk acceptance (the exposure accepted)",
+  exception: "approving an exception (its exposure)",
+  operational_loss: "approving a loss event (its gross loss)",
+  outsourcing: "approving an outsourcing arrangement (its contract value)",
+};
 const AUTHORITY_STATUS = opts(["active", "retired"]);
 const DUAL_STATUS = opts(["active", "disabled"]);
 
 // ------------------------------------------------------------------ tones
 const CATEGORY_TONE: Record<string, Tone> = {
   credit: "info", expenditure: "info", procurement: "neutral", hr: "neutral",
-  it_change: "medium", risk_acceptance: "high", treasury: "info", general: "neutral",
+  it_change: "medium", risk_acceptance: "high", exception: "high", operational_loss: "medium",
+  outsourcing: "medium", treasury: "info", general: "neutral",
 };
 const AUTHORITY_STATUS_TONE: Record<string, Tone> = { active: "low", retired: "neutral" };
 const DUAL_STATUS_TONE: Record<string, Tone> = { active: "low", disabled: "neutral" };
@@ -295,7 +307,9 @@ function DelegationOfAuthorityInner() {
         <TextInput value={mf.activity} onChange={(v) => setM("activity", v)} placeholder="Approve credit facility" required />
       </Field>
       <div className="field-row">
-        <Field label="Category" help="The kind of activity this mandate governs.">
+        <Field label="Category" help={CHECKED_CATEGORIES[mf.category]
+          ? `Checked when ${CHECKED_CATEGORIES[mf.category]} is approved: with any active line in this category, only a role whose band covers the amount may approve.`
+          : "The kind of activity this mandate governs."}>
           <Select value={mf.category} onChange={(v) => setM("category", v)} options={CATEGORIES} />
         </Field>
         <Field label="Status">
@@ -361,10 +375,10 @@ function DelegationOfAuthorityInner() {
         Switching a rule off, exempting a decision, adding or raising a threshold, or deleting a rule needs an administrator — the people a rule binds cannot relax it. Every change is recorded in the activity trail.
       </p>
       <div className="field-row">
-        <Field label="Maker role" help="The role that initiates / prepares the transaction.">
+        <Field label="Maker role" help="Only this role may ask for the decision (request an acceptance, raise an exception, submit for review) — while someone else holds it. Blank = anyone.">
           <TextInput value={rf.maker_role} onChange={(v) => setR("maker_role", v)} placeholder="Payments Officer" />
         </Field>
-        <Field label="Checker role" help="The role that independently verifies / releases.">
+        <Field label="Checker role" help="Only this role may take the decision — while someone other than the maker holds it and can decide; otherwise anyone who can decide may, so a vacant role never blocks it. Blank = anyone.">
           <TextInput value={rf.checker_role} onChange={(v) => setR("checker_role", v)} placeholder="Branch Manager" />
         </Field>
       </div>

@@ -4,11 +4,12 @@ import uuid
 from datetime import date, datetime
 
 from app.schemas.common import GraphRef
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.models.bia import BiaStatus, DependencyType
-from app.models.enums import Criticality
+from app.models.enums import AssetClass, Criticality
+from app.schemas.tenant_settings import currency_or_default
 
 
 # --------------------------------------------------------------- dependencies ---
@@ -38,11 +39,18 @@ class BiaDependencyUpdate(BaseModel):
     single_point_of_failure: bool | None = None
 
 
+class BiaAssetRef(GraphRef):
+    """The asset a dependency rests on, with its class so a page can open the right
+    register (IT assets and information assets live on separate pages)."""
+
+    asset_class: AssetClass | None = None
+
+
 class BiaDependencyRead(BiaDependencyBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     bia_id: uuid.UUID
-    asset: GraphRef | None = None
+    asset: BiaAssetRef | None = None
     vendor: GraphRef | None = None
     created_at: datetime
 
@@ -75,7 +83,7 @@ class BiaBase(BaseModel):
 
 
 class BiaCreate(BiaBase):
-    pass
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class BiaUpdate(BaseModel):
@@ -102,6 +110,8 @@ class BiaUpdate(BaseModel):
     status: BiaStatus | None = None
     assessment_date: date | None = None
     next_review_date: date | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class BiaRead(BiaBase):

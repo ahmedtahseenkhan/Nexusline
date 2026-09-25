@@ -30,6 +30,7 @@ from app.schemas.access_review import (
 from app.schemas.common import Page
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import lifecycle_gates
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/access-reviews", tags=["access reviews"])
@@ -135,6 +136,9 @@ async def list_reviews(
 
 @router.post("", response_model=ReviewRead, status_code=201, dependencies=[Depends(require("review:write"))])
 async def create_review(body: ReviewCreate, db: DbSession, user: CurrentUser) -> ReviewRead:
+    # Completion is the sign-off on a decision for every account, so a review is never
+    # created completed (services.lifecycle_gates; the import downgrades it too).
+    lifecycle_gates.enforce_create("access_review", {"status": body.status})
     obj = AccessReview(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db)
     obj.next_review_date = next_review_date(obj.frequency)
@@ -158,11 +162,9 @@ async def update_review(review_id: uuid.UUID, body: ReviewUpdate, db: DbSession,
     data = {k: v for k, v in body.model_dump(exclude_unset=True).items()
             if v is not None or k in ("asset_id", "due_date")}
     changes = _changes(obj, data)
-    if changes.get("status", {}).get("to") == AccessReviewStatus.completed.value:
-        # Completion checks every account is decided and records the sign-off; an edit
-        # of the status field must not skip that.
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail="Use Complete review to complete it: every account must be decided first.")
+    # Completion checks every account is decided and records the sign-off; an edit of
+    # the status field must not skip that (the rule create and import share).
+    lifecycle_gates.enforce_edit("access_review", obj, data)
     for f, v in data.items():
         setattr(obj, f, v)
     if "frequency" in data:

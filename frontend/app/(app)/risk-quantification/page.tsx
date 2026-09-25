@@ -18,6 +18,7 @@ import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
 import Link from "next/link";
 import { getFormatSettings, unconvertedNote, useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ types
 type RiskQuant = {
@@ -447,8 +448,9 @@ function RiskQuantificationInner() {
         <Field label="Iterations" help="Monte Carlo sample count (100 – 1,000,000).">
           <TextInput type="number" value={f.iterations} onChange={(v) => set("iterations", v)} placeholder="10000" />
         </Field>
-        <Field label="Status" help="Simulated is set by running the simulation; approving needs a run of the current inputs.">
-          <Select value={f.status} onChange={(v) => set("status", v)} options={QUANT_STATUS} />
+        <Field label="Status" help={`Simulated is set by running the simulation. ${DECISION_HELP.risk_quantification}`}>
+          <Select value={f.status} onChange={(v) => set("status", v)}
+            options={statusOptions("risk_quantification", QUANT_STATUS, editing?.status, editing?.workflow_status)} />
         </Field>
       </div>
       {editing?.last_simulated && inputsChanged(f, editing) && (

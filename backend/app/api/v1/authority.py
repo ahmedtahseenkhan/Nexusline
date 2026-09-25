@@ -145,6 +145,71 @@ async def check_mandate(
                         reason=reason or "", lines=[AuthorityMatrixRead.model_validate(r) for r in rows])
 
 
+class MandateLineRead(BaseModel):
+    reference: str
+    role_title: str
+    approval_level: int
+    amount_from: float
+    amount_to: float | None
+    currency: str
+
+
+class RecordMandate(BaseModel):
+    """The delegation-of-authority check on one pending decision, for the current user.
+
+    ``governed`` is False when the organisation has no matrix lines in the category —
+    then anyone who may decide may approve. ``lines`` are the category's lines in the
+    currency compared, so the form can say who may approve."""
+
+    entity_type: str
+    record_id: uuid.UUID
+    category: str
+    governed: bool
+    allowed: bool
+    reason: str = ""
+    amount: float | None = None
+    currency: str = ""
+    basis: str = ""
+    compared_amount: float | None = None
+    compared_currency: str = ""
+    lines: list[MandateLineRead] = []
+
+
+#: Who may ask about a decision: whoever may read the record it is about.
+_MANDATE_READ: dict[str, str] = {"risk_acceptance": "risk:read"}
+
+
+@router.get("/authority-matrix/mandate/{entity_type}/{record_id}", response_model=RecordMandate,
+            summary="May the current user approve this record under the authority matrix?")
+async def check_record_mandate(
+    entity_type: str, record_id: uuid.UUID, db: DbSession, user: CurrentUser,
+) -> RecordMandate:
+    """The answer :func:`authority_limits.enforce` gives when the current user approves
+    this record — its category, the amount checked and where it came from, and the
+    lines that say who may approve. Readable by anyone who may read the record (an
+    approver need not hold ``authority:read``)."""
+    from app.services import authority_limits
+    from app.services.entity_types import ENTITY_TYPES
+
+    if not authority_limits.is_governed_type(entity_type):
+        raise HTTPException(status_code=404, detail=f"No authority-matrix check applies to {entity_type}.")
+    needed = _MANDATE_READ.get(entity_type) or ENTITY_TYPES[entity_type].read_perm
+    if needed not in set(user.permission_codes or []):
+        raise HTTPException(status_code=403, detail=f"Requires permission(s): {needed}")
+    record = await authority_limits.load_record(db, entity_type, record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+    subject = await authority_limits.subject_for(db, entity_type, record)
+    verdict = await authority_limits.verdict(db, subject, user)
+    return RecordMandate(
+        entity_type=entity_type, record_id=record_id, category=subject.category,
+        governed=verdict.governed, allowed=verdict.allowed, reason=verdict.reason,
+        amount=subject.amount, currency=subject.currency, basis=subject.basis,
+        compared_amount=verdict.compared_amount, compared_currency=verdict.compared_currency,
+        lines=[MandateLineRead(**vars(ln)) for ln in sorted(verdict.lines, key=lambda ln: (ln.approval_level, ln.amount_from))],
+    )
+
+
 def _band_or_422(amount_from, amount_to) -> None:
     if amount_to is not None and float(amount_to) < float(amount_from or 0):
         raise HTTPException(
@@ -335,7 +400,8 @@ async def update_dual_control_rule(
         if k in data:
             data[k] = data[k].strip()
     before = {k: getattr(obj, k) for k in (
-        "module", "action", "requires_dual_control", "threshold_amount", "enabled", "status")}
+        "module", "action", "requires_dual_control", "threshold_amount", "enabled", "status",
+        "maker_role", "checker_role")}
     after = {**before, **{k: v for k, v in data.items() if k in before}}
     moved = (after["module"], after["action"]) != (before["module"], before["action"])
     if moved:

@@ -16,6 +16,7 @@ import { Badge } from "@/components/badges";
 import ImportExport from "@/components/ImportExport";
 import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ local types
 interface ModelValidation {
@@ -381,8 +382,9 @@ function ModelRiskInner() {
           <Select value={mf.materiality} onChange={(v) => setM("materiality", v)} options={MATERIALITY} />
         </Field>
       </div>
-      <Field label="Status">
-        <Select value={mf.status} onChange={(v) => setM("status", v)} options={MODEL_STATUS} />
+      <Field label="Status" help={DECISION_HELP.model_inventory}>
+        <Select value={mf.status} onChange={(v) => setM("status", v)}
+          options={statusOptions("model_inventory", MODEL_STATUS, editingModel?.status, editingModel?.workflow_status)} />
       </Field>
       <div className="field-row">
         <Field label="Regulatory relevant" help="Used for regulatory reporting / capital (IFRS 9, Basel, SBP).">

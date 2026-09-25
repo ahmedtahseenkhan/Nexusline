@@ -100,14 +100,14 @@ async def test_a_resent_unchanged_input_keeps_the_run(record):
     assert out.last_simulated == date(2026, 9, 20) and out.status == QuantStatus.simulated
 
 
-async def test_approving_needs_a_current_run(record):
-    with pytest.raises(HTTPException) as exc:
-        await api.update_quantification(
-            uuid.uuid4(), RiskQuantUpdate(lm_max=3e7, status="approved"), _DB(),
-        )
-    assert (exc.value.status_code, exc.value.detail) == (422, api.NEEDS_SIMULATION_DETAIL)
-    out = await api.update_quantification(uuid.uuid4(), RiskQuantUpdate(status="approved"), _DB())
-    assert out.status == QuantStatus.approved
+async def test_approving_is_not_an_edit(record):
+    # Approved is the sign-off the approval lifecycle gives (lifecycle_gates.QUANT_STATUS):
+    # an edit can't write it, with or without a current run.
+    for body in (RiskQuantUpdate(lm_max=3e7, status="approved"), RiskQuantUpdate(status="approved")):
+        with pytest.raises(HTTPException) as exc:
+            await api.update_quantification(uuid.uuid4(), body, _DB())
+        assert exc.value.status_code == 422 and "not by editing its status" in exc.value.detail
+    assert record["obj"].status != QuantStatus.approved
 
 
 async def test_a_partial_edit_is_checked_on_the_resulting_range(record):

@@ -39,7 +39,7 @@ from app.schemas.shariah import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
-from app.services import dual_control
+from app.services import dual_control, lifecycle_gates
 
 router = APIRouter(tags=["shariah governance"])
 
@@ -133,6 +133,9 @@ async def get_ruling(rid: uuid.UUID, db: DbSession) -> RulingRead:
 
 @router.post("/shariah-rulings", response_model=RulingRead, status_code=201, dependencies=[_WRITE])
 async def create_ruling(body: RulingCreate, db: DbSession, user: CurrentUser) -> RulingRead:
+    # Under review / approved record the Shariah Board's decision: the approval lifecycle
+    # reaches them (lifecycle_gates.SHARIAH_RULING_STATUS), never the form.
+    lifecycle_gates.enforce_create("shariah_ruling", body.model_dump())
     obj = ShariahRuling(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db, ShariahRuling, "SR")
     db.add(obj)
@@ -145,7 +148,9 @@ async def create_ruling(body: RulingCreate, db: DbSession, user: CurrentUser) ->
 @router.patch("/shariah-rulings/{rid}", response_model=RulingRead, dependencies=[_WRITE])
 async def update_ruling(rid: uuid.UUID, body: RulingUpdate, db: DbSession) -> RulingRead:
     obj = await _get(db, ShariahRuling, rid, "Ruling")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    lifecycle_gates.enforce_edit("shariah_ruling", obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
     return await _ruling_read(db, obj)
@@ -205,6 +210,8 @@ async def get_product(pid: uuid.UUID, db: DbSession) -> ProductRead:
 
 @router.post("/islamic-products", response_model=ProductRead, status_code=201, dependencies=[_WRITE])
 async def create_product(body: ProductCreate, db: DbSession, user: CurrentUser) -> ProductRead:
+    # Approved is the Shariah approval, given through the lifecycle; active needs it.
+    lifecycle_gates.enforce_create("islamic_product", body.model_dump())
     if body.approving_ruling_id is not None:
         await _get(db, ShariahRuling, body.approving_ruling_id, "Ruling")
     obj = IslamicProduct(tenant_id=user.tenant_id, **body.model_dump())
@@ -220,6 +227,7 @@ async def create_product(body: ProductCreate, db: DbSession, user: CurrentUser) 
 async def update_product(pid: uuid.UUID, body: ProductUpdate, db: DbSession) -> ProductRead:
     obj = await _get(db, IslamicProduct, pid, "Product")
     data = body.model_dump(exclude_unset=True)
+    lifecycle_gates.enforce_edit("islamic_product", obj, data)
     if data.get("approving_ruling_id") is not None:
         await _get(db, ShariahRuling, data["approving_ruling_id"], "Ruling")
     for k, v in data.items():

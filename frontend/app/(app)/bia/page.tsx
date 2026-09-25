@@ -37,7 +37,7 @@ type BiaDependency = {
   // graph links to catalog records (optional, from GET /bia/{id})
   asset_id: string | null;
   vendor_id: string | null;
-  asset: GraphRef | null;
+  asset: (GraphRef & { asset_class?: string | null }) | null;
   vendor: GraphRef | null;
 };
 
@@ -619,7 +619,11 @@ function BiaInner() {
                       <td><CritBadge value={d.criticality} /></td>
                       <td className="muted">{hrs(d.rto_hours)}</td>
                       <td>{d.single_point_of_failure ? <Badge tone="critical">SPOF</Badge> : <span className="muted">—</span>}</td>
-                      <td><RelatedChips label="" items={d.asset ? [d.asset] : undefined} href="/information-assets" /></td>
+                      <td>
+                        {/* IT and information assets live in separate registers; open the one the asset belongs to. */}
+                        <RelatedChips label="" items={d.asset ? [d.asset] : undefined}
+                          href={d.asset?.asset_class === "it_asset" ? "/it-assets" : "/information-assets"} />
+                      </td>
                       <td><RelatedChips label="" items={d.vendor ? [d.vendor] : undefined} href="/vendors" /></td>
                       <td><button className="btn secondary sm" onClick={() => removeDependency(d.id)}>Remove</button></td>
                     </tr>

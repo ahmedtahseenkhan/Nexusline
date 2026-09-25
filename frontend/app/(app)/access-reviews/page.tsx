@@ -263,8 +263,8 @@ function AccessReviewsInner() {
         <Field label="Reviewer / Certifier">
           <TextInput value={f.reviewer} onChange={(v) => set("reviewer", v)} placeholder="Jane Doe (System Owner)" />
         </Field>
-        <Field label="Status">
-          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
+        <Field label="Status" help="Completed comes from Complete review, once every account has been decided — not from editing.">
+          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS.filter((o) => o.value !== "completed" || editing?.status === "completed")} />
         </Field>
       </div>
       <div className="field-row">

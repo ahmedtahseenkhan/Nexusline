@@ -27,6 +27,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Badge } from "@/components/badges";
 import UserPicker from "@/components/UserPicker";
+import MandateNote from "@/components/MandateNote";
 import Disclosure from "@/components/record/Disclosure";
 import { WorkflowBadge } from "@/components/record/WorkflowBadge";
 import { useRecordGovernance, govModelFromParts } from "@/components/record/RecordGovernance";
@@ -77,6 +78,12 @@ const ACTION_ARIA: Record<WorkflowActionKey, string> = {
   revise: "Revise: reopen the record for revision",
   retire: "Retire the record",
 };
+
+/** Record types whose approval is checked against the delegation-of-authority matrix
+ *  (backend services/authority_limits.py): the approver sees their mandate before approving.
+ *  Exceptions show it in their own drawer, beside the Approve / Reject decision. */
+const MANDATE_TYPES = new Set(["loss_event", "outsourcing_arrangement"]);
+type MandateType = "loss_event" | "outsourcing_arrangement";
 
 const dateFmt = { date: (v: string | null | undefined) => formatDate(v), dateTime: (v: string | null | undefined) => formatDateTime(v), money: () => "" };
 
@@ -206,6 +213,9 @@ export default function WorkflowFields({ entityType, entityId, onChanged, varian
   const omit = new Set(omitActions ?? []);
   const actions = wf.allowed_actions.filter((a) => !omit.has(a));
   const history = showAll ? wf.history : wf.history.slice(0, HISTORY_PREVIEW);
+  const mandate = wf.allowed_actions.includes("approve") && MANDATE_TYPES.has(entityType)
+    ? <MandateNote entityType={entityType as MandateType} recordId={entityId} refreshKey={wf} />
+    : null;
   const ownerName = wf.owner ? wf.owner.full_name || wf.owner.email : wf.owner_text;
 
   const historyList = (
@@ -346,6 +356,7 @@ export default function WorkflowFields({ entityType, entityId, onChanged, varian
             )}
           </div>
         )}
+        {mandate && <div className="d">{mandate}</div>}
         {actions.includes("reject") && (
           <div className="d">
             <Disclosure label="Reject approval" hideTrigger open={rejecting} onOpenChange={setRejecting} id={rejectPanel} triggerRef={rejectBtn}>
@@ -432,6 +443,7 @@ export default function WorkflowFields({ entityType, entityId, onChanged, varian
 
       {(actions.length > 0 || wf.blocked_reason) && (
         <div style={{ display: "grid", gap: 8 }}>
+          {mandate}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {actions.map((action) =>
               action === "reject" ? (

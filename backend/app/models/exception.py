@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
+from decimal import Decimal
 
-from sqlalchemy import Column, Date, ForeignKey, String, Table, Text, Uuid
+from sqlalchemy import Column, Date, ForeignKey, Numeric, String, Table, Text, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -68,11 +69,17 @@ class ExceptionRecord(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflow
     expires_at: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     closure_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
+    # The exposure the exception leaves uncovered, in ``exposure_currency`` (blank = the
+    # reporting currency): what the approver's delegation-of-authority mandate is
+    # checked against (services.authority_limits).
+    exposure_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    exposure_currency: Mapped[str] = mapped_column(String(8), default="", nullable=False)
+
     requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     approver_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     decided_at: Mapped[date | None] = mapped_column(Date, nullable=True)
 
-    risks: Mapped[list["Risk"]] = relationship(secondary=exception_risks, lazy="selectin",
+    risks: Mapped[list["Risk"]] = relationship(secondary=exception_risks, lazy="selectin",  # noqa: F821
         secondaryjoin="and_(exception_risks.c.risk_id == Risk.id, Risk.deleted == False)",
     )  # noqa: F821
     policies: Mapped[list["Policy"]] = relationship(  # noqa: F821

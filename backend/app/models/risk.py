@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import (
@@ -23,6 +24,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Table,
     Text,
@@ -375,6 +377,12 @@ class RiskAcceptance(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     )
     expires_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     decided_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # The exposure being accepted, fixed when the acceptance is requested — what the
+    # approver's delegation-of-authority mandate is checked against
+    # (services.authority_limits). ``exposure_basis`` says where the figure came from.
+    exposure_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    exposure_currency: Mapped[str] = mapped_column(String(8), default="", nullable=False)
+    exposure_basis: Mapped[str] = mapped_column(String(40), default="", nullable=False)
 
     risk: Mapped[Risk] = relationship(back_populates="acceptances")
 

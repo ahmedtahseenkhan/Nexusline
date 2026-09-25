@@ -3,9 +3,10 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.common import GraphRef
+from app.schemas.tenant_settings import currency_or_default
 
 from app.models.enums import (
     AssetClass,
@@ -273,6 +274,8 @@ class AssetWrite(BaseModel):
     # the API writes the risk_assets join table directly when this is provided.
     risk_ids: list[uuid.UUID] = []
 
+    _ccy = field_validator("currency")(currency_or_default)
+
 
 class AssetCreate(AssetWrite):
     pass
@@ -326,6 +329,8 @@ class AssetUpdate(BaseModel):
     exception_ids: list[uuid.UUID] | None = None
     related_ids: list[uuid.UUID] | None = None
     risk_ids: list[uuid.UUID] | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class AssetRead(BaseModel):

@@ -18,6 +18,8 @@ import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
+import { useHasPermission } from "@/lib/tenantSettings";
 
 // ------------------------------------------------------------------ types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -46,7 +48,108 @@ type VulnFinding = {
   created_at: string;
   // additive FK to the IT-asset register (nullable)
   asset?: Ref | null;
+  // Risk acceptance: the latest request and its decision (set by the acceptance endpoints only).
+  acceptance_status?: string;
+  acceptance_reason?: string;
+  acceptance_until?: string | null;
+  acceptance_decided_at?: string | null;
+  acceptance_decision_note?: string;
+  acceptance_expired?: boolean;
+  /** Why the signed-in user can't decide the pending request (null when they can). */
+  acceptance_blocked_reason?: string | null;
 };
+
+const OPEN_FINDING = new Set(["open", "in_progress"]);
+
+/** Accepting a vulnerability's risk instead of fixing it: one person asks, with a reason
+ *  and an end date (at most a year); someone else decides. The server enforces who may
+ *  do which (dual control vuln_finding / accept_risk); this card offers what it allows. */
+function RiskAcceptanceCard({ finding, onChanged }: { finding: VulnFinding; onChanged: () => void }) {
+  const { formatDate } = useFormat();
+  const canRequest = useHasPermission("vuln:write");
+  const canApprove = useHasPermission("workflow:approve");
+  const [reason, setReason] = useState("");
+  const [until, setUntil] = useState("");
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const pending = finding.acceptance_status === "requested";
+
+  async function run(fn: () => Promise<unknown>, done: string) {
+    setBusy(true);
+    try {
+      await fn();
+      toast(done);
+      setReason(""); setUntil(""); setComment("");
+      onChanged();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Failed", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const request = () => run(
+    () => apiCall("POST", `/vuln-findings/${finding.id}/risk-acceptance`, { reason, until }),
+    "Risk acceptance requested — someone else decides it",
+  );
+  const decide = (approve: boolean) => run(
+    () => apiCall("POST", `/vuln-findings/${finding.id}/risk-acceptance/decision`, { approve, comment }),
+    approve ? "Risk accepted" : "Risk acceptance rejected",
+  );
+
+  if (!pending && !OPEN_FINDING.has(finding.status) && finding.status !== "risk_accepted") return null;
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-pad">
+        <strong>Risk acceptance</strong>
+        {finding.status === "risk_accepted" && (
+          <p className="muted" style={{ margin: "4px 0", fontSize: 13 }}>
+            Accepted until {formatDate(finding.acceptance_until ?? null)}
+            {finding.acceptance_reason ? ` — ${finding.acceptance_reason}` : ""}
+            {finding.acceptance_expired && <> · <Badge tone="critical">Expired</Badge> fix it or ask again</>}
+          </p>
+        )}
+        {pending ? (
+          <>
+            <p className="muted" style={{ margin: "4px 0", fontSize: 13 }}>
+              Requested until {formatDate(finding.acceptance_until ?? null)}: {finding.acceptance_reason}
+            </p>
+            {finding.acceptance_blocked_reason ? (
+              <p role="note" className="muted" style={{ fontSize: 12.5, margin: "6px 0 0" }}>{finding.acceptance_blocked_reason}</p>
+            ) : canApprove ? (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                <input className="input" style={{ flex: 1, minWidth: 160 }} placeholder="Comment (required to reject)"
+                  value={comment} onChange={(e) => setComment(e.target.value)} />
+                <button className="btn sm" disabled={busy} onClick={() => decide(true)}>Accept risk</button>
+                <button className="btn secondary sm" disabled={busy || !comment.trim()} onClick={() => decide(false)}>Reject</button>
+              </div>
+            ) : null}
+          </>
+        ) : OPEN_FINDING.has(finding.status) && canRequest ? (
+          <>
+            {finding.acceptance_status === "rejected" && (
+              <p className="muted" style={{ margin: "4px 0", fontSize: 13 }}>
+                The last request was rejected{finding.acceptance_decision_note ? `: ${finding.acceptance_decision_note}` : "."}
+              </p>
+            )}
+            <p className="muted" style={{ margin: "4px 0 8px", fontSize: 13 }}>
+              Can&apos;t fix it yet? Ask for its risk to be accepted until a date (at most a year). Someone other than you decides.
+            </p>
+            <div className="field-row">
+              <Field label="Why accept it" help="The justification and any compensating control.">
+                <TextArea value={reason} onChange={setReason} rows={2} />
+              </Field>
+              <Field label="Accepted until">
+                <TextInput type="date" value={until} onChange={setUntil} />
+              </Field>
+            </div>
+            <button className="btn sm" disabled={busy || !reason.trim() || !until} onClick={request}>Request risk acceptance</button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 type PatchRecord = {
   id: string;
@@ -481,8 +584,9 @@ function VulnerabilitiesInner() {
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Status">
-          <Select value={ff.status} onChange={(v) => setF("status", v)} options={opts(VULN_STATUS)} />
+        <Field label="Status" help={DECISION_HELP.vuln_finding}>
+          <Select value={ff.status} onChange={(v) => setF("status", v)}
+            options={statusOptions("vuln_finding", opts(VULN_STATUS), editingFinding?.status, editingFinding?.workflow_status)} />
         </Field>
         <Field label="Owner" help="Remediation owner.">
           <TextInput value={ff.owner} onChange={(v) => setF("owner", v)} placeholder="Owner" />
@@ -775,6 +879,8 @@ function VulnerabilitiesInner() {
                 </div>
               </div>
             </div>
+
+            <RiskAcceptanceCard finding={detail} onChanged={() => { reload(); loadDetail(detail.id); }} />
 
           </>
         )}

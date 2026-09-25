@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.models.enums import (
@@ -16,6 +16,7 @@ from app.models.enums import (
     StageStatus,
 )
 from app.schemas.common import GraphRef, LookupRef, UserRef
+from app.schemas.tenant_settings import currency_or_blank
 
 # Phase 1 picker fields: each ``<name>_id`` wins over the legacy ``<name>`` text when both
 # are sent. The text is still accepted this release (older clients, CSV import) and is
@@ -34,7 +35,7 @@ _WF_OWNER = "User who owns the approval workflow. `workflow_status` changes only
 # date ("2026-09-01", taken as 00:00) — is read in the organisation's timezone.
 _TS = "Timestamp (ISO 8601). Without an offset — or as a bare date, meaning 00:00 — it is read in the organisation's timezone."
 _OCCURRED = "When the incident happened. " + _TS
-_DETECTED = "When it was detected; starts the regulator's clock. " + _TS
+_DETECTED = "When it was detected; starts the regulator's clock. Blank on a new incident = when it is logged. " + _TS
 _CONTAINED = "When it was contained. Stamped automatically when the status moves to contained. " + _TS
 _RESOLVED = "When it was resolved. Stamped automatically when the status moves to resolved/closed. " + _TS
 _NEAR_MISS = "Nothing was lost: a near miss carries no cost and is left out of loss totals."
@@ -304,3 +305,5 @@ class LossFromIncident(BaseModel):
     gross_loss: float | None = Field(default=None, ge=0)
     recovery: float | None = Field(default=None, ge=0)
     currency: str | None = Field(default=None, max_length=8)
+
+    _ccy = field_validator("currency")(currency_or_blank)

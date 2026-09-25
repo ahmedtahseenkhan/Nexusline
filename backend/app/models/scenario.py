@@ -18,15 +18,20 @@ record in any other currency is bucketed against those edges converted into its
 currency at the organisation's own exchange rates (``api.v1.scenario``), the way
 jurisdictions that adopted the SMA restate them in local currency. Hard-coding a
 local-currency figure silently mis-buckets every record kept in another currency.
+
+A calculation marked **final** is a filed figure: the exchange rate, bucket edges and
+results it used are frozen onto the record (the ``final_*`` columns) at that moment, so
+a later rate change never restates capital already reported to the regulator. Going
+back to draft is an explicit, reasoned, audited reopen.
 """
 from __future__ import annotations
 
 import enum
 import math
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Date, Numeric, String, Text
+from sqlalchemy import Date, DateTime, Integer, Numeric, String, Text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -158,4 +163,18 @@ class CapitalCalculation(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workf
     )
     # BIC / LC / ILM / ORC depend on the bucket edges in this record's currency, which
     # need the organisation's exchange rates: ``api.v1.scenario._capital_read`` computes
-    # them with :func:`sma_capital`.
+    # them with :func:`sma_capital` — live while draft, from the snapshot below once final.
+
+    # Frozen basis, stamped when the calculation becomes final and cleared on reopen.
+    # ``final_fx_factor`` is units of this record's currency per 1 EUR (1 for EUR).
+    final_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    final_by: Mapped[str] = mapped_column(String(255), default="", server_default="", nullable=False)
+    final_fx_factor: Mapped[float | None] = mapped_column(Numeric(24, 10), nullable=True)
+    final_bucket_1: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)
+    final_bucket_2: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)
+    final_basis: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
+    final_bucket: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    final_bic: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)
+    final_loss_component: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)
+    final_ilm: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)
+    final_orc: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)

@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, insert, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_search, apply_sort
+from app.core.schema_loading import options_for, serialize_all
 from app.models.asset import Asset, assets_legals, assets_processes
 from app.models.control import Control, control_business_units, control_processes
 from app.models.organization import BusinessUnit, Legal, Process
@@ -142,12 +143,10 @@ async def _bu_reads(db, objs) -> list[BusinessUnitRead]:
     names = await _bu_name_map(db)
     controls = await _controls_map(db, control_business_units, control_business_units.c.business_unit_id,
                                    [o.id for o in objs])
-    items = []
-    for obj in objs:
-        rd = BusinessUnitRead.model_validate(obj)
+    items = await serialize_all(db, objs, BusinessUnitRead.model_validate)
+    for obj, rd in zip(objs, items):
         rd.parent_name = names.get(obj.parent_id) if obj.parent_id else None
         rd.controls = controls.get(obj.id, [])
-        items.append(rd)
     await ref_fields.fill_refs(db, list(zip(objs, items)), BU_REFS)
     return items
 
@@ -182,7 +181,9 @@ async def list_business_units(
         stmt = stmt.where(BusinessUnit.manager_id == manager_id)
     stmt = apply_sort(stmt, params, _BU_SORTABLE, default=BusinessUnit.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
+    # Load what the list serialises (``schema_loading``), not every link of every link.
+    loads = options_for(BusinessUnit, BusinessUnitRead)
+    rows = list((await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all())
     return Page(items=await _bu_reads(db, rows), total=total, limit=limit, offset=offset)
 
 
@@ -276,12 +277,10 @@ async def _process_assets_map(db, process_ids) -> dict:
 async def _process_reads(db, objs) -> list[ProcessRead]:
     assets_map = await _process_assets_map(db, [o.id for o in objs])
     controls = await _controls_map(db, control_processes, control_processes.c.process_id, [o.id for o in objs])
-    items = []
-    for obj in objs:
-        rd = ProcessRead.model_validate(obj)
+    items = await serialize_all(db, objs, ProcessRead.model_validate)
+    for obj, rd in zip(objs, items):
         rd.assets = assets_map.get(obj.id, [])
         rd.controls = controls.get(obj.id, [])
-        items.append(rd)
     await ref_fields.fill_refs(db, list(zip(objs, items)), PROCESS_REFS)
     return items
 
@@ -346,7 +345,9 @@ async def list_processes(
         stmt = stmt.where(Process.business_unit_id == business_unit_id)
     stmt = apply_sort(stmt, params, _PROCESS_SORTABLE, default=Process.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = list((await db.scalars(stmt.limit(limit).offset(offset))).all())
+    # Load what the list serialises (``schema_loading``), not every link of every link.
+    loads = options_for(Process, ProcessRead)
+    rows = list((await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all())
     return Page(items=await _process_reads(db, rows), total=total, limit=limit, offset=offset)
 
 

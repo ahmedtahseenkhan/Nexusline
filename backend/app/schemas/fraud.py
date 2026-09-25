@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.models.enums import ControlEffectiveness
@@ -16,6 +16,7 @@ from app.models.fraud import (
     FraudScheme,
     PerpetratorType,
 )
+from app.schemas.tenant_settings import currency_or_default
 
 
 # ------------------------------------------------------------- fraud risks ---
@@ -92,7 +93,7 @@ class FraudCaseBase(BaseModel):
 
 
 class FraudCaseCreate(FraudCaseBase):
-    pass
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class FraudCaseUpdate(BaseModel):
@@ -115,6 +116,8 @@ class FraudCaseUpdate(BaseModel):
     investigator: str | None = None
     root_cause: str | None = None
     resolution: str | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class FraudCaseRead(FraudCaseBase):

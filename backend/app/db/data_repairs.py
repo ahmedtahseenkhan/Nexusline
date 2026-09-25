@@ -36,6 +36,12 @@ retried on the next start instead of stopping the start-up.
   history at all, the approval is recorded as ``approved`` with one ``system`` row
   saying it was recorded on upgrade. Never a record in review, one a reviewer sent back,
   or one at a draft-equivalent status.
+* **Maker roles (2026-09-25)** Organisations seeded before maker roles were enforced
+  have ``Risk Manager`` as the maker role of the risk-acceptance, risk-approval and
+  exception-approval rules. Where such a rule is still exactly as seeded and nobody has
+  created or edited it by hand, the maker role is cleared with one ``system`` row per
+  organisation ("maker role cleared — was never enforced; set it again to enforce")
+  (``services.default_governance.clear_legacy_maker_roles``).
 """
 from __future__ import annotations
 
@@ -110,6 +116,8 @@ class RepairReport:
     #: B10c (decision 6): records already in force before the approval lifecycle existed,
     #: whose approval was recorded on upgrade so they can be attested again.
     predated_approvals_recorded: int = 0
+    #: Maker roles on untouched legacy default rules, cleared before they became enforced.
+    legacy_maker_roles_cleared: int = 0
     indexes_skipped: list[str] = field(default_factory=list)
     repairs_failed: list[str] = field(default_factory=list)
 
@@ -125,6 +133,7 @@ class RepairReport:
             or self.governance_defaults_added or self.control_themes_classified
             or self.requirement_sort_keys_filled or self.crosswalks_synced
             or self.retention_defaults_upgraded or self.predated_approvals_recorded
+            or self.legacy_maker_roles_cleared
             or self.indexes_skipped or self.repairs_failed
         )
 
@@ -880,6 +889,12 @@ async def seed_default_governance(db, tenant_id) -> int:
     return len(result.routes_added) + len(result.routes_upgraded) + result.rules_added
 
 
+async def _clear_legacy_maker_roles(db, tenant_id) -> int:
+    from app.services import default_governance
+
+    return await default_governance.clear_legacy_maker_roles(db, tenant_id)
+
+
 async def _reconcile_title_flags(db) -> tuple[int, int]:
     from app.services.risk_integrity import reconcile_generated_title_flags
 
@@ -940,6 +955,14 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
         # organisation (marked in the activity log). Never overwrites.
         report.governance_defaults_added += await _guarded(
             db, report, "default_governance", lambda: seed_default_governance(db, tenant_id),
+        ) or 0
+        # Maker roles became enforced (dual_control.enforce_maker_role). The old defaults
+        # named "Risk Manager" as the maker of risk acceptance, risk approval and exception
+        # approval, never enforced; on rules still exactly as seeded it is cleared (one
+        # audit row per organisation), so the upgrade blocks nobody. Rules an
+        # administrator created or edited keep what they say.
+        report.legacy_maker_roles_cleared += await _guarded(
+            db, report, "legacy_maker_roles", lambda: _clear_legacy_maker_roles(db, tenant_id),
         ) or 0
         # --- phase4c: shipped crosswalk content (idempotent; rejected rows stay out) ---
         report.crosswalks_synced += await _guarded(

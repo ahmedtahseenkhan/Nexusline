@@ -10,8 +10,10 @@ sign off on.
   given module + action, whether dual control is required, who makes and who checks,
   and above which amount threshold the control kicks in.
 
-This module delivers the *configuration / registry* + UI. Runtime enforcement of the
-matrix and the four-eyes rules is a later cross-cutting task.
+Runtime enforcement lives in the services: four-eyes, and a rule's maker / checker
+roles, in ``services/dual_control.py``; the matrix's limits on the decisions that carry
+an amount (risk acceptance, exceptions, loss events, outsourcing) in
+``services/authority_limits.py``.
 """
 from __future__ import annotations
 
@@ -44,6 +46,12 @@ class AuthorityCategory(str, enum.Enum):
     risk_acceptance = "risk_acceptance"
     treasury = "treasury"
     general = "general"
+    # Decisions the GRC registers check against the matrix (services.authority_limits):
+    # approving a risk exception, signing off an operational loss event, approving an
+    # outsourcing arrangement.
+    exception = "exception"
+    operational_loss = "operational_loss"
+    outsourcing = "outsourcing"
 
 
 class AuthorityStatus(str, enum.Enum):

@@ -156,13 +156,14 @@ async def _review_block(db, assessment: Assessment, user) -> str | None:
 
     if user is None:
         return None
-    required, _rule = await dual_control.dual_control_required(db, "assessment", "review")
+    required, rule = await dual_control.dual_control_required(db, "assessment", "review")
     if not required:
         return None
     maker = assessment.sent_by_id or await dual_control.maker_of(db, "assessment", assessment.id, record=assessment)
     if maker is not None and maker == getattr(user, "id", None):
         return REVIEW_SOD_MESSAGE
-    return None
+    return await dual_control.checker_role_refusal(db, rule, module="assessment", action="review",
+                                                   checker_id=getattr(user, "id", None), maker_id=maker)
 
 
 REVIEW_SOD_MESSAGE = (

@@ -267,6 +267,10 @@ async def create_engagement(body: EngagementCreate, db: DbSession, user: Current
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="audit_engagement",
                            entity_id=obj.id, summary=f"Opened audit {obj.reference}: {obj.title}")
+    # An audit recorded already closed (last year's, brought in from the old tool) moves
+    # its unit's cycle on exactly as closing it here does.
+    if obj.status == AuditEngagementStatus.closed:
+        await _roll_universe_forward(db, obj, user)
     return EngagementRead.model_validate(await _load_engagement(db, obj.id))
 
 
@@ -424,6 +428,7 @@ async def add_finding(eid: uuid.UUID, body: FindingCreate, db: DbSession, user: 
     data = body.model_dump(
         exclude={"control_ids", "risk_ids", "requirement_ids", "engagement_id"}
     )
+    stamp_new_finding(data, date.today())
     finding = AuditFinding(tenant_id=user.tenant_id, engagement_id=eid, **data)
     finding.controls = await _resolve(db, Control, body.control_ids)
     finding.risks = await _resolve(db, Risk, body.risk_ids)
@@ -434,6 +439,18 @@ async def add_finding(eid: uuid.UUID, body: FindingCreate, db: DbSession, user: 
     await audit_log.record(db, actor=user, action="create", entity_type="audit_finding",
                            entity_id=finding.id, summary=f"Raised finding {finding.reference}: {finding.title}")
     return EngagementRead.model_validate(await _load_engagement(db, eid))
+
+
+def stamp_new_finding(data: dict, today: date) -> None:
+    """The closed date a new finding gets, as the edit would give it. Pure; in place.
+
+    A finding logged already resolved (an external firm's list brought in with its
+    closed items) is dated the day it is logged unless the row says when it closed; an
+    open one carries no closed date."""
+    if data.get("status") in RESOLVED_FINDING_STATES:
+        data["closed_date"] = data.get("closed_date") or today
+    else:
+        data["closed_date"] = None
 
 
 async def _resolve(db, model, ids):
@@ -467,6 +484,7 @@ async def create_finding(body: FindingCreate, db: DbSession, user: CurrentUser) 
     data = body.model_dump(
         exclude={"control_ids", "risk_ids", "requirement_ids", "engagement_id"}
     )
+    stamp_new_finding(data, date.today())
     finding = AuditFinding(
         tenant_id=user.tenant_id, engagement_id=body.engagement_id, **data
     )

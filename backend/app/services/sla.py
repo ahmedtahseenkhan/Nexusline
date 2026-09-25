@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.enums import (
     AuditFindingStatus,
@@ -72,7 +73,10 @@ class EntitySla:
     #: day an issue or risk was identified, an incident detected. A record imported from
     #: a legacy tool keeps its history this way — clocked from creation it would get a
     #: fresh window on import day and could never show as breached.
+    #: A dotted name (``engagement.report_date``) reads the date off a related record.
     started_fields: tuple[str, ...] = ()
+    #: Loader options the sweep needs to read ``started_fields`` without lazy loads.
+    load_options: tuple = ()
 
 
 def _risk_severity(risk: Risk, scale) -> Severity:
@@ -113,6 +117,15 @@ ENTITIES: dict[str, EntitySla] = {
             AuditFindingStatus.closed, AuditFindingStatus.risk_accepted
         ),
         label_of=lambda f: f"{f.reference}: {f.title}",
+        # A finding has no date of its own, and the day it was keyed in is an accident of
+        # data entry. Under IIA Standards 2440/2500 a finding is formally raised when the
+        # engagement's report communicates it to management, and management's remediation
+        # commitment runs from there — so the clock starts at the report date; before the
+        # report is issued, at the end of fieldwork (the exit meeting, where findings are
+        # agreed); only then at creation. An SBP inspection or statutory audit logged
+        # after the fact keeps its real age this way instead of a fresh window.
+        started_fields=("engagement.report_date", "engagement.actual_end"),
+        load_options=(selectinload(AuditFinding.engagement),),
     ),
     "incident": EntitySla(
         key="incident", label="Incident", model=Incident, link="/incidents",
@@ -246,7 +259,7 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
     flagged: list[TatRecord] = []
 
     for spec in ENTITIES.values():
-        stmt = select(spec.model)
+        stmt = select(spec.model).options(*spec.load_options)
         if hasattr(spec.model, "deleted"):
             stmt = stmt.where(spec.model.deleted.is_(False))
         for row in (await db.scalars(stmt)).all():
@@ -301,12 +314,16 @@ def _as_day(value) -> date | None:
 
 def _started_on(row, fields: tuple[str, ...] = ()) -> date | None:
     """When the clock started: the first of the record's own start dates that is set
-    (``EntitySla.started_fields``), else its creation date. Pure.
+    (``EntitySla.started_fields``, dotted names following a relationship), else its
+    creation date. Pure.
 
     A start date later than the record's creation (a typo, or a date entered ahead) is
     taken as given — the window then simply runs from it."""
     for name in fields:
-        own = _as_day(getattr(row, name, None))
+        value = row
+        for part in name.split("."):
+            value = getattr(value, part, None) if value is not None else None
+        own = _as_day(value)
         if own is not None:
             return own
     return _as_day(getattr(row, "created_at", None))

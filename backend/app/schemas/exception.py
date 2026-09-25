@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.models.enums import ExceptionStatus, ExceptionType
+from app.schemas.tenant_settings import currency_or_blank
 
 
 class LinkRef(BaseModel):
@@ -27,9 +28,15 @@ class ExceptionBase(BaseModel):
     business_owner: str = ""
     start_date: date | None = None
     expires_at: date | None = None
+    # The exposure the exception leaves uncovered; blank currency = the reporting
+    # currency. Checked against the approver's delegation-of-authority mandate.
+    exposure_amount: float | None = Field(default=None, ge=0)
+    exposure_currency: str = Field(default="", max_length=8)
 
 
 class ExceptionCreate(ExceptionBase):
+    _ccy = field_validator("exposure_currency")(currency_or_blank)
+
     closure_date: date | None = None
     risk_ids: list[uuid.UUID] = Field(default_factory=list)
     policy_ids: list[uuid.UUID] = Field(default_factory=list)
@@ -50,7 +57,11 @@ class ExceptionUpdate(BaseModel):
     start_date: date | None = None
     expires_at: date | None = None
     closure_date: date | None = None
+    exposure_amount: float | None = Field(default=None, ge=0)
+    exposure_currency: str | None = Field(default=None, max_length=8)
     risk_ids: list[uuid.UUID] | None = None
+
+    _ccy = field_validator("exposure_currency")(currency_or_blank)
     policy_ids: list[uuid.UUID] | None = None
     requirement_ids: list[uuid.UUID] | None = None
     control_ids: list[uuid.UUID] | None = None

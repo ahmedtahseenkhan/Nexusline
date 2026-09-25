@@ -11,7 +11,13 @@ with its count, its items overdue first, and a deep link per item. The kinds:
   not while an approval route owns the decision); control tests pending an independent
   review you may give (``control:test``; you didn't perform, record or edit the test);
   issue fixes ready for validation (every action done; not the owner or whoever raised
-  it); issue due-date extensions awaiting approval (not the person who asked).
+  it); issue due-date extensions awaiting approval (not the person who asked); risk
+  acceptances on vulnerability findings (not the person who asked). Each decision is
+  offered only where the rule's checker role lets this user take it
+  (``dual_control.checker_role_refusal``, the check the decision makes); where they may
+  return it but not approve it — the record isn't ready, or its amount is above their
+  delegation-of-authority mandate (``lifecycle_gates.approve_refusal``) — the item says
+  so in ``note``.
 * **Things you own that are due** — within :data:`HORIZON_DAYS` or overdue: risk
   treatment actions, issue actions and issues you own; incidents assigned to you;
   control tests on controls you own or operate; tests a reviewer returned to you; risk
@@ -40,6 +46,7 @@ from typing import Any
 from fastapi import HTTPException, status
 from sqlalchemy import String, Uuid, and_, cast, exists, false, literal, null, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.schemas.my_work import MyWorkItem, MyWorkRead, MyWorkSection, TreatmentActionDone
 
@@ -70,6 +77,10 @@ KINDS: tuple[tuple[str, str, str], ...] = (
      "Every action is done; an independent validator must confirm the fix works."),
     ("due_date_change", "Due-date extensions to approve",
      "Later due dates on serious issues, asked for by someone else."),
+    ("risk_acceptance", "Risk acceptances to decide",
+     "Requests to accept a risk rather than treat it, asked for by someone else."),
+    ("vuln_acceptance", "Vulnerability risk acceptances to decide",
+     "Requests to accept a vulnerability's risk instead of fixing it, asked for by someone else."),
     ("treatment_action", "Your risk treatment actions",
      "Open actions you own, overdue or due in the next two weeks."),
     ("issue_action", "Your issue actions",
@@ -219,6 +230,8 @@ class Ctx:
     horizon: date
     directory: Any = None
     modules_off: set[str] = field(default_factory=set)
+    #: The signed-in user (role names, tenant) — what the delegation-of-authority check reads.
+    user: Any = None
 
     def holds(self, *codes: str) -> bool:
         return set(codes) <= self.permissions
@@ -230,21 +243,53 @@ class Ctx:
 async def _module_off(db: AsyncSession) -> set[str]:
     """Licensable modules this organisation can't use (licence, deploy config or its own
     choice); their work isn't listed because their pages are locked."""
+    from app.core.modules import MODULES
     from app.models.settings import TenantSettings
     from app.services import modules
 
     choice = await db.scalar(select(TenantSettings.enabled_modules))
-    off = set()
-    for key in ("operational_risk", "internal_audit", "regulatory_change", "declarations"):
-        if not modules.is_enabled(key) or (isinstance(choice, list) and key not in choice):
-            off.add(key)
-    return off
+    usable = modules.effective_modules(
+        modules.enabled_modules(), choice if isinstance(choice, list) else None
+    )
+    return set(MODULES) - usable
+
+
+def _entity_off(ctx: Ctx, entity_type: str | None) -> bool:
+    """Whether a record type belongs to a module this organisation can't use."""
+    from app.services import modules
+
+    key = modules.module_for_entity_type(entity_type)
+    return key is not None and key in ctx.modules_off
 
 
 def _link(base: str, entity_id: Any) -> str:
     from app.services.notifications import with_id
 
     return with_id(base, entity_id)
+
+
+async def _checker_blocked(
+    db: AsyncSession, ctx: Ctx, rule: Any, module: str, action: str, makers: Iterable[Any],
+) -> bool:
+    """Whether the rule's checker role keeps this user from deciding — the check the
+    decision makes (``dual_control.checker_role_refusal``, once per maker as the
+    enforcing calls do), against the directory My Work already loaded."""
+    from app.services import dual_control
+
+    if not (getattr(rule, "checker_role", "") or "").strip():
+        return False
+    for maker in sorted({m for m in makers if m is not None}, key=str) or [None]:
+        if await dual_control.checker_role_refusal(
+            db, rule, module=module, action=action, checker_id=ctx.user_id, maker_id=maker,
+            directory=ctx.directory,
+        ):
+            return True
+    return False
+
+
+def _approve_note(refusal: str | None) -> str:
+    """The row note for a decision this user can take only one way: return it."""
+    return f"You can return it, not approve it: {refusal}" if refusal else ""
 
 
 # ================================================================== decisions ===
@@ -262,6 +307,8 @@ async def approvals_waiting(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
         await db.scalars(
             select(ApprovalRequest)
             .where(ApprovalRequest.status == ApprovalStatus.pending, ~voted)
+            # The votes so far: whether one more approval finishes the request.
+            .options(selectinload(ApprovalRequest.actions))
             .order_by(ApprovalRequest.created_at)
             .limit(ROW_CAP)
         )
@@ -270,7 +317,10 @@ async def approvals_waiting(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     # the Approvals page and the decide endpoint, so nothing listed here is refused there.
     gates = await load_stage_gates(db, rows, ctx.directory) if rows else {}
     out = []
+    offered: list = []
     for ap in rows:
+        if _entity_off(ctx, ap.entity_type):
+            continue  # its module is off: the record it is about can't be opened
         gate = gates.get(ap.id)
         addressed = any(
             (kind == USER and value == ctx.user_id) or (kind == ROLE and value in ctx.role_names)
@@ -281,6 +331,14 @@ async def approvals_waiting(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
             role_names=ctx.role_names, stage=gate,
         ) is not None:
             continue
+        offered.append((ap, gate))
+    # The approval itself may still be refused (the record isn't ready, or the amount is
+    # above this user's mandate) — they can reject, so it stays, saying why. The same
+    # check as the Approvals page and the decision (``approvals.approve_blocks``).
+    from app.api.v1.approvals import approve_blocks
+
+    blocks = await approve_blocks(db, [ap for ap, _gate in offered], ctx.user) if offered else {}
+    for ap, _gate in offered:
         parts = []
         if ap.entity_label:
             parts.append(f"About {ap.entity_label}")
@@ -291,7 +349,7 @@ async def approvals_waiting(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
         out.append(ctx.mk(
             "approval", due=ap.due_date, id=ap.id, title=ap.title, reference=ap.reference or "",
             subtitle=" · ".join(parts), link=_link("/approvals", ap.id),
-            entity_type="approval", entity_id=ap.id,
+            entity_type="approval", entity_id=ap.id, note=_approve_note(blocks.get(ap.id)),
         ))
     return out
 
@@ -355,10 +413,10 @@ async def records_in_review(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     from app.models.asset import Asset
     from app.models.audit import AuditLog
     from app.models.workflow import WorkflowInstance, WorkflowInstanceStatus
-    from app.services import dual_control, record_registry
+    from app.services import dual_control, lifecycle_gates, record_registry
     from app.services.notifications import link_to
 
-    types = review_types(ctx.permissions)
+    types = [(t, m) for t, m in review_types(ctx.permissions) if not _entity_off(ctx, t)]
     if not types:
         return []
     rows = (await db.execute(union_all(*[in_review_select(t, m) for t, m in types]).limit(ROW_CAP))).all()
@@ -387,7 +445,8 @@ async def records_in_review(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
             )
         ).all()
     )
-    required = {t: (await dual_control.dual_control_required(db, t, "approve"))[0] for t in present}
+    rules = {t: await dual_control.dual_control_required(db, t, "approve") for t in present}
+    required = {t: rule[0] for t, rule in rules.items()}
     asset_ids = [r.id for r in rows if record_registry.model_for(r.entity_type) is Asset]
     asset_class = dict((await db.execute(select(Asset.id, Asset.asset_class).where(Asset.id.in_(asset_ids)))).all()) if asset_ids else {}
     out = []
@@ -398,11 +457,18 @@ async def records_in_review(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
         makers = (created.get(key, r.maker_hint), submitted.get(key))
         if not decided_by_others_only(ctx.user_id, makers, required=required[r.entity_type]):
             continue
+        # A rule's checker role (records._self_decision_block: checked against the maker).
+        if required[r.entity_type] and await _checker_blocked(
+            db, ctx, rules[r.entity_type][1], r.entity_type, "approve", (makers[0],),
+        ):
+            continue
+        # Approving may still be refused (not ready, or above the mandate); returning isn't.
+        note = _approve_note(await lifecycle_gates.write_back_refusal(db, r.entity_type, r.id, ctx.user))
         out.append(ctx.mk(
             "record_review", id=r.id, title=r.title or r.reference or "Untitled record",
             reference=r.reference or "", subtitle=record_registry.type_label(r.entity_type),
             link=link_to(r.entity_type, r.id, asset_class=asset_class.get(r.id)),
-            entity_type=r.entity_type, entity_id=r.id,
+            entity_type=r.entity_type, entity_id=r.id, note=note,
         ))
     return out
 
@@ -428,7 +494,7 @@ async def tests_to_review(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     ).all()
     if not rows:
         return []
-    required, _rule = await dual_control.dual_control_required(db, "control", "review_test")
+    required, rule = await dual_control.dual_control_required(db, "control", "review_test")
     makers: dict = {r.id: {r.tested_by_id} for r in rows}
     if required:
         for test_id, actor in (
@@ -443,6 +509,8 @@ async def tests_to_review(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     out = []
     for r in rows:
         if not decided_by_others_only(ctx.user_id, makers.get(r.id, ()), required=required):
+            continue
+        if required and await _checker_blocked(db, ctx, rule, "control", "review_test", makers.get(r.id, ())):
             continue
         result = getattr(r.result, "value", r.result).replace("_", " ")
         kind = f"{r.test_type} test" if r.test_type else "test"
@@ -476,7 +544,7 @@ async def issues_to_validate(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     ).all()
     if not rows:
         return []
-    required, _rule = await dual_control.dual_control_required(db, "issue", "validate")
+    required, rule = await dual_control.dual_control_required(db, "issue", "validate")
     raisers: dict = {}
     if required:
         created, _sub = makers_from_trail(
@@ -495,6 +563,8 @@ async def issues_to_validate(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
         # the owner for issues that arrived without a create entry).
         makers = (r.owner_id, raisers.get(r.id, r.owner_id))
         if not decided_by_others_only(ctx.user_id, makers, required=required):
+            continue
+        if required and await _checker_blocked(db, ctx, rule, "issue", "validate", (makers[1],)):
             continue
         again = r.validation_result == "not_effective"
         out.append(ctx.mk(
@@ -524,10 +594,14 @@ async def extensions_to_approve(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     ).all()
     if not rows:
         return []
-    required, _rule = await dual_control.dual_control_required(db, "issue", "extend_due_date")
+    required, rule = await dual_control.dual_control_required(db, "issue", "extend_due_date")
     out = []
     for r in rows:
         if not decided_by_others_only(ctx.user_id, (r.requested_by_id,), required=required):
+            continue
+        if required and await _checker_blocked(
+            db, ctx, rule, "issue", "extend_due_date", (r.requested_by_id,),
+        ):
             continue
         who = ctx.directory.label(r.requested_by_id) if ctx.directory is not None else ""
         out.append(MyWorkItem(
@@ -535,6 +609,96 @@ async def extensions_to_approve(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
             subtitle=(f"{who}: " if who else "") + (r.reason or "No reason given"),
             due_date=r.new_due_date, previous_date=r.old_due_date,
             link=_link("/issues", r.issue_id), entity_type="issue", entity_id=r.issue_id,
+        ))
+    return out
+
+
+async def vuln_acceptances_to_decide(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    """Pending risk acceptances on vulnerability findings this user may decide — the
+    decide endpoint's own rule (``vuln_acceptance.decision_refusal``)."""
+    from app.models.vulnerability import VulnFinding
+    from app.services import vuln_acceptance as va
+
+    if not ctx.holds(*va.DECIDE_PERMISSIONS):
+        return []
+    rows = (
+        await db.execute(
+            select(VulnFinding.id, VulnFinding.reference, VulnFinding.title, VulnFinding.status,
+                   VulnFinding.severity, VulnFinding.acceptance_status, VulnFinding.acceptance_reason,
+                   VulnFinding.acceptance_until, VulnFinding.acceptance_requested_by_id)
+            .where(VulnFinding.deleted.is_(False), VulnFinding.acceptance_status == va.REQUESTED)
+            .order_by(VulnFinding.acceptance_requested_at)
+            .limit(ROW_CAP)
+        )
+    ).all()
+    out = []
+    for r in rows:
+        if await va.decision_refusal(db, r, user_id=ctx.user_id, permissions=ctx.permissions,
+                                     approve=False, directory=ctx.directory):
+            continue
+        cannot_approve = await va.decision_refusal(db, r, user_id=ctx.user_id, permissions=ctx.permissions,
+                                                   approve=True, directory=ctx.directory)
+        who = ctx.directory.label(r.acceptance_requested_by_id) if ctx.directory is not None else ""
+        severity = getattr(r.severity, "value", r.severity)
+        out.append(ctx.mk(
+            "vuln_acceptance", due=r.acceptance_until, id=r.id, title=r.title, reference=r.reference or "",
+            subtitle=(f"{who}: " if who else "") + f"{severity} severity — {r.acceptance_reason or 'no reason given'}",
+            link=_link("/vulnerabilities", r.id), entity_type="vuln_finding", entity_id=r.id,
+            note=_approve_note(cannot_approve),
+        ))
+    return out
+
+
+async def risk_acceptances_to_decide(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
+    """Pending risk acceptances this user may decide — the decision endpoint's own rules
+    (``risks.decide_acceptance``): four-eyes and the rule's checker role decide who is
+    offered it; the risk's readiness, the request's expiry and the delegation-of-authority
+    mandate decide whether they can approve or only return it."""
+    from app.models.enums import AcceptanceStatus
+    from app.models.risk import Risk, RiskAcceptance
+    from app.services import authority_limits, dual_control, risk_integrity
+
+    if not ctx.holds("risk:accept"):
+        return []
+    rows = (
+        await db.execute(
+            select(RiskAcceptance, Risk.reference, Risk.title, Risk.status, Risk.last_assessed_at,
+                   Risk.assessment_rationale, Risk.annual_loss_expectancy)
+            .join(Risk, Risk.id == RiskAcceptance.risk_id)
+            .where(RiskAcceptance.status == AcceptanceStatus.pending, Risk.deleted.is_(False))
+            .order_by(RiskAcceptance.created_at)
+            .limit(ROW_CAP)
+        )
+    ).all()
+    today = date.today()
+    out = []
+    for acc, reference, title, risk_status, assessed_at, rationale, ale in rows:
+        exposure = acc.exposure_amount if acc.exposure_amount is not None else ale
+        required, rule = await dual_control.dual_control_required(
+            db, "risk", "accept", float(exposure) if exposure else None
+        )
+        if required:
+            if acc.requested_by == ctx.user_id:
+                continue
+            if await dual_control.checker_role_refusal(
+                db, rule, module="risk", action="accept", checker_id=ctx.user_id,
+                maker_id=acc.requested_by, directory=ctx.directory,
+            ):
+                continue
+        cannot_approve = risk_integrity.acceptance_refusal(risk_status, assessed_at, rationale)
+        if not cannot_approve and acc.expires_at is not None and acc.expires_at < today:
+            cannot_approve = f"the request expired on {acc.expires_at.isoformat()}"
+        if not cannot_approve and ctx.user is not None:
+            subject = await authority_limits.subject_for(db, "risk_acceptance", acc)
+            if subject is not None:
+                verdict = await authority_limits.verdict(db, subject, ctx.user)
+                cannot_approve = None if verdict.allowed else verdict.reason
+        who = ctx.directory.label(acc.requested_by) if ctx.directory is not None else ""
+        out.append(ctx.mk(
+            "risk_acceptance", due=acc.expires_at, id=acc.id, title=title, reference=reference or "",
+            subtitle=(f"{who}: " if who else "") + (acc.rationale or "no rationale given"),
+            link=_link("/risks", acc.risk_id), entity_type="risk", entity_id=acc.risk_id,
+            note=_approve_note(cannot_approve),
         ))
     return out
 
@@ -1345,6 +1509,8 @@ BUILDERS = {
     "test_review": tests_to_review,
     "issue_validation": issues_to_validate,
     "due_date_change": extensions_to_approve,
+    "risk_acceptance": risk_acceptances_to_decide,
+    "vuln_acceptance": vuln_acceptances_to_decide,
     "treatment_action": my_treatment_actions,
     "issue_action": my_issue_actions,
     "issue": my_issues,
@@ -1381,9 +1547,12 @@ async def my_work(db: AsyncSession, user: Any, today: date | None = None) -> MyW
         user_id=user.id, email=user.email or "", permissions=set(user.permission_codes or []),
         role_names={r.name for r in user.roles}, role_ids={r.id for r in user.roles},
         today=today, horizon=today + timedelta(days=HORIZON_DAYS),
-        directory=await load_directory(db), modules_off=await _module_off(db),
+        directory=await load_directory(db), modules_off=await _module_off(db), user=user,
     )
     found = {kind: await build(db, ctx) for kind, build in BUILDERS.items()}
+    # Backstop for every section: an item about a record in a module this organisation
+    # can't use would deep-link to a locked page, so it is not work it can do.
+    found = {kind: [i for i in items if not _entity_off(ctx, i.entity_type)] for kind, items in found.items()}
     return assemble(user.id, today, found)
 
 

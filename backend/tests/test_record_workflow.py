@@ -241,7 +241,7 @@ def _user(*perms):
 @pytest.fixture
 def quiet(monkeypatch):
     """Stub everything apply() calls outside itself; record what was audited."""
-    from app.services import audit, dual_control, workflow_engine
+    from app.services import audit, authority_limits, dual_control, workflow_engine
 
     calls: dict[str, list] = {"audit": [], "sod": [], "start": []}
 
@@ -262,6 +262,8 @@ def quiet(monkeypatch):
     monkeypatch.setattr(workflow_engine, "start", _start)
     monkeypatch.setattr(dual_control, "enforce_record_maker_checker", _sod)
     monkeypatch.setattr(dual_control, "enforce_maker_checker", _sod)
+    monkeypatch.setattr(dual_control, "enforce_maker_role", _none)
+    monkeypatch.setattr(authority_limits, "enforce", _none)
     monkeypatch.setattr(audit, "record", _audit)
     monkeypatch.setattr(rw, "last_submitter", _none)
     return calls

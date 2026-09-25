@@ -16,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.services import control_assurance
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.core.schema_loading import options_for
 from app.models.compliance import (
     ComplianceFinding,
     Framework,
@@ -62,10 +63,11 @@ async def search_requirements(db: DbSession, search: str | None = None, limit: i
     """Flat, searchable requirements list across all frameworks — powers link pickers
     (the per-framework endpoint can't be server-typeaheaded)."""
     lim = max(1, min(limit, 50))
+    # Each clause and its framework's name: none of their links.
     stmt = (
         select(Requirement)
         .where(Requirement.deleted.is_(False))
-        .options(selectinload(Requirement.framework))
+        .options(*options_for(Requirement, None, ("framework",)))
     )
     if search:
         stmt = stmt.where(
@@ -412,6 +414,12 @@ async def create_requirement(
 
     await _load_framework(db, framework_id)
     data = body.model_dump(exclude={"control_ids", "risk_ids", "policy_ids"})
+    # A clause created excluded (treatment or status "not applicable") is the same
+    # decision as excluding it later, and needs the same justification.
+    if not soa_export.is_applicable(data.get("treatment"), data.get("status")):
+        error = soa_export.applicability_error(False, data.get("applicability_justification"))
+        if error:
+            raise HTTPException(status_code=422, detail=error)
     req = Requirement(tenant_id=user.tenant_id, framework_id=framework_id, **data)
     req.controls = await _resolve_controls(db, body.control_ids)
     req.risks = await _resolve_any(db, Risk, body.risk_ids)

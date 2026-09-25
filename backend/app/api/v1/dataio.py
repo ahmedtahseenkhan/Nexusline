@@ -31,6 +31,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import selectinload
@@ -38,6 +39,7 @@ from sqlalchemy.orm import selectinload
 from app.core import db_errors
 
 from app.core.deps import CurrentUser, DbSession
+from app.core.schema_loading import options_for, serialize_all
 from app.models.custom_field import CUSTOM_FIELD_MODELS, CustomField, CustomFieldValue
 from app.models.import_profile import ImportProfile
 from app.schemas.dataio import (
@@ -58,7 +60,7 @@ from app.schemas.dataio import (
 )
 from app.services import audit as audit_log
 from app.services import modules as module_service
-from app.services import csv_io, custom_field_values, import_mapping, ref_fields, webhooks, xlsx_io
+from app.services import csv_io, custom_field_values, import_mapping, lifecycle_gates, ref_fields, webhooks, xlsx_io
 from app.services.import_registry import (
     REGISTRY,
     VIA_COLUMN,
@@ -165,12 +167,23 @@ async def _build_ref_index(db: DbSession, link: LinkSpec) -> dict[str, object]:
     """
     model = link.target_model
     attrs = [a for a in dict.fromkeys(("reference", link.match_field, *link.also_match)) if hasattr(model, a)]
-    objects = (await db.scalars(_scoped(select(model), model, link))).all()
-    rows = [
-        {"id": o.id, **{a: getattr(o, a, None) for a in attrs},
-         "_label": link.label(o) if link.label is not None else None}
-        for o in objects
-    ]
+    if link.label is None and all(a in sa_inspect(model).column_attrs for a in attrs):
+        # Only the columns matched on: loading the records would load their links too,
+        # and a register's links' links — seconds of queries for a list of names.
+        result = await db.execute(
+            _scoped(select(model.id, *(getattr(model, a) for a in attrs)), model, link)
+        )
+        rows = [{"id": row[0], **dict(zip(attrs, row[1:])), "_label": None} for row in result.all()]
+    else:
+        # A label (or a matched property) may read the record's links: load the records,
+        # none of their links, and render where a link it reads can still be loaded.
+        objects = (await db.scalars(
+            _scoped(select(model), model, link).options(*options_for(model, None))
+        )).all()
+        rows = await serialize_all(db, objects, lambda o: {
+            "id": o.id, **{a: getattr(o, a, None) for a in attrs},
+            "_label": link.label(o) if link.label is not None else None,
+        })
 
     def add(index: dict[str, object], key: object, obj_id: object) -> None:
         text = _index_key(str(key or ""))
@@ -582,7 +595,9 @@ async def import_resource(
             # Custom cells are validated before anything is written, and written inside
             # the row's own savepoint, so a bad value never leaves a half-imported row.
             custom_values = _custom_cells(source_row, custom_fields)
-            with ref_fields.collect_warnings() as ref_warnings:
+            # The gate decided this row's state (_row_payload): the module's create
+            # accepts what passed it (services.lifecycle_gates.import_decided).
+            with ref_fields.collect_warnings() as ref_warnings, lifecycle_gates.import_decided():
                 async with db.begin_nested():
                     record = await res.create_func(body=obj, db=db, user=user)
                     if custom_values:
@@ -790,7 +805,7 @@ async def preview_import(
             payload, row_warnings = _row_payload(res, source_row, mapping, header_by_field, link_indexes, gate)
             obj = res.create_schema(**payload)
             custom_values = _custom_cells(source_row, custom_fields)
-            with ref_fields.collect_warnings() as ref_warnings:
+            with ref_fields.collect_warnings() as ref_warnings, lifecycle_gates.import_decided():
                 try:
                     async with db.begin_nested():
                         record = await res.create_func(body=obj, db=db, user=user)

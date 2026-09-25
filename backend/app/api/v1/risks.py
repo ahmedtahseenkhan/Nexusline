@@ -16,6 +16,7 @@ from sqlalchemy.orm import aliased
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.core.schema_loading import options_for, serialize_all
 from app.models.asset import Asset
 from app.models.control import Control, ControlAudit
 from app.models.incident import Incident
@@ -65,8 +66,10 @@ from app.schemas.risk import (
 from app.db.data_repairs import RESIDUAL_REVIEW_REASON
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import authority_limits
 from app.services import control_assurance
 from app.services import delete_guard
+from app.services import lifecycle_gates
 from app.services import master_data
 from app.services import dual_control
 from app.services import ref_fields
@@ -634,8 +637,11 @@ async def list_risks(
         stmt = apply_sort(stmt, params, _RISK_SORTABLE, default=Risk.inherent_score)
     else:
         stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
-    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    items = [RiskRead.model_validate(r, context=context) for r in rows]
+    # Load what the register serialises, plus the controls' findings ``_control_health``
+    # reads after validation — not every link of every linked record.
+    loads = options_for(Risk, RiskRead, ("controls.audit_findings",))
+    rows = (await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all()
+    items = await serialize_all(db, rows, lambda r: RiskRead.model_validate(r, context=context))
     await ref_fields.fill_refs(db, list(zip(rows, items)), RISK_REFS)
     await _fill_hierarchy(db, list(zip(rows, items)))
     today = date.today()
@@ -661,8 +667,11 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
     Phase 2 rules (``services.risk_integrity``): a blank title is composed from the
     statement; dimension scores decide their basis' impact; target <= residual <=
     inherent; scores given on create stamp the assessment trail, and a risk created
-    beyond draft needs chosen inherent scores and an ``assessment_rationale``.
+    beyond draft needs chosen inherent scores and an ``assessment_rationale``. A risk is
+    never created accepted: acceptance is requested and decided by a holder of
+    ``risk:accept`` (``services.lifecycle_gates``).
     """
+    lifecycle_gates.enforce_create("risk", {"status": body.status})
     await _check_scale(db, user, body.model_dump())
     data = body.model_dump(
         exclude={
@@ -1108,6 +1117,9 @@ async def update_risk(
 ) -> RiskRead:
     risk = await _load_risk(db, risk_id)
     data = body.model_dump(exclude_unset=True)
+    # Accepted is a decision (request, then risk:accept decides), not an edit.
+    if data.get("status") is not None:
+        lifecycle_gates.enforce_edit("risk", risk, data)
     # A null inherent score means "not chosen": the stored value stands (NOT NULL).
     for name in ("inherent_likelihood", "inherent_impact"):
         if name in data and data[name] is None:
@@ -1704,6 +1716,22 @@ async def request_acceptance(
             status_code=status.HTTP_409_CONFLICT,
             detail="This risk already has an acceptance request awaiting a decision.",
         )
+    # Requesting acceptance is the maker's step (a rule's maker role, where one is named).
+    await dual_control.enforce_maker_role(db, module="risk", action="accept", maker_id=user.id)
+    # The exposure being accepted is fixed now: it is what the approver's delegation-of-
+    # authority mandate is checked against, and what the record shows was accepted.
+    exposure, currency, basis = await authority_limits.acceptance_exposure(
+        db, risk, body.exposure_amount, body.exposure_currency
+    )
+    if exposure is None and await dual_control.authority_lines(db, "risk_acceptance"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "exposure_amount: risk acceptance is under your delegation-of-authority matrix, "
+                "so the request needs the exposure being accepted. This risk has no quantified "
+                "exposure — give the amount."
+            ),
+        )
     acceptance = RiskAcceptance(
         tenant_id=user.tenant_id,
         risk_id=risk.id,
@@ -1711,6 +1739,9 @@ async def request_acceptance(
         rationale=body.rationale,
         expires_at=body.expires_at,
         status=AcceptanceStatus.pending,
+        exposure_amount=authority_limits.as_decimal(exposure),
+        exposure_currency=currency or "",
+        exposure_basis=(basis or "")[:40],
     )
     db.add(acceptance)
     await db.flush()
@@ -1721,7 +1752,10 @@ async def request_acceptance(
         entity_type="risk_acceptance",
         entity_id=acceptance.id,
         summary=f"Requested acceptance for risk {risk.reference}",
-        changes={"rationale": body.rationale, "expires_at": str(body.expires_at or "")},
+        changes={
+            "rationale": body.rationale, "expires_at": str(body.expires_at or ""),
+            **({"exposure": f"{currency} {exposure:,.2f} ({basis})"} if exposure is not None else {}),
+        },
     )
     await db.refresh(acceptance)
     return RiskAcceptanceRead.model_validate(acceptance)
@@ -1756,16 +1790,20 @@ async def decide_acceptance(
         )
 
     # Maker-checker: accepting a risk is a four-eyes control — the person who requested
-    # the acceptance can never approve it. Gated by the risk's exposure (ALE) so a
-    # DualControlRule threshold can scope it to material risks.
+    # the acceptance can never approve it. Gated by the exposure being accepted (fixed on
+    # the request; the risk's ALE for an older request) so a DualControlRule threshold
+    # can scope it to material risks.
     risk = await _load_risk(db, risk_id)
+    exposure = getattr(acceptance, "exposure_amount", None)
+    if exposure is None:
+        exposure = risk.annual_loss_expectancy
     await dual_control.enforce_maker_checker(
         db,
         module="risk",
         action="accept",
         maker_id=acceptance.requested_by,
         checker_id=user.id,
-        amount=float(risk.annual_loss_expectancy) if risk.annual_loss_expectancy else None,
+        amount=float(exposure) if exposure else None,
         subject="risk acceptance",
     )
 
@@ -1785,6 +1823,8 @@ async def decide_acceptance(
                     "and ask for a new acceptance with a current expiry date."
                 ),
             )
+        # Delegation of authority: the approver's mandate must cover the exposure.
+        await authority_limits.enforce(db, "risk_acceptance", acceptance, user)
     status_before = _status_value(risk.status)
     acceptance.approver_id = user.id
     acceptance.decided_at = date.today()

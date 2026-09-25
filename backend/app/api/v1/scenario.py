@@ -9,7 +9,9 @@ Completes the Basel operational-risk suite. Two record types:
   BIC / Loss Component / ILM / ORC computed server-side. The Basel BI bucket edges
   (EUR 1bn / EUR 30bn) are converted into each record's currency at the organisation's
   latest exchange rates; without a rate the capital is not computed and the read says
-  which rate is missing (see :func:`sma_thresholds`).
+  which rate is missing (see :func:`sma_thresholds`). Marking a calculation final
+  freezes that basis onto it (:func:`_freeze`); ``POST .../reopen`` is the only way
+  back to draft, and it needs a reason that goes into the audit trail.
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from app.models.scenario import (
     BASEL_BI_BUCKET_2,
     BASEL_THRESHOLD_CURRENCY,
     CapitalCalculation,
+    CapitalStatus,
     ScenarioAnalysis,
     ScenarioStatus,
     sma_capital,
@@ -38,6 +41,7 @@ from app.schemas.common import Page
 from app.schemas.scenario import (
     CapitalCreate,
     CapitalRead,
+    CapitalReopen,
     CapitalSnapshot,
     CapitalUpdate,
     ScenarioCreate,
@@ -161,6 +165,8 @@ class SmaThresholds:
     bucket_1: float
     bucket_2: float
     basis: str
+    #: Units of the record's currency per 1 EUR (1 for a EUR record).
+    factor: float = 1.0
 
 
 def sma_thresholds(book: fx.RateBook, currency: str | None, on_date: date | None = None) -> SmaThresholds | str:
@@ -189,17 +195,33 @@ def sma_thresholds(book: fx.RateBook, currency: str | None, on_date: date | None
         )
     factor = float(eur[0]) / float(own[0])
     dates = sorted({d.isoformat() for _r, d in (eur, own) if d is not None})
-    return SmaThresholds(
-        BASEL_BI_BUCKET_1 * factor,
-        BASEL_BI_BUCKET_2 * factor,
-        f"Basel CRE25 bucket edges {edges} at 1 {base} = {factor:,.4f} {code}"
-        + (f" (rate of {', '.join(dates)})" if dates else ""),
-    )
+    basis = f"Basel CRE25 bucket edges {edges} at 1 {base} = {factor:,.4f} {code}"
+    if dates:
+        basis += f" (rate of {', '.join(dates)})"
+    return SmaThresholds(BASEL_BI_BUCKET_1 * factor, BASEL_BI_BUCKET_2 * factor, basis, factor)
 
 
 def _capital_read(obj: CapitalCalculation, book: fx.RateBook) -> CapitalRead:
-    """The record with its SMA figures (``models.scenario.sma_capital``)."""
+    """The record with its SMA figures (``models.scenario.sma_capital``): the frozen
+    snapshot once final, else computed at today's rates."""
     read = CapitalRead.model_validate(obj)
+    if obj.status == CapitalStatus.final and obj.final_at is not None:
+        read.basis_frozen = True
+        read.bucket = obj.final_bucket
+        read.bic = _num(obj.final_bic)
+        read.loss_component = _num(obj.final_loss_component) or 0
+        read.ilm = _num(obj.final_ilm)
+        read.orc = _num(obj.final_orc)
+        read.bucket_1_threshold = _num(obj.final_bucket_1)
+        read.bucket_2_threshold = _num(obj.final_bucket_2)
+        read.fx_factor = _num(obj.final_fx_factor)
+        read.threshold_basis = obj.final_basis
+        return read
+    if obj.status == CapitalStatus.final:
+        read.frozen_note = (
+            "Marked final before calculations froze their basis, so these figures use "
+            "today's exchange rate. Reopen it and mark it final again to freeze them."
+        )
     read.loss_component = round(15.0 * float(obj.avg_annual_loss or 0), 2)
     edges = sma_thresholds(book, obj.currency)
     if isinstance(edges, str):
@@ -213,8 +235,75 @@ def _capital_read(obj: CapitalCalculation, book: fx.RateBook) -> CapitalRead:
     read.orc = round(result.orc, 2)
     read.bucket_1_threshold = round(edges.bucket_1, 2)
     read.bucket_2_threshold = round(edges.bucket_2, 2)
+    read.fx_factor = edges.factor
     read.threshold_basis = edges.basis
     return read
+
+
+def _num(value) -> float | None:
+    return None if value is None else float(value)
+
+
+def _differs(current, new) -> bool:
+    """Whether an update really changes a field; money compares by value (Decimal vs float)."""
+    if isinstance(new, float) and current is not None:
+        return float(current) != new
+    return current != new
+
+
+def _freeze(obj: CapitalCalculation, book: fx.RateBook, user) -> None:
+    """Stamp the basis a calculation is final on: the EUR factor, the bucket edges in its
+    currency, and BIC / LC / ILM / ORC as computed now. A final figure is what was filed
+    (the ICAAP, the SBP return), so a later rate change must not restate it. Refused
+    when the edges cannot be computed — a final figure with no capital is not a figure."""
+    edges = sma_thresholds(book, obj.currency)
+    if isinstance(edges, str):
+        raise HTTPException(status_code=409, detail=f"Cannot mark the calculation final. {edges}")
+    result = sma_capital(obj.business_indicator, obj.avg_annual_loss, edges.bucket_1, edges.bucket_2)
+    obj.final_at = datetime.now(timezone.utc)
+    obj.final_by = user.email
+    obj.final_fx_factor = edges.factor
+    obj.final_bucket_1 = round(edges.bucket_1, 2)
+    obj.final_bucket_2 = round(edges.bucket_2, 2)
+    obj.final_basis = edges.basis
+    obj.final_bucket = result.bucket
+    obj.final_bic = round(result.bic, 2)
+    obj.final_loss_component = round(result.loss_component, 2)
+    obj.final_ilm = round(result.ilm, 6)
+    obj.final_orc = round(result.orc, 2)
+
+
+def _snapshot(obj: CapitalCalculation) -> dict:
+    """The frozen basis as plain values, for the audit entry of a reopen."""
+    return {
+        "final_at": obj.final_at.isoformat() if obj.final_at else None,
+        "final_by": obj.final_by,
+        "currency": obj.currency,
+        "business_indicator": _num(obj.business_indicator),
+        "avg_annual_loss": _num(obj.avg_annual_loss),
+        "fx_factor": _num(obj.final_fx_factor),
+        "bucket_1": _num(obj.final_bucket_1),
+        "bucket_2": _num(obj.final_bucket_2),
+        "basis": obj.final_basis,
+        "bucket": obj.final_bucket,
+        "bic": _num(obj.final_bic),
+        "loss_component": _num(obj.final_loss_component),
+        "ilm": _num(obj.final_ilm),
+        "orc": _num(obj.final_orc),
+    }
+
+
+def _unfreeze(obj: CapitalCalculation) -> None:
+    obj.final_at = None
+    obj.final_by = ""
+    obj.final_basis = ""
+    for col in ("final_fx_factor", "final_bucket_1", "final_bucket_2", "final_bucket",
+                "final_bic", "final_loss_component", "final_ilm", "final_orc"):
+        setattr(obj, col, None)
+
+
+#: Fields that decide the figure. Locked while final; only a reopen unlocks them.
+_CAPITAL_INPUTS = ("period", "business_indicator", "avg_annual_loss", "currency")
 
 
 # BIC / Loss Component / ILM / ORC are all computed server-side, so only the input
@@ -253,12 +342,17 @@ async def list_capital(db: DbSession, search: str | None = None,
 @router.post("/capital-calculations", response_model=CapitalRead, status_code=201, dependencies=[_WRITE])
 async def create_capital(body: CapitalCreate, db: DbSession, user: CurrentUser) -> CapitalRead:
     obj = CapitalCalculation(tenant_id=user.tenant_id, **body.model_dump())
+    book = await fx.load_rate_book(db)
+    if obj.status == CapitalStatus.final:
+        _freeze(obj, book, user)
     obj.reference = await _next_ref(db, CapitalCalculation, "CAP")
     db.add(obj)
     await db.flush()
+    final = " and marked it final" if obj.final_at else ""
     await audit_log.record(db, actor=user, action="create", entity_type="capital_calculation",
-                           entity_id=obj.id, summary=f"Computed SMA capital {obj.reference} ({obj.period})")
-    return _capital_read(obj, await fx.load_rate_book(db))
+                           entity_id=obj.id,
+                           summary=f"Computed SMA capital {obj.reference} ({obj.period}){final}")
+    return _capital_read(obj, book)
 
 
 @router.get("/capital-calculations/{cid}", response_model=CapitalRead, dependencies=[_READ])
@@ -268,20 +362,101 @@ async def get_capital(cid: uuid.UUID, db: DbSession) -> CapitalRead:
 
 
 @router.patch("/capital-calculations/{cid}", response_model=CapitalRead, dependencies=[_WRITE])
-async def update_capital(cid: uuid.UUID, body: CapitalUpdate, db: DbSession) -> CapitalRead:
+async def update_capital(cid: uuid.UUID, body: CapitalUpdate, db: DbSession,
+                         user: CurrentUser) -> CapitalRead:
     obj = await _get(db, CapitalCalculation, cid, "Capital calculation")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    changed = {k: v for k, v in data.items() if _differs(getattr(obj, k), v)}
+    was_final = obj.status == CapitalStatus.final
+    if was_final:
+        locked = sorted(k for k in changed if k in _CAPITAL_INPUTS or k == "status")
+        if locked:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{obj.reference} is final, so {', '.join(locked)} cannot change. "
+                       "Reopen it (with a reason) to make it a draft again.",
+            )
+    for k, v in changed.items():
         setattr(obj, k, v)
+    book = await fx.load_rate_book(db)
+    finalised = not was_final and obj.status == CapitalStatus.final
+    if finalised:
+        _freeze(obj, book, user)
     await db.flush()
+    if changed:
+        if finalised:
+            summary = f"Marked SMA capital {obj.reference} final (ORC {obj.final_orc:,.2f} {obj.currency})"
+        else:
+            summary = f"Updated SMA capital {obj.reference} ({', '.join(sorted(changed))})"
+        await audit_log.record(
+            db, actor=user, action="finalise" if finalised else "update",
+            entity_type="capital_calculation", entity_id=obj.id, summary=summary,
+            changes={"basis": _snapshot(obj)} if finalised else None,
+        )
+    return _capital_read(obj, book)
+
+
+REOPEN_OWN_FINAL = (
+    "Segregation of duties: you marked this capital figure final, so someone else must reopen it. "
+    "A final figure is what was filed (the ICAAP, the SBP return); unlocking it takes a second person."
+)
+
+
+async def _check_reopen_four_eyes(db, obj: CapitalCalculation, user) -> None:
+    """Dual control ``(capital_calculation, reopen)``: reopening unlocks a figure that may
+    already be filed, so it is an amendment of an authorised record — as a core-banking
+    system would, it needs a second person: whoever marked the figure final may not
+    reopen it (a rule's checker role, where one is named, also applies)."""
+    from app.models.identity import User
+    from app.services import dual_control
+
+    required, rule = await dual_control.dual_control_required(
+        db, "capital_calculation", "reopen", amount=float(obj.final_orc or 0) or None,
+    )
+    if not required:
+        return
+    finaliser = (obj.final_by or "").strip().lower()
+    if finaliser and finaliser == (user.email or "").strip().lower():
+        raise HTTPException(status_code=403, detail=REOPEN_OWN_FINAL)
+    maker_id = await db.scalar(select(User.id).where(func.lower(User.email) == finaliser)) if finaliser else None
+    await dual_control.enforce_checker_role(db, rule, module="capital_calculation", action="reopen",
+                                            checker_id=user.id, maker_id=maker_id)
+
+
+@router.post("/capital-calculations/{cid}/reopen", response_model=CapitalRead, dependencies=[_WRITE],
+             summary="Put a final capital calculation back to draft (reasoned, audited)")
+async def reopen_capital(cid: uuid.UUID, body: CapitalReopen, db: DbSession,
+                         user: CurrentUser) -> CapitalRead:
+    obj = await _get(db, CapitalCalculation, cid, "Capital calculation")
+    if obj.status != CapitalStatus.final:
+        raise HTTPException(status_code=409, detail=f"{obj.reference} is not final, so there is nothing to reopen.")
+    await _check_reopen_four_eyes(db, obj, user)
+    frozen = _snapshot(obj)
+    obj.status = CapitalStatus.draft
+    _unfreeze(obj)
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="reopen", entity_type="capital_calculation", entity_id=obj.id,
+        summary=f"Reopened final SMA capital {obj.reference} ({obj.period}): {body.reason.strip()}"[:500],
+        changes={"reason": body.reason.strip(), "frozen_basis": frozen},
+    )
     return _capital_read(obj, await fx.load_rate_book(db))
 
 
 @router.delete("/capital-calculations/{cid}", status_code=204, dependencies=[_WRITE])
-async def delete_capital(cid: uuid.UUID, db: DbSession) -> None:
+async def delete_capital(cid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _get(db, CapitalCalculation, cid, "Capital calculation")
+    if obj.status == CapitalStatus.final:
+        # A filed figure does not disappear quietly: reopening records who and why first.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{obj.reference} is final. Reopen it (with a reason) before archiving it.",
+        )
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
+    await audit_log.record(db, actor=user, action="delete", entity_type="capital_calculation",
+                           entity_id=obj.id, summary=f"Archived SMA capital {obj.reference} ({obj.period})")
 
 
 # ================================================================= summary ===
@@ -323,6 +498,8 @@ async def scenario_summary(db: DbSession) -> ScenarioSummary:
             orc=figures.orc,
             currency=latest.currency,
             threshold_note=figures.threshold_note,
+            basis_frozen=figures.basis_frozen,
+            final_at=figures.final_at,
         )
 
     return ScenarioSummary(

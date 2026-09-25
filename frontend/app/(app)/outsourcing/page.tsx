@@ -24,6 +24,7 @@ import UserPicker from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import type { LookupRef, UserRef } from "@/lib/masterData";
 import { titleCase } from "@/lib/text";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ local types
 interface OutsourcingReview {
@@ -508,8 +509,9 @@ function OutsourcingInner() {
         <Field label="Category">
           <Select value={af.category} onChange={(v) => setA("category", v)} options={CATEGORY} />
         </Field>
-        <Field label="Status" help="A material arrangement can't be active or under review until its materiality rationale, exit plan and substitutability are recorded.">
-          <Select value={af.status} onChange={(v) => setA("status", v)} options={STATUS} />
+        <Field label="Status" help={`${DECISION_HELP.outsourcing_arrangement} A material arrangement also needs its materiality rationale, exit plan and substitutability, and SBP's approval where it is required.`}>
+          <Select value={af.status} onChange={(v) => setA("status", v)}
+            options={statusOptions("outsourcing_arrangement", STATUS, editingArr?.status, editingArr?.workflow_status)} />
         </Field>
       </div>
       <Field label="Owner" help="Accountable business / risk owner.">

@@ -139,9 +139,17 @@ function ApprovalsInner() {
         </span>
       ) : (
         <>
-          <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true), "Decision recorded")} title="An independent checker approves">
-            <IconCheck width={13} height={13} /> Approve
-          </button>
+          {a.can_approve === false && a.approve_blocked_reason ? (
+            // Deciding is open to them, approving is not (not ready / above their mandate):
+            // the reason stands in for the button; Reject stays available.
+            <span className="muted" aria-disabled="true" style={{ fontSize: 12.5, maxWidth: 280 }}>
+              {a.approve_blocked_reason}
+            </span>
+          ) : (
+            <button className="btn sm" onClick={() => act(api.decideApproval(a.id, true), "Decision recorded")} title="An independent checker approves">
+              <IconCheck width={13} height={13} /> Approve
+            </button>
+          )}
           <input
             className="input"
             style={{ width: 150 }}

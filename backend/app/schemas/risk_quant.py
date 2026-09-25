@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.base import WorkflowState
 from app.models.risk_quant import QuantStatus
+from app.schemas.tenant_settings import currency_or_default
 
 
 # ----------------------------------------------------------- input rules ---
@@ -68,6 +69,8 @@ class RiskQuantCreate(RiskQuantBase):
             raise ValueError(problem)
         return self
 
+    _ccy = field_validator("currency")(currency_or_default)
+
 
 class RiskQuantUpdate(BaseModel):
     title: str | None = None
@@ -85,6 +88,8 @@ class RiskQuantUpdate(BaseModel):
     owner: str | None = None
     notes: str | None = None
     status: QuantStatus | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class RiskQuantRead(RiskQuantBase):

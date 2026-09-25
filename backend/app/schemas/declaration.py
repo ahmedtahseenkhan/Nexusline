@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.models.declaration import CampaignStatus, DeclarationStatus, DeclarationType
+from app.schemas.tenant_settings import currency_or_default
 
 
 # ------------------------------------------------------ declarations (submissions) ---
@@ -25,7 +26,7 @@ class DeclarationBase(BaseModel):
 
 
 class DeclarationCreate(DeclarationBase):
-    pass
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class DeclarationUpdate(BaseModel):
@@ -40,6 +41,8 @@ class DeclarationUpdate(BaseModel):
     status: DeclarationStatus | None = None
     reviewer: str | None = None
     review_notes: str | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class DeclarationRead(DeclarationBase):

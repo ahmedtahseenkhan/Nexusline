@@ -1160,8 +1160,8 @@ function RisksPage() {
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Status" help="Where the risk is in assessment and treatment. A draft may be saved unscored; any other status needs the inherent scores and an assessment rationale. Approval is separate: submit it for review from the risk's detail view.">
-          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
+        <Field label="Status" help="Where the risk is in assessment and treatment. A draft may be saved unscored; any other status needs the inherent scores and an assessment rationale. Approval is separate: submit it for review from the risk's detail view. Accepted is a decision: request acceptance from the risk, and a holder of risk:accept decides it.">
+          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS.filter((o) => o.value !== "accepted" || editing?.status === "accepted")} />
         </Field>
       </div>
       {/* Phase 3 hierarchy: enterprise → category → scenario. The server checks the parent

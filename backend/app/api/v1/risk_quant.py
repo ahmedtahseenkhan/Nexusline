@@ -31,7 +31,7 @@ from app.schemas.risk_quant import (
 from app.services.refs import next_reference
 from app.schemas.fx import UnconvertedAmount
 from app.services import audit as audit_log
-from app.services import fx
+from app.services import fx, lifecycle_gates
 
 router = APIRouter(tags=["risk quantification"])
 
@@ -108,13 +108,28 @@ NEEDS_SIMULATION_DETAIL = (
     "Run the simulation on the current inputs before approving this quantification."
 )
 
+#: An approved quantification is the figure the bank signed off; changing its inputs or
+#: re-running it would change that figure under the approval.
+APPROVED_LOCKED_DETAIL = (
+    "This quantification is approved, so its inputs and figures are fixed. Use Revise to "
+    "reopen it, change it, simulate again and submit it for approval."
+)
+
+
+def _signed_off(obj: RiskQuantification) -> bool:
+    """Approved through the lifecycle (a status typed in before the gate is not a
+    sign-off, and stays editable)."""
+    return obj.status == QuantStatus.approved and getattr(
+        obj.workflow_status, "value", obj.workflow_status) == "approved"
+
 
 def _status_for(requested: QuantStatus, has_result: bool) -> QuantStatus:
     """The status a create/edit may leave, given whether a current simulation exists.
 
     *Simulated* is set by the simulate action and means "results describe these inputs";
     asked for without a current run it is saved as *draft*. *Approved* signs off figures,
-    so it needs a current run (422 otherwise).
+    so it needs a current run (422 otherwise) — and only the approval lifecycle moves a
+    record into it (``lifecycle_gates.QUANT_STATUS``); here it is only ever echoed back.
     """
     if has_result:
         return requested
@@ -143,6 +158,7 @@ def _differs(new, old) -> bool:
 @router.post("/risk-quantification", response_model=RiskQuantRead, status_code=201, dependencies=[_WRITE])
 async def create_quantification(body: RiskQuantCreate, db: DbSession, user: CurrentUser) -> RiskQuantRead:
     await _validate_risk(db, body.risk_id)
+    lifecycle_gates.enforce_create("risk_quantification", body.model_dump())
     obj = RiskQuantification(tenant_id=user.tenant_id, **body.model_dump())
     obj.status = _status_for(body.status, has_result=False)
     obj.reference = await _next_ref(db, RiskQuantification, "FAIR")
@@ -165,6 +181,7 @@ async def update_quantification(qid: uuid.UUID, body: RiskQuantUpdate, db: DbSes
     # A null in a partial update means "not sent" (every column but the risk link is
     # NOT NULL).
     data = {k: v for k, v in data.items() if v is not None or k == "risk_id"}
+    lifecycle_gates.enforce_edit("risk_quantification", obj, data)
     if "risk_id" in data:
         await _validate_risk(db, data["risk_id"])
     merged = {name: data.get(name, getattr(obj, name)) for name in SIMULATION_INPUTS}
@@ -177,6 +194,8 @@ async def update_quantification(qid: uuid.UUID, body: RiskQuantUpdate, db: DbSes
         name for name in SIMULATION_INPUTS
         if name in data and _differs(data[name], getattr(obj, name))
     ]
+    if changed and _signed_off(obj):
+        raise HTTPException(status_code=409, detail=APPROVED_LOCKED_DETAIL)
     has_result = obj.last_simulated is not None and not changed
     new_status = _status_for(data.pop("status", obj.status), has_result)
     for k, v in data.items():
@@ -217,6 +236,8 @@ def _triangular_sample(low: float, mode: float, high: float) -> float:
 @router.post("/risk-quantification/{qid}/simulate", response_model=SimulationResult, dependencies=[_WRITE])
 async def simulate(qid: uuid.UUID, db: DbSession, user: CurrentUser) -> SimulationResult:
     obj = await _load(db, qid)
+    if _signed_off(obj):
+        raise HTTPException(status_code=409, detail=APPROVED_LOCKED_DETAIL)
     # Records saved before the range rules existed may still hold an impossible range.
     problem = range_problem({name: getattr(obj, name) for name in SIMULATION_INPUTS})
     if problem:

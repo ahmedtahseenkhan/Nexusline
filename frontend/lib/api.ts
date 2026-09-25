@@ -839,9 +839,31 @@ export interface Page<T> {
   limit: number;
   offset: number;
 }
+  /** The exposure being accepted, fixed on the request (checked against the approver's mandate). */
+  exposure_amount?: number | null;
+  exposure_currency?: string;
+  exposure_basis?: string;
 
 // --- dashboard overview (the redesigned page's single payload) ---------------------
 /** `value` is null and `population` 0 when a measure has no data: it is left out of the score. */
+/** GET /authority-matrix/mandate/{entity_type}/{id}: may the current user approve this
+ *  record under the delegation-of-authority matrix? `governed` false = no lines in the
+ *  category, so the matrix does not restrict it. */
+export interface RecordMandate {
+  entity_type: string;
+  record_id: string;
+  category: string;
+  governed: boolean;
+  allowed: boolean;
+  reason: string;
+  amount: number | null;
+  currency: string;
+  basis: string;
+  compared_amount: number | null;
+  compared_currency: string;
+  lines: { reference: string; role_title: string; approval_level: number; amount_from: number; amount_to: number | null; currency: string }[];
+}
+
 export interface HealthComponent { key: string; label: string; value: number | null; weight: number; detail: string; population: number; formula: string }
 export interface HealthCoverage { scored: number; total: number; weight_pct: number }
 export interface TopRisk {
@@ -1273,6 +1295,10 @@ export interface MetricInfo {
   description: string;
   kind: string;
   category: string;
+  /** May decide but not approve: the record isn't ready, or its amount is above the
+   *  user's delegation-of-authority mandate. They can still reject; this says why. */
+  can_approve?: boolean;
+  approve_blocked_reason?: string | null;
 }
 export interface Widget {
   id: string;
@@ -2512,7 +2538,10 @@ export const api = {
   exportSavedReport: (id: string, format: ReportFormat, name: string) =>
     downloadBlob(`/report-builder/saved/${id}/export?format=${format}`, `${slugForFile(name)}.${format}`),
 
-  requestAcceptance: (riskId: string, body: { rationale: string; expires_at?: string | null }) =>
+  requestAcceptance: (
+    riskId: string,
+    body: { rationale: string; expires_at?: string | null; exposure_amount?: number | null; exposure_currency?: string },
+  ) =>
     request<RiskAcceptance>(`/risks/${riskId}/acceptances`, { method: "POST", body: JSON.stringify(body) }),
   decideAcceptance: (riskId: string, acceptanceId: string, body: { approve: boolean; note?: string }) =>
     request<RiskAcceptance>(`/risks/${riskId}/acceptances/${acceptanceId}/decision`, {
@@ -2545,6 +2574,10 @@ export const api = {
     request<AmlRisk>("/aml/risk-assessments", { method: "POST", body: JSON.stringify(p) }),
   updateAmlRisk: (id: string, p: Record<string, unknown>) =>
     request<AmlRisk>(`/aml/risk-assessments/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  /** The delegation-of-authority check on one pending decision, for the current user. */
+  recordMandate: (entityType: string, recordId: string) =>
+    request<RecordMandate>(`/authority-matrix/mandate/${entityType}/${recordId}`),
+
   deleteAmlRisk: (id: string) => request<void>(`/aml/risk-assessments/${id}`, { method: "DELETE" }),
 
   // Operational risk — RCSA, KRIs, loss database

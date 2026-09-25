@@ -18,6 +18,16 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from app.services.lifecycle_gates import (  # noqa: F401 - StateRule re-exported
+    ACCESS_REVIEW_STATUS,
+    DPIA_STATUS,
+    ISSUE_STATUS,
+    MODEL_STATUS,
+    POLICY_STATUS,
+    RISK_STATUS,
+    StateRule,
+)
+
 from app.models.access_review import AccessReview
 from app.models.asset import Asset, AssetClassification, AssetLabel, AssetMediaType, AssetTag
 from app.models.bia import BiaAssessment, BiaStatus
@@ -266,38 +276,6 @@ class Column:
     export_batch: Callable[[Any, list[Any]], Awaitable[dict[Any, Any]]] | None = None
     parse: Callable[..., Any] | None = None
     match_on_field: bool = True
-
-
-@dataclass(frozen=True)
-class StateRule:
-    """A status value the product reaches only through a workflow action.
-
-    Creating a record through the UI starts it in its initial state; approving,
-    publishing, closing or accepting it is a separate decision, taken — where maker-
-    checker applies — by someone other than the person who entered it. An import is a
-    create, so a row asking for one of ``later`` is brought in at ``initial`` with a row
-    warning, unless the importer could have taken the decision alone in the app: they
-    hold ``permissions`` (default: the record type's approve permissions), no four-eyes
-    rule governs any of ``four_eyes`` for the record type, and — for ``routed`` rules —
-    no approval route is configured for it. Values in ``always`` are never carried (an
-    ``in_review`` row cannot join an approval route by import). ``clears`` are fields
-    dropped with the downgrade (a closed issue's ``closed_date``).
-
-    Downgrading rather than failing the row keeps the export of a register importable
-    (approved records re-import as drafts, to be approved again here) and loses none of
-    the row's data; preview shows the same warning before anything is written.
-    """
-
-    field: str
-    later: frozenset[str]
-    initial: str
-    how: str
-    permissions: tuple[str, ...] = ()
-    four_eyes: tuple[str, ...] = ("approve",)
-    module: str = ""  # dual-control / permission module; default the record's entity type
-    routed: bool = False
-    always: frozenset[str] = frozenset()
-    clears: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -608,8 +586,28 @@ class ImportGate:
     preview and import take exactly the same decision for every row."""
 
     decisions: tuple[tuple[StateRule, str], ...] = ()  # (rule, "" = may carry | why not)
+    #: (live-only rule, the value a new record starts with) — lifecycle_gates.APPROVED_FIRST.
+    approved_first: tuple[tuple[Any, str], ...] = ()
 
     def apply(self, payload: dict[str, Any]) -> list[str]:
+        warnings = self._apply_decisions(payload)
+        # Operational states that need the approval to exist (an outsourced service
+        # "active", a model "in production"): judged after the row's own approval state
+        # is settled above, exactly as an edit would be.
+        approved = str(getattr(payload.get("workflow_status"), "value", payload.get("workflow_status")) or "")
+        if approved != "approved":
+            for rule, start in self.approved_first:
+                raw = payload.get(rule.field)
+                value = str(getattr(raw, "value", raw) or "")
+                if value in rule.values:
+                    payload[rule.field] = start
+                    warnings.append(
+                        f"{rule.field}: imported as '{start}', not '{value}' — {_a_noun(rule.noun)} "
+                        f"can't be {value.replace('_', ' ')} before {rule.approval}."
+                    )
+        return warnings
+
+    def _apply_decisions(self, payload: dict[str, Any]) -> list[str]:
         warnings: list[str] = []
         for rule, blocked in self.decisions:
             raw = payload.get(rule.field)
@@ -634,12 +632,16 @@ class ImportGate:
 async def import_gate(db: Any, res: ResourceIO, user: Any) -> ImportGate:
     """Resolve ``res.state_rules`` for ``user``: may they bring a record in past its
     initial state, i.e. could they have taken that decision alone in the app?"""
-    if not res.state_rules:
-        return ImportGate()
     from app.services import dual_control, record_workflow, workflow_engine
+    from app.services.lifecycle_gates import APPROVED_FIRST
     from app.services.record_registry import entity_type_for_model
 
     entity_type = entity_type_for_model(res.model) or res.resource
+    approved_first = tuple(
+        (rule, _start_value(res, rule.field)) for rule in APPROVED_FIRST.get(entity_type, ())
+    )
+    if not res.state_rules:
+        return ImportGate(approved_first=approved_first)
     held = set(getattr(user, "permission_codes", []) or [])
     decisions: list[tuple[StateRule, str]] = []
     for rule in res.state_rules:
@@ -660,7 +662,17 @@ async def import_gate(db: Any, res: ResourceIO, user: Any) -> ImportGate:
         if not blocked and rule.routed and await workflow_engine.definition_for(db, entity_type):
             blocked = "these records go through a configured approval route"
         decisions.append((rule, blocked))
-    return ImportGate(tuple(decisions))
+    return ImportGate(tuple(decisions), approved_first)
+
+
+def _start_value(res: ResourceIO, field_name: str) -> str:
+    """The value a record created through the form starts with (its Create default)."""
+    default = res.create_schema.model_fields[field_name].default
+    return str(getattr(default, "value", default) or "")
+
+
+def _a_noun(noun: str) -> str:
+    return f"an {noun}" if noun[:1].lower() in "aeiou" else f"a {noun}"
 
 
 def _with_workflow_column(res: ResourceIO) -> ResourceIO:
@@ -759,10 +771,21 @@ def _importing_workflow_status(res: ResourceIO) -> ResourceIO:
         created = await base_func(body=base_body, db=db, user=user)
         if state is not None and state_value != "draft":
             record = await db.get(model, getattr(created, "id", None))
+            if record is not None and state_value == "approved" and entity_type:
+                # An approval carried in is still an approval: where the delegation-of-
+                # authority matrix governs the record type, the importer's own mandate
+                # must cover its amount, or the row stays a draft to be approved here.
+                from app.services import authority_limits, ref_fields
+
+                subject = await authority_limits.subject_for(db, entity_type, record)
+                verdict = await authority_limits.verdict(db, subject, user) if subject else None
+                if verdict is not None and not verdict.allowed:
+                    ref_fields._warn(f"workflow_status: imported as 'draft', not 'approved' — {verdict.reason}")
+                    return created
             if record is not None:
-                with record_workflow.system_write():
-                    record.workflow_status = state
-                    await db.flush()
+                # The business status that records the same decision follows (an
+                # exception imported approved is approved, not pending).
+                await record_workflow.carry_state(db, record, state_value)
                 await audit.record(
                     db, actor=user, action="import_state", entity_type=entity_type or res.resource,
                     entity_id=record.id,
@@ -828,14 +851,8 @@ _register(ResourceIO(
                  help="Information classification label, e.g. Internal or Confidential"),
         boolean("use_attachments", help="true when the policy text is an attached document"),
     ],
-    state_rules=(
-        StateRule(
-            field="status", later=frozenset({"under_review", "approved", "published"}),
-            initial="draft", four_eyes=("approve", "publish"), routed=True,
-            how="A policy is approved through Submit for review and Approve, then published "
-            "with Publish.",
-        ),
-    ),
+    # One rule for the form, the edit and the import (services.lifecycle_gates).
+    state_rules=(POLICY_STATUS,),
 ))
 
 # ----- risks ---------------------------------------------------------------
@@ -917,14 +934,8 @@ _register(ResourceIO(
                "here takes its overall impact from these scores (the impact column is ignored)"),
     ],
     prepare=_dimension_scores_decide_impact,
-    state_rules=(
-        # Accepting a risk is a decision (request, then a holder of risk:accept decides).
-        StateRule(
-            field="status", later=frozenset({"accepted"}), initial="assessed",
-            permissions=("risk:read", "risk:accept"), four_eyes=("accept",),
-            how="Request acceptance from the risk; a holder of risk:accept decides it.",
-        ),
-    ),
+    # Accepting a risk is a decision (request, then a holder of risk:accept decides).
+    state_rules=(RISK_STATUS,),
 ))
 
 # ----- controls ------------------------------------------------------------
@@ -1245,6 +1256,9 @@ _register(ResourceIO(
         text("rationale"),
         text("compensating_controls"),
         text("business_owner"),
+        number("exposure_amount", help="Exposure the exception leaves uncovered (checked against "
+               "the approver's delegation-of-authority mandate)"),
+        text("exposure_currency", help=_CURRENCY_HELP + "; blank = the organisation's reporting currency"),
         enum_col("workflow_status", WorkflowState),
         date_col("start_date"),
         date_col("expires_at"),
@@ -1475,6 +1489,7 @@ _register(ResourceIO(
     resource="dpias", label="Data Protection Impact Assessments", model=Dpia,
     create_schema=DpiaCreate, create_func=create_dpia,
     read_perm="dpo:read", write_perm="dpo:write", importable=True,
+    state_rules=(DPIA_STATUS,),
     columns=[
         text("title", required=True),
         text("processing_activity", help="Name of the processing activity assessed"),
@@ -1670,6 +1685,8 @@ _register(ResourceIO(
         link_col("asset", "asset_id", Asset, "asset", match_field="name", multi=False,
                  help="Asset the reviewed system maps to (single value)"),
     ],
+    # A completed review is the sign-off on decisions an import does not bring.
+    state_rules=(ACCESS_REVIEW_STATUS,),
 ))
 
 
@@ -1714,14 +1731,7 @@ _register(ResourceIO(
         link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
         link_col("third_parties", "vendor_ids", Vendor, "vendors", match_field="name"),
     ],
-    state_rules=(
-        StateRule(
-            field="status", later=frozenset({"remediated", "closed", "risk_accepted"}),
-            initial="open", four_eyes=("validate", "close"), clears=("closed_date",),
-            how="Close it from the issue: its remediation is validated and the issue closed "
-            "by someone other than whoever raised it.",
-        ),
-    ),
+    state_rules=(ISSUE_STATUS,),
 ))
 
 # ----- operational risk: RCSA ----------------------------------------------
@@ -1897,6 +1907,7 @@ _register(ResourceIO(
     resource="models", label="Model Inventory", model=ModelInventory,
     create_schema=ModelCreate, create_func=create_model,
     read_perm="modelrisk:read", write_perm="modelrisk:write", importable=True,
+    state_rules=(MODEL_STATUS,),
     columns=[
         text("name", required=True),
         text("purpose"),

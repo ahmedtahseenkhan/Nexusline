@@ -14,12 +14,14 @@ import RecordApproval from "@/components/RecordApproval";
 import RelatedChips from "@/components/RelatedChips";
 import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
 import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -487,8 +489,9 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
         <Field label="Processing activity" help="The RoPA activity this assessment covers.">
           <TextInput value={df.processing_activity} onChange={(v) => setD("processing_activity", v)} placeholder="Customer onboarding" />
         </Field>
-        <Field label="Status">
-          <Select value={df.status} onChange={(v) => setD("status", v)} options={DPIA_STATUS} />
+        <Field label="Status" help={DECISION_HELP.dpia}>
+          <Select value={df.status} onChange={(v) => setD("status", v)}
+            options={statusOptions("dpia", DPIA_STATUS, editing?.status, editing?.workflow_status)} />
         </Field>
       </div>
       <Field label="Description">
@@ -541,7 +544,12 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
         searchPlaceholder="Search DPIAs by title, reference, owner…"
         emptyMessage="No DPIAs yet. Assess the data-protection impact of high-risk processing activities."
         refreshKey={refreshKey}
-        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DPIA</button>}
+        toolbarRight={
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <ImportExport resource="dpias" label="DPIAs" onDone={() => { reload(); onChanged(); }} />
+            <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DPIA</button>
+          </div>
+        }
       />
       {showForm && (
         <FormModal
@@ -694,7 +702,12 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
         searchPlaceholder="Search DSARs by subject, reference, handler…"
         emptyMessage="No subject requests yet. Log access, erasure and portability requests to track the SLA."
         refreshKey={refreshKey}
-        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DSAR</button>}
+        toolbarRight={
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <ImportExport resource="dsars" label="Data Subject Requests" onDone={() => { reload(); onChanged(); }} />
+            <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DSAR</button>
+          </div>
+        }
       />
       {showForm && (
         <FormModal
@@ -1137,7 +1150,12 @@ function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary
         searchPlaceholder="Search consents by subject, purpose, reference…"
         emptyMessage="No consent records yet. Record subject consents, their lawful basis, and withdrawals."
         refreshKey={refreshKey}
-        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New consent</button>}
+        toolbarRight={
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <ImportExport resource="consent-records" label="Consent Records" onDone={() => { reload(); onChanged(); }} />
+            <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New consent</button>
+          </div>
+        }
       />
 
       {showForm && (

@@ -633,6 +633,9 @@ class _ListDB:
     async def scalars(self, stmt):
         return SimpleNamespace(all=lambda: list(self.rows))
 
+    async def run_sync(self, fn):
+        return fn(None)
+
 
 async def test_the_asset_list_shows_risk_scores_only_to_a_risk_reader(monkeypatch):
     async def must_not_load(*a, **k):

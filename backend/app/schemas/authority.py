@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.authority import AuthorityCategory, AuthorityStatus, DualControlStatus
 from app.models.base import WorkflowState
+from app.schemas.tenant_settings import currency_or_default
 
 
 # ------------------------------------------------------- authority matrix lines ---
@@ -25,7 +26,7 @@ class AuthorityMatrixBase(BaseModel):
 
 
 class AuthorityMatrixCreate(AuthorityMatrixBase):
-    pass
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class AuthorityMatrixUpdate(BaseModel):
@@ -40,6 +41,8 @@ class AuthorityMatrixUpdate(BaseModel):
     conditions: str | None = None
     effective_date: date | None = None
     status: AuthorityStatus | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class AuthorityMatrixRead(AuthorityMatrixBase):
@@ -67,7 +70,7 @@ class DualControlRuleBase(BaseModel):
 
 
 class DualControlRuleCreate(DualControlRuleBase):
-    pass
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class DualControlRuleUpdate(BaseModel):
@@ -81,6 +84,8 @@ class DualControlRuleUpdate(BaseModel):
     description: str | None = None
     enabled: bool | None = None
     status: DualControlStatus | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class DualControlRuleRead(DualControlRuleBase):

@@ -30,6 +30,8 @@ type MyWorkItem = {
   entity_type: string;
   entity_id: string | null;
   actions: QuickAction[];
+  /** Set when the reader can return the item but not approve it, and why. */
+  note?: string;
 };
 
 type MyWorkSection = {
@@ -53,7 +55,8 @@ type MyWork = {
 
 /** Kinds that are somebody else's work waiting on the reader's decision. */
 const DECISIONS = new Set([
-  "approval", "record_review", "test_review", "issue_validation", "due_date_change",
+  "approval", "record_review", "test_review", "issue_validation", "due_date_change", "risk_acceptance",
+  "vuln_acceptance",
   // Phase 4B: submitted vendor assessments and audit findings whose agreed date has come.
   "assessment_review", "finding_follow_up",
   // Decision 9: the second signature that completes someone else's attestation.
@@ -207,6 +210,9 @@ export default function MyWorkPage() {
                     {item.reference && <span className="muted" style={{ fontWeight: 500, marginLeft: 6 }}>{item.reference}</span>}
                   </div>
                   {item.subtitle && <div className="when">{item.subtitle}</div>}
+                  {item.note && (
+                    <div role="note" style={{ fontSize: 12.5, color: "var(--amber)", marginTop: 2 }}>{item.note}</div>
+                  )}
                 </div>
                 {dueText(item) && (
                   <div style={{ fontSize: 12.5, whiteSpace: "nowrap", color: item.overdue ? "var(--red)" : "var(--muted)" }}>

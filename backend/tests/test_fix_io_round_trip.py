@@ -365,6 +365,36 @@ def test_a_lenient_link_skips_what_it_cannot_match_with_a_warning():
         _resolve_link("nobody", _link_col(), {"Risk": {}}, [])
 
 
+class _IndexDb:
+    """Answers the link-index query with fixed rows, keeping the statement it was sent."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.statements: list = []
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        return SimpleNamespace(all=lambda: self.rows)
+
+
+async def test_the_link_index_reads_only_the_matched_columns():
+    """The index is built from ``id`` and the columns a cell may name — never the
+    records themselves, whose links (and their links) would load with them."""
+    fraud, theft, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    db = _IndexDb([
+        (fraud, "R-1", "Card  Fraud"),
+        (theft, "R-2", "Theft"),
+        (other, "", "theft"),  # a second record answering to the same name
+    ])
+    index = await dataio._build_ref_index(db, _link_col().link)
+
+    (statement,) = db.statements
+    assert [c["name"] for c in statement.column_descriptions] == ["id", "reference", "title"]
+    assert "deleted" in str(statement.whereclause)  # archived records never match
+    assert index["r-1"] == fraud and index["card fraud"] == fraud and index["r-2"] == theft
+    assert index["theft"] is _AMBIGUOUS
+
+
 def test_scoped_lookups_get_their_own_index():
     country = _cols("vendors")["country"].link
     assert dataio._index_name(country) == "Lookup[key=country]"
@@ -505,6 +535,9 @@ class _Db:
         return _Savepoint(self)
 
     async def scalars(self, *_a, **_k):
+        return SimpleNamespace(all=lambda: [])
+
+    async def execute(self, *_a, **_k):
         return SimpleNamespace(all=lambda: [])
 
     async def flush(self):

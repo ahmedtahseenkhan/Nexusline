@@ -70,3 +70,9 @@ class ApprovalRead(BaseModel):
     can_cancel: bool = False
     can_decide: bool = False
     decide_blocked_reason: str | None = None
+    #: A user who may decide may still be unable to *approve*: when their approval would
+    #: finish the record's review and the record is not ready for it (a DPIA not yet
+    #: completed) or its amount is above their delegation-of-authority mandate. They can
+    #: still reject. ``approve_blocked_reason`` is the text the approval would be refused with.
+    can_approve: bool = False
+    approve_blocked_reason: str | None = None

@@ -88,6 +88,7 @@ ENTITY_TYPES: dict[str, EntitySpec] = {
     "key_risk_indicator": _spec("Key risk indicator", "oprisk"),
     "loss_event": _spec("Loss event", "oprisk"),
     "scenario_analysis": _spec("Scenario analysis", "scenario"),
+    "capital_calculation": _spec("Capital calculation", "scenario"),
     "risk_quantification": _spec("Risk quantification", "riskquant"),
     "model_inventory": _spec("Model", "modelrisk"),
     "model_validation": _spec("Model validation", "modelrisk"),

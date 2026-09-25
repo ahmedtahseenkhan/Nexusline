@@ -13,6 +13,7 @@ from sqlalchemy.orm import noload, selectinload
 from app.core.config import settings
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.core.schema_loading import options_for, serialize_all
 from app.models.asset import Asset, assets_incidents
 from app.models.control import Control
 from app.models.data_protection import BreachStatus, DataBreach
@@ -90,7 +91,7 @@ async def incident_reads(db, rows) -> list[IncidentRead]:
     """Read models for a page of incidents, with people and lookup values resolved in one
     query per kind across the incidents and their regulatory reports."""
     now = clock.now_utc()
-    items = [with_clock(IncidentRead.model_validate(r), r, now) for r in rows]
+    items = await serialize_all(db, rows, lambda r: with_clock(IncidentRead.model_validate(r), r, now))
     pairs: list = []
     for row, item in zip(rows, items):
         pairs.append((row, item))
@@ -375,8 +376,10 @@ async def list_incidents(
         stmt = apply_sort(stmt, params, _INCIDENT_SORTABLE, default=Incident.created_at)
     else:
         stmt = stmt.order_by(Incident.created_at.desc())
+    # Load what the list serialises (``schema_loading``), not every link of every link.
+    loads = options_for(Incident, IncidentRead)
     rows = (
-        await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))
+        await db.scalars(stmt.options(*loads).limit(limit).offset(offset))
     ).all()
     return Page(items=await incident_reads(db, rows), total=total, limit=limit, offset=offset)
 
@@ -397,6 +400,9 @@ async def create_incident(body: IncidentCreate, db: DbSession, user: CurrentUser
     notification = {k: data.pop(k) for k in NOTIFICATION_FIELDS if data.get(k) is not None}
     for k in NOTIFICATION_FIELDS:
         data.pop(k, None)
+    # The same stamps a status move gives on edit, plus detection (clock.creation_stamps).
+    current = {f: data.get(f) for f in clock.TIMELINE_FIELDS}
+    data.update(clock.creation_stamps(data.get("status"), current, clock.now_utc()))
     _refuse(incident_problems(data))
     if data.get("is_reportable") and not data.get("regulator_id") and not data.get("regulator"):
         data["regulator"] = settings.default_regulator  # matched to the lookup below

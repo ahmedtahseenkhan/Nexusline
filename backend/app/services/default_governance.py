@@ -18,7 +18,9 @@ organisation gets, and it is used by:
 (enabled or not) — except the two untouched, never-enabled routes the old demo seed
 created, which named roles no organisation has (``CISO``, ``CRO``) and are upgraded in
 place. A rule is added only for a (module, action) that has no rule, deleted ones
-included, so a rule an administrator removed does not come back.
+included, so a rule an administrator removed does not come back. The one exception is
+:func:`clear_legacy_maker_roles`: the maker role the old defaults named, never enforced,
+is cleared on rules still exactly as seeded before maker roles became binding.
 
 **Routes** (:data:`DEFAULT_ROUTES`) govern the record lifecycle's *submit for review*
 (``services/record_workflow.py``): the maker submits, and the named role decides in the
@@ -54,6 +56,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -161,17 +164,23 @@ def _delete_rule(entity: str, label: str) -> RuleSpec:
 #: ``(risk|control|policy|vendor, attest)`` rules keep them — they are in the
 #: administrator's register and are theirs to disable — and attesting honours a rule that
 #: is there; nothing re-creates one.
+#:
+#: Maker roles are enforced (``dual_control.enforce_maker_role``: requesting an
+#: acceptance, raising an exception, submitting for review), so the defaults leave them
+#: blank where the first line asks — a risk owner requests acceptance of their risk and a
+#: business owner raises an exception (ServiceNow IRM, Archer) — and name only the
+#: checker. An organisation that reserves the request to its risk team names the role.
 DEFAULT_RULES: tuple[RuleSpec, ...] = (
-    RuleSpec("risk", "accept", RISK_MANAGER, RISK_APPROVER,
+    RuleSpec("risk", "accept", "", RISK_APPROVER,
              "Accepting a risk: whoever asked for the acceptance cannot approve it."),
-    RuleSpec("risk", "approve", RISK_MANAGER, RISK_APPROVER,
+    RuleSpec("risk", "approve", "", RISK_APPROVER,
              "Approving a risk submitted for review: not whoever entered or submitted it."),
     RuleSpec("risk", "bulk_archive", RISK_MANAGER, "",
              "Archiving risks with no live links in bulk. One person does it in one step, so "
              "while this rule requires dual control the bulk archive is refused; archive "
              "risks one at a time, or exempt this action to allow it."),
     _delete_rule("risk", "risk"),
-    RuleSpec("exception", "approve", RISK_MANAGER, RISK_APPROVER,
+    RuleSpec("exception", "approve", "", RISK_APPROVER,
              "Approving an exception: whoever requested it cannot approve it."),
     RuleSpec("control", "audit", "", COMPLIANCE_MANAGER,
              "Recording a control test: not whoever entered the control."),
@@ -206,7 +215,29 @@ DEFAULT_RULES: tuple[RuleSpec, ...] = (
              "Approving a purification disbursement: not whoever entered it."),
     RuleSpec("shariah", "charity_disbursed", "", "",
              "Releasing a purification disbursement: not whoever entered it."),
+    RuleSpec("capital_calculation", "reopen", "", "",
+             "Reopening a final regulatory capital figure: not whoever marked it final."),
+    RuleSpec("vuln_finding", "accept_risk", "", "",
+             "Accepting a vulnerability's risk: whoever asked for the acceptance cannot approve it."),
 )
+
+#: Default rules as organisations were seeded before maker roles were enforced (up to
+#: 2026-09-25): these three named ``Risk Manager`` as the maker. Nothing checked a maker
+#: role then, so the value only described intent; enforcing it on upgrade would suddenly
+#: stop every risk owner who is not a Risk Manager from requesting an acceptance, raising
+#: an exception or submitting a risk. :func:`clear_legacy_maker_roles` clears it on rules
+#: that are still exactly as seeded.
+LEGACY_MAKER_ROLE_RULES: tuple[RuleSpec, ...] = (
+    RuleSpec("risk", "accept", RISK_MANAGER, RISK_APPROVER,
+             "Accepting a risk: whoever asked for the acceptance cannot approve it."),
+    RuleSpec("risk", "approve", RISK_MANAGER, RISK_APPROVER,
+             "Approving a risk submitted for review: not whoever entered or submitted it."),
+    RuleSpec("exception", "approve", RISK_MANAGER, RISK_APPROVER,
+             "Approving an exception: whoever requested it cannot approve it."),
+)
+#: Activity-log action of the upgrade that clears them (one row per organisation).
+MAKER_ROLE_CLEARED_ACTION = "maker_role_cleared"
+MAKER_ROLE_CLEARED_NOTE = "maker role cleared — was never enforced; set it again to enforce"
 
 
 # ----------------------------------------------------------------------- pure rules ---
@@ -241,6 +272,32 @@ def legacy_upgrade_for(
         if (entity_type, name, signature) == (legacy_type, legacy_name, legacy_stages):
             return next(r for r in DEFAULT_ROUTES if r.entity_type == entity_type)
     return None
+
+
+def is_untouched_legacy_maker_rule(rule: Any, touched: bool) -> bool:
+    """Whether ``rule`` (a ``DualControlRule`` or a mapping of its fields) is one of
+    :data:`LEGACY_MAKER_ROLE_RULES` exactly as it was seeded, and nobody has created or
+    edited it by hand (``touched``: the rule has a create or update entry by a person in
+    the activity trail). Pure.
+
+    Exactly as seeded means the same key, maker role, checker role and description,
+    four-eyes required and no threshold — whether or not it is enabled, since the
+    seed enables it or not by the installation's switch."""
+    if touched:
+        return False
+
+    def get(name: str) -> Any:
+        return rule.get(name) if isinstance(rule, Mapping) else getattr(rule, name, None)
+
+    if not get("requires_dual_control") or get("threshold_amount") is not None:
+        return False
+    return any(
+        (get("module"), get("action")) == (spec.module, spec.action)
+        and (get("maker_role") or "") == spec.maker_role
+        and (get("checker_role") or "") == spec.checker_role
+        and (get("description") or "") == spec.description
+        for spec in LEGACY_MAKER_ROLE_RULES
+    )
 
 
 def needs_second_user(active_users: int, sod_enforced: bool) -> bool:
@@ -389,6 +446,62 @@ async def ensure_default_rules(db: AsyncSession, tenant_id, *, enabled: bool | N
         await db.flush()
         added += 1
     return added
+
+
+async def clear_legacy_maker_roles(db: AsyncSession, tenant_id) -> int:
+    """Clear the maker role on this organisation's untouched legacy default rules
+    (:func:`is_untouched_legacy_maker_rule`) and say so once in the activity trail.
+
+    Idempotent: a cleared rule no longer matches, and a rule an administrator sets the
+    role on again carries their update entry, so the next start leaves it alone. Returns
+    the number of rules cleared. The session must be scoped to ``tenant_id``."""
+    from app.models.audit import AuditLog
+    from app.models.authority import DualControlRule
+    from app.services.audit import SYSTEM_ACTOR_EMAIL
+
+    keys = {(r.module, r.action) for r in LEGACY_MAKER_ROLE_RULES}
+    rules = [
+        r for r in (await db.scalars(
+            select(DualControlRule).where(
+                DualControlRule.deleted.is_(False),
+                DualControlRule.module.in_({m for m, _ in keys}),
+                DualControlRule.action.in_({a for _, a in keys}),
+                DualControlRule.maker_role == RISK_MANAGER,
+            )
+        )).all()
+        if (r.module, r.action) in keys
+    ]
+    if not rules:
+        return 0
+    touched = set((await db.scalars(
+        select(AuditLog.entity_id).where(
+            AuditLog.entity_type == "dual_control_rule",
+            AuditLog.entity_id.in_([r.id for r in rules]),
+            AuditLog.action.in_(("create", "update")),
+            AuditLog.actor_id.is_not(None),
+        )
+    )).all())
+    cleared = [r for r in rules if is_untouched_legacy_maker_rule(r, r.id in touched)]
+    if not cleared:
+        return 0
+    for rule in cleared:
+        rule.maker_role = ""
+    names = ", ".join(f"{r.reference or r.module + '/' + r.action}" for r in cleared)
+    db.add(AuditLog(
+        tenant_id=tenant_id, actor_id=None, actor_email=SYSTEM_ACTOR_EMAIL,
+        action=MAKER_ROLE_CLEARED_ACTION, entity_type="dual_control_rule", entity_id=None,
+        summary=f"Maker-checker rules {names}: {MAKER_ROLE_CLEARED_NOTE}."[:500],
+        changes={
+            "via": "data_repair",
+            "rules": [
+                {"id": str(r.id), "reference": r.reference, "module": r.module, "action": r.action,
+                 "maker_role": {"from": RISK_MANAGER, "to": ""}}
+                for r in cleared
+            ],
+        },
+    ))
+    await db.flush()
+    return len(cleared)
 
 
 async def already_seeded(db: AsyncSession) -> bool:

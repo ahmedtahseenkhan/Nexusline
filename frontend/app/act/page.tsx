@@ -42,6 +42,8 @@ type Preview = {
   user_name: string;
   expires_at: string | null;
   approval: ActionApproval | null;
+  /** Why Approve would be refused for this person (they can still reject). */
+  approve_blocked_reason?: string;
   date_format: string;
   timezone: string;
 };
@@ -132,7 +134,10 @@ export default function ActPage() {
     }
     setToken(t);
     call<Preview>(`/actions/${encodeURIComponent(t)}`)
-      .then(setPreview)
+      .then((p) => {
+        setPreview(p);
+        if (p.approve_blocked_reason) setDecision("reject");
+      })
       .catch((e: Error) => setInvalid(e.message || "This link is not valid."));
   }, []);
 
@@ -220,13 +225,18 @@ export default function ActPage() {
         <fieldset style={{ border: "none", padding: 0, margin: "14px 0 0" }}>
           <legend className="label" style={{ marginBottom: 6 }}>Your decision</legend>
           <div className="seg" role="radiogroup" aria-label="Your decision">
-            <button type="button" role="radio" aria-checked={decision === "approve"} className={decision === "approve" ? "on" : ""} onClick={() => setDecision("approve")}>
+            <button type="button" role="radio" aria-checked={decision === "approve"} className={decision === "approve" ? "on" : ""} onClick={() => setDecision("approve")} disabled={!!preview.approve_blocked_reason}>
               Approve
             </button>
             <button type="button" role="radio" aria-checked={decision === "reject"} className={decision === "reject" ? "on" : ""} onClick={() => setDecision("reject")}>
               Reject
             </button>
           </div>
+          {preview.approve_blocked_reason && (
+            <p className="sub" style={{ marginTop: 8 }}>
+              You can&apos;t approve this: {preview.approve_blocked_reason} You can still reject it.
+            </p>
+          )}
         </fieldset>
 
         <label className="label" htmlFor="act-comment" style={{ marginTop: 12 }}>

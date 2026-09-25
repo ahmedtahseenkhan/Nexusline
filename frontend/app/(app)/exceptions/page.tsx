@@ -1,7 +1,8 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { apiCall } from "@/lib/api";
+import { api, apiCall, type RecordMandate } from "@/lib/api";
+import { useHasPermission } from "@/lib/tenantSettings";
 import { type Page as PagedList } from "@/lib/list";
 import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
@@ -11,6 +12,7 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
+import MandateNote from "@/components/MandateNote";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText, { RichTextView } from "@/components/RichText";
@@ -36,6 +38,8 @@ type Exception = {
   business_owner: string;
   workflow_status: string;
   status: string;
+  exposure_amount: number | null;
+  exposure_currency: string;
   start_date: string | null;
   expires_at: string | null;
   closure_date: string | null;
@@ -64,6 +68,11 @@ const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: c
 
 const TYPE = opts(["risk", "policy", "compliance", "other"]);
 const STATUS = opts(["pending", "approved", "rejected", "expired", "closed"]);
+/** What an edit may set: approving and rejecting are decisions (Approve / Reject, or the
+ *  approval workflow) and expiry is worked out from the date, so the edit offers only
+ *  pending and closed — plus the stored status, so saving the form echoes it back. */
+const editStatusOptions = (current: string): Option[] =>
+  STATUS.filter((o) => o.value === "pending" || o.value === "closed" || o.value === current);
 
 const refToOpt = (x: LinkRef): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
 
@@ -75,6 +84,8 @@ type FormState = {
   rationale: string;
   status: string;
   business_owner: string;
+  exposure_amount: string;
+  exposure_currency: string;
   start_date: string;
   expires_at: string;
   closure_date: string;
@@ -88,7 +99,7 @@ type FormState = {
 
 const BLANK: FormState = {
   title: "", description: "", exception_type: "risk", classification: "",
-  rationale: "", status: "pending", business_owner: "",
+  rationale: "", status: "pending", business_owner: "", exposure_amount: "", exposure_currency: "",
   start_date: "", expires_at: "", closure_date: "", compensating_controls: "",
   control_ids: [], risk_ids: [], policy_ids: [], requirement_ids: [], asset_ids: [],
 };
@@ -102,6 +113,8 @@ function fromException(x: Exception): FormState {
     rationale: x.rationale || "",
     status: x.status,
     business_owner: x.business_owner || "",
+    exposure_amount: x.exposure_amount != null ? String(x.exposure_amount) : "",
+    exposure_currency: x.exposure_currency || "",
     start_date: x.start_date || "",
     expires_at: x.expires_at || "",
     closure_date: x.closure_date || "",
@@ -125,6 +138,8 @@ function toPayload(f: FormState, editing: boolean): Record<string, unknown> {
     classification: f.classification,
     rationale: f.rationale,
     business_owner: f.business_owner,
+    exposure_amount: f.exposure_amount.trim() === "" ? null : Number(f.exposure_amount),
+    exposure_currency: f.exposure_currency,
     compensating_controls: f.compensating_controls,
     start_date: f.start_date || null,
     expires_at: f.expires_at || null,
@@ -141,10 +156,16 @@ function toPayload(f: FormState, editing: boolean): Record<string, unknown> {
 /* ================================================================ page ===== */
 function ExceptionsInner() {
   const [openId, setOpenId] = useRecordParam("id");
-  const { formatDate, formatDateTime } = useFormat();
+  const { formatDate, formatDateTime, formatMoney, currency, currencyOptions } = useFormat();
   const [detail, setDetail] = useState<Exception | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  // Who may decide: not whoever raised it (four eyes), nobody without exception:approve,
+  // and above the approver's delegation-of-authority mandate only Reject.
+  const canApprove = useHasPermission("exception:approve");
+  const [meId, setMeId] = useState<string | null>(null);
+  const [mandate, setMandate] = useState<RecordMandate | null>(null);
+  useEffect(() => { api.me().then((m) => setMeId(m.id)).catch(() => {}); }, []);
 
   // filters
   const [fStatus, setFStatus] = useState("");
@@ -241,8 +262,8 @@ function ExceptionsInner() {
       </div>
       <div className="field-row">
         {editing ? (
-          <Field label="Status" help="Manual override. The row actions (Approve / Reject / Close) are the primary path.">
-            <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
+          <Field label="Status" help="Approve and Reject are decisions — use the actions on the exception (or its approval workflow). Here it can go back to pending or be closed.">
+            <Select value={f.status} onChange={(v) => set("status", v)} options={editStatusOptions(editing.status)} />
           </Field>
         ) : (
           <Field label="Status" help="New exceptions start as Pending and await an approval decision.">
@@ -251,6 +272,16 @@ function ExceptionsInner() {
         )}
         <Field label="Business Owner">
           <TextInput value={f.business_owner} onChange={(v) => set("business_owner", v)} placeholder="Head of Engineering" />
+        </Field>
+      </div>
+      <div className="field-row">
+        <Field label="Exposure" help={editing && editing.status !== "pending"
+          ? "Fixed at the decision: the approver's mandate was checked against it. Raise a new exception for a different exposure."
+          : "The exposure this exception leaves uncovered. The approver's delegation-of-authority mandate is checked against it (or against the largest quantified exposure of the linked risks, when higher)."}>
+          <TextInput type="number" value={f.exposure_amount} onChange={(v) => set("exposure_amount", v)} placeholder="0" />
+        </Field>
+        <Field label="Exposure currency">
+          <Select value={f.exposure_currency || currency} onChange={(v) => set("exposure_currency", v)} options={currencyOptions} />
         </Field>
       </div>
       <Field label="Rationale / Justification" help="Business justification for accepting this gap.">
@@ -357,9 +388,11 @@ function ExceptionsInner() {
         width={720}
         actions={detail && (
           <>
-            {detail.status === "pending" && (
+            {detail.status === "pending" && canApprove && !!meId && detail.requested_by !== meId && (
               <>
-                <button className="btn sm" onClick={() => decide(detail.id, true)}><IconCheck width={13} height={13} /> Approve</button>
+                {!(mandate?.record_id === detail.id && mandate.governed && !mandate.allowed) && (
+                  <button className="btn sm" onClick={() => decide(detail.id, true)}><IconCheck width={13} height={13} /> Approve</button>
+                )}
                 <button className="btn secondary sm" onClick={() => decide(detail.id, false)}>Reject</button>
               </>
             )}
@@ -383,7 +416,17 @@ function ExceptionsInner() {
               <div><div className="muted" style={{ fontSize: 12 }}>Expires</div><div style={{ marginTop: 4 }}>{formatDate(detail.expires_at)}</div></div>
               <div><div className="muted" style={{ fontSize: 12 }}>Closure</div><div style={{ marginTop: 4 }}>{formatDate(detail.closure_date)}</div></div>
               <div><div className="muted" style={{ fontSize: 12 }}>Decided</div><div style={{ marginTop: 4 }}>{formatDateTime(detail.decided_at)}</div></div>
+              <div><div className="muted" style={{ fontSize: 12 }}>Exposure</div><div style={{ marginTop: 4 }}>{detail.exposure_amount != null ? formatMoney(detail.exposure_amount, detail.exposure_currency || undefined) : "—"}</div></div>
             </div>
+            {detail.status === "pending" && (
+              <div style={{ marginBottom: 16 }}>
+                {detail.requested_by && detail.requested_by === meId ? (
+                  <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>You raised this exception, so someone else who may approve exceptions has to decide it.</p>
+                ) : (
+                  <MandateNote entityType="exception" recordId={detail.id} refreshKey={detail} onMandate={setMandate} />
+                )}
+              </div>
+            )}
 
             {detail.description && (
               <div style={{ marginBottom: 12 }}><span className="muted" style={{ fontSize: 12 }}>Description</span><div style={{ fontSize: 13 }}>{detail.description}</div></div>

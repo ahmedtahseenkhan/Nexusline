@@ -26,6 +26,7 @@ import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
 import { getFormatSettings, useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -749,8 +750,9 @@ function ShariahInner() {
         <Field label="Subject" help="What the ruling concerns.">
           <TextInput value={rf.subject} onChange={(v) => setR("subject", v)} placeholder="Commodity murabaha" />
         </Field>
-        <Field label="Status">
-          <Select value={rf.status} onChange={(v) => setR("status", v)} options={RULING_STATUS} />
+        <Field label="Status" help={DECISION_HELP.shariah_ruling}>
+          <Select value={rf.status} onChange={(v) => setR("status", v)}
+            options={statusOptions("shariah_ruling", RULING_STATUS, editingRuling?.status, editingRuling?.workflow_status)} />
         </Field>
       </div>
       <div className="field-row">
@@ -797,8 +799,9 @@ function ShariahInner() {
         <Field label="Shariah mode" help="Islamic mode of finance / contract type.">
           <Select value={pf.shariah_mode} onChange={(v) => setP("shariah_mode", v)} options={SHARIAH_MODE} />
         </Field>
-        <Field label="Status">
-          <Select value={pf.status} onChange={(v) => setP("status", v)} options={PRODUCT_STATUS} />
+        <Field label="Status" help={DECISION_HELP.islamic_product}>
+          <Select value={pf.status} onChange={(v) => setP("status", v)}
+            options={statusOptions("islamic_product", PRODUCT_STATUS, editingProduct?.status, editingProduct?.workflow_status)} />
         </Field>
       </div>
       <div className="field-row">

@@ -699,10 +699,10 @@ async def add_step(
 ) -> ProgramRead:
     program = await _load_program(db, program_id)
     payload = body.model_dump()
-    if not payload.get("order_index"):
-        payload["order_index"] = max((s.order_index for s in program.steps), default=0) + 1
-    step = AuditProgramStep(tenant_id=user.tenant_id, program_id=program_id, **payload)
+    position = payload.pop("order_index", None) or len(program.steps) + 1
+    step = AuditProgramStep(tenant_id=user.tenant_id, program_id=program_id, order_index=0, **payload)
     db.add(step)
+    _place_step(program, step, position)
     await db.flush()
     await audit_log.record(
         db, actor=user, action="update", entity_type="audit_program", entity_id=program_id,
@@ -710,6 +710,22 @@ async def add_step(
         changes={"step_added": snapshot(step, ("order_index", "title"))},
     )
     return await _program_out(db, program_id)
+
+
+def _place_step(program: AuditProgram, step: AuditProgramStep, position: int | None) -> None:
+    """Keep the checklist numbered 1..n with no gaps or ties.
+
+    ``position`` is where ``step`` goes (1-based; out of range clamps to the ends,
+    ``None`` leaves it where it is); every other step shifts to make room, so "Order 1"
+    on the last step moves it to the top rather than creating a second step 1."""
+    others = [s for s in sorted(program.steps, key=lambda s: s.order_index) if s is not step and s.id != step.id]
+    if position is None:
+        ordered = others
+    else:
+        at = min(max(position, 1), len(others) + 1) - 1
+        ordered = [*others[:at], step, *others[at:]]
+    for index, s in enumerate(ordered, start=1):
+        s.order_index = index
 
 
 async def _load_step(db: DbSession, step_id: uuid.UUID) -> AuditProgramStep:
@@ -727,8 +743,13 @@ async def update_step(
     step = await _load_step(db, step_id)
     data = body.model_dump(exclude_unset=True)
     changes = field_changes(step, data)
+    position = data.pop("order_index", None)
+    # Loaded before the edits: the reload would otherwise overwrite them.
+    program = await _load_program(db, step.program_id) if position is not None else None
     for name, value in data.items():
         setattr(step, name, value)
+    if program is not None:
+        _place_step(program, step, position)
     await db.flush()
     if changes:
         await audit_log.record(
@@ -747,7 +768,9 @@ async def delete_step(step_id: uuid.UUID, db: DbSession, user: CurrentUser) -> N
         summary=f"Removed programme step {step.order_index}: {step.title}"[:500],
         changes={"step_removed": snapshot(step, ("order_index", "title", "procedure"))},
     )
+    program = await _load_program(db, step.program_id)
     await db.delete(step)
+    _place_step(program, step, None)  # close the gap it leaves
 
 
 @router.post(

@@ -17,6 +17,7 @@ from app.models.enums import (
 )
 from app.schemas.asset import AssetRef
 from app.schemas.control import ControlAssuranceRef
+from app.schemas.tenant_settings import currency_or_blank
 from app.schemas.threat import NamedRef
 from app.services.risk_scoring import (
     DEFAULT_MAX_SCORE,
@@ -236,6 +237,13 @@ class RiskAssessment(BaseModel):
 class RiskAcceptanceCreate(BaseModel):
     rationale: str = Field(min_length=1)
     expires_at: date | None = None
+    # The exposure being accepted, for a risk with no quantified exposure (a quantified
+    # one is taken from the risk; a higher figure typed here wins). Checked against the
+    # approver's delegation-of-authority mandate (services.authority_limits).
+    exposure_amount: float | None = Field(default=None, ge=0)
+    exposure_currency: str = Field(default="", max_length=8)
+
+    _ccy = field_validator("exposure_currency")(currency_or_blank)
 
 
 class RiskAcceptanceDecision(BaseModel):
@@ -253,6 +261,9 @@ class RiskAcceptanceRead(BaseModel):
     status: AcceptanceStatus
     expires_at: date | None
     decided_at: date | None
+    exposure_amount: float | None = None
+    exposure_currency: str = ""
+    exposure_basis: str = ""
     created_at: datetime
 
 

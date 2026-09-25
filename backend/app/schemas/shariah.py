@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.schemas.common import GraphRef
@@ -17,6 +17,7 @@ from app.models.enums import (
     ShariahReviewStatus,
     ShariahRulingStatus,
 )
+from app.schemas.tenant_settings import currency_or_default
 
 
 # ------------------------------------------------------------------- rulings ---
@@ -201,7 +202,7 @@ class CharityBase(BaseModel):
 
 
 class CharityCreate(CharityBase):
-    pass
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class CharityUpdate(BaseModel):
@@ -213,6 +214,8 @@ class CharityUpdate(BaseModel):
     status: CharityStatus | None = None
     disbursement_date: date | None = None
     notes: str | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class CharityRead(CharityBase):

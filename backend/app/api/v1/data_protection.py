@@ -45,6 +45,7 @@ from app.schemas.data_protection import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services import lifecycle_gates
 
 router = APIRouter(tags=["data protection"])
 
@@ -61,6 +62,21 @@ async def _get(db, model, obj_id, name):
     if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
+
+
+async def _archive(db, obj, user, entity_type: str, label: str) -> None:
+    """Soft-delete (archive) a record and write it to the audit trail: a DPO register is
+    evidence for the regulator, so who removed an entry and when must be answerable.
+    Restoring goes through the shared records API, which logs the matching ``restore``."""
+    obj.deleted = True
+    obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await audit_log.record(db, actor=user, action="delete", entity_type=entity_type,
+                           entity_id=obj.id, summary=f"Archived {label} {obj.reference}")
+
+
+def _changed(data: dict) -> str:
+    return ", ".join(sorted(data)) or "no fields"
 
 
 # =================================================================== DPIA ===
@@ -97,28 +113,35 @@ async def list_dpias(db: DbSession, status: str | None = None, search: str | Non
 
 @router.post("/dpias", response_model=DpiaRead, status_code=201, dependencies=[_WRITE])
 async def create_dpia(body: DpiaCreate, db: DbSession, user: CurrentUser) -> DpiaRead:
+    # Approved is the DPO's sign-off, given through the approval lifecycle once the
+    # assessment is completed (lifecycle_gates.DPIA_STATUS).
+    lifecycle_gates.enforce_create("dpia", body.model_dump())
     obj = Dpia(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db, Dpia, "DPIA")
     db.add(obj)
     await db.flush()
+    await audit_log.record(db, actor=user, action="create", entity_type="dpia", entity_id=obj.id,
+                           summary=f"Created DPIA {obj.reference}: {obj.title}")
     return DpiaRead.model_validate(obj)
 
 
 @router.patch("/dpias/{did}", response_model=DpiaRead, dependencies=[_WRITE])
-async def update_dpia(did: uuid.UUID, body: DpiaUpdate, db: DbSession) -> DpiaRead:
+async def update_dpia(did: uuid.UUID, body: DpiaUpdate, db: DbSession, user: CurrentUser) -> DpiaRead:
     obj = await _get(db, Dpia, did, "DPIA")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    lifecycle_gates.enforce_edit("dpia", obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    await audit_log.record(db, actor=user, action="update", entity_type="dpia", entity_id=obj.id,
+                           summary=f"Updated DPIA {obj.reference} ({_changed(data)})")
     return DpiaRead.model_validate(obj)
 
 
 @router.delete("/dpias/{did}", status_code=204, dependencies=[_WRITE])
-async def delete_dpia(did: uuid.UUID, db: DbSession) -> None:
+async def delete_dpia(did: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _get(db, Dpia, did, "DPIA")
-    obj.deleted = True
-    obj.deleted_date = datetime.now(timezone.utc)
-    await db.flush()
+    await _archive(db, obj, user, "dpia", "DPIA")
 
 
 # =================================================================== DSAR ===
@@ -183,20 +206,21 @@ async def create_dsar(body: DsarCreate, db: DbSession, user: CurrentUser) -> Dsa
 
 
 @router.patch("/dsars/{did}", response_model=DsarRead, dependencies=[_WRITE])
-async def update_dsar(did: uuid.UUID, body: DsarUpdate, db: DbSession) -> DsarRead:
+async def update_dsar(did: uuid.UUID, body: DsarUpdate, db: DbSession, user: CurrentUser) -> DsarRead:
     obj = await _get(db, Dsar, did, "DSAR")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    await audit_log.record(db, actor=user, action="update", entity_type="dsar", entity_id=obj.id,
+                           summary=f"Updated DSAR {obj.reference} ({_changed(data)})")
     return DsarRead.model_validate(obj)
 
 
 @router.delete("/dsars/{did}", status_code=204, dependencies=[_WRITE])
-async def delete_dsar(did: uuid.UUID, db: DbSession) -> None:
+async def delete_dsar(did: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _get(db, Dsar, did, "DSAR")
-    obj.deleted = True
-    obj.deleted_date = datetime.now(timezone.utc)
-    await db.flush()
+    await _archive(db, obj, user, "dsar", "DSAR")
 
 
 # ============================================================ data breach ===
@@ -291,15 +315,15 @@ async def update_data_breach(bid: uuid.UUID, body: DataBreachUpdate, db: DbSessi
     if "incident_id" in data and data["incident_id"] != getattr(obj.incident, "id", None):
         await _link_incident(db, obj, data["incident_id"], user)
     await db.flush()
+    await audit_log.record(db, actor=user, action="update", entity_type="data_breach", entity_id=obj.id,
+                           summary=f"Updated data breach {obj.reference} ({_changed(data)})")
     return DataBreachRead.model_validate(obj)
 
 
 @router.delete("/data-breaches/{bid}", status_code=204, dependencies=[_WRITE])
-async def delete_data_breach(bid: uuid.UUID, db: DbSession) -> None:
+async def delete_data_breach(bid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _get(db, DataBreach, bid, "Data breach")
-    obj.deleted = True
-    obj.deleted_date = datetime.now(timezone.utc)
-    await db.flush()
+    await _archive(db, obj, user, "data_breach", "data breach")
 
 
 # ========================================================= consent records ===
@@ -340,24 +364,28 @@ async def create_consent_record(body: ConsentRecordCreate, db: DbSession, user: 
     obj.reference = await _next_ref(db, ConsentRecord, "CON")
     db.add(obj)
     await db.flush()
+    await audit_log.record(db, actor=user, action="create", entity_type="consent_record", entity_id=obj.id,
+                           summary=f"Recorded consent {obj.reference} for {obj.subject_name}")
     return ConsentRecordRead.model_validate(obj)
 
 
 @router.patch("/consent-records/{cid}", response_model=ConsentRecordRead, dependencies=[_WRITE])
-async def update_consent_record(cid: uuid.UUID, body: ConsentRecordUpdate, db: DbSession) -> ConsentRecordRead:
+async def update_consent_record(cid: uuid.UUID, body: ConsentRecordUpdate, db: DbSession,
+                                user: CurrentUser) -> ConsentRecordRead:
     obj = await _get(db, ConsentRecord, cid, "Consent record")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    await audit_log.record(db, actor=user, action="update", entity_type="consent_record", entity_id=obj.id,
+                           summary=f"Updated consent record {obj.reference} ({_changed(data)})")
     return ConsentRecordRead.model_validate(obj)
 
 
 @router.delete("/consent-records/{cid}", status_code=204, dependencies=[_WRITE])
-async def delete_consent_record(cid: uuid.UUID, db: DbSession) -> None:
+async def delete_consent_record(cid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _get(db, ConsentRecord, cid, "Consent record")
-    obj.deleted = True
-    obj.deleted_date = datetime.now(timezone.utc)
-    await db.flush()
+    await _archive(db, obj, user, "consent_record", "consent record")
 
 
 # ================================================================= summary ===
