@@ -18,6 +18,7 @@ import RecordPanels from "@/components/RecordPanels";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import { Badge, Severity } from "@/components/badges";
@@ -122,6 +123,7 @@ function ProcessesInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("process");
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
@@ -141,12 +143,14 @@ function ProcessesInner() {
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(p: Process) {
     setEditing(p);
     setF(fromProcess(p));
+    cfForm.start(p.id);
     setError(null);
     setShowForm(true);
   }
@@ -161,8 +165,10 @@ function ProcessesInner() {
     setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Process>("PATCH", `/processes/${editing.id}`, payload);
-      else await apiCall<Process>("POST", "/processes", payload);
+      const saved = editing
+        ? await apiCall<Process>("PATCH", `/processes/${editing.id}`, payload)
+        : await apiCall<Process>("POST", "/processes", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       if (recordId) loadDetail(recordId);  // refresh the open view drawer
@@ -380,6 +386,7 @@ function ProcessesInner() {
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "continuity", label: "Continuity (RTO / RPO / MTD)", content: continuityTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}

@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
@@ -240,6 +241,7 @@ function BiaInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [bf, setBf] = useState<BiaForm>(BLANK_BIA);
+  const cfForm = useCustomFieldForm("bia_assessment");
   const setB = <K extends keyof BiaForm>(k: K, v: BiaForm[K]) => setBf((p) => ({ ...p, [k]: v }));
 
   const [dd, setDd] = useState<DepDraft>(BLANK_DEP);
@@ -267,15 +269,17 @@ function BiaInner() {
   }, [openId, loadDetail]);
 
   // ------------------------------------------------------------- BIA CRUD
-  function openNew() { setEditing(null); setBf({ ...BLANK_BIA, currency }); setError(null); setShowForm(true); }
-  function openEdit(b: BiaAssessment) { setEditing(b); setBf(fromBia(b)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setBf({ ...BLANK_BIA, currency }); cfForm.start(null); setError(null); setShowForm(true); }
+  function openEdit(b: BiaAssessment) { setEditing(b); setBf(fromBia(b)); cfForm.start(b.id); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = biaPayload(bf);
-      if (editing) await apiCall<BiaAssessment>("PATCH", `/bia/${editing.id}`, payload);
-      else await apiCall<BiaAssessment>("POST", "/bia", payload);
+      const saved = editing
+        ? await apiCall<BiaAssessment>("PATCH", `/bia/${editing.id}`, payload)
+        : await apiCall<BiaAssessment>("POST", "/bia", payload);
+      await cfForm.save(saved.id);
       setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "BIA created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save BIA"); }
     finally { setSaving(false); }
@@ -632,6 +636,7 @@ function BiaInner() {
             { id: "process", label: "Process", content: processTab, required: true },
             { id: "impact", label: "Impact & Timing", content: impactTab },
             { id: "recovery", label: "Recovery", content: recoveryTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

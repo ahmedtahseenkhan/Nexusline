@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import ImportExport from "@/components/ImportExport";
@@ -227,6 +228,7 @@ function ModelRiskInner() {
   const [showModelForm, setShowModelForm] = useState(false);
   const [savingModel, setSavingModel] = useState(false);
   const [mf, setMf] = useState<ModelForm>(BLANK_MODEL);
+  const cfForm = useCustomFieldForm("model_inventory");
   const setM = <K extends keyof ModelForm>(k: K, v: ModelForm[K]) => setMf((p) => ({ ...p, [k]: v }));
 
   // ---- inline validation add-form ----
@@ -259,12 +261,14 @@ function ModelRiskInner() {
   function openNewModel() {
     setEditingModel(null);
     setMf(BLANK_MODEL);
+    cfForm.start(null);
     setError(null);
     setShowModelForm(true);
   }
   function openEditModel(m: ModelInventory) {
     setEditingModel(m);
     setMf(fromModel(m));
+    cfForm.start(m.id);
     setError(null);
     setShowModelForm(true);
   }
@@ -273,8 +277,10 @@ function ModelRiskInner() {
     setSavingModel(true);
     try {
       const payload = modelPayload(mf);
-      if (editingModel) await apiCall<ModelInventory>("PATCH", `/model-risk/${editingModel.id}`, payload);
-      else await apiCall<ModelInventory>("POST", "/model-risk", payload);
+      const saved = editingModel
+        ? await apiCall<ModelInventory>("PATCH", `/model-risk/${editingModel.id}`, payload)
+        : await apiCall<ModelInventory>("POST", "/model-risk", payload);
+      await cfForm.save(saved.id);
       setShowModelForm(false);
       reload();
       if (openId) loadModelDetail(openId);
@@ -622,6 +628,7 @@ function ModelRiskInner() {
             { id: "model", label: "Model", content: modelTab, required: true },
             { id: "ownership", label: "Ownership", content: ownershipTab },
             { id: "schedule", label: "Validation schedule", content: scheduleTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowModelForm(false)}
           onSave={saveModel}

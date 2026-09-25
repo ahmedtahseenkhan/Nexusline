@@ -12,6 +12,7 @@ import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -202,6 +203,7 @@ function PrivacyInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("processing_activity");
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -239,11 +241,13 @@ function PrivacyInner() {
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   async function openEdit(r: Ropa) {
     setEditing(r);
+    cfForm.start(r.id);
     setError(null);
     // Refetch one for the freshest link arrays.
     try {
@@ -259,8 +263,10 @@ function PrivacyInner() {
     setError(null);
     setSaving(true);
     try {
-      if (editing) await apiCall<Ropa>("PATCH", `/processing-activities/${editing.id}`, toPayload(f));
-      else await apiCall<Ropa>("POST", "/processing-activities", toPayload(f));
+      const saved = editing
+        ? await apiCall<Ropa>("PATCH", `/processing-activities/${editing.id}`, toPayload(f))
+        : await apiCall<Ropa>("POST", "/processing-activities", toPayload(f));
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -552,6 +558,7 @@ function PrivacyInner() {
             { id: "transfers", label: "Transfers & Retention", content: transfersTab },
             { id: "rights", label: "Data Subject Rights", content: rightsTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

@@ -29,6 +29,7 @@ import ImportExport from "@/components/ImportExport";
 import GenerateRisks, { type GenerateRisksHandle } from "@/components/GenerateRisks";
 import { InlineLookupCreate } from "@/components/LookupManager";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import {
   AssetRiskReportButton,
   Disclosure,
@@ -290,7 +291,8 @@ function InformationAssetsInner() {
   const canGenerate = useHasPermission("risk:write");
   const ctx = useRecordCtx(gov, canWrite);
   const fmt = ctx.fmt;
-  const cf = useCustomFieldFacts("asset", detail?.id, { builtInLabels: ["Owner", "Business owner", "Guardian"] });
+  const cfForm = useCustomFieldForm("information_asset");
+  const cf = useCustomFieldFacts("information_asset", detail?.id, { builtInLabels: ["Owner", "Business owner", "Guardian"] });
 
   const loadSummary = useCallback(() => {
     apiCall<Summary>("GET", "/assets/summary?asset_class=information_asset").then(setSummary).catch(() => {});
@@ -341,21 +343,24 @@ function InformationAssetsInner() {
     [],
   );
 
-  function openNew() { setEditing(null); setEditTab(undefined); setF(BLANK); setError(null); setShowForm(true); }
-  function openEdit(a: Asset, tab?: string) { setEditing(a); setEditTab(tab); setF(fromAsset(a)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setEditTab(undefined); setF(BLANK); cfForm.start(null); setError(null); setShowForm(true); }
+  function openEdit(a: Asset, tab?: string) { setEditing(a); setEditTab(tab); setF(fromAsset(a)); cfForm.start(a.id); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Asset>("PATCH", `/assets/${editing.id}`, payload);
-      else await apiCall<Asset>("POST", "/assets", payload);
+      const saved = editing
+        ? await apiCall<Asset>("PATCH", `/assets/${editing.id}`, payload)
+        : await apiCall<Asset>("POST", "/assets", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       setRefreshKey((k) => k + 1);
       loadSummary();
       if (openId) {
         loadDetail(openId);
         void gov.reload();
+        void cf.reload();
       }
       toast(editing ? "Changes saved" : "Created");
     } catch (e) {
@@ -1036,6 +1041,7 @@ function InformationAssetsInner() {
             { id: "value", label: "Business Value & Classification", content: valueTab },
             { id: "self", label: "Self-assessment", content: selfAssessTab },
             { id: "governance", label: "Governance", content: governanceTab },
+            ...cfForm.tabs,
           ]}
           initialTab={editTab}
           onClose={() => setShowForm(false)}

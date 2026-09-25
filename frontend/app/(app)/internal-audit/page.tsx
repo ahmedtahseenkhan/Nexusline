@@ -20,6 +20,8 @@ import AuditPlanTab from "@/components/AuditPlanTab";
 import AuditProgramTab from "@/components/AuditProgramTab";
 import AuditCalendarTab from "@/components/AuditCalendarTab";
 import FormModal from "@/components/FormModal";
+import CustomFieldsPanel from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import RichText from "@/components/RichText";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import RelatedChips from "@/components/RelatedChips";
@@ -338,6 +340,7 @@ function InternalAuditInner() {
   const [showEngForm, setShowEngForm] = useState(false);
   const [savingEng, setSavingEng] = useState(false);
   const [ef, setEf] = useState<EngForm>(BLANK_ENG);
+  const engCfForm = useCustomFieldForm("audit_engagement");
   const setE = <K extends keyof EngForm>(k: K, v: EngForm[K]) => setEf((p) => ({ ...p, [k]: v }));
 
   // ---- engagement detail drawer (URL-driven) ----
@@ -408,14 +411,16 @@ function InternalAuditInner() {
   }
 
   // ------------------------------------------------------------- engagement CRUD
-  function openNewEng() { setEditingEng(null); setEf(BLANK_ENG); setError(null); setShowEngForm(true); }
-  function openEditEng(e: AuditEngagement) { setEditingEng(e); setEf(fromEng(e)); setError(null); setShowEngForm(true); }
+  function openNewEng() { setEditingEng(null); setEf(BLANK_ENG); engCfForm.start(null); setError(null); setShowEngForm(true); }
+  function openEditEng(e: AuditEngagement) { setEditingEng(e); setEf(fromEng(e)); engCfForm.start(e.id); setError(null); setShowEngForm(true); }
   async function saveEng() {
     setError(null); setSavingEng(true);
     try {
       const payload = engPayload(ef);
-      if (editingEng) await api.updateAuditEngagement(editingEng.id, payload);
-      else await api.createAuditEngagement(payload);
+      const saved = editingEng
+        ? await api.updateAuditEngagement(editingEng.id, payload)
+        : await api.createAuditEngagement(payload);
+      await engCfForm.save(saved.id);
       setShowEngForm(false); reload();
       if (openId) loadDetail(openId);
       toast(editingEng ? "Changes saved" : "Engagement created");
@@ -957,6 +962,11 @@ function InternalAuditInner() {
                   <button className="btn">{editingFinding ? "Save finding" : "Add"}</button>
                   {editingFinding && <button type="button" className="btn secondary" onClick={cancelEditFinding}>Cancel</button>}
                 </form>
+                {editingFinding && (
+                  <div style={{ marginBottom: 14 }}>
+                    <CustomFieldsPanel key={editingFinding.id} model="audit_finding" entityId={editingFinding.id} />
+                  </div>
+                )}
 
                 <div className="table-wrap">
                   <table>
@@ -1041,6 +1051,7 @@ function InternalAuditInner() {
             { id: "general", label: "General", content: engGeneral, required: true },
             { id: "planning", label: "Planning", content: engPlanning },
             { id: "conclusion", label: "Conclusion", content: engConclusion },
+            ...engCfForm.tabs,
           ]}
           onClose={() => setShowEngForm(false)}
           onSave={saveEng}

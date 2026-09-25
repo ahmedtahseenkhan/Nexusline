@@ -11,6 +11,10 @@ import { sentenceCase } from "@/lib/text";
 
 const TYPES = ["text", "textarea", "number", "date", "select", "checkbox"];
 
+// Module keys whose sentence-cased form reads wrong ("It asset").
+const MODULE_LABELS: Record<string, string> = { it_asset: "IT asset", information_asset: "Information asset" };
+const moduleLabel = (m: string) => MODULE_LABELS[m] ?? sentenceCase(m);
+
 export default function CustomFieldsPage() {
   const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +62,7 @@ export default function CustomFieldsPage() {
   }
 
   const columns: Column<CustomField>[] = [
-    { key: "model", header: "Module", sortable: true, render: (f) => <span className="muted">{sentenceCase(f.model)}</span> },
+    { key: "model", header: "Module", sortable: true, render: (f) => <span className="muted">{moduleLabel(f.model)}</span> },
     { key: "label", header: "Label", sortable: true, render: (f) => <span className="cell-title">{f.label}</span> },
     { key: "field_type", header: "Type", sortable: true, render: (f) => <Badge tone="info">{f.field_type}</Badge> },
     { key: "required", header: "Required", render: (f) => (f.required ? <Badge tone="medium">required</Badge> : <span className="muted">optional</span>) },
@@ -70,7 +74,7 @@ export default function CustomFieldsPage() {
     <>
       <div className="page-head">
         <h1>Custom Fields</h1>
-        <p>Extend any module with your own fields. They appear on each record automatically.</p>
+        <p>Extend any module with your own fields. They appear in the module&apos;s Add / Edit form and on each record.</p>
       </div>
 
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
@@ -80,7 +84,7 @@ export default function CustomFieldsPage() {
           <div style={{ flex: "0 0 180px" }}>
             <label className="label">Module</label>
             <select className="input" value={model} onChange={(e) => setModel(e.target.value)}>
-              {models.map((m) => <option key={m} value={m}>{sentenceCase(m)}</option>)}
+              {models.map((m) => <option key={m} value={m}>{moduleLabel(m)}</option>)}
             </select>
           </div>
           <div style={{ flex: "1 1 220px" }}>
@@ -115,7 +119,7 @@ export default function CustomFieldsPage() {
         toolbarRight={
           <select className="input" style={{ maxWidth: 200 }} value={filterModel} onChange={(e) => setFilterModel(e.target.value)}>
             <option value="">All modules</option>
-            {models.map((m) => <option key={m} value={m}>{sentenceCase(m)}</option>)}
+            {models.map((m) => <option key={m} value={m}>{moduleLabel(m)}</option>)}
           </select>
         }
         emptyMessage="No custom fields yet. Add one above to extend a module."

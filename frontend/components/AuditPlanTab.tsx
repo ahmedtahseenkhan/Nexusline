@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { Badge } from "@/components/badges";
 import { confirmDialog, toast } from "@/lib/feedback";
+import CustomFieldsPanel from "@/components/CustomFieldsPanel";
 
 /* The annual plan. Its whole point is that the *commitment* is recorded separately from
    what happened, so "did we do what we told the board we would do?" is a number rather
@@ -298,6 +299,7 @@ export default function AuditPlanTab() {
               </table>
             </div>
           </div>
+          <CustomFieldsPanel model="audit_plan" entityId={plan.id} />
         </>
       )}
     </>

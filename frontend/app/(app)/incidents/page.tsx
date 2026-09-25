@@ -25,6 +25,7 @@ import UserPicker, { UserName } from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import {
   Fact, FactGrid, FactList, LabelledSearch, OpenPoints, PrimaryAction, RecordSection, RelatedGroups, SectionNav, SummaryBand,
   approvalHintFor, approvalMetaItem, relatedCount, rowAction, rowLabel, useRecordCtx, useRecordGovernanceData, useRecordSections,
@@ -415,6 +416,7 @@ function IncidentsInner() {
   const nowMs = useNow(); // the notification countdown in the band and open points stays live
   const ctx = useRecordCtx(gov, canWrite, new Date(nowMs));
   const sections = useRecordSections();
+  const cfForm = useCustomFieldForm("incident");
   const cf = useCustomFieldFacts("incident", detail?.id, { builtInLabels: INCIDENT_BUILT_IN_LABELS });
   /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
   const [editTab, setEditTab] = useState<string | undefined>(undefined);
@@ -431,16 +433,18 @@ function IncidentsInner() {
   const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
   const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string; classification: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.classification })));
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setEditTab(undefined); setShowForm(true); }
-  function openEdit(i: IncidentFull, tab?: string) { setEditing(i); setF(fromIncident(i, tz)); setError(null); setEditTab(tab); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(i: IncidentFull, tab?: string) { setEditing(i); setF(fromIncident(i, tz)); cfForm.start(i.id); setError(null); setEditTab(tab); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f, tz);
-      if (editing) await apiCall<IncidentFull>("PATCH", `/incidents/${editing.id}`, payload);
-      else await apiCall<IncidentFull>("POST", "/incidents", payload);
-      setShowForm(false); refresh();
+      const saved = editing
+        ? await apiCall<IncidentFull>("PATCH", `/incidents/${editing.id}`, payload)
+        : await apiCall<IncidentFull>("POST", "/incidents", payload);
+      await cfForm.save(saved.id);
+      setShowForm(false); refresh(); void cf.reload();
       toast(editing ? "Changes saved" : "Incident logged");
       if (f.personal_data_breach && !editing?.personal_data_breach) toast("Personal data breach: a breach record was opened in Data Protection");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save incident"); }
@@ -1240,6 +1244,7 @@ function IncidentsInner() {
             { id: "regulatory", label: "Regulatory", content: regulatoryTab },
             { id: "analysis", label: "Impact & analysis", content: analysisTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           initialTab={editTab}
           onClose={() => setShowForm(false)}

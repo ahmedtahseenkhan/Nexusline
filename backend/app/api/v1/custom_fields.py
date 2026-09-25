@@ -9,7 +9,12 @@ from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
-from app.models.custom_field import CUSTOM_FIELD_MODELS, CustomField, CustomFieldValue
+from app.models.custom_field import (
+    CUSTOM_FIELD_MODELS,
+    CustomField,
+    CustomFieldValue,
+    custom_field_entity_type,
+)
 from app.schemas.common import Page
 from app.schemas.custom_field import (
     CustomFieldCreate,
@@ -37,6 +42,23 @@ async def _load(db, field_id: uuid.UUID) -> CustomField:
     if obj is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Custom field not found")
     return obj
+
+
+async def _reject_duplicate_label(
+    db, model: str, label: str, exclude: uuid.UUID | None = None
+) -> None:
+    """One label per module: a repeated name is ambiguous on the record, in the form and
+    as a spreadsheet heading on export/import."""
+    stmt = select(CustomField.id).where(
+        CustomField.model == model, func.lower(func.trim(CustomField.label)) == label.strip().lower()
+    )
+    if exclude is not None:
+        stmt = stmt.where(CustomField.id != exclude)
+    if await db.scalar(stmt.limit(1)) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This module already has a custom field named '{label.strip()}'",
+        )
 
 
 @router.get("/models", response_model=list[str])
@@ -75,6 +97,7 @@ async def list_fields(
 async def create_field(body: CustomFieldCreate, db: DbSession, user: CurrentUser) -> CustomFieldRead:
     if body.model not in CUSTOM_FIELD_MODELS:
         raise HTTPException(status_code=422, detail=f"Unsupported model '{body.model}'")
+    await _reject_duplicate_label(db, body.model, body.label)
     obj = CustomField(tenant_id=user.tenant_id, **body.model_dump())
     db.add(obj)
     await db.flush()
@@ -92,6 +115,8 @@ async def update_field(
 ) -> CustomFieldRead:
     obj = await _load(db, field_id)
     changes = body.model_dump(exclude_unset=True)
+    if changes.get("label"):
+        await _reject_duplicate_label(db, obj.model, changes["label"], exclude=obj.id)
     for k, v in changes.items():
         setattr(obj, k, v)
     await db.flush()
@@ -117,7 +142,7 @@ async def delete_field(field_id: uuid.UUID, db: DbSession, user: CurrentUser) ->
 async def get_values(
     model: str, entity_id: uuid.UUID, db: DbSession, user: CurrentUser
 ) -> list[CustomFieldValueItem]:
-    entity_types.require_read(user, model)
+    entity_types.require_read(user, custom_field_entity_type(model))
     fields = (
         await db.scalars(
             select(CustomField)
@@ -149,7 +174,7 @@ async def set_values(
 ) -> list[CustomFieldValueItem]:
     # Custom-field values are record data: writing them needs the owning module's write
     # permission, and the model name must be a real entity type.
-    entity_types.require_write(user, model)
+    entity_types.require_write(user, custom_field_entity_type(model))
     # Only accept values for fields that belong to this model (RLS already scopes by tenant).
     valid_ids = set(
         (await db.scalars(select(CustomField.id).where(CustomField.model == model))).all()

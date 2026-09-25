@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, NumberInput, type Option } from "@/components/fields";
 import BoardPacks from "@/components/BoardPacks";
 import CommitteeMembers, { type CommitteeMember } from "@/components/CommitteeMembers";
@@ -276,6 +277,7 @@ function GovernanceInner() {
   const [showCommitteeForm, setShowCommitteeForm] = useState(false);
   const [savingCommittee, setSavingCommittee] = useState(false);
   const [cf, setCf] = useState<CommitteeForm>(BLANK_COMMITTEE);
+  const committeeCfForm = useCustomFieldForm("committee");
   const setC = <K extends keyof CommitteeForm>(k: K, v: CommitteeForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
   // ---- inside-drawer meeting + decision drafts ----
@@ -329,12 +331,14 @@ function GovernanceInner() {
   function openNewCommittee() {
     setEditingCommittee(null);
     setCf(BLANK_COMMITTEE);
+    committeeCfForm.start(null);
     setError(null);
     setShowCommitteeForm(true);
   }
   function openEditCommittee(c: Committee) {
     setEditingCommittee(c);
     setCf(fromCommittee(c));
+    committeeCfForm.start(c.id);
     setError(null);
     setShowCommitteeForm(true);
   }
@@ -343,8 +347,10 @@ function GovernanceInner() {
     setSavingCommittee(true);
     try {
       const payload = committeePayload(cf);
-      if (editingCommittee) await apiCall<Committee>("PATCH", `/governance/${editingCommittee.id}`, payload);
-      else await apiCall<Committee>("POST", "/governance", payload);
+      const saved = editingCommittee
+        ? await apiCall<Committee>("PATCH", `/governance/${editingCommittee.id}`, payload)
+        : await apiCall<Committee>("POST", "/governance", payload);
+      await committeeCfForm.save(saved.id);
       setShowCommitteeForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -811,6 +817,7 @@ function GovernanceInner() {
           tabs={[
             { id: "general", label: "General", content: committeeGeneral, required: true },
             { id: "charter", label: "Charter", content: committeeCharter },
+            ...committeeCfForm.tabs,
           ]}
           onClose={() => setShowCommitteeForm(false)}
           onSave={saveCommittee}

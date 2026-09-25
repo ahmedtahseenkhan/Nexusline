@@ -11,6 +11,7 @@ import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, Select, NumberInput, type Option } from "@/components/fields";
@@ -150,6 +151,7 @@ function ProjectsInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("project");
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   // child-record draft inputs (drawer)
@@ -175,15 +177,17 @@ function ProjectsInner() {
   const searchControls = (q: string) => apiCall<PagedList<{ id: string; name: string; reference: string }>>("GET", `/controls?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.reference })));
   const searchPolicies = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/policies?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
-  function openEdit(p: Project) { setEditing(p); setF(fromProject(p)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setShowForm(true); }
+  function openEdit(p: Project) { setEditing(p); setF(fromProject(p)); cfForm.start(p.id); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Project>("PATCH", `/projects/${editing.id}`, payload);
-      else await apiCall<Project>("POST", "/projects", payload);
+      const saved = editing
+        ? await apiCall<Project>("PATCH", `/projects/${editing.id}`, payload)
+        : await apiCall<Project>("POST", "/projects", payload);
+      await cfForm.save(saved.id);
       setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "Project created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save project"); }
     finally { setSaving(false); }
@@ -407,6 +411,7 @@ function ProjectsInner() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

@@ -8,6 +8,8 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
+import CustomFieldsPanel from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -127,6 +129,7 @@ function AccessReviewsInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("access_review");
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   // Line-item ("account") management inputs (drawer).
@@ -151,14 +154,16 @@ function AccessReviewsInner() {
       .catch(() => {});
   }, []);
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
-  function openEdit(r: AccessReview) { setEditing(r); setF(fromReview(r)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setShowForm(true); }
+  function openEdit(r: AccessReview) { setEditing(r); setF(fromReview(r)); cfForm.start(r.id); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
-      if (editing) await apiCall<AccessReview>("PATCH", `/access-reviews/${editing.id}`, toPayload(f));
-      else await apiCall<AccessReview>("POST", "/access-reviews", toPayload(f));
+      const saved = editing
+        ? await apiCall<AccessReview>("PATCH", `/access-reviews/${editing.id}`, toPayload(f))
+        : await apiCall<AccessReview>("POST", "/access-reviews", toPayload(f));
+      await cfForm.save(saved.id);
       setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "Review created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save review"); }
     finally { setSaving(false); }
@@ -390,6 +395,9 @@ function AccessReviewsInner() {
                 </div>
               </div>
             </div>
+
+            {/* Re-mounts after a save so edited custom-field values show at once. */}
+            <CustomFieldsPanel key={`${detail.id}-${refreshKey}`} model="access_review" entityId={detail.id} />
           </>
         )}
       </RecordDrawer>
@@ -398,7 +406,7 @@ function AccessReviewsInner() {
         <FormModal
           title={editing ? `Edit review — ${editing.reference}` : "Add item (Access Reviews)"}
           wide
-          tabs={[{ id: "general", label: "General", content: generalTab, required: true }]}
+          tabs={[{ id: "general", label: "General", content: generalTab, required: true }, ...cfForm.tabs]}
           onClose={() => setShowForm(false)}
           onSave={save}
           saving={saving}

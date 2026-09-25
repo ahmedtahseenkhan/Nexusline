@@ -8,6 +8,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
@@ -184,6 +185,7 @@ function WhistleblowingInner() {
   const [detail, setDetail] = useState<WhistleReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const cfForm = useCustomFieldForm("whistleblowing_report");
   const [summary, setSummary] = useState<WhistleSummary | null>(null);
 
   // filters
@@ -214,14 +216,16 @@ function WhistleblowingInner() {
   useEffect(() => { loadSummary(); }, [loadSummary]);
 
   // ------------------------------------------------------------- report CRUD
-  function openNewReport() { setEditingReport(null); setRf(BLANK_REPORT); setError(null); setShowReportForm(true); }
-  function openEditReport(r: WhistleReport) { setEditingReport(r); setRf(fromReport(r)); setError(null); setShowReportForm(true); }
+  function openNewReport() { setEditingReport(null); setRf(BLANK_REPORT); cfForm.start(null); setError(null); setShowReportForm(true); }
+  function openEditReport(r: WhistleReport) { setEditingReport(r); setRf(fromReport(r)); cfForm.start(r.id); setError(null); setShowReportForm(true); }
   async function saveReport() {
     setError(null); setSavingReport(true);
     try {
       const payload = reportPayload(rf);
-      if (editingReport) await apiCall<WhistleReport>("PATCH", `/whistleblowing/${editingReport.id}`, payload);
-      else await apiCall<WhistleReport>("POST", "/whistleblowing", payload);
+      const saved = editingReport
+        ? await apiCall<WhistleReport>("PATCH", `/whistleblowing/${editingReport.id}`, payload)
+        : await apiCall<WhistleReport>("POST", "/whistleblowing", payload);
+      await cfForm.save(saved.id);
       setShowReportForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
       toast(editingReport ? "Changes saved" : "Report received");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save report"); }
@@ -498,6 +502,7 @@ function WhistleblowingInner() {
             { id: "report", label: "Report", content: reportTab, required: true },
             { id: "reporter", label: "Reporter", content: reporterTab },
             { id: "handling", label: "Handling", content: handlingTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowReportForm(false)}
           onSave={saveReport}

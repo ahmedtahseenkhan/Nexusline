@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
@@ -270,6 +271,7 @@ function DeclarationsInner() {
   const [showCampaignForm, setShowCampaignForm] = useState(false);
   const [savingCampaign, setSavingCampaign] = useState(false);
   const [cf, setCf] = useState<CampaignForm>(BLANK_CAMPAIGN);
+  const campaignCfForm = useCustomFieldForm("declaration_campaign");
   const setC = <K extends keyof CampaignForm>(k: K, v: CampaignForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
   // ---- declaration edit dialog ----
@@ -283,12 +285,14 @@ function DeclarationsInner() {
   function openNewCampaign() {
     setEditingCampaign(null);
     setCf(BLANK_CAMPAIGN);
+    campaignCfForm.start(null);
     setError(null);
     setShowCampaignForm(true);
   }
   function openEditCampaign(c: DeclarationCampaign) {
     setEditingCampaign(c);
     setCf(fromCampaign(c));
+    campaignCfForm.start(c.id);
     setError(null);
     setShowCampaignForm(true);
   }
@@ -297,8 +301,10 @@ function DeclarationsInner() {
     setSavingCampaign(true);
     try {
       const payload = campaignPayload(cf);
-      if (editingCampaign) await apiCall<DeclarationCampaign>("PATCH", `/declaration-campaigns/${editingCampaign.id}`, payload);
-      else await apiCall<DeclarationCampaign>("POST", "/declaration-campaigns", payload);
+      const saved = editingCampaign
+        ? await apiCall<DeclarationCampaign>("PATCH", `/declaration-campaigns/${editingCampaign.id}`, payload)
+        : await apiCall<DeclarationCampaign>("POST", "/declaration-campaigns", payload);
+      await campaignCfForm.save(saved.id);
       setShowCampaignForm(false);
       reloadCampaigns();
       loadSummary();
@@ -709,6 +715,7 @@ function DeclarationsInner() {
           tabs={[
             { id: "general", label: "General", content: campaignGeneral, required: true },
             { id: "timing", label: "Timing", content: campaignTiming },
+            ...campaignCfForm.tabs,
           ]}
           onClose={() => setShowCampaignForm(false)}
           onSave={saveCampaign}

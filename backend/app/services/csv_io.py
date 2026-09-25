@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date
+from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type hints
@@ -40,6 +41,9 @@ def export_csv(rows: list[dict], headers: list[str]) -> str:
 def _cell(value: object) -> str:
     if value is None:
         return ""
+    if isinstance(value, Enum):
+        # ``str()`` of a str-Enum is "Criticality.medium"; the importer wants "medium".
+        value = value.value
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, date):
@@ -49,9 +53,12 @@ def _cell(value: object) -> str:
 
 def make_template(columns: list["Column"]) -> str:
     """Build a CSV template: a header row of importable columns plus one example row."""
-    headers = [c.header for c in columns]
-    example = {c.header: _example_value(c) for c in columns}
-    return export_csv([example], headers)
+    return export_csv([example_row(columns)], [c.header for c in columns])
+
+
+def example_row(columns: list["Column"]) -> dict[str, str]:
+    """One realistic placeholder value per column (header -> value)."""
+    return {c.header: _example_value(c) for c in columns}
 
 
 def _example_value(column: "Column") -> str:

@@ -31,9 +31,11 @@ interface ResourceSchema {
   columns: SchemaColumn[];
 }
 
-interface CsvPayload {
+/** A downloadable file: CSV text, or an Excel workbook as base64. */
+interface FilePayload {
   filename: string;
-  csv: string;
+  csv?: string;
+  xlsx_b64?: string;
 }
 
 interface ImportError {
@@ -66,6 +68,8 @@ interface InspectResponse {
   sheet: string;
   sample_rows: string[][];
   suggestions: MappingSuggestion[];
+  /** Columns headed with a custom field's name (as our template and export write them). */
+  custom_field_suggestions: { source: string; custom_field_id: string; label: string }[];
   unmapped_source_headers: string[];
   unfilled_target_headers: string[];
   missing_required: string[];
@@ -128,11 +132,25 @@ type Step = 1 | 2 | 3 | 4;
 
 /** Trigger a browser download of CSV text via a transient object URL. */
 function downloadCsv(filename: string, csv: string) {
-  const blob = new Blob([csv], { type: "text/csv" });
+  downloadBlob(filename || "export.csv", new Blob([csv], { type: "text/csv" }));
+}
+
+function downloadFile(file: FilePayload) {
+  if (file.xlsx_b64 != null) {
+    const bytes = Uint8Array.from(atob(file.xlsx_b64), (c) => c.charCodeAt(0));
+    downloadBlob(file.filename, new Blob([bytes], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }));
+  } else {
+    downloadCsv(file.filename, file.csv ?? "");
+  }
+}
+
+function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename || "export.csv";
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -193,7 +211,13 @@ const BAND_LABEL: Record<MappingSuggestion["band"], string> = {
 /* ---------------------------------------------------------------- Export --- */
 
 /** Reusable Export / Template / Import control. */
-export type ImportExportHandle = { exportCsv: () => void; template: () => void; openImport: () => void };
+export type ImportExportHandle = {
+  exportCsv: () => void;
+  exportExcel: () => void;
+  /** The import template, as an Excel workbook (dropdowns + a Guide sheet). */
+  template: () => void;
+  openImport: () => void;
+};
 
 /** Import/export for one register. Renders its own three buttons unless `hideButtons`
  *  is set, in which case the page drives it through the ref — the buttons then live in
@@ -202,15 +226,15 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
   { resource, label, onDone, hideButtons }, ref,
 ) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<"export" | "template" | null>(null);
+  const [busy, setBusy] = useState<"export" | "excel" | "template" | null>(null);
   const [barError, setBarError] = useState<string | null>(null);
 
-  async function doDownload(kind: "export" | "template") {
+  // Exports and the template carry every column, the organisation's custom fields included.
+  async function doDownload(kind: "export" | "template", format: "csv" | "xlsx") {
     setBarError(null);
-    setBusy(kind);
+    setBusy(kind === "export" && format === "xlsx" ? "excel" : kind);
     try {
-      const data = await apiCall<CsvPayload>("GET", `/io/${resource}/${kind}`);
-      downloadCsv(data.filename, data.csv);
+      downloadFile(await apiCall<FilePayload>("GET", `/io/${resource}/${kind}?format=${format}`));
     } catch (e) {
       setBarError(errorText(e, `Failed to download ${kind}`));
     } finally {
@@ -219,8 +243,9 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
   }
 
   useImperativeHandle(ref, () => ({
-    exportCsv: () => doDownload("export"),
-    template: () => doDownload("template"),
+    exportCsv: () => doDownload("export", "csv"),
+    exportExcel: () => doDownload("export", "xlsx"),
+    template: () => doDownload("template", "xlsx"),
     openImport: () => setOpen(true),
   }));
   // With the buttons hidden there is nowhere to show a download error inline.
@@ -233,17 +258,25 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
         <div style={{ display: "inline-flex", gap: 6 }}>
           <button
             className="btn secondary sm"
-            onClick={() => doDownload("export")}
+            onClick={() => doDownload("export", "xlsx")}
             disabled={busy !== null}
-            title={`Download all ${label} as CSV`}
+            title={`Download all ${label} as an Excel workbook`}
           >
-            {busy === "export" ? "Exporting…" : "Export CSV"}
+            {busy === "excel" ? "Exporting…" : "Export Excel"}
           </button>
           <button
             className="btn secondary sm"
-            onClick={() => doDownload("template")}
+            onClick={() => doDownload("export", "csv")}
             disabled={busy !== null}
-            title="Download a demo CSV with headers and an example row"
+            title={`Download all ${label} as CSV`}
+          >
+            {busy === "export" ? "Exporting…" : "CSV"}
+          </button>
+          <button
+            className="btn secondary sm"
+            onClick={() => doDownload("template", "xlsx")}
+            disabled={busy !== null}
+            title="Download an Excel template: every column, dropdowns for choices, and a Guide sheet"
           >
             {busy === "template" ? "…" : "Template"}
           </button>
@@ -268,7 +301,7 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
           resource={resource}
           label={label}
           onClose={() => setOpen(false)}
-          onDownloadTemplate={() => doDownload("template")}
+          onDownloadTemplate={() => doDownload("template", "xlsx")}
           onDone={onDone}
         />
       )}
@@ -422,6 +455,9 @@ function ImportWizard({
         const next: Record<string, Destination> = {};
         for (const header of found.headers) next[header] = { kind: "ignore" };
         for (const s of found.suggestions) next[s.source] = { kind: "field", target: s.target };
+        for (const s of found.custom_field_suggestions ?? []) {
+          next[s.source] = { kind: "custom", customFieldId: s.custom_field_id };
+        }
         setDestinations(next);
       } catch (err) {
         setFileError(errorText(err, "Could not read that file"));
@@ -447,6 +483,9 @@ function ImportWizard({
       setProfileName(profile.name);
     } else {
       for (const s of inspection.suggestions) next[s.source] = { kind: "field", target: s.target };
+      for (const s of inspection.custom_field_suggestions ?? []) {
+        next[s.source] = { kind: "custom", customFieldId: s.custom_field_id };
+      }
       setProfileName("");
     }
     setDestinations(next);
@@ -576,7 +615,7 @@ function ImportWizard({
                   style={{ padding: "1px 8px", fontSize: 12 }}
                   onClick={onDownloadTemplate}
                 >
-                  Download template
+                  Download Excel template
                 </button>
               </p>
 

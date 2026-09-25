@@ -15,6 +15,7 @@ import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText, { RichTextView } from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Badge } from "@/components/badges";
 import { IconCheck, IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
@@ -153,6 +154,7 @@ function ExceptionsInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("exception");
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -167,15 +169,17 @@ function ExceptionsInner() {
   const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name })));
   const searchRequirements = (q: string) => apiCall<{ id: string; reference: string; title: string; framework: string }[]>("GET", `/requirements?search=${encodeURIComponent(q)}&limit=20`).then((rows) => rows.map((r) => ({ value: r.id, label: `${r.reference ? r.reference + " · " : ""}${r.title}`, sub: r.framework })));
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
-  function openEdit(x: Exception) { setEditing(x); setF(fromException(x)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setShowForm(true); }
+  function openEdit(x: Exception) { setEditing(x); setF(fromException(x)); cfForm.start(x.id); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f, !!editing);
-      if (editing) await apiCall("PATCH", `/exceptions/${editing.id}`, payload);
-      else await apiCall("POST", "/exceptions", payload);
+      const saved = editing
+        ? await apiCall<Exception>("PATCH", `/exceptions/${editing.id}`, payload)
+        : await apiCall<Exception>("POST", "/exceptions", payload);
+      await cfForm.save(saved.id);
       setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "Exception requested");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save exception"); }
     finally { setSaving(false); }
@@ -402,6 +406,7 @@ function ExceptionsInner() {
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "validity", label: "Validity", content: validityTab },
             { id: "links", label: "Compensating & Links", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

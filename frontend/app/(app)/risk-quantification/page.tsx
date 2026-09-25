@@ -9,6 +9,7 @@ import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import FormModal from "@/components/FormModal";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
@@ -200,6 +201,7 @@ function RiskQuantificationInner() {
   const money = (n: number | null | undefined, ccy?: string | null) => formatMoney(n, ccy, { decimals: 0 });
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const cfForm = useCustomFieldForm("risk_quantification");
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const [summary, setSummary] = useState<QuantSummary | null>(null);
@@ -247,12 +249,14 @@ function RiskQuantificationInner() {
   function openNew() {
     setEditing(null);
     setF({ ...BLANK, currency });
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(q: RiskQuant) {
     setEditing(q);
     setF(fromQuant(q));
+    cfForm.start(q.id);
     setError(null);
     setShowForm(true);
     // Best-effort: seed the risk-picker label from the register (record only stores the id).
@@ -267,8 +271,10 @@ function RiskQuantificationInner() {
     setSaving(true);
     try {
       const body = payload(f);
-      if (editing) await apiCall("PATCH", `/risk-quantification/${editing.id}`, body);
-      else await apiCall("POST", "/risk-quantification", body);
+      const saved = editing
+        ? await apiCall<RiskQuant>("PATCH", `/risk-quantification/${editing.id}`, body)
+        : await apiCall<RiskQuant>("POST", "/risk-quantification", body);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -569,6 +575,7 @@ function RiskQuantificationInner() {
             { id: "frequency", label: "Frequency", content: frequencyTab },
             { id: "magnitude", label: "Magnitude", content: magnitudeTab },
             { id: "settings", label: "Settings", content: settingsTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

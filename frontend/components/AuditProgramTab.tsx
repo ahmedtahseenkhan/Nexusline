@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiCall } from "@/lib/api";
 import { Badge } from "@/components/badges";
 import { confirmDialog, toast } from "@/lib/feedback";
+import CustomFieldsPanel from "@/components/CustomFieldsPanel";
 
 /* Reusable checklists. The high-value path is generating one from an installed
    framework: the clause list is already loaded, so an ISO 27001 audit programme is a
@@ -217,6 +218,7 @@ export default function AuditProgramTab({ engagements }: { engagements: { id: st
           </div>
         </div>
       )}
+      {program && <CustomFieldsPanel model="audit_program" entityId={program.id} />}
     </>
   );
 }

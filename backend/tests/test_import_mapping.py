@@ -322,11 +322,20 @@ def test_custom_field_model_key_matches_the_registry_names():
     from app.models.custom_field import CUSTOM_FIELD_MODELS
 
     assert custom_field_model_key(Risk) == "risk"
-    assert custom_field_model_key(Asset) == "asset"
     assert custom_field_model_key(AuditEngagement) == "audit_engagement"
     assert custom_field_model_key(KeyRiskIndicator) == "key_risk_indicator"
-    for model in (Risk, Asset, AuditEngagement, KeyRiskIndicator):
+    for model in (Risk, AuditEngagement, KeyRiskIndicator):
         assert custom_field_model_key(model) in CUSTOM_FIELD_MODELS
+
+
+def test_asset_registers_have_separate_custom_field_keys():
+    """IT and information assets share the ``Asset`` class but not their fields."""
+    from app.models.custom_field import CUSTOM_FIELD_MODELS
+
+    assert custom_field_model_key(Asset, "it-assets") == "it_asset"
+    assert custom_field_model_key(Asset, "information-assets") == "information_asset"
+    assert {"it_asset", "information_asset"} <= set(CUSTOM_FIELD_MODELS)
+    assert "asset" not in CUSTOM_FIELD_MODELS
 
 
 def test_exception_register_uses_its_overridden_key():
@@ -348,11 +357,12 @@ def test_importable_resources_derive_a_known_custom_field_model():
 
     missing = sorted(
         {
-            custom_field_model_key(res.model)
+            custom_field_model_key(res.model, res.resource)
             for res in REGISTRY.values()
-            if res.importable and custom_field_model_key(res.model) not in CUSTOM_FIELD_MODELS
+            if res.importable
+            and custom_field_model_key(res.model, res.resource) not in CUSTOM_FIELD_MODELS
         }
     )
     # ``risk_scenario_template`` is configuration rather than a record users annotate,
     # so it deliberately has no custom fields; nor do exchange rates (``fx_rate``).
-    assert missing == ["evidence", "fx_rate", "obligation", "risk_scenario_template"]
+    assert missing == ["fx_rate", "obligation", "risk_scenario_template"]

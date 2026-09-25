@@ -14,6 +14,7 @@ import RecordApproval from "@/components/RecordApproval";
 import RelatedChips from "@/components/RelatedChips";
 import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
@@ -720,6 +721,7 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bf, setBf] = useState<BreachForm>(BLANK_BREACH);
+  const cfForm = useCustomFieldForm("data_breach");
   const setB = <K extends keyof BreachForm>(k: K, v: BreachForm[K]) => setBf((p) => ({ ...p, [k]: v }));
 
   // server typeahead over the incident register for the breach's incident FK
@@ -740,12 +742,14 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
   function openNew() {
     setEditing(null);
     setBf(BLANK_BREACH);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(b: DataBreach) {
     setEditing(b);
     setBf(fromBreach(b));
+    cfForm.start(b.id);
     setError(null);
     setShowForm(true);
   }
@@ -754,8 +758,10 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
     setSaving(true);
     try {
       const payload = breachPayload(bf);
-      if (editing) await apiCall("PATCH", `/data-breaches/${editing.id}`, payload);
-      else await apiCall("POST", "/data-breaches", payload);
+      const saved = editing
+        ? await apiCall<DataBreach>("PATCH", `/data-breaches/${editing.id}`, payload)
+        : await apiCall<DataBreach>("POST", "/data-breaches", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       onChanged();
@@ -973,6 +979,7 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
             { id: "general", label: "General", content: general, required: true },
             { id: "timing", label: "Timing & notification", content: timing },
             { id: "response", label: "Response", content: response },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

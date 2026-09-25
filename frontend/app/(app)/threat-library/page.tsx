@@ -12,6 +12,8 @@ import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import CustomFieldsPanel from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -199,6 +201,9 @@ function ThreatLibraryInner() {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  // Custom fields are defined per catalog: one form per kind, the dialog uses the one in play.
+  const cfForms = { threat: useCustomFieldForm("threat"), vulnerability: useCustomFieldForm("vulnerability") };
+  const cfForm = cfForms[kind];
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
@@ -216,6 +221,7 @@ function ThreatLibraryInner() {
     setKind(k);
     setEditing(null);
     setF(BLANK);
+    cfForms[k].start(null);
     setError(null);
     setShowForm(true);
   }
@@ -223,6 +229,7 @@ function ThreatLibraryInner() {
     setKind(k);
     setEditing(r);
     setF(fromRow(r));
+    cfForms[k].start(r.id);
     setError(null);
     setShowForm(true);
   }
@@ -255,8 +262,10 @@ function ThreatLibraryInner() {
         category: f.category.trim(),
         asset_ids: f.asset_ids.map((o) => o.value),
       };
-      if (editing) await apiCall("PATCH", `/${m.base}/${editing.id}`, payload);
-      else await apiCall("POST", `/${m.base}`, payload);
+      const saved = editing
+        ? await apiCall<CatalogRow>("PATCH", `/${m.base}/${editing.id}`, payload)
+        : await apiCall<CatalogRow>("POST", `/${m.base}`, payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       if (recordId) loadDetail(recordId); // refresh the open view drawer
@@ -466,6 +475,10 @@ function ThreatLibraryInner() {
               <RelatedChips label="Risks referencing this" items={detail.risks} href="/risks" />
               <RelatedChips label="Applies to assets" items={detail.assets} href="/information-assets" />
             </div>
+
+            <div style={{ marginTop: 16 }}>
+              <CustomFieldsPanel key={`${viewKind}-${detail.id}`} model={viewKind} entityId={detail.id} />
+            </div>
           </>
         )}
       </RecordDrawer>
@@ -473,7 +486,7 @@ function ThreatLibraryInner() {
       {showForm && (
         <FormModal
           title={editing ? `Edit ${m.label.toLowerCase()} — ${editing.name}` : `Add ${m.label.toLowerCase()}`}
-          tabs={[{ id: "general", label: "General", content: formBody, required: true }]}
+          tabs={[{ id: "general", label: "General", content: formBody, required: true }, ...cfForm.tabs]}
           onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}
           saving={saving || deleting}

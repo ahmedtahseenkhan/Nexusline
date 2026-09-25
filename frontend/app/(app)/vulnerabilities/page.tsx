@@ -8,6 +8,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import RecordApproval from "@/components/RecordApproval";
 import RelatedChips from "@/components/RelatedChips";
 import AsyncSelect from "@/components/AsyncSelect";
@@ -256,6 +257,7 @@ function VulnerabilitiesInner() {
   const [section, setSection] = useState<SectionId>("findings");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const findingCfForm = useCustomFieldForm("vuln_finding");
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -327,12 +329,14 @@ function VulnerabilitiesInner() {
   function openNewFinding() {
     setEditingFinding(null);
     setFf(BLANK_FINDING);
+    findingCfForm.start(null);
     setError(null);
     setShowFindingForm(true);
   }
   function openEditFinding(v: VulnFinding) {
     setEditingFinding(v);
     setFf(fromFinding(v));
+    findingCfForm.start(v.id);
     setError(null);
     setShowFindingForm(true);
   }
@@ -341,8 +345,10 @@ function VulnerabilitiesInner() {
     setSavingFinding(true);
     try {
       const payload = findingPayload(ff);
-      if (editingFinding) await apiCall("PATCH", `/vuln-findings/${editingFinding.id}`, payload);
-      else await apiCall("POST", "/vuln-findings", payload);
+      const saved = editingFinding
+        ? await apiCall<VulnFinding>("PATCH", `/vuln-findings/${editingFinding.id}`, payload)
+        : await apiCall<VulnFinding>("POST", "/vuln-findings", payload);
+      await findingCfForm.save(saved.id);
       setShowFindingForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -782,6 +788,7 @@ function VulnerabilitiesInner() {
           tabs={[
             { id: "general", label: "General", content: findingGeneral, required: true },
             { id: "details", label: "Details", content: findingDetails },
+            ...findingCfForm.tabs,
           ]}
           onClose={() => setShowFindingForm(false)}
           onSave={saveFinding}

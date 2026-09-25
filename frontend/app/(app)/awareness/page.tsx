@@ -8,6 +8,8 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
+import CustomFieldsPanel from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
 import RichText from "@/components/RichText";
@@ -112,6 +114,7 @@ function AwarenessInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("awareness_program");
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   // training-record management state (drawer)
@@ -127,12 +130,12 @@ function AwarenessInner() {
   const loadDetail = useCallback((id: string) => { api.awarenessProgram(id).then(setDetail).catch(() => setDetail(null)); }, []);
   useEffect(() => { if (openId) loadDetail(openId); else { setDetail(null); setQuizFor(null); } }, [openId, loadDetail]);
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setShowForm(true); }
   async function openEdit(id: string) {
     setError(null);
     try {
       const full = await api.awarenessProgram(id);
-      setEditing(full); setF(fromProgram(full)); setShowForm(true);
+      setEditing(full); setF(fromProgram(full)); cfForm.start(full.id); setShowForm(true);
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to open program"); }
   }
 
@@ -144,8 +147,10 @@ function AwarenessInner() {
         frequency: f.frequency, passing_score: f.passing_score === "" ? 0 : f.passing_score,
         due_date: f.due_date || null, questions: questionsPayload(f.questions),
       };
-      if (editing) await apiCall<AwarenessProgram>("PATCH", `/awareness-programs/${editing.id}`, payload);
-      else await api.createAwarenessProgram(payload);
+      const saved = editing
+        ? await apiCall<AwarenessProgram>("PATCH", `/awareness-programs/${editing.id}`, payload)
+        : await api.createAwarenessProgram(payload);
+      await cfForm.save(saved.id);
       setShowForm(false); reload(); if (openId) loadDetail(openId);
       toast(editing ? "Changes saved" : "Program created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save program"); }
@@ -471,6 +476,11 @@ function AwarenessInner() {
               </div>
               <button className="btn sm" type="button" onClick={addRecord}><IconPlus width={14} height={14} /> Add record</button>
             </div>
+
+            {/* Re-mounts after a save so edited custom-field values show at once. */}
+            <div style={{ marginTop: 14 }}>
+              <CustomFieldsPanel key={`${detail.id}-${refreshKey}`} model="awareness_program" entityId={detail.id} />
+            </div>
           </>
         )}
       </RecordDrawer>
@@ -482,6 +492,7 @@ function AwarenessInner() {
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "content", label: "Training Material", content: contentTab },
             { id: "quiz", label: `Quiz${f.questions.length ? ` (${f.questions.length})` : ""}`, content: quizTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

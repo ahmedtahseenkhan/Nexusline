@@ -19,6 +19,8 @@ import { useFormat } from "@/lib/format";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import FormModal from "@/components/FormModal";
+import CustomFieldsPanel from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import QuestionnaireForm from "@/components/QuestionnaireForm";
 import UserPicker from "@/components/UserPicker";
 import { Field, TextInput, TextArea, Select, NumberInput, type Option } from "@/components/fields";
@@ -56,6 +58,7 @@ function AssessmentsInner() {
   const [view, setView] = useState<"answers" | "findings" | "links" | "log">("answers");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const cfForm = useCustomFieldForm("assessment");
   const [filters, setFilters] = useState<{ status: string; purpose: string; overdue: string }>({ status: "", purpose: "", overdue: "" });
 
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -174,10 +177,12 @@ function AssessmentsInner() {
   // ------------------------------------------------------------- header form
   function openNew() {
     setModalError(null);
+    cfForm.start(null);
     setHeader({ editing: null, form: { ...BLANK, questionnaire_id: qs[0]?.published_version_id || qs[0]?.id || "" } });
   }
   function openEdit(a: AssessmentApi) {
     setModalError(null);
+    cfForm.start(a.id);
     setHeader({ editing: a, form: {
       title: a.title, vendor_id: a.vendor_id || "", questionnaire_id: a.questionnaire_id, due_date: a.due_date || "",
       contact_name: a.contact_name, contact_email: a.contact_email, reviewer_id: a.reviewer_id,
@@ -199,6 +204,7 @@ function AssessmentsInner() {
       const a = header.editing
         ? await apiCall<AssessmentApi>("PATCH", `/assessments/${header.editing.id}`, body)
         : await apiCall<AssessmentApi>("POST", "/assessments", body);
+      await cfForm.save(a.id);
       setHeader(null);
       reload();
       setOpenId(a.id);
@@ -551,6 +557,11 @@ function AssessmentsInner() {
                 {log.length === 0 && <span className="muted">No access through a link yet.</span>}
               </div>
             )}
+
+            {/* Re-mounts after a save so edited custom-field values show at once. */}
+            <div style={{ marginTop: 16 }}>
+              <CustomFieldsPanel key={`${detail.id}-${refreshKey}`} model="assessment" entityId={detail.id} />
+            </div>
           </>
         )}
       </RecordDrawer>
@@ -561,7 +572,7 @@ function AssessmentsInner() {
           tabs={[{ id: "details", label: "Details", required: true, content: (
             <HeaderFields form={header.form} set={(p) => setHeader({ ...header, form: { ...header.form, ...p } })}
               vendors={vendors} vendorOpts={vendorOpts} qOpts={qOpts} lockQuestionnaire={!!header.editing?.answers.length} />
-          ) }]}
+          ) }, ...cfForm.tabs]}
           onClose={() => setHeader(null)} onSave={saveHeader} saving={busy} error={modalError}
           saveLabel={header.editing ? "Save changes" : "Create draft"}
         />

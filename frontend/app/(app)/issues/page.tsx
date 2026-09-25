@@ -24,6 +24,7 @@ import LookupSelect from "@/components/LookupSelect";
 import BusinessUnitSelect, { UnitName } from "@/components/BusinessUnitSelect";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import {
   Disclosure, FactList, LabelledSearch, OpenPoints, PrimaryAction, RecordSection, RelatedGroups, SectionNav, SummaryBand,
   approvalHintFor, approvalMetaItem, pickPrimary, primaryLabel, relatedCount, rowAction, rowLabel, useRecordCtx,
@@ -511,6 +512,7 @@ function IssuesInner() {
   const canWrite = useHasPermission("issue:write");
   const ctx = useRecordCtx(gov, canWrite);
   const sections = useRecordSections();
+  const cfForm = useCustomFieldForm("issue");
   const cf = useCustomFieldFacts("issue", detail?.id, { builtInLabels: ISSUE_BUILT_IN_LABELS });
   /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
   const [editTab, setEditTab] = useState<string | undefined>(undefined);
@@ -551,8 +553,8 @@ function IssuesInner() {
   }, [editingSourceId, editingSourceType]);
 
   // ------------------------------------------------------------- issue CRUD
-  function openNew() { setEditing(null); setF(BLANK_ISSUE); setError(null); setEditTab(undefined); setShowForm(true); }
-  function openEdit(i: Issue, tab?: string) { setEditing(i); setF(fromIssue(i)); setError(null); setEditTab(tab); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK_ISSUE); cfForm.start(null); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(i: Issue, tab?: string) { setEditing(i); setF(fromIssue(i)); cfForm.start(i.id); setError(null); setEditTab(tab); setShowForm(true); }
   async function save() {
     setError(null); setSaving(true);
     try {
@@ -560,13 +562,15 @@ function IssuesInner() {
       let message = "Issue raised";
       if (editing) {
         const saved = await apiCall<Issue>("PATCH", `/issues/${editing.id}`, payload);
+        await cfForm.save(saved.id);
         const waiting = movesDueDate(f, editing) && saved.due_date === editing.due_date
           && saved.due_date_changes.some((c) => c.status === "pending");
         message = waiting ? "Saved. The later due date is waiting for approval." : "Changes saved";
       } else {
-        await apiCall<Issue>("POST", "/issues", payload);
+        const created = await apiCall<Issue>("POST", "/issues", payload);
+        await cfForm.save(created.id);
       }
-      setShowForm(false); refresh();
+      setShowForm(false); refresh(); void cf.reload();
       toast(message);
     } catch (e) { setError(errMsg(e, "Failed to save issue")); }
     finally { setSaving(false); }
@@ -1413,6 +1417,7 @@ function IssuesInner() {
             { id: "classification", label: "Classification", content: classificationTab },
             { id: "links", label: "Links", content: linksTab },
             { id: "remediation", label: "Remediation", content: remediationTab },
+            ...cfForm.tabs,
           ]}
           initialTab={editTab}
           onClose={() => setShowForm(false)}

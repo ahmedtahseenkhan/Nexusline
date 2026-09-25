@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { titleCase } from "@/lib/text";
@@ -131,6 +132,7 @@ function EsgInner() {
   const [showEsgForm, setShowEsgForm] = useState(false);
   const [savingEsg, setSavingEsg] = useState(false);
   const [ef, setEf] = useState<EsgForm>(BLANK_ESG);
+  const esgCfForm = useCustomFieldForm("esg_assessment");
   const setE = <K extends keyof EsgForm>(k: K, v: EsgForm[K]) => setEf((p) => ({ ...p, [k]: v }));
 
   // ---- Env rating dialog ----
@@ -151,13 +153,15 @@ function EsgInner() {
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
 
   // ------------------------------------------------------------- ESG CRUD
-  function openNewEsg() { setEditingEsg(null); setEf(BLANK_ESG); setError(null); setShowEsgForm(true); }
-  function openEditEsg(a: EsgAssessment) { setEditingEsg(a); setEf(fromEsg(a)); setError(null); setShowEsgForm(true); }
+  function openNewEsg() { setEditingEsg(null); setEf(BLANK_ESG); esgCfForm.start(null); setError(null); setShowEsgForm(true); }
+  function openEditEsg(a: EsgAssessment) { setEditingEsg(a); setEf(fromEsg(a)); esgCfForm.start(a.id); setError(null); setShowEsgForm(true); }
   async function saveEsg() {
     setError(null); setSavingEsg(true);
     try {
-      if (editingEsg) await apiCall("PATCH", `/esg-assessments/${editingEsg.id}`, ef);
-      else await apiCall("POST", "/esg-assessments", ef);
+      const saved = editingEsg
+        ? await apiCall<EsgAssessment>("PATCH", `/esg-assessments/${editingEsg.id}`, ef)
+        : await apiCall<EsgAssessment>("POST", "/esg-assessments", ef);
+      await esgCfForm.save(saved.id);
       setShowEsgForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
       toast(editingEsg ? "Changes saved" : "ESG assessment created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save ESG assessment"); }
@@ -421,6 +425,7 @@ function EsgInner() {
           tabs={[
             { id: "general", label: "General", content: esgGeneral, required: true },
             { id: "governance", label: "Ownership & SBP", content: esgGovernance },
+            ...esgCfForm.tabs,
           ]}
           onClose={() => setShowEsgForm(false)}
           onSave={saveEsg}

@@ -21,6 +21,7 @@ import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
@@ -190,6 +191,7 @@ function GoalsInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("goal");
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   const [ad, setAd] = useState<AuditDraft>(BLANK_AUDIT);
@@ -214,12 +216,14 @@ function GoalsInner() {
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(g: Goal) {
     setEditing(g);
     setF(fromGoal(g));
+    cfForm.start(g.id);
     setError(null);
     setShowForm(true);
   }
@@ -229,8 +233,10 @@ function GoalsInner() {
     setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Goal>("PATCH", `/goals/${editing.id}`, payload);
-      else await apiCall<Goal>("POST", "/goals", payload);
+      const saved = editing
+        ? await apiCall<Goal>("PATCH", `/goals/${editing.id}`, payload)
+        : await apiCall<Goal>("POST", "/goals", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -494,6 +500,7 @@ function GoalsInner() {
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "audit", label: "Audit Cycle", content: auditTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

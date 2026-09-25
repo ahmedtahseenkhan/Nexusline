@@ -553,14 +553,25 @@ _MODEL_KEY_OVERRIDES: dict[str, str] = {
 }
 
 
-def custom_field_model_key(model: type) -> str:
+# Import resources that share a model class but not a field set: IT and information
+# assets are both ``Asset`` rows, each register with its own custom fields.
+_RESOURCE_KEY_OVERRIDES: dict[str, str] = {
+    "it-assets": "it_asset",
+    "information-assets": "information_asset",
+}
+
+
+def custom_field_model_key(model: type, resource: str | None = None) -> str:
     """The ``CUSTOM_FIELD_MODELS`` key for a SQLAlchemy model class.
 
     Custom fields are addressed by a snake_case model name (``risk``,
     ``audit_engagement``) while the import registry holds the class itself. The two
     agree by convention for all but the handful of names in ``_MODEL_KEY_OVERRIDES``,
-    so a resource never has to declare the key twice.
+    so a resource never has to declare the key twice. ``resource`` resolves registers
+    that share a class (``_RESOURCE_KEY_OVERRIDES``).
     """
+    if resource in _RESOURCE_KEY_OVERRIDES:
+        return _RESOURCE_KEY_OVERRIDES[resource]
     name = model.__name__
     if name in _MODEL_KEY_OVERRIDES:
         return _MODEL_KEY_OVERRIDES[name]

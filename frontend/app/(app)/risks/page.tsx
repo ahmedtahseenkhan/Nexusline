@@ -2238,14 +2238,15 @@ function RisksPage() {
                 onClick: () =>
                   api.pdfRiskRegister(exportFilters, scopeLabel === "Whole register" ? undefined : scopeLabel).catch(() => {}),
               },
-              { label: "Export CSV", hint: "All risks, every column", onClick: () => io.current?.exportCsv() },
+              { label: "Export Excel", hint: "All risks, every column incl. custom fields", onClick: () => io.current?.exportExcel() },
+              { label: "Export CSV", hint: "All risks, every column incl. custom fields", onClick: () => io.current?.exportCsv() },
             ]}
           />
           <Menu
             label="More"
             items={[
               { label: "Import risks…", hint: "From your existing register — CSV or Excel", onClick: () => io.current?.openImport() },
-              { label: "Download import template", onClick: () => io.current?.template() },
+              { label: "Download import template", hint: "Excel, with dropdowns and a guide", onClick: () => io.current?.template() },
               "divider",
               /* The answer to "one control applies to four assets — shouldn't each get its
                  own rating?": one proposed risk per asset, impact from that asset's own

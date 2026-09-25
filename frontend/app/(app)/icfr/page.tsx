@@ -12,6 +12,7 @@ import RelatedChips from "@/components/RelatedChips";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
@@ -355,6 +356,7 @@ function IcfrInner() {
   const [showProcessForm, setShowProcessForm] = useState(false);
   const [savingProcess, setSavingProcess] = useState(false);
   const [pf, setPf] = useState<ProcessForm>(BLANK_PROCESS);
+  const processCfForm = useCustomFieldForm("icfr_process");
   const setP = <K extends keyof ProcessForm>(k: K, v: ProcessForm[K]) => setPf((p) => ({ ...p, [k]: v }));
 
   // ---- process drawer (RCM) ----
@@ -416,12 +418,14 @@ function IcfrInner() {
   function openNewProcess() {
     setEditingProcess(null);
     setPf(BLANK_PROCESS);
+    processCfForm.start(null);
     setError(null);
     setShowProcessForm(true);
   }
   function openEditProcess(p: IcfrProcess) {
     setEditingProcess(p);
     setPf(fromProcess(p));
+    processCfForm.start(p.id);
     setError(null);
     setShowProcessForm(true);
   }
@@ -430,8 +434,10 @@ function IcfrInner() {
     setSavingProcess(true);
     try {
       const payload = processPayload(pf);
-      if (editingProcess) await apiCall("PATCH", `/icfr/${editingProcess.id}`, payload);
-      else await apiCall("POST", "/icfr", payload);
+      const saved = editingProcess
+        ? await apiCall<IcfrProcess>("PATCH", `/icfr/${editingProcess.id}`, payload)
+        : await apiCall<IcfrProcess>("POST", "/icfr", payload);
+      await processCfForm.save(saved.id);
       setShowProcessForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -1102,6 +1108,7 @@ function IcfrInner() {
           tabs={[
             { id: "general", label: "General", content: processGeneral, required: true },
             { id: "details", label: "Details", content: processDetails },
+            ...processCfForm.tabs,
           ]}
           onClose={() => setShowProcessForm(false)}
           onSave={saveProcess}

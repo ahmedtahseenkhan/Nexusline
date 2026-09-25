@@ -73,6 +73,7 @@ import RecordPanels from "@/components/RecordPanels";
 import ControlMonitoringSection from "@/components/ControlMonitoring";
 import type { ControlMonitoring } from "@/lib/record/control";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import type { MenuItem } from "@/components/Menu";
 import { BulkSuggestMappings, PendingSuggestionsHint } from "@/components/SuggestedClauses";
 import BulkEditBar from "@/components/BulkEditBar";
@@ -451,6 +452,7 @@ function ControlsInner() {
   const drawerSections = useRef<RecordSectionsApi | null>(null);
   /** Scroll to a record section (focuses its heading, writes `#id`, moves the nav highlight). */
   const sections = { scrollTo: (id: string) => (drawerSections.current ?? pageSections).scrollTo(id) };
+  const cfForm = useCustomFieldForm("control");
   const cf = useCustomFieldFacts("control", detail?.id, { builtInLabels: ["Owner", "Operator", "Classification", "Status"] });
 
   const [editing, setEditing] = useState<Control | null>(null);
@@ -557,17 +559,19 @@ function ControlsInner() {
     : Promise.resolve([]);
 
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setEditTab(undefined); setShowForm(true); }
   /** Edit, optionally on the tab a fix names ("general", "attributes", "audit", "links"). */
-  function openEdit(c: Control, tab?: string) { setEditing(c); setF(fromControl(c)); setError(null); setEditTab(tab); setShowForm(true); }
+  function openEdit(c: Control, tab?: string) { setEditing(c); setF(fromControl(c)); cfForm.start(c.id); setError(null); setEditTab(tab); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Control>("PATCH", `/controls/${editing.id}`, payload);
-      else await apiCall<Control>("POST", "/controls", payload);
-      setShowForm(false); refreshOpen(); toast(editing ? "Changes saved" : "Control created");
+      const saved = editing
+        ? await apiCall<Control>("PATCH", `/controls/${editing.id}`, payload)
+        : await apiCall<Control>("POST", "/controls", payload);
+      await cfForm.save(saved.id);
+      setShowForm(false); refreshOpen(); void cf.reload(); toast(editing ? "Changes saved" : "Control created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save control"); }
     finally { setSaving(false); }
   }
@@ -1501,6 +1505,7 @@ function ControlsInner() {
             { id: "cost", label: "Cost & Resourcing", content: costTab },
             { id: "audit", label: "Testing & Maintenance", content: auditTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

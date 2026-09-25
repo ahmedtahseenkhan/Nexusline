@@ -18,6 +18,7 @@ import RecordPanels from "@/components/RecordPanels";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -97,6 +98,7 @@ function BusinessUnitsInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("business_unit");
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
@@ -122,12 +124,14 @@ function BusinessUnitsInner() {
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(u: BusinessUnit) {
     setEditing(u);
     setF(fromUnit(u));
+    cfForm.start(u.id);
     setError(null);
     setShowForm(true);
   }
@@ -154,8 +158,10 @@ function BusinessUnitsInner() {
       legal_ids: f.legal_ids.map((o) => o.value),
     };
     try {
-      if (editing) await apiCall<BusinessUnit>("PATCH", `/business-units/${editing.id}`, payload);
-      else await apiCall<BusinessUnit>("POST", "/business-units", payload);
+      const saved = editing
+        ? await apiCall<BusinessUnit>("PATCH", `/business-units/${editing.id}`, payload)
+        : await apiCall<BusinessUnit>("POST", "/business-units", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       invalidateBusinessUnits();
       reload();
@@ -375,6 +381,7 @@ function BusinessUnitsInner() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}

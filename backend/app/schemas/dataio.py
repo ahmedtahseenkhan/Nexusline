@@ -51,6 +51,15 @@ class MappingSuggestionRead(BaseModel):
     band: str  # high | medium | low — drives whether the wizard flags it for review
 
 
+class CustomFieldSuggestionRead(BaseModel):
+    """A column whose heading names one of the register's custom fields — an exported
+    or template file re-imported keeps its custom-field values."""
+
+    source: str
+    custom_field_id: uuid.UUID
+    label: str
+
+
 class InspectRequest(BaseModel):
     """Either CSV text (``content``) or a base64 .xlsx workbook (``file_b64``)."""
 
@@ -77,6 +86,7 @@ class InspectResponse(BaseModel):
     # the client's columns — the fastest way for a person to spot a wrong match.
     sample_rows: list[list[str]]
     suggestions: list[MappingSuggestionRead]
+    custom_field_suggestions: list[CustomFieldSuggestionRead] = []
     unmapped_source_headers: list[str]
     unfilled_target_headers: list[str]
     missing_required: list[str]

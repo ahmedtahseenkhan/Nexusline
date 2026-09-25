@@ -8,6 +8,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import RecordApproval, { WorkflowBadge } from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
@@ -227,6 +228,7 @@ function ScenarioAnalysisInner() {
   const [section, setSection] = useState<SectionId>("scenarios");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const cfForm = useCustomFieldForm("scenario_analysis");
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const [summary, setSummary] = useState<ScenarioSummary | null>(null);
@@ -286,12 +288,14 @@ function ScenarioAnalysisInner() {
   function openNewScenario() {
     setEditingScenario(null);
     setSf({ ...BLANK_SCENARIO, currency });
+    cfForm.start(null);
     setError(null);
     setShowScenarioForm(true);
   }
   function openEditScenario(s: ScenarioAnalysis) {
     setEditingScenario(s);
     setSf(fromScenario(s));
+    cfForm.start(s.id);
     setError(null);
     setShowScenarioForm(true);
   }
@@ -300,8 +304,10 @@ function ScenarioAnalysisInner() {
     setSavingScenario(true);
     try {
       const payload = scenarioPayload(sf);
-      if (editingScenario) await apiCall("PATCH", `/scenario-analyses/${editingScenario.id}`, payload);
-      else await apiCall("POST", "/scenario-analyses", payload);
+      const saved = editingScenario
+        ? await apiCall<ScenarioAnalysis>("PATCH", `/scenario-analyses/${editingScenario.id}`, payload)
+        : await apiCall<ScenarioAnalysis>("POST", "/scenario-analyses", payload);
+      await cfForm.save(saved.id);
       setShowScenarioForm(false);
       reload();
       if (openId) loadScenarioDetail(openId);
@@ -696,6 +702,7 @@ function ScenarioAnalysisInner() {
             { id: "scenario", label: "Scenario", content: scenarioTab, required: true },
             { id: "estimates", label: "Estimates", content: estimatesTab },
             { id: "workshop", label: "Workshop", content: workshopTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowScenarioForm(false)}
           onSave={saveScenario}

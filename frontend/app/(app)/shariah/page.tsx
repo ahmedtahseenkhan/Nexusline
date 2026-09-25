@@ -17,6 +17,7 @@ import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import RecordApproval, { WorkflowBadge } from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import RichText from "@/components/RichText";
@@ -340,6 +341,7 @@ function ShariahInner() {
   const [section, setSection] = useState<SectionId>("fatwa");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const reviewCfForm = useCustomFieldForm("shariah_review");
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   // ---- ruling dialog ----
@@ -499,6 +501,7 @@ function ShariahInner() {
     setEditingReview(null);
     setVf(BLANK_REVIEW);
     setProductSelLabel("");
+    reviewCfForm.start(null);
     setError(null);
     setShowReviewForm(true);
   }
@@ -506,6 +509,7 @@ function ShariahInner() {
     setEditingReview(r);
     setVf(fromReview(r));
     setProductSelLabel("");
+    reviewCfForm.start(r.id);
     setError(null);
     setShowReviewForm(true);
     if (r.product_id) {
@@ -519,8 +523,10 @@ function ShariahInner() {
     setSavingReview(true);
     try {
       const payload = reviewPayload(vf);
-      if (editingReview) await api.updateShariahReview(editingReview.id, payload);
-      else await api.createShariahReview(payload);
+      const saved = editingReview
+        ? await api.updateShariahReview(editingReview.id, payload)
+        : await api.createShariahReview(payload);
+      await reviewCfForm.save(saved.id);
       setShowReviewForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -1187,6 +1193,7 @@ function ShariahInner() {
             { id: "general", label: "General", content: reviewGeneral, required: true },
             { id: "timing", label: "Timing", content: reviewTiming },
             { id: "conclusion", label: "Conclusion", content: reviewConclusion },
+            ...reviewCfForm.tabs,
           ]}
           onClose={() => setShowReviewForm(false)}
           onSave={saveReview}

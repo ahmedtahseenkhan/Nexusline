@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import RichText from "@/components/RichText";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -195,6 +196,7 @@ function ContinuityInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("continuity_plan");
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
   // child-record draft inputs (drawer)
@@ -223,18 +225,20 @@ function ContinuityInner() {
   }, []);
 
   function openNew() {
-    setEditing(null); setF(BLANK); setError(null); setShowForm(true);
+    setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setShowForm(true);
   }
   function openEdit(p: ContinuityPlan) {
-    setEditing(p); setF(fromPlan(p)); setError(null); setShowForm(true);
+    setEditing(p); setF(fromPlan(p)); cfForm.start(p.id); setError(null); setShowForm(true);
   }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<ContinuityPlan>("PATCH", `/continuity-plans/${editing.id}`, payload);
-      else await apiCall<ContinuityPlan>("POST", "/continuity-plans", payload);
+      const saved = editing
+        ? await apiCall<ContinuityPlan>("PATCH", `/continuity-plans/${editing.id}`, payload)
+        : await apiCall<ContinuityPlan>("POST", "/continuity-plans", payload);
+      await cfForm.save(saved.id);
       setShowForm(false); reload(); if (openId) loadDetail(openId); toast(editing ? "Changes saved" : "Plan created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save plan"); }
     finally { setSaving(false); }
@@ -372,6 +376,7 @@ function ContinuityInner() {
     { id: "general", label: "General", content: generalTab, required: true },
     { id: "bia", label: "BIA & Recovery", content: biaTab },
     { id: "links", label: "Links", content: linksTab },
+    ...cfForm.tabs,
   ];
 
   return (

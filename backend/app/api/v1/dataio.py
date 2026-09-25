@@ -28,18 +28,21 @@ import base64
 import csv
 import io
 import uuid
+from datetime import date
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession
 from app.models.custom_field import CUSTOM_FIELD_MODELS, CustomField, CustomFieldValue
+from app.models.enums import CustomFieldType
 from app.models.import_profile import ImportProfile
 from app.schemas.dataio import (
     ImportError as RowError,
 )
 from app.schemas.dataio import (
+    CustomFieldSuggestionRead,
     ImportProfileCreate,
     ImportProfileRead,
     ImportRequest,
@@ -52,7 +55,7 @@ from app.schemas.dataio import (
     PreviewRow,
 )
 from app.services import audit as audit_log
-from app.services import csv_io, import_mapping, ref_fields
+from app.services import csv_io, import_mapping, ref_fields, xlsx_io
 from app.services.import_registry import REGISTRY, Column, LinkSpec, ResourceIO
 
 router = APIRouter(prefix="/io", tags=["data-io"])
@@ -180,7 +183,7 @@ async def list_resources(user: CurrentUser) -> list[dict]:
 async def get_schema(resource: str, user: CurrentUser) -> dict:
     res = _get_resource(resource)
     _require_perm(user, res.read_perm)
-    model_key = import_mapping.custom_field_model_key(res.model)
+    model_key = import_mapping.custom_field_model_key(res.model, res.resource)
     return {
         "resource": res.resource,
         "label": res.label,
@@ -192,18 +195,45 @@ async def get_schema(resource: str, user: CurrentUser) -> dict:
     }
 
 
-@router.get("/{resource}/template")
-async def get_template(resource: str, user: CurrentUser) -> dict:
-    res = _get_resource(resource)
-    _require_perm(user, res.read_perm)
+_FORMAT = Query(default="csv", pattern="^(csv|xlsx)$")
+
+
+def _file_payload(
+    res: ResourceIO, kind: str, fmt: str, columns: list[Column], rows: list[dict],
+    examples: dict[str, str] | None = None,
+) -> dict:
+    """``{filename, csv}`` or ``{filename, xlsx_b64}`` — the shape the page downloads."""
+    if fmt == "xlsx":
+        data = xlsx_io.build_workbook(columns, rows, title=res.label, examples=examples)
+        return {
+            "filename": f"{res.resource}_{kind}.xlsx",
+            "xlsx_b64": base64.b64encode(data).decode("ascii"),
+        }
     return {
-        "filename": f"{res.resource}_template.csv",
-        "csv": csv_io.make_template(res.columns),
+        "filename": f"{res.resource}_{kind}.csv",
+        "csv": csv_io.export_csv(rows, [c.header for c in columns]),
     }
 
 
+@router.get("/{resource}/template")
+async def get_template(
+    resource: str, db: DbSession, user: CurrentUser, format: str = _FORMAT
+) -> dict:
+    res = _get_resource(resource)
+    _require_perm(user, res.read_perm)
+    custom = await _custom_columns(db, res)
+    columns = [*res.columns, *(col for col, _ in custom)]
+    examples = csv_io.example_row(columns)
+    # The CSV template carries its example as a row; the workbook keeps the data sheet
+    # clean (a forgotten example row would import) and shows examples on its Guide.
+    rows = [] if format == "xlsx" else [examples]
+    return _file_payload(res, "template", format, columns, rows, examples)
+
+
 @router.get("/{resource}/export")
-async def export_resource(resource: str, db: DbSession, user: CurrentUser) -> dict:
+async def export_resource(
+    resource: str, db: DbSession, user: CurrentUser, format: str = _FORMAT
+) -> dict:
     res = _get_resource(resource)
     _require_perm(user, res.read_perm)
 
@@ -224,8 +254,9 @@ async def export_resource(resource: str, db: DbSession, user: CurrentUser) -> di
         stmt = stmt.options(*options)
 
     records = (await db.scalars(stmt)).all()
+    custom = await _custom_columns(db, res)
+    values = await _custom_values(db, custom, [obj.id for obj in records])
 
-    headers = [c.header for c in res.columns]
     rows: list[dict] = []
     for obj in records:
         row: dict[str, object] = {}
@@ -234,12 +265,127 @@ async def export_resource(resource: str, db: DbSession, user: CurrentUser) -> di
                 row[col.header] = _export_link(obj, col.link)
             else:
                 row[col.header] = getattr(obj, col.field, None)
+        for col, cf in custom:
+            raw = values.get((cf.id, obj.id), "")
+            row[col.header] = _typed_custom(col, raw) if format == "xlsx" else raw
         rows.append(row)
 
-    return {
-        "filename": f"{res.resource}_export.csv",
-        "csv": csv_io.export_csv(rows, headers),
-    }
+    columns = [*res.columns, *(col for col, _ in custom)]
+    return _file_payload(res, "export", format, columns, rows)
+
+
+# ---------------------------------------------------------------------------
+# Custom fields as spreadsheet columns
+# ---------------------------------------------------------------------------
+_CF_KIND = {
+    CustomFieldType.text: "text",
+    CustomFieldType.textarea: "text",
+    CustomFieldType.number: "float",
+    CustomFieldType.date: "date",
+    CustomFieldType.checkbox: "bool",
+    CustomFieldType.select: "enum",
+}
+
+
+def _norm_header(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+async def _custom_columns(db: DbSession, res: ResourceIO) -> list[tuple[Column, CustomField]]:
+    """The register's enabled custom fields as extra spreadsheet columns.
+
+    Each is headed by its label; a label that repeats a built-in heading (or another
+    custom field) becomes "Label (custom)" so every heading stays unique and an
+    exported file maps back to the same fields on import.
+    """
+    model_key = import_mapping.custom_field_model_key(res.model, res.resource)
+    if model_key not in CUSTOM_FIELD_MODELS:
+        return []
+    fields = (
+        await db.scalars(
+            select(CustomField)
+            .where(CustomField.model == model_key, CustomField.enabled.is_(True))
+            .order_by(CustomField.order_index, CustomField.label)
+        )
+    ).all()
+    taken = {_norm_header(c.header) for c in res.columns}
+    out: list[tuple[Column, CustomField]] = []
+    for cf in fields:
+        label = cf.label.strip()
+        header = label
+        n = 1
+        while _norm_header(header) in taken:
+            header = f"{label} (custom)" if n == 1 else f"{label} (custom {n})"
+            n += 1
+        taken.add(_norm_header(header))
+        options = [o.strip() for o in (cf.options or "").splitlines() if o.strip()]
+        kind = _CF_KIND.get(cf.field_type, "text")
+        out.append((
+            Column(
+                header=header,
+                field=f"cf:{cf.id}",
+                required=cf.required,
+                kind=kind,
+                enum_values=options if kind == "enum" else None,
+                help=cf.help_text or "Custom field",
+            ),
+            cf,
+        ))
+    return out
+
+
+async def _custom_values(
+    db: DbSession, custom: list[tuple[Column, CustomField]], entity_ids: list[uuid.UUID]
+) -> dict[tuple[uuid.UUID, uuid.UUID], str]:
+    """(field id, record id) -> stored value, for the exported records."""
+    if not custom or not entity_ids:
+        return {}
+    rows = (
+        await db.scalars(
+            select(CustomFieldValue).where(
+                CustomFieldValue.custom_field_id.in_([cf.id for _, cf in custom]),
+                CustomFieldValue.entity_id.in_(entity_ids),
+            )
+        )
+    ).all()
+    return {(v.custom_field_id, v.entity_id): v.value for v in rows}
+
+
+def _typed_custom(col: Column, raw: str) -> object:
+    """A stored custom value as a typed cell (real dates / numbers / booleans in Excel)."""
+    try:
+        return csv_io.coerce(raw, col.kind if col.kind != "enum" else "text")
+    except ValueError:
+        return raw  # stored before validation existed — export what is there
+
+
+def _custom_cell(col: Column, raw: str | None) -> str:
+    """Validate one imported custom-field cell and return the value to store.
+
+    Checkbox values normalise to ``true``/``false``, dates to ISO, select values to the
+    option's own spelling (case-insensitive). Raises ``ValueError`` naming the column.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    try:
+        if col.kind == "enum":
+            match = next(
+                (o for o in col.enum_values or [] if o.casefold() == text.casefold()), None
+            )
+            if match is None:
+                raise ValueError(
+                    f"'{text}' is not a valid option (allowed: {', '.join(col.enum_values or [])})"
+                )
+            return match
+        value = csv_io.coerce(text, col.kind)
+    except ValueError as exc:
+        raise ValueError(f"{col.header}: {exc}") from exc
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, date):
+        return value.isoformat()
+    return text
 
 
 def _is_relationship(model: type, attr: str) -> bool:
@@ -296,13 +442,14 @@ async def import_resource(
             # last so a stray CSV column can never route rows into the wrong register.
             payload.update(res.fixed)
             obj = res.create_schema(**payload)
-            # Custom-field values are written inside the row's own savepoint, so a bad
-            # value rolls the record back with it rather than leaving a half-imported row.
+            # Custom cells are validated before anything is written, and written inside
+            # the row's own savepoint, so a bad value never leaves a half-imported row.
+            custom_values = _custom_cells(source_row, custom_fields)
             with ref_fields.collect_warnings() as row_warnings:
                 async with db.begin_nested():
                     record = await res.create_func(body=obj, db=db, user=user)
-                    if custom_fields:
-                        _write_custom_values(db, user, record, source_row, custom_fields)
+                    if custom_values:
+                        _write_custom_values(db, user, record, custom_values)
             created += 1
             warnings.extend(RowError(row=row_no, message=m) for m in row_warnings)
         except Exception as exc:  # noqa: BLE001 - row isolation: report & continue
@@ -333,11 +480,11 @@ async def import_resource(
 # ---------------------------------------------------------------------------
 @router.post("/{resource}/inspect", response_model=InspectResponse)
 async def inspect_upload(
-    resource: str, body: InspectRequest, user: CurrentUser
+    resource: str, body: InspectRequest, db: DbSession, user: CurrentUser
 ) -> InspectResponse:
     """Read an uploaded CSV or .xlsx and propose a column mapping.
 
-    Nothing is written and no database is touched. The response carries the
+    Nothing is written. The response carries the
     canonicalised ``csv`` (banner rows stripped, chosen sheet flattened) which the
     wizard passes to preview and import, so a workbook is parsed exactly once.
     """
@@ -368,7 +515,24 @@ async def inspect_upload(
     suggestions, unmapped, unfilled = import_mapping.suggest_mapping(
         table.headers, res.columns, resource=res.resource
     )
+    # A heading that names a custom field exactly (as our template and export write
+    # it) goes to that field, ahead of any fuzzy guess at a built-in one.
+    custom_by_header = {_norm_header(col.header): (col, cf) for col, cf in await _custom_columns(db, res)}
+    custom_suggestions: list[CustomFieldSuggestionRead] = []
+    for header in table.headers:
+        hit = custom_by_header.get(_norm_header(header))
+        if hit is None:
+            continue
+        builtin = next((s for s in suggestions if s.source == header), None)
+        if builtin is not None and _norm_header(builtin.target) == _norm_header(header):
+            continue
+        suggestions = [s for s in suggestions if s.source != header]
+        unmapped = [h for h in unmapped if h != header]
+        custom_suggestions.append(
+            CustomFieldSuggestionRead(source=header, custom_field_id=hit[1].id, label=hit[1].label)
+        )
     mapped_headers = {s.target for s in suggestions}
+    unfilled = [c.header for c in res.columns if c.header not in mapped_headers]
     missing_required = [c.header for c in res.columns if c.required and c.header not in mapped_headers]
 
     return InspectResponse(
@@ -386,6 +550,7 @@ async def inspect_upload(
             )
             for s in suggestions
         ],
+        custom_field_suggestions=custom_suggestions,
         unmapped_source_headers=unmapped,
         unfilled_target_headers=unfilled,
         missing_required=missing_required,
@@ -408,7 +573,7 @@ async def preview_import(
 
     header_by_field = {c.header: c for c in res.columns}
     mapping = _validated_mapping(res, body.mapping)
-    await _validated_custom_fields(db, res, body.custom_field_mapping)
+    custom_fields = await _validated_custom_fields(db, res, body.custom_field_mapping)
     link_indexes = await _link_indexes(db, res)
 
     all_rows = list(csv.DictReader(io.StringIO(body.content)))
@@ -418,17 +583,21 @@ async def preview_import(
         source_row = dict(raw_row)
         canonical = import_mapping.apply_mapping(source_row, mapping) if mapping else source_row
         values = {k: (v or "") for k, v in canonical.items() if k in header_by_field}
+        for source, (col, _) in custom_fields.items():
+            values[col.header] = source_row.get(source) or ""
         error = ""
         try:
             payload = _row_to_payload(canonical, header_by_field, link_indexes)
             payload.update(res.fixed)
             res.create_schema(**payload)  # validation only — never persisted
+            _custom_cells(source_row, custom_fields)
             valid += 1
         except Exception as exc:  # noqa: BLE001 - surface, do not raise
             error = _clean_message(exc)
         rows.append(PreviewRow(row=offset + 2, values=values, error=error))
 
-    populated = [c.header for c in res.columns if any(c.header in r.values for r in rows)]
+    headers = [*(c.header for c in res.columns), *(col.header for col, _ in custom_fields.values())]
+    populated = [h for h in dict.fromkeys(headers) if any(h in r.values for r in rows)]
     return PreviewResponse(
         total=len(all_rows), previewed=len(rows), valid=valid, rows=rows, columns=populated
     )
@@ -554,15 +723,16 @@ def _validated_mapping(res: ResourceIO, mapping: dict[str, str]) -> dict[str, st
 
 async def _validated_custom_fields(
     db: DbSession, res: ResourceIO, mapping: dict[str, uuid.UUID]
-) -> dict[str, uuid.UUID]:
+) -> dict[str, tuple[Column, uuid.UUID]]:
     """Check every custom field exists, is enabled and belongs to this resource's model.
 
     Without the model check a caller could park a risk column's data on a vendor field,
-    where it would be invisible in the UI but present in the database.
+    where it would be invisible in the UI but present in the database. Returns each
+    source column's custom field as a typed ``Column`` (for validating its cells) and id.
     """
     if not mapping:
         return {}
-    model_key = import_mapping.custom_field_model_key(res.model)
+    model_key = import_mapping.custom_field_model_key(res.model, res.resource)
     if model_key not in CUSTOM_FIELD_MODELS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -572,6 +742,8 @@ async def _validated_custom_fields(
     ids = list(dict.fromkeys(mapping.values()))
     rows = (await db.scalars(select(CustomField).where(CustomField.id.in_(ids)))).all()
     by_id = {row.id: row for row in rows}
+    columns = {cf.id: col for col, cf in await _custom_columns(db, res)}
+    out: dict[str, tuple[Column, uuid.UUID]] = {}
     for source, field_id in mapping.items():
         field = by_id.get(field_id)
         if field is None:
@@ -587,12 +759,25 @@ async def _validated_custom_fields(
                     f"not '{model_key}'"
                 ),
             )
-        if not field.enabled:
+        if not field.enabled or field_id not in columns:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Custom field '{field.label}' is disabled",
             )
-    return dict(mapping)
+        out[source] = (columns[field_id], field_id)
+    return out
+
+
+def _custom_cells(
+    source_row: dict[str, str | None], custom_fields: dict[str, tuple[Column, uuid.UUID]]
+) -> dict[uuid.UUID, str]:
+    """The row's validated custom-field values (field id -> value); blanks omitted."""
+    out: dict[uuid.UUID, str] = {}
+    for source, (col, field_id) in custom_fields.items():
+        value = _custom_cell(col, source_row.get(source))
+        if value:
+            out[field_id] = value
+    return out
 
 
 async def _link_indexes(db: DbSession, res: ResourceIO) -> dict[str, dict[str, object]]:
@@ -610,10 +795,9 @@ def _write_custom_values(
     db: DbSession,
     user: CurrentUser,
     record: object,
-    source_row: dict[str, str | None],
-    custom_fields: dict[str, uuid.UUID],
+    values: dict[uuid.UUID, str],
 ) -> None:
-    """Persist the mapped-to-custom-field cells for one freshly created record.
+    """Persist the validated custom-field cells for one freshly created record.
 
     ``record`` is whatever the module's create function returned — every one of them
     returns a Read schema carrying the new ``id``.
@@ -621,10 +805,7 @@ def _write_custom_values(
     entity_id = getattr(record, "id", None)
     if entity_id is None:
         raise ValueError("Could not resolve the created record's id for custom fields")
-    for source, field_id in custom_fields.items():
-        value = (source_row.get(source) or "").strip()
-        if not value:
-            continue
+    for field_id, value in values.items():
         db.add(
             CustomFieldValue(
                 tenant_id=user.tenant_id,

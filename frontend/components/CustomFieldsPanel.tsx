@@ -27,6 +27,7 @@ import type { FactItem } from "@/components/record/types";
 import { useEscapeLayer } from "@/lib/escapeLayer";
 import { formatDate } from "@/lib/format";
 import { useHasPermission } from "@/lib/tenantSettings";
+import { useCustomFieldsSaved } from "@/components/useCustomFieldForm";
 
 type Props = {
   model: string;
@@ -150,6 +151,9 @@ export function useCustomFieldFacts(
     setError(null);
     load();
   }, [load]);
+
+  // The record's Add / Edit form saves custom fields too; re-read when it does.
+  useCustomFieldsSaved(model, entityId, load);
 
   const setEditing = useCallback(
     (v: boolean) => {
@@ -288,8 +292,7 @@ function CustomFieldsEditPanel({ model, entityId }: { model: string; entityId: s
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [msg, setMsg] = useState("");
 
-  useEffect(() => {
-    setStatus("idle");
+  const load = useCallback(() => {
     api
       .customFieldValues(model, entityId)
       .then((rows) => {
@@ -298,6 +301,13 @@ function CustomFieldsEditPanel({ model, entityId }: { model: string; entityId: s
       })
       .catch(() => setItems([]));
   }, [model, entityId]);
+
+  useEffect(() => {
+    setStatus("idle");
+    load();
+  }, [load]);
+
+  useCustomFieldsSaved(model, entityId, load);
 
   if (items.length === 0) return null;
 

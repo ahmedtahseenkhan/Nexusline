@@ -13,6 +13,7 @@ import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import FileAttachments from "@/components/FileAttachments";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconEvidence, IconPlus } from "@/components/icons";
@@ -141,6 +142,7 @@ function EvidenceInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("evidence");
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setF((p) => ({ ...p, [k]: v }));
@@ -160,12 +162,14 @@ function EvidenceInner() {
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(e: Evidence) {
     setEditing(e);
     setF(fromEvidence(e));
+    cfForm.start(e.id);
     setError(null);
     setShowForm(true);
   }
@@ -191,12 +195,14 @@ function EvidenceInner() {
       const payload = toPayload(f);
       if (editing) {
         await apiCall<Evidence>("PATCH", `/evidence/${editing.id}`, payload);
+        await cfForm.save(editing.id);
         setShowForm(false);
         toast("Changes saved");
       } else {
         // Convert to edit mode after creating so the Files tab becomes usable and
         // the user can immediately upload the actual artifact.
         const created = await apiCall<Evidence>("POST", "/evidence", payload);
+        await cfForm.save(created.id);
         setEditing(created);
         toast("Evidence collected");
       }
@@ -460,6 +466,7 @@ function EvidenceInner() {
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "source", label: "Source & Validity", content: sourceTab },
             { id: "files", label: "Files", content: filesTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}

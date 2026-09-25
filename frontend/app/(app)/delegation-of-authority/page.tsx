@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { titleCase } from "@/lib/text";
@@ -165,6 +166,7 @@ function DelegationOfAuthorityInner() {
   const [showMatrixForm, setShowMatrixForm] = useState(false);
   const [savingMatrix, setSavingMatrix] = useState(false);
   const [mf, setMf] = useState<MatrixForm>(BLANK_MATRIX);
+  const matrixCfForm = useCustomFieldForm("authority_matrix");
   const setM = <K extends keyof MatrixForm>(k: K, v: MatrixForm[K]) => setMf((p) => ({ ...p, [k]: v }));
 
   // ---- rule dialog ----
@@ -185,14 +187,16 @@ function DelegationOfAuthorityInner() {
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
 
   // ------------------------------------------------------------- matrix CRUD
-  function openNewMatrix() { setEditingMatrix(null); setMf({ ...BLANK_MATRIX, currency }); setError(null); setShowMatrixForm(true); }
-  function openEditMatrix(m: AuthorityMatrix) { setEditingMatrix(m); setMf(fromMatrix(m, currency)); setError(null); setShowMatrixForm(true); }
+  function openNewMatrix() { setEditingMatrix(null); setMf({ ...BLANK_MATRIX, currency }); matrixCfForm.start(null); setError(null); setShowMatrixForm(true); }
+  function openEditMatrix(m: AuthorityMatrix) { setEditingMatrix(m); setMf(fromMatrix(m, currency)); matrixCfForm.start(m.id); setError(null); setShowMatrixForm(true); }
   async function saveMatrix() {
     setError(null); setSavingMatrix(true);
     try {
       const payload = matrixPayload(mf);
-      if (editingMatrix) await apiCall<AuthorityMatrix>("PATCH", `/authority-matrix/${editingMatrix.id}`, payload);
-      else await apiCall<AuthorityMatrix>("POST", "/authority-matrix", payload);
+      const saved = editingMatrix
+        ? await apiCall<AuthorityMatrix>("PATCH", `/authority-matrix/${editingMatrix.id}`, payload)
+        : await apiCall<AuthorityMatrix>("POST", "/authority-matrix", payload);
+      await matrixCfForm.save(saved.id);
       setShowMatrixForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
       toast(editingMatrix ? "Changes saved" : "Authority line created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save authority line"); }
@@ -472,6 +476,7 @@ function DelegationOfAuthorityInner() {
           tabs={[
             { id: "general", label: "General", content: matrixGeneral, required: true },
             { id: "amounts", label: "Authority & amounts", content: matrixAmounts },
+            ...matrixCfForm.tabs,
           ]}
           onClose={() => setShowMatrixForm(false)}
           onSave={saveMatrix}

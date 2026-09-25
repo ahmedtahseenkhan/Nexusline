@@ -17,6 +17,7 @@ import RecordPanels from "@/components/RecordPanels";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import RichText, { RichTextView } from "@/components/RichText";
 import { Field, TextInput, NumberInput } from "@/components/fields";
@@ -102,6 +103,7 @@ function LegalInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("legal");
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
@@ -122,12 +124,14 @@ function LegalInner() {
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(l: Legal) {
     setEditing(l);
     setF(fromLegal(l));
+    cfForm.start(l.id);
     setError(null);
     setShowForm(true);
   }
@@ -156,8 +160,10 @@ function LegalInner() {
       asset_ids: f.asset_ids.map((o) => o.value),
     };
     try {
-      if (editing) await apiCall<Legal>("PATCH", `/legals/${editing.id}`, payload);
-      else await apiCall<Legal>("POST", "/legals", payload);
+      const saved = editing
+        ? await apiCall<Legal>("PATCH", `/legals/${editing.id}`, payload)
+        : await apiCall<Legal>("POST", "/legals", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       if (recordId) loadDetail(recordId);  // refresh the open view drawer
@@ -350,6 +356,7 @@ function LegalInner() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}
