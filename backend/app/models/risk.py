@@ -314,6 +314,8 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     )
     audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
         "AuditFinding", secondary="audit_finding_risks", lazy="selectin", viewonly=True,
+        # Findings of an archived engagement leave this record's view with the audit.
+        secondaryjoin=lambda: _live_findings("audit_finding_risks"),
     )
     kris: Mapped[list["KeyRiskIndicator"]] = relationship(  # noqa: F821
         "KeyRiskIndicator", secondary="kri_risks", lazy="selectin", viewonly=True,
@@ -499,3 +501,9 @@ class RiskTreatmentAction(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base
     status: Mapped[str] = mapped_column(String(16), default="open", nullable=False)  # open|in_progress|done|cancelled
     percent_complete: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+def _live_findings(link_table_name: str):
+    from app.models import internal_audit
+
+    return internal_audit.live_finding_secondaryjoin(getattr(internal_audit, link_table_name))

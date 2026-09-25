@@ -6,13 +6,17 @@ Completes the Basel operational-risk suite. Two record types:
   loss = expected annual loss), filterable by free-text search, Basel event type
   and status.
 * ``/capital-calculations`` — Basel III Standardised Approach (SMA) capital, with
-  BIC / Loss Component / ILM / ORC computed server-side.
+  BIC / Loss Component / ILM / ORC computed server-side. The Basel BI bucket edges
+  (EUR 1bn / EUR 30bn) are converted into each record's currency at the organisation's
+  latest exchange rates; without a rate the capital is not computed and the read says
+  which rate is missing (see :func:`sma_thresholds`).
 """
 from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,7 +25,15 @@ from sqlalchemy import Select, func, or_, select
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.enums import BaselEventType
-from app.models.scenario import CapitalCalculation, ScenarioAnalysis, ScenarioStatus
+from app.models.scenario import (
+    BASEL_BI_BUCKET_1,
+    BASEL_BI_BUCKET_2,
+    BASEL_THRESHOLD_CURRENCY,
+    CapitalCalculation,
+    ScenarioAnalysis,
+    ScenarioStatus,
+    sma_capital,
+)
 from app.schemas.common import Page
 from app.schemas.scenario import (
     CapitalCreate,
@@ -137,11 +149,74 @@ async def update_scenario(sid: uuid.UUID, body: ScenarioUpdate, db: DbSession) -
 async def delete_scenario(sid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, ScenarioAnalysis, sid, "Scenario")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
 # ===================================================== capital calculations ===
+@dataclass(frozen=True)
+class SmaThresholds:
+    """The Basel BI bucket edges in one currency, and how they were obtained."""
+
+    bucket_1: float
+    bucket_2: float
+    basis: str
+
+
+def sma_thresholds(book: fx.RateBook, currency: str | None, on_date: date | None = None) -> SmaThresholds | str:
+    """The EUR 1bn / EUR 30bn bucket edges (CRE25.4) expressed in ``currency``.
+
+    Converted through the reporting currency at the latest rates on or before
+    ``on_date`` (today): 1 EUR = rate(EUR) / rate(currency) units of ``currency``. The
+    edges are restated at the rate current when the figure is read, as a supervisor
+    restates them for its own currency. Returns the refusal text instead when a rate is
+    missing — bucketing a PKR 100bn BI without knowing what EUR 1bn is worth in PKR
+    would be a guess about which of three coefficients applies.
+    """
+    base = BASEL_THRESHOLD_CURRENCY
+    code = fx.normalise(currency, book.reporting_currency)
+    edges = f"{base} {BASEL_BI_BUCKET_1 / 1e9:g}bn / {base} {BASEL_BI_BUCKET_2 / 1e9:g}bn"
+    if code == base:
+        return SmaThresholds(BASEL_BI_BUCKET_1, BASEL_BI_BUCKET_2, f"Basel CRE25 bucket edges {edges}")
+    eur = book.rate_for(base, on_date)
+    own = book.rate_for(code, on_date)
+    missing = [c for c, r in ((base, eur), (code, own)) if r is None]
+    if missing:
+        return (
+            f"No {' or '.join(missing)} → {book.reporting_currency} exchange rate, so the Basel "
+            f"bucket edges ({edges}) cannot be expressed in {code} and the capital is not "
+            "computed. Add the rate under Organisation settings → Exchange rates."
+        )
+    factor = float(eur[0]) / float(own[0])
+    dates = sorted({d.isoformat() for _r, d in (eur, own) if d is not None})
+    return SmaThresholds(
+        BASEL_BI_BUCKET_1 * factor,
+        BASEL_BI_BUCKET_2 * factor,
+        f"Basel CRE25 bucket edges {edges} at 1 {base} = {factor:,.4f} {code}"
+        + (f" (rate of {', '.join(dates)})" if dates else ""),
+    )
+
+
+def _capital_read(obj: CapitalCalculation, book: fx.RateBook) -> CapitalRead:
+    """The record with its SMA figures (``models.scenario.sma_capital``)."""
+    read = CapitalRead.model_validate(obj)
+    read.loss_component = round(15.0 * float(obj.avg_annual_loss or 0), 2)
+    edges = sma_thresholds(book, obj.currency)
+    if isinstance(edges, str):
+        read.threshold_note = edges
+        return read
+    result = sma_capital(obj.business_indicator, obj.avg_annual_loss, edges.bucket_1, edges.bucket_2)
+    read.bucket = result.bucket
+    read.bic = round(result.bic, 2)
+    read.loss_component = round(result.loss_component, 2)
+    read.ilm = round(result.ilm, 4)
+    read.orc = round(result.orc, 2)
+    read.bucket_1_threshold = round(edges.bucket_1, 2)
+    read.bucket_2_threshold = round(edges.bucket_2, 2)
+    read.threshold_basis = edges.basis
+    return read
+
+
 # BIC / Loss Component / ILM / ORC are all computed server-side, so only the input
 # columns are sortable.
 _CAPITAL_SORTABLE = {
@@ -171,7 +246,8 @@ async def list_capital(db: DbSession, search: str | None = None,
     else:
         stmt = stmt.order_by(CapitalCalculation.created_at.desc())
     rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    return Page(items=[CapitalRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    book = await fx.load_rate_book(db)
+    return Page(items=[_capital_read(r, book) for r in rows], total=total, limit=limit, offset=offset)
 
 
 @router.post("/capital-calculations", response_model=CapitalRead, status_code=201, dependencies=[_WRITE])
@@ -182,12 +258,13 @@ async def create_capital(body: CapitalCreate, db: DbSession, user: CurrentUser) 
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="capital_calculation",
                            entity_id=obj.id, summary=f"Computed SMA capital {obj.reference} ({obj.period})")
-    return CapitalRead.model_validate(obj)
+    return _capital_read(obj, await fx.load_rate_book(db))
 
 
 @router.get("/capital-calculations/{cid}", response_model=CapitalRead, dependencies=[_READ])
 async def get_capital(cid: uuid.UUID, db: DbSession) -> CapitalRead:
-    return CapitalRead.model_validate(await _get(db, CapitalCalculation, cid, "Capital calculation"))
+    obj = await _get(db, CapitalCalculation, cid, "Capital calculation")
+    return _capital_read(obj, await fx.load_rate_book(db))
 
 
 @router.patch("/capital-calculations/{cid}", response_model=CapitalRead, dependencies=[_WRITE])
@@ -196,14 +273,14 @@ async def update_capital(cid: uuid.UUID, body: CapitalUpdate, db: DbSession) -> 
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(obj, k, v)
     await db.flush()
-    return CapitalRead.model_validate(obj)
+    return _capital_read(obj, await fx.load_rate_book(db))
 
 
 @router.delete("/capital-calculations/{cid}", status_code=204, dependencies=[_WRITE])
 async def delete_capital(cid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, CapitalCalculation, cid, "Capital calculation")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -233,19 +310,20 @@ async def scenario_summary(db: DbSession) -> ScenarioSummary:
         .where(CapitalCalculation.deleted.is_(False))
         .order_by(CapitalCalculation.created_at.desc())
     )
-    latest_capital = (
-        CapitalSnapshot(
+    latest_capital = None
+    if latest is not None:
+        figures = _capital_read(latest, book)
+        latest_capital = CapitalSnapshot(
             reference=latest.reference,
             period=latest.period,
-            bic=latest.bic,
-            loss_component=latest.loss_component,
-            ilm=latest.ilm,
-            orc=latest.orc,
+            bucket=figures.bucket,
+            bic=figures.bic,
+            loss_component=figures.loss_component,
+            ilm=figures.ilm,
+            orc=figures.orc,
             currency=latest.currency,
+            threshold_note=figures.threshold_note,
         )
-        if latest is not None
-        else None
-    )
 
     return ScenarioSummary(
         rows=rows,

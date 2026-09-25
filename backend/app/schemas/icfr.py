@@ -3,8 +3,9 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from app.schemas.common import GraphRef
-from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
 from app.models.enums import ControlEffectiveness, ReviewFrequency
@@ -18,6 +19,8 @@ from app.models.icfr import (
     IcfrTestResult,
     IcfrTestStatus,
     IcfrTestType,
+    derive_effectiveness,
+    figures_problem,
 )
 
 
@@ -35,7 +38,12 @@ class IcfrTestBase(BaseModel):
 
 
 class IcfrTestCreate(IcfrTestBase):
-    pass
+    @model_validator(mode="after")
+    def _figures_agree(self):
+        problem = figures_problem(self.sample_size, self.exceptions_found, self.result)
+        if problem:
+            raise ValueError(problem)
+        return self
 
 
 class IcfrTestUpdate(BaseModel):
@@ -75,7 +83,6 @@ class IcfrControlBase(BaseModel):
 
 class IcfrControlCreate(IcfrControlBase):
     control_id: uuid.UUID | None = None
-    pass
 
 
 class IcfrControlUpdate(BaseModel):
@@ -97,6 +104,7 @@ class IcfrControlRead(IcfrControlBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     control_id: uuid.UUID | None = None
+    #: The linked enterprise control (id, reference, name).
     control: GraphRef | None = None
     process_id: uuid.UUID
     reference: str
@@ -104,6 +112,20 @@ class IcfrControlRead(IcfrControlBase):
     latest_result: IcfrTestResult | None = None
     created_at: datetime
     tests: list[IcfrTestRead] = []
+    #: Where each rating comes from: "tests" (the latest conclusive test of that kind),
+    #: "design" (operating capped because the design is ineffective) or "manual"
+    #: (entered by hand; no conclusive test yet). See ``models.icfr.derive_effectiveness``.
+    design_basis: str = "manual"
+    operating_basis: str = "manual"
+
+    @model_validator(mode="after")
+    def _derive(self):
+        # Ratings are read from the tests every time, so a record saved before ratings
+        # were derived still shows what its tests say.
+        design, operating, self.design_basis, self.operating_basis = derive_effectiveness(
+            self.tests, self.design_effectiveness, self.operating_effectiveness)
+        self.design_effectiveness, self.operating_effectiveness = design, operating
+        return self
 
 
 # --------------------------------------------------------------------- processes ---

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -117,7 +117,7 @@ async def update_dpia(did: uuid.UUID, body: DpiaUpdate, db: DbSession) -> DpiaRe
 async def delete_dpia(did: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, Dpia, did, "DPIA")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -195,7 +195,7 @@ async def update_dsar(did: uuid.UUID, body: DsarUpdate, db: DbSession) -> DsarRe
 async def delete_dsar(did: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, Dsar, did, "DSAR")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -298,7 +298,7 @@ async def update_data_breach(bid: uuid.UUID, body: DataBreachUpdate, db: DbSessi
 async def delete_data_breach(bid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, DataBreach, bid, "Data breach")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -356,7 +356,7 @@ async def update_consent_record(cid: uuid.UUID, body: ConsentRecordUpdate, db: D
 async def delete_consent_record(cid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, ConsentRecord, cid, "Consent record")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 

@@ -32,6 +32,9 @@ CUSTOM_FIELD_MODELS = [
     "audit_plan", "audit_program",
     "process", "legal",
     "evidence", "connector",
+    # Registers verification found without custom fields.
+    "aml_risk_assessment", "suspicious_activity_report", "screening_case",
+    "fraud_risk", "fraud_case", "dpia", "dsar", "consent_record", "auditable_unit",
 ]
 
 # Custom-field keys that are not themselves entity types: the record's permissions,

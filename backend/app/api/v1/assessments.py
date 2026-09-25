@@ -472,6 +472,9 @@ async def _read(db, obj: Assessment, user=None) -> AssessmentRead:
     for answer in read.answers:
         answer.files = [FileRef.model_validate(f) for f in files.get(answer.id, [])]
     read.active_links = await _active_links(db, obj.id)
+    if getattr(obj.status, "value", obj.status) in _EDITABLE_IN_APP:
+        reopened = _reopened(obj)
+        read.reopened_question_ids = sorted(reopened) if reopened is not None else None
     if getattr(obj.status, "value", obj.status) == VendorAssessmentStatus.submitted.value:
         read.review_blocked_reason = await _review_block(db, obj, user)
     return read
@@ -617,6 +620,9 @@ async def update_assessment(aid: uuid.UUID, body: AssessmentUpdate, db: DbSessio
 async def _submit(db, assessment: Assessment, actor, *, submitted_by: str) -> Assessment:
     """Shared by the app and the portal: required answers, score + band, flagged findings,
     tiering, audit and a notification to the sender and reviewer."""
+    unchanged = wf.returned_refusal(assessment)
+    if unchanged is not None:
+        raise _http(unchanged)
     files = await _file_map(db, [a.id for a in assessment.answers])
     counts = {k: len(v) for k, v in files.items()}
     spec, values, result = wf.evaluate(assessment, counts)
@@ -667,11 +673,10 @@ async def submit_answers(aid: uuid.UUID, body: SubmitAnswers, db: DbSession, use
         raise HTTPException(status_code=409, detail=(
             f"The assessment is {state.replace('_', ' ')}; answers can't change now. "
             "Return answers to the respondent to reopen them."))
-    returned = {a.question_id for a in assessment.answers if a.review_state == REVIEW_RETURNED}
     try:
         new_rows, _changed = wf.upsert_answers(
             assessment, body.answers, tenant_id=user.tenant_id, answered_by=user.email,
-            only_questions=returned if (returned and assessment.submitted_at) else None,
+            only_questions=_reopened(assessment),
         )
     except wf.WorkflowError as exc:
         raise _http(exc) from exc
@@ -1090,7 +1095,10 @@ async def _attach(db, assessment: Assessment, question_id: uuid.UUID, file: Uplo
         db.add(answer)
         await db.flush()
     elif answer.review_state in (REVIEW_RETURNED, REVIEW_ACCEPTED):
+        # New evidence is a change to the answer: back to the reviewer, stamped so the
+        # returned round still counts it as revised.
         answer.review_state = REVIEW_PENDING
+        answer.answered_by, answer.answered_at = uploaded_by[:255], datetime.now(timezone.utc)
     existing = (await _file_map(db, [answer.id])).get(answer.id, [])
     if len(existing) >= portal.MAX_FILES_PER_ANSWER:
         raise HTTPException(status_code=422, detail=f"An answer can carry up to {portal.MAX_FILES_PER_ANSWER} files.")
@@ -1158,8 +1166,8 @@ async def _open(db, token: str, request: Request, action: str) -> _Opened:
 
 
 def _reopened(assessment: Assessment) -> set[uuid.UUID] | None:
-    returned = {a.question_id for a in assessment.answers if a.review_state == REVIEW_RETURNED}
-    return returned if (returned and assessment.submitted_at) else None
+    """What the respondent may change in a returned round (``services.questionnaire_workflow``)."""
+    return wf.reopened_questions(assessment)
 
 
 async def _portal_view(db, opened: _Opened) -> PortalView:
@@ -1270,7 +1278,7 @@ async def portal_upload(token: str, question_id: uuid.UUID, request: Request, fi
         _require_editable(a)
         reopened = _reopened(a)
         if reopened is not None and question_id not in reopened:
-            raise HTTPException(status_code=409, detail="Only the answers the reviewer returned can be changed now.")
+            raise HTTPException(status_code=409, detail=wf.REOPENED_ONLY)
         actor = portal.portal_actor(a.tenant_id, opened.link)
         sf = await _attach(db, a, question_id, file, uploaded_by=actor.email)
         if getattr(a.status, "value", a.status) == "sent":
@@ -1297,8 +1305,12 @@ async def portal_delete_file(token: str, file_id: uuid.UUID, request: Request) -
             raise HTTPException(status_code=404, detail="File not found")
         reopened = _reopened(a)
         if reopened is not None and answer.question_id not in reopened:
-            raise HTTPException(status_code=409, detail="Only the answers the reviewer returned can be changed now.")
+            raise HTTPException(status_code=409, detail=wf.REOPENED_ONLY)
         actor = portal.portal_actor(a.tenant_id, opened.link)
+        if answer.review_state == REVIEW_RETURNED:
+            # Removing the evidence the reviewer questioned is a change to the answer too.
+            answer.review_state = REVIEW_PENDING
+            answer.answered_by, answer.answered_at = actor.email[:255], datetime.now(timezone.utc)
         await db.delete(sf)
         storage.delete_object(sf.storage_key)
         await audit.record(db, actor=actor, action="respond_delete_file", entity_type="assessment", entity_id=a.id,

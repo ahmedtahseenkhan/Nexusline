@@ -7,6 +7,7 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import FormModal from "@/components/FormModal";
 import CustomFieldsPanel from "@/components/CustomFieldsPanel";
 import { useCustomFieldForm } from "@/components/useCustomFieldForm";
@@ -158,7 +159,7 @@ function AwarenessInner() {
   }
 
   async function removeProgram(id: string, ref: string) {
-    if (!(await confirmDialog({ title: `Delete program ${ref}?`, message: "This removes its quiz and training records.", danger: true }))) return;
+    if (!(await confirmDialog({ title: `Delete program ${ref}?`, message: "The program is archived with its quiz and training records kept, and leaves the register. You can restore it from Archived.", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/awareness-programs/${id}`);
@@ -333,6 +334,7 @@ function AwarenessInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<ProgramRow>
+        toolbarRight={<ArchivedRecords entityType="awareness_program" noun="awareness programs" onRestored={reload} refreshKey={refreshKey} />}
         columns={columns}
         fetcher={fetchPrograms}
         rowKey={(p) => p.id}

@@ -74,6 +74,8 @@ type BiaAssessment = {
   rto_band: string;
   created_at: string;
   dependencies: BiaDependency[];
+  /** Continuity plans justified by this BIA (the link is set on the plan). */
+  continuity_plans?: GraphRef[];
 };
 
 type BiaSummary = {
@@ -547,6 +549,9 @@ function BiaInner() {
 
             <div style={{ marginBottom: 16 }}>
               <RelatedChips label="Business process" items={detail.process ? [detail.process] : undefined} href="/processes" />
+              <div style={{ marginTop: 10 }}>
+                <RelatedChips label="Continuity plans" items={detail.continuity_plans} href="/continuity" format="ref-name" />
+              </div>
             </div>
 
             <strong>Dependencies</strong>

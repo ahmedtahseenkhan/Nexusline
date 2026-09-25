@@ -106,6 +106,7 @@ type PolicyDetail = Policy & {
   projects?: PolicyLink[];
   goals?: PolicyLink[];
   processing_activities?: PolicyLink[];
+  obligations?: PolicyLink[];
 };
 
 type FormState = {
@@ -669,6 +670,7 @@ function PoliciesInner() {
     { key: "projects", label: "Projects", items: detail.projects, href: "/projects" },
     { key: "goals", label: "Goals", items: detail.goals, href: "/goals" },
     { key: "processing", label: "Processing activities", items: detail.processing_activities, href: "/privacy" },
+    { key: "obligations", label: "Regulatory obligations", items: detail.obligations, href: (x) => `/regulatory-change?obligation=${x.id}` },
   ] : [];
 
   return (

@@ -28,15 +28,17 @@ import base64
 import csv
 import io
 import uuid
-from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import selectinload
+
+from app.core import db_errors
 
 from app.core.deps import CurrentUser, DbSession
 from app.models.custom_field import CUSTOM_FIELD_MODELS, CustomField, CustomFieldValue
-from app.models.enums import CustomFieldType
 from app.models.import_profile import ImportProfile
 from app.schemas.dataio import (
     ImportError as RowError,
@@ -55,8 +57,18 @@ from app.schemas.dataio import (
     PreviewRow,
 )
 from app.services import audit as audit_log
-from app.services import csv_io, import_mapping, ref_fields, xlsx_io
-from app.services.import_registry import REGISTRY, Column, LinkSpec, ResourceIO
+from app.services import modules as module_service
+from app.services import csv_io, custom_field_values, import_mapping, ref_fields, webhooks, xlsx_io
+from app.services.import_registry import (
+    REGISTRY,
+    VIA_COLUMN,
+    VIA_JOIN,
+    Column,
+    ImportGate,
+    LinkSpec,
+    ResourceIO,
+    import_gate,
+)
 
 router = APIRouter(prefix="/io", tags=["data-io"])
 
@@ -100,14 +112,19 @@ def _column_payload(col: Column) -> dict:
     }
 
 
-def _ref_label(obj: object, match_field: str) -> str:
+def _ref_label(obj: object, match_field: str, link: LinkSpec | None = None,
+               shared: frozenset[str] = frozenset()) -> str:
     """Render a linked object as a human reference for export.
 
-    Prefer the object's ``reference`` (when present and non-empty), else fall
-    back to the configured ``match_field`` (``name``/``title``).
+    Prefer the link's own ``label`` renderer, then the object's ``reference`` (when
+    present, non-empty and not ``shared`` by another live record — a shared reference
+    would resolve to the wrong one on re-import), else the configured ``match_field``
+    (``name``/``title``).
     """
+    if link is not None and link.label is not None:
+        return link.label(obj)
     ref = getattr(obj, "reference", "") or ""
-    if ref:
+    if ref and ref.strip().lower() not in shared:
         return str(ref)
     value = getattr(obj, match_field, None)
     if value:
@@ -120,31 +137,61 @@ def _ref_label(obj: object, match_field: str) -> str:
     return str(getattr(obj, "id", ""))
 
 
+#: Index value for a key that names more than one record.
+_AMBIGUOUS = object()
+
+
+def _index_key(key: str) -> str:
+    return " ".join(key.split()).lower()
+
+
+def _scoped(stmt, model: type, link: LinkSpec):
+    if hasattr(model, "deleted"):
+        stmt = stmt.where(model.deleted.is_(False))
+    for attr, value in link.scope:
+        stmt = stmt.where(getattr(model, attr) == value)
+    return stmt
+
+
 async def _build_ref_index(db: DbSession, link: LinkSpec) -> dict[str, object]:
     """Preload one ``reference/name/title`` -> id map for a link target.
 
-    Built once per import (per distinct target) to avoid per-row queries. Keys
-    are lower-cased and stripped for case-insensitive matching; both the
-    ``reference`` (if the model has one) and the ``match_field`` are indexed.
+    Built once per import (per distinct target and scope) to avoid per-row queries.
+    Keys are lower-cased with whitespace collapsed, for case-insensitive matching. The
+    ``reference`` (if the model has one) wins over every other key; then the
+    ``match_field``, the link's ``label`` and any ``also_match`` attributes. A key two
+    different records answer to maps to ``_AMBIGUOUS``: guessing one of them would link
+    the wrong record without anyone noticing.
     """
     model = link.target_model
-    stmt = select(model)
-    if hasattr(model, "deleted"):
-        stmt = stmt.where(model.deleted.is_(False))
-    rows = (await db.scalars(stmt)).all()
+    attrs = [a for a in dict.fromkeys(("reference", link.match_field, *link.also_match)) if hasattr(model, a)]
+    objects = (await db.scalars(_scoped(select(model), model, link))).all()
+    rows = [
+        {"id": o.id, **{a: getattr(o, a, None) for a in attrs},
+         "_label": link.label(o) if link.label is not None else None}
+        for o in objects
+    ]
 
-    index: dict[str, object] = {}
-    has_reference = hasattr(model, "reference")
-    for obj in rows:
-        obj_id = getattr(obj, "id")
-        if has_reference:
-            ref = getattr(obj, "reference", "") or ""
-            if ref:
-                index.setdefault(ref.strip().lower(), obj_id)
-        label = getattr(obj, link.match_field, None)
-        if label:
-            index.setdefault(str(label).strip().lower(), obj_id)
-    return index
+    def add(index: dict[str, object], key: object, obj_id: object) -> None:
+        text = _index_key(str(key or ""))
+        if not text:
+            return
+        seen = index.get(text)
+        index[text] = obj_id if seen is None or seen == obj_id else _AMBIGUOUS
+
+    refs: dict[str, object] = {}
+    names: dict[str, object] = {}
+    for row in rows:
+        add(refs, row.get("reference"), row["id"])
+        for attr in (link.match_field, *link.also_match, "_label"):
+            add(names, row.get(attr), row["id"])
+    return {**names, **refs}
+
+
+def _index_name(link: LinkSpec) -> str:
+    """One index per target model and scope (a country list is not the regulator list)."""
+    scope = ",".join(f"{attr}={getattr(value, 'value', value)}" for attr, value in link.scope)
+    return f"{link.target_model.__name__}[{scope}]" if scope else link.target_model.__name__
 
 
 def _split_tokens(raw: str) -> list[str]:
@@ -165,8 +212,10 @@ async def list_resources(user: CurrentUser) -> list[dict]:
     """Menu of every registered resource (drives the import/export UI).
 
     Only requires authentication; per-resource access is enforced on the
-    resource-specific endpoints.
+    resource-specific endpoints. A register whose module is not licensed, or that the
+    organisation has switched off, is left out of the menu (its endpoints refuse it).
     """
+    usable = await module_service.usable_modules(user.tenant_id)
     return [
         {
             "resource": res.resource,
@@ -176,6 +225,7 @@ async def list_resources(user: CurrentUser) -> list[dict]:
             "read_perm": res.read_perm,
         }
         for res in REGISTRY.values()
+        if (module := module_service.module_for_permission(res.read_perm)) is None or module in usable
     ]
 
 
@@ -191,7 +241,7 @@ async def get_schema(resource: str, user: CurrentUser) -> dict:
         # Empty when this register has no custom fields — the wizard then omits the
         # "keep this column as a custom field" option rather than offering a dead end.
         "custom_field_model": model_key if model_key in CUSTOM_FIELD_MODELS else "",
-        "columns": [_column_payload(c) for c in res.columns],
+        "columns": [_column_payload(c) for c in res.all_columns],
     }
 
 
@@ -222,12 +272,25 @@ async def get_template(
     res = _get_resource(resource)
     _require_perm(user, res.read_perm)
     custom = await _custom_columns(db, res)
-    columns = [*res.columns, *(col for col, _ in custom)]
+    columns = [*res.all_columns, *(col for col, _ in custom)]
     examples = csv_io.example_row(columns)
+    # A required link has no sensible placeholder, so its example names a real record
+    # (the first one, alphabetically) when the organisation has one: the template's own
+    # example row then previews clean, as the wizard's first check of the file.
+    for col in columns:
+        if col.required and col.link is not None and not examples.get(col.header):
+            examples[col.header] = await _example_reference(db, col.link)
     # The CSV template carries its example as a row; the workbook keeps the data sheet
     # clean (a forgotten example row would import) and shows examples on its Guide.
     rows = [] if format == "xlsx" else [examples]
     return _file_payload(res, "template", format, columns, rows, examples)
+
+
+async def _example_reference(db: DbSession, link: LinkSpec) -> str:
+    model = link.target_model
+    stmt = _scoped(select(model), model, link).order_by(getattr(model, link.match_field)).limit(1)
+    first = await db.scalar(stmt)
+    return _ref_label(first, link.match_field, link) if first is not None else ""
 
 
 @router.get("/{resource}/export")
@@ -244,25 +307,41 @@ async def export_resource(
     # Discriminator-backed resources export only their own register's rows.
     for attr, value in res.fixed.items():
         stmt = stmt.where(getattr(model, attr) == value)
-    # Eager-load every exportable link relationship so rendering avoids lazy IO.
+    if res.export_where is not None:
+        stmt = stmt.where(*res.export_where())
+    # Eager-load every relationship a link column reads so rendering avoids lazy IO.
     options = []
-    for col in res.columns:
+    for col in res.all_columns:
         link = col.link
-        if link is not None and link.exportable and _is_relationship(model, link.export_attr):
-            options.append(selectinload(getattr(model, link.export_attr)))
+        if link is not None and link.exportable and col.export_batch is None:
+            first = link.export_attr.split(".")[0]
+            if _is_relationship(model, first):
+                options.append(selectinload(getattr(model, first)))
     if options:
         stmt = stmt.options(*options)
 
     records = (await db.scalars(stmt)).all()
+    linked = await _prefetch_links(db, res, records)
+    shared = await _shared_references(db, res)
+    batches = {
+        col.header: await col.export_batch(db, list(records))
+        for col in res.all_columns if col.export_batch is not None
+    }
     custom = await _custom_columns(db, res)
     values = await _custom_values(db, custom, [obj.id for obj in records])
 
     rows: list[dict] = []
     for obj in records:
         row: dict[str, object] = {}
-        for col in res.columns:
-            if col.link is not None:
-                row[col.header] = _export_link(obj, col.link)
+        for col in res.all_columns:
+            if col.export_batch is not None:
+                row[col.header] = batches[col.header].get(obj.id, "")
+            elif col.export_value is not None:
+                row[col.header] = col.export_value(obj)
+            elif col.link is not None:
+                row[col.header] = _export_link(
+                    obj, col.link, linked.get(col.header), shared.get(col.link.target_model, frozenset())
+                )
             else:
                 row[col.header] = getattr(obj, col.field, None)
         for col, cf in custom:
@@ -270,21 +349,78 @@ async def export_resource(
             row[col.header] = _typed_custom(col, raw) if format == "xlsx" else raw
         rows.append(row)
 
-    columns = [*res.columns, *(col for col, _ in custom)]
+    columns = [*res.all_columns, *(col for col, _ in custom)]
     return _file_payload(res, "export", format, columns, rows)
+
+
+async def _prefetch_links(
+    db: DbSession, res: ResourceIO, records: list
+) -> dict[str, dict[object, list]]:
+    """Linked targets of every ``column`` / ``join`` link, per record id, in one query per
+    link — for links the model has no relationship to read."""
+    out: dict[str, dict[object, list]] = {}
+    ids = [obj.id for obj in records]
+    for col in res.all_columns:
+        link = col.link
+        if link is None or link.exportable or col.export_batch is not None or not ids:
+            continue
+        target = link.target_model
+        pairs: list[tuple[object, object]] = []
+        if link.via == VIA_COLUMN:
+            pairs = [(obj.id, getattr(obj, link.create_field, None)) for obj in records]
+            pairs = [(rid, tid) for rid, tid in pairs if tid is not None]
+        elif link.via == VIA_JOIN:
+            table, own, other = _join_columns(res.model, target)
+            pairs = list((await db.execute(select(own, other).where(own.in_(ids)))).all())
+        target_ids = {tid for _, tid in pairs}
+        found = {}
+        if target_ids:
+            rows = (await db.scalars(_scoped(select(target), target, link).where(target.id.in_(target_ids)))).all()
+            found = {t.id: t for t in rows}
+        per_record: dict[object, list] = {}
+        for rid, tid in pairs:
+            if tid in found:
+                per_record.setdefault(rid, []).append(found[tid])
+        out[col.header] = per_record
+    return out
+
+
+def _join_columns(model: type, target: type):
+    """(table, column naming ``model``, column naming ``target``) of the join table behind
+    ``target``'s relationship back to ``model`` (``Asset.legals`` for Legal's assets)."""
+    for rel in target.__mapper__.relationships:
+        if rel.mapper.class_ is model and rel.secondary is not None:
+            table = rel.secondary
+            own = next(c for c in table.c if any(fk.column.table is model.__table__ for fk in c.foreign_keys))
+            other = next(c for c in table.c if any(fk.column.table is target.__table__ for fk in c.foreign_keys))
+            return table, own, other
+    raise LookupError(f"No join table links {target.__name__} back to {model.__name__}")
+
+
+async def _shared_references(db: DbSession, res: ResourceIO) -> dict[type, frozenset[str]]:
+    """Per linked model, the references more than one live record carries. An export
+    names those records by name/title instead, so the cell resolves back to the same
+    record on import."""
+    from sqlalchemy import func
+
+    out: dict[type, frozenset[str]] = {}
+    for col in res.all_columns:
+        target = col.link.target_model if col.link is not None else None
+        if target is None or target in out or not hasattr(target, "reference"):
+            continue
+        stmt = select(func.lower(func.trim(target.reference))).where(target.reference != "")
+        if hasattr(target, "deleted"):
+            stmt = stmt.where(target.deleted.is_(False))
+        stmt = stmt.group_by(func.lower(func.trim(target.reference))).having(func.count() > 1)
+        out[target] = frozenset((await db.scalars(stmt)).all())
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Custom fields as spreadsheet columns
 # ---------------------------------------------------------------------------
-_CF_KIND = {
-    CustomFieldType.text: "text",
-    CustomFieldType.textarea: "text",
-    CustomFieldType.number: "float",
-    CustomFieldType.date: "date",
-    CustomFieldType.checkbox: "bool",
-    CustomFieldType.select: "enum",
-}
+#: Custom-field type -> column kind: the record form's own rule set.
+_CF_KIND = custom_field_values.KIND
 
 
 def _norm_header(text: str) -> str:
@@ -308,7 +444,7 @@ async def _custom_columns(db: DbSession, res: ResourceIO) -> list[tuple[Column, 
             .order_by(CustomField.order_index, CustomField.label)
         )
     ).all()
-    taken = {_norm_header(c.header) for c in res.columns}
+    taken = {_norm_header(c.header) for c in res.all_columns}
     out: list[tuple[Column, CustomField]] = []
     for cf in fields:
         label = cf.label.strip()
@@ -318,7 +454,7 @@ async def _custom_columns(db: DbSession, res: ResourceIO) -> list[tuple[Column, 
             header = f"{label} (custom)" if n == 1 else f"{label} (custom {n})"
             n += 1
         taken.add(_norm_header(header))
-        options = [o.strip() for o in (cf.options or "").splitlines() if o.strip()]
+        options = custom_field_values.options_of(cf)
         kind = _CF_KIND.get(cf.field_type, "text")
         out.append((
             Column(
@@ -362,30 +498,17 @@ def _typed_custom(col: Column, raw: str) -> object:
 def _custom_cell(col: Column, raw: str | None) -> str:
     """Validate one imported custom-field cell and return the value to store.
 
-    Checkbox values normalise to ``true``/``false``, dates to ISO, select values to the
-    option's own spelling (case-insensitive). Raises ``ValueError`` naming the column.
+    The record form's value rules (``services.custom_field_values``): checkbox values
+    normalise to ``true``/``false``, dates to ISO, select values to the option's own
+    spelling (case-insensitive), numbers must be finite. A blank cell stays blank even
+    for a required field: records that predate the field being made required export
+    blank, and must still import (the record page asks for the value). Raises
+    ``ValueError`` naming the column.
     """
-    text = (raw or "").strip()
-    if not text:
-        return ""
     try:
-        if col.kind == "enum":
-            match = next(
-                (o for o in col.enum_values or [] if o.casefold() == text.casefold()), None
-            )
-            if match is None:
-                raise ValueError(
-                    f"'{text}' is not a valid option (allowed: {', '.join(col.enum_values or [])})"
-                )
-            return match
-        value = csv_io.coerce(text, col.kind)
+        return custom_field_values.normalise(col.kind, raw, col.enum_values)
     except ValueError as exc:
         raise ValueError(f"{col.header}: {exc}") from exc
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, date):
-        return value.isoformat()
-    return text
 
 
 def _is_relationship(model: type, attr: str) -> bool:
@@ -396,20 +519,37 @@ def _is_relationship(model: type, attr: str) -> bool:
         return False
 
 
-def _export_link(obj: object, link: LinkSpec) -> str:
+def _export_link(
+    obj: object, link: LinkSpec, prefetched: dict[object, list] | None = None,
+    shared: frozenset[str] = frozenset(),
+) -> str:
     """Render a record's linked object(s) as a CSV cell.
 
-    Import-only links (``exportable=False``) have no model relationship to read,
-    so the cell is left blank; the header is still emitted for round-trip symmetry.
+    A relationship link reads ``export_attr`` (a dotted path steps through one more
+    relationship per segment); a ``column`` / ``join`` link reads what
+    :func:`_prefetch_links` loaded. Archived targets are left out: the importer cannot
+    link them, so exporting them would only make the file fail on the way back in.
     """
-    if not link.exportable:
-        return ""
-    related = getattr(obj, link.export_attr, None)
-    if related is None:
-        return ""
-    if link.multi:
-        return ", ".join(_ref_label(item, link.match_field) for item in related)
-    return _ref_label(related, link.match_field)
+    if link.exportable:
+        related: list = [obj]
+        for attr in link.export_attr.split("."):
+            step: list = []
+            for item in related:
+                value = getattr(item, attr, None)
+                if value is None:
+                    continue
+                step.extend(value if isinstance(value, (list, tuple, set)) else [value])
+            related = step
+    else:
+        related = list((prefetched or {}).get(getattr(obj, "id", None), []))
+    live = [item for item in related if not getattr(item, "deleted", False) and _in_scope(item, link)]
+    # Sorted, so the same links always export as the same cell.
+    labels = sorted(dict.fromkeys(_ref_label(item, link.match_field, link, shared) for item in live))
+    return ", ".join(labels) if link.multi else (labels[0] if labels else "")
+
+
+def _in_scope(item: object, link: LinkSpec) -> bool:
+    return all(getattr(item, attr, None) == value for attr, value in link.scope)
 
 
 @router.post("/{resource}/import")
@@ -420,10 +560,11 @@ async def import_resource(
     _require_perm(user, res.write_perm)
     _require_importable(res)
 
-    header_by_field = {c.header: c for c in res.columns}
+    header_by_field = {c.header: c for c in res.all_columns}
     mapping = _validated_mapping(res, body.mapping)
     custom_fields = await _validated_custom_fields(db, res, body.custom_field_mapping)
     link_indexes = await _link_indexes(db, res)
+    gate = await import_gate(db, res, user)
 
     reader = csv.DictReader(io.StringIO(body.content))
     errors: list[RowError] = []
@@ -436,24 +577,22 @@ async def import_resource(
         total += 1
         try:
             source_row = dict(raw_row)
-            canonical = import_mapping.apply_mapping(source_row, mapping) if mapping else source_row
-            payload = _row_to_payload(canonical, header_by_field, link_indexes)
-            # Discriminators are the resource's identity, not per-row data: stamp them
-            # last so a stray CSV column can never route rows into the wrong register.
-            payload.update(res.fixed)
+            payload, row_warnings = _row_payload(res, source_row, mapping, header_by_field, link_indexes, gate)
             obj = res.create_schema(**payload)
             # Custom cells are validated before anything is written, and written inside
             # the row's own savepoint, so a bad value never leaves a half-imported row.
             custom_values = _custom_cells(source_row, custom_fields)
-            with ref_fields.collect_warnings() as row_warnings:
+            with ref_fields.collect_warnings() as ref_warnings:
                 async with db.begin_nested():
                     record = await res.create_func(body=obj, db=db, user=user)
                     if custom_values:
                         _write_custom_values(db, user, record, custom_values)
+                        await db.flush()
             created += 1
-            warnings.extend(RowError(row=row_no, message=m) for m in row_warnings)
+            warnings.extend(RowError(row=row_no, message=m) for m in [*row_warnings, *ref_warnings])
         except Exception as exc:  # noqa: BLE001 - row isolation: report & continue
-            errors.append(RowError(row=row_no, message=_clean_message(exc)))
+            errors.append(RowError(row=row_no, message=_clean_message(exc, res)))
+            await _reload_expired(db)
 
     await db.flush()
     # A bulk load is the largest single write a user can make; record it as one event so
@@ -473,6 +612,52 @@ async def import_resource(
     return ImportResult(
         total=total, created=created, skipped=total - created, errors=errors, warnings=warnings
     )
+
+
+async def _reload_expired(db: DbSession) -> None:
+    """Reload what a rolled-back row savepoint expired.
+
+    Rolling back a savepoint expires every record the row touched — the risks and
+    controls it linked to, through their back-references. Under asyncio an expired
+    attribute cannot load itself on access, so the *next* row that linked the same
+    record failed with an unrelated "greenlet_spawn" error. Reloading them here keeps
+    every row independent of the one before it."""
+    stale = [
+        (state.obj(), set(state.expired_attributes))
+        for state in db.sync_session.identity_map.all_states()
+        if state.expired or state.expired_attributes
+    ]
+    for obj, names in stale:
+        if obj is None:
+            continue
+        try:
+            # Named explicitly so lazy relationships (a role's permissions) load too.
+            await db.refresh(obj, attribute_names=sorted(names) or None)
+        except Exception:  # noqa: BLE001 - gone with the savepoint: forget it instead
+            db.expunge(obj)
+
+
+def _row_payload(
+    res: ResourceIO,
+    source_row: dict[str, str | None],
+    mapping: dict[str, str],
+    header_by_field: dict[str, Column],
+    link_indexes: dict[str, dict[str, object]],
+    gate: ImportGate,
+) -> tuple[dict, list[str]]:
+    """One row as Create-schema kwargs, plus its warnings — shared by preview and import
+    so both take the same decision on every row."""
+    canonical = import_mapping.apply_mapping(source_row, mapping) if mapping else source_row
+    warnings: list[str] = []
+    payload = _row_to_payload(canonical, header_by_field, link_indexes, warnings)
+    # Discriminators are the resource's identity, not per-row data: stamp them
+    # last so a stray CSV column can never route rows into the wrong register.
+    payload.update(res.fixed)
+    if res.prepare is not None:
+        warnings.extend(res.prepare(payload))
+    # A status only a workflow action reaches enters at its initial state (StateRule).
+    warnings.extend(gate.apply(payload))
+    return payload, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +698,7 @@ async def inspect_upload(
         )
 
     suggestions, unmapped, unfilled = import_mapping.suggest_mapping(
-        table.headers, res.columns, resource=res.resource
+        table.headers, res.all_columns, resource=res.resource
     )
     # A heading that names a custom field exactly (as our template and export write
     # it) goes to that field, ahead of any fuzzy guess at a built-in one.
@@ -532,8 +717,8 @@ async def inspect_upload(
             CustomFieldSuggestionRead(source=header, custom_field_id=hit[1].id, label=hit[1].label)
         )
     mapped_headers = {s.target for s in suggestions}
-    unfilled = [c.header for c in res.columns if c.header not in mapped_headers]
-    missing_required = [c.header for c in res.columns if c.required and c.header not in mapped_headers]
+    unfilled = [c.header for c in res.all_columns if c.header not in mapped_headers]
+    missing_required = [c.header for c in res.all_columns if c.required and c.header not in mapped_headers]
 
     return InspectResponse(
         csv=table.csv,
@@ -557,24 +742,38 @@ async def inspect_upload(
     )
 
 
+#: Session key under which ``services.webhooks`` queues deliveries until commit.
+_WEBHOOK_QUEUE = webhooks._PENDING
+
+
+class _DryRun(Exception):
+    """Raised inside a preview row's savepoint to roll back what the row wrote."""
+
+
 @router.post("/{resource}/preview", response_model=PreviewResponse)
 async def preview_import(
     resource: str, body: PreviewRequest, db: DbSession, user: CurrentUser
 ) -> PreviewResponse:
     """Dry-run a mapping over the first N rows. **Writes nothing.**
 
-    Runs the exact same coercion, link resolution and schema validation the real import
-    runs, so an error here is an error there — including the most common one, a
-    reference naming a record that does not exist yet.
+    Each row goes through exactly what the import does — coercion, link resolution,
+    the workflow-state gate, schema validation *and the module's own create function*
+    (so its business rules, such as a risk leaving Draft only with an owner) — inside
+    a savepoint that is then rolled back. So an error or warning here is the error or
+    warning the import will report for that row.
     """
     res = _get_resource(resource)
     _require_perm(user, res.write_perm)
     _require_importable(res)
 
-    header_by_field = {c.header: c for c in res.columns}
+    header_by_field = {c.header: c for c in res.all_columns}
     mapping = _validated_mapping(res, body.mapping)
     custom_fields = await _validated_custom_fields(db, res, body.custom_field_mapping)
     link_indexes = await _link_indexes(db, res)
+    gate = await import_gate(db, res, user)
+    # A create queues its webhooks for delivery on commit; the dry run's must not go out.
+    queued = db.info.get(_WEBHOOK_QUEUE)
+    queued_before = list(queued) if queued is not None else None
 
     all_rows = list(csv.DictReader(io.StringIO(body.content)))
     rows: list[PreviewRow] = []
@@ -586,17 +785,35 @@ async def preview_import(
         for source, (col, _) in custom_fields.items():
             values[col.header] = source_row.get(source) or ""
         error = ""
+        row_warnings: list[str] = []
         try:
-            payload = _row_to_payload(canonical, header_by_field, link_indexes)
-            payload.update(res.fixed)
-            res.create_schema(**payload)  # validation only — never persisted
-            _custom_cells(source_row, custom_fields)
+            payload, row_warnings = _row_payload(res, source_row, mapping, header_by_field, link_indexes, gate)
+            obj = res.create_schema(**payload)
+            custom_values = _custom_cells(source_row, custom_fields)
+            with ref_fields.collect_warnings() as ref_warnings:
+                try:
+                    async with db.begin_nested():
+                        record = await res.create_func(body=obj, db=db, user=user)
+                        if custom_values:
+                            _write_custom_values(db, user, record, custom_values)
+                        await db.flush()
+                        raise _DryRun
+                except _DryRun:
+                    pass
+            row_warnings = [*row_warnings, *ref_warnings]
             valid += 1
         except Exception as exc:  # noqa: BLE001 - surface, do not raise
-            error = _clean_message(exc)
-        rows.append(PreviewRow(row=offset + 2, values=values, error=error))
+            error = _clean_message(exc, res)
+            row_warnings = []
+        await _reload_expired(db)
+        rows.append(PreviewRow(row=offset + 2, values=values, error=error, warnings=row_warnings))
 
-    headers = [*(c.header for c in res.columns), *(col.header for col, _ in custom_fields.values())]
+    if queued_before is None:
+        db.info.pop(_WEBHOOK_QUEUE, None)
+    else:
+        db.info[_WEBHOOK_QUEUE] = queued_before
+
+    headers = [*(c.header for c in res.all_columns), *(col.header for col, _ in custom_fields.values())]
     populated = [h for h in dict.fromkeys(headers) if any(h in r.values for r in rows)]
     return PreviewResponse(
         total=len(all_rows), previewed=len(rows), valid=valid, rows=rows, columns=populated
@@ -697,7 +914,7 @@ def _validated_mapping(res: ResourceIO, mapping: dict[str, str]) -> dict[str, st
     columns onto the same field — both would otherwise fail silently per row."""
     if not mapping:
         return {}
-    known = {c.header for c in res.columns}
+    known = {c.header for c in res.all_columns}
     cleaned = {source: target for source, target in mapping.items() if target}
 
     unknown = sorted(set(cleaned.values()) - known)
@@ -781,11 +998,11 @@ def _custom_cells(
 
 
 async def _link_indexes(db: DbSession, res: ResourceIO) -> dict[str, dict[str, object]]:
-    """One reference index per distinct link target (avoids per-row queries)."""
+    """One reference index per distinct link target and scope (avoids per-row queries)."""
     indexes: dict[str, dict[str, object]] = {}
-    for col in res.columns:
+    for col in res.all_columns:
         if col.link is not None:
-            key = col.link.target_model.__name__
+            key = _index_name(col.link)
             if key not in indexes:
                 indexes[key] = await _build_ref_index(db, col.link)
     return indexes
@@ -820,8 +1037,11 @@ def _row_to_payload(
     raw_row: dict[str, str | None],
     header_by_field: dict[str, Column],
     link_indexes: dict[str, dict[str, object]],
+    warnings: list[str] | None = None,
 ) -> dict:
-    """Map a CSV row dict to a Create-schema kwargs dict (typed & link-resolved)."""
+    """Map a CSV row dict to a Create-schema kwargs dict (typed & link-resolved).
+
+    ``warnings`` collects what a lenient link had to skip."""
     payload: dict[str, object] = {}
     for header, raw_value in raw_row.items():
         if header is None:
@@ -830,8 +1050,19 @@ def _row_to_payload(
         if col is None:
             continue  # ignore unknown/extra columns
 
+        if col.parse is not None:
+            text = (raw_value or "").strip()
+            if text:
+                if col.link is not None:
+                    payload[col.field] = col.parse(
+                        text, lambda token, c=col: _lookup_token(token, c, link_indexes)
+                    )
+                else:
+                    payload[col.field] = col.parse(text)
+            continue
+
         if col.link is not None:
-            resolved = _resolve_link(raw_value, col, link_indexes)
+            resolved = _resolve_link(raw_value, col, link_indexes, warnings)
             if resolved is not None:
                 payload[col.field] = resolved
             continue
@@ -842,35 +1073,94 @@ def _row_to_payload(
     return payload
 
 
+def _lookup_token(token: str, col: Column, link_indexes: dict[str, dict[str, object]]):
+    """The id one token names; ``ValueError`` naming the column when it names none or
+    several records."""
+    link = col.link
+    assert link is not None
+    noun = link.target_model.__name__
+    obj_id = link_indexes[_index_name(link)].get(_index_key(token))
+    if obj_id is None:
+        raise ValueError(f"{col.header}: no {noun} matching '{token.strip()}'")
+    if obj_id is _AMBIGUOUS:
+        raise ValueError(
+            f"{col.header}: '{token.strip()}' matches more than one {noun}; use its reference "
+            "or another value that names only one"
+        )
+    return obj_id
+
+
 def _resolve_link(
-    raw_value: str | None, col: Column, link_indexes: dict[str, dict[str, object]]
+    raw_value: str | None,
+    col: Column,
+    link_indexes: dict[str, dict[str, object]],
+    warnings: list[str] | None = None,
 ):
-    """Resolve a link cell to id(s); raise ValueError naming any unknown token."""
+    """Resolve a link cell to id(s); raise ValueError naming any unknown token.
+
+    A token repeated in one cell is linked once. A ``lenient`` link skips a token it
+    cannot resolve and says so in ``warnings`` instead of failing the row."""
     text = (raw_value or "").strip()
     if text == "":
         return None
     link = col.link
     assert link is not None
-    index = link_indexes[link.target_model.__name__]
-
-    def lookup(token: str):
-        obj_id = index.get(token.strip().lower())
-        if obj_id is None:
-            raise ValueError(
-                f"{col.header}: no {link.target_model.__name__} matching '{token.strip()}'"
-            )
-        return obj_id
-
+    tokens = _split_tokens(text) if link.multi else [text]
+    ids: list = []
+    for token in tokens:
+        try:
+            obj_id = _lookup_token(token, col, link_indexes)
+        except ValueError as exc:
+            if not link.lenient:
+                raise
+            if warnings is not None:
+                warnings.append(f"{exc}; left blank.")
+            continue
+        if obj_id not in ids:
+            ids.append(obj_id)
     if link.multi:
-        return [lookup(tok) for tok in _split_tokens(text)]
-    return lookup(text)
+        return ids
+    return ids[0] if ids else None
 
 
-def _clean_message(exc: Exception) -> str:
-    """Reduce an exception to one concise line (no tracebacks)."""
-    msg = str(exc).strip()
-    if not msg:
-        msg = exc.__class__.__name__
-    # Pydantic ValidationError renders multi-line; keep it terse.
-    first = " ".join(msg.splitlines())
-    return first[:500]
+def _clean_message(exc: Exception, res: ResourceIO | None = None) -> str:
+    """Reduce an exception to one concise sentence a user can act on.
+
+    Never a traceback, and never the SQL of a database refusal: an ``HTTPException``
+    gives its detail, a validation error its messages (under the spreadsheet heading of
+    the field, when ``res`` names one), a database error the plain sentence
+    ``core.db_errors`` makes of it."""
+    msg = ""
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        msg = detail if isinstance(detail, str) else "; ".join(
+            str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in (detail or [])
+        )
+    elif isinstance(exc, PydanticValidationError):
+        parts = []
+        headers = {c.field: c.header for c in res.all_columns} if res is not None else {}
+        for err in exc.errors():
+            text = str(err.get("msg", "")).removeprefix("Value error, ")
+            loc = ".".join(str(headers.get(x, x)) for x in err.get("loc", ()) if x != "__root__")
+            parts.append(f"{loc}: {text}" if loc else text)
+        msg = "; ".join(parts)
+    elif isinstance(exc, IntegrityError):
+        msg = db_errors._describe(exc)[1]
+    elif isinstance(exc, DBAPIError):
+        msg = _db_error_sentence(exc)
+    msg = (msg or str(exc)).strip() or exc.__class__.__name__
+    return " ".join(msg.splitlines())[:500]
+
+
+def _db_error_sentence(exc: DBAPIError) -> str:
+    """A database refusal other than a constraint (a value too long, a bad number)."""
+    cause = getattr(exc.orig, "__cause__", None) or exc.orig
+    kind = type(cause).__name__
+    if kind == "StringDataRightTruncationError":
+        column = getattr(cause, "column_name", None)
+        where = f" for '{column.replace('_', ' ')}'" if column else ""
+        return f"A value is longer than allowed{where}: {str(cause).splitlines()[0]}."
+    if kind in ("NumericValueOutOfRangeError", "InvalidTextRepresentationError",
+                "InvalidDatetimeFormatError", "DatetimeFieldOverflowError"):
+        return f"A value is not valid for its field: {str(cause).splitlines()[0]}."
+    return "The database refused this row: " + (str(cause).splitlines()[0] if str(cause) else kind) + "."

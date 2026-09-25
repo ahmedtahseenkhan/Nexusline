@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,11 +18,14 @@ from sqlalchemy import func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.models.enums import Criticality
 from app.models.model_risk import (
     ModelInventory,
     ModelStatus,
     ModelType,
     ModelValidation,
+    ModelValidationStatus,
+    ValidationOutcome,
 )
 from app.schemas.common import Page
 from app.schemas.model_risk import (
@@ -35,6 +38,7 @@ from app.schemas.model_risk import (
 )
 from app.services.refs import next_reference
 from app.services import audit as audit_log
+from app.services.risk_scoring import add_months
 
 router = APIRouter(tags=["model risk"])
 
@@ -151,23 +155,51 @@ async def update_model(mid: uuid.UUID, body: ModelUpdate, db: DbSession) -> Mode
 async def delete_model(mid: uuid.UUID, db: DbSession) -> None:
     obj = await _load_model(db, mid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
 # ========================================================= model validations ===
+#: Months between independent validations, by the model's materiality tier. Market
+#: practice under SR 11-7 / PRA SS1/23 / ECB TRIM, followed by SBP's model-risk
+#: expectations: the highest tiers are revalidated at least annually, medium every two
+#: years, low every three.
+VALIDATION_CYCLE_MONTHS: dict[Criticality, int] = {
+    Criticality.critical: 12,
+    Criticality.high: 12,
+    Criticality.medium: 24,
+    Criticality.low: 36,
+}
+
+#: Outcomes that approve the model for another cycle. A failed validation does not: the
+#: model is remediated and revalidated, so its due date is left where it was.
+_APPROVING_OUTCOMES = (ValidationOutcome.pass_, ValidationOutcome.pass_with_findings)
+
+
+def advance_validation_schedule(model: ModelInventory, v: ModelValidation) -> None:
+    """Move the inventory's validation dates on for a *completed* exercise.
+
+    Only the most recent exercise counts, so a back-dated entry cannot regress the
+    schedule; a planned or in-progress validation is not a validation yet. The next
+    date is recomputed from the model's tier when the outcome approves the model.
+    """
+    if v.status != ModelValidationStatus.completed or v.validation_date is None:
+        return
+    if model.last_validation_date is not None and v.validation_date < model.last_validation_date:
+        return
+    model.last_validation_date = v.validation_date
+    if v.outcome in _APPROVING_OUTCOMES:
+        months = VALIDATION_CYCLE_MONTHS.get(model.materiality, 12)
+        model.next_validation_date = add_months(v.validation_date, months)
+
+
 @router.post("/model-risk/{mid}/validations", response_model=ModelRead, status_code=201, dependencies=[_WRITE])
 async def add_validation(mid: uuid.UUID, body: ValidationCreate, db: DbSession, user: CurrentUser) -> ModelRead:
     model = await _load_model(db, mid)
     v = ModelValidation(tenant_id=user.tenant_id, model_id=mid, **body.model_dump())
     v.reference = await _next_ref(db, ModelValidation, "VAL")
     db.add(v)
-    # Advance the inventory's last-validation date only for the most recent exercise, so a
-    # back-dated validation entry can't regress the schedule.
-    if body.validation_date is not None and (
-        model.last_validation_date is None or body.validation_date >= model.last_validation_date
-    ):
-        model.last_validation_date = body.validation_date
+    advance_validation_schedule(model, v)
     await db.flush()
     return ModelRead.model_validate(await _load_model(db, mid))
 
@@ -177,6 +209,10 @@ async def update_validation(vid: uuid.UUID, body: ValidationUpdate, db: DbSessio
     obj = await _get(db, ModelValidation, vid, "Validation")
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(obj, k, v)
+    # A planned validation completed later moves the schedule on just as a new one does.
+    model = await db.get(ModelInventory, obj.model_id)
+    if model is not None:
+        advance_validation_schedule(model, obj)
     await db.flush()
     return ValidationRead.model_validate(obj)
 

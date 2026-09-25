@@ -597,6 +597,24 @@ async def create_loss_event(
             status_code=status.HTTP_409_CONFLICT,
             detail="A near miss has no loss to record. Untick near miss first if money was lost.",
         )
+    # One incident is one operational-risk event: Basel's loss-data rules (and SBP's ORM
+    # returns built on them) group every financial impact of the same event under one
+    # loss record, so a second click must not double-count the loss. Further amounts,
+    # recoveries and write-offs are recorded on the existing loss event. The row lock
+    # makes two simultaneous clicks queue, so the second sees the first one's record.
+    await db.scalar(select(Incident.id).where(Incident.id == inc.id).with_for_update())
+    existing = await db.scalar(
+        select(LossEvent.reference)
+        .where(LossEvent.incident_id == inc.id, LossEvent.deleted.is_(False))
+        .order_by(LossEvent.created_at)
+        .limit(1)
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This incident's loss is already recorded as {existing}. Record further "
+                   "amounts or recoveries on that loss event.",
+        )
     body = body or LossFromIncident()
     org = await get_or_create_settings(db, user.tenant_id)
     tz = clock.zone(getattr(org, "timezone", None))

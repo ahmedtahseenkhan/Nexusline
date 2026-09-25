@@ -16,8 +16,8 @@ class AuthorityMatrixBase(BaseModel):
     category: AuthorityCategory = AuthorityCategory.general
     role_title: str = ""
     approval_level: int = Field(default=1, ge=1)
-    amount_from: float = 0
-    amount_to: float | None = None
+    amount_from: float = Field(default=0, ge=0)
+    amount_to: float | None = Field(default=None, ge=0)
     currency: str = "PKR"
     conditions: str = ""
     effective_date: date | None = None
@@ -34,8 +34,8 @@ class AuthorityMatrixUpdate(BaseModel):
     category: AuthorityCategory | None = None
     role_title: str | None = None
     approval_level: int | None = Field(default=None, ge=1)
-    amount_from: float | None = None
-    amount_to: float | None = None
+    amount_from: float | None = Field(default=None, ge=0)
+    amount_to: float | None = Field(default=None, ge=0)
     currency: str | None = None
     conditions: str | None = None
     effective_date: date | None = None
@@ -59,7 +59,7 @@ class DualControlRuleBase(BaseModel):
     requires_dual_control: bool = True
     maker_role: str = ""
     checker_role: str = ""
-    threshold_amount: float | None = None
+    threshold_amount: float | None = Field(default=None, ge=0)
     currency: str = "PKR"
     description: str = ""
     enabled: bool = True
@@ -90,6 +90,9 @@ class DualControlRuleRead(DualControlRuleBase):
     id: uuid.UUID
     reference: str
     created_at: datetime
+    #: False for a rule on a (module, action) nothing checks — typed free-hand before
+    #: keys were validated. It governs nothing; the page flags it.
+    enforced: bool = True
 
 
 # ------------------------------------------------------------------- summary ---

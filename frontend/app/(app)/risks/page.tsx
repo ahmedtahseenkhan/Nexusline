@@ -231,6 +231,10 @@ type RiskRow = {
   kris?: Ref[];
   loss_events?: Ref[];
   issues?: Ref[];
+  /** RCSAs with a line assessing this risk, FAIR quantifications and continuity plans. */
+  rcsa_assessments?: Ref[];
+  quantifications?: Ref[];
+  continuity_plans?: Ref[];
 };
 
 type Named = { id: string; name?: string; reference?: string; title?: string };
@@ -455,9 +459,19 @@ const BLANK: FormState = {
   level: "", parent: null,
 };
 
-function fromRisk(r: RiskRow): FormState {
+function fromRisk(r: RiskRow, impactMode?: string): FormState {
   // A draft never scored (no assessment stamp) shows blank scores, not the stored 1x1.
   const unscored = r.status === "draft" && !r.last_assessed_at;
+  // A residual signed off through accept-residual before it cleared the residual
+  // dimension scores can hold an impact its dimensions no longer derive. The signed-off
+  // impact is the record; the stale residual dimension scores are left out of the form
+  // (saving then removes them), otherwise every save is refused.
+  let dimRows = r.impact_dimensions ?? [];
+  const residualDims = dimRows.filter((d) => d.basis === "residual").map((d) => d.score);
+  const residualDerived = combineImpact(residualDims, impactMode);
+  if (residualDerived != null && r.residual_impact != null && residualDerived !== r.residual_impact) {
+    dimRows = dimRows.filter((d) => d.basis !== "residual");
+  }
   return {
     title: r.title,
     description: r.description || "",
@@ -479,7 +493,7 @@ function fromRisk(r: RiskRow): FormState {
     target_likelihood: r.target_likelihood ? String(r.target_likelihood) : "",
     target_impact: r.target_impact ? String(r.target_impact) : "",
     assessment_rationale: r.assessment_rationale || "",
-    dims: Object.fromEntries((r.impact_dimensions ?? []).map((d) => [`${d.basis}:${d.dimension_id}`, String(d.score)])),
+    dims: Object.fromEntries(dimRows.map((d) => [`${d.basis}:${d.dimension_id}`, String(d.score)])),
     residual_override_reason: r.residual_override_reason || "",
     annual_loss_frequency: r.annual_loss_frequency ?? "",
     single_loss_expectancy: r.single_loss_expectancy ?? "",
@@ -791,7 +805,7 @@ function RisksPage() {
   function openEdit(r: RiskRow, tab?: string) {
     setEditTab(tab);
     setEditing(r);
-    setF(fromRisk(r));
+    setF(fromRisk(r, settings?.impact_mode));
     setCfValues({});
     if (cfDefs.length) {
       api
@@ -1809,6 +1823,11 @@ function RisksPage() {
       // The operational-risk page cannot open a KRI or loss event by id yet (follow-up F12).
       { key: "kris", label: "KRIs", items: r.kris, href: () => "/operational-risk" },
       { key: "loss_events", label: "Loss events", items: r.loss_events, href: () => "/operational-risk" },
+      // RCSA opens in the operational-risk drawer (its default section); each entry names
+      // the RCSA lines that assess this risk.
+      { key: "rcsa_assessments", label: "RCSA assessments", items: r.rcsa_assessments, href: "/operational-risk" },
+      { key: "quantifications", label: "Risk quantifications", items: r.quantifications, href: "/risk-quantification" },
+      { key: "continuity_plans", label: "Continuity plans", items: r.continuity_plans, href: "/continuity" },
       // B3: each exception's state and expiry; nothing extra on an older API.
       { key: "exceptions", label: "Exceptions", items: r.exceptions, href: "/exceptions", meta: (x: RiskExceptionRef) => exceptionMeta(x, ctx.fmt) },
       { key: "policies", label: "Policies", items: r.policies, href: "/policies" },

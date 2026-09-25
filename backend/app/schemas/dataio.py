@@ -97,6 +97,9 @@ class PreviewRow(BaseModel):
     row: int  # line number in the uploaded file (header is line 1)
     values: dict[str, str]  # our canonical header -> the value we would import
     error: str = ""
+    # What the import will report for this row without failing it: text kept as a note,
+    # a status brought in at its initial state, a derived value that is not carried.
+    warnings: list[str] = []
 
 
 class PreviewRequest(BaseModel):

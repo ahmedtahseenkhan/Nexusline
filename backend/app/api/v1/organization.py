@@ -12,8 +12,9 @@ from sqlalchemy import delete, func, insert, select
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_search, apply_sort
 from app.models.asset import Asset, assets_legals, assets_processes
+from app.models.control import Control, control_business_units, control_processes
 from app.models.organization import BusinessUnit, Legal, Process
-from app.schemas.common import Page
+from app.schemas.common import GraphRef, Page
 from app.schemas.organization import (
     BusinessUnitCreate,
     BusinessUnitRead,
@@ -86,6 +87,52 @@ async def _load_many(db, model, ids):
     return rows
 
 
+async def _controls_map(db, link_table, key_column, ids) -> dict:
+    """Map unit / process id -> [control refs] through the control register's scope
+    table (the control owns the edge; this side only shows it). Column-only, so a list
+    of units does not load every control's own links."""
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(key_column, Control.id, Control.reference, Control.name)
+        .join(Control, Control.id == link_table.c.control_id)
+        .where(key_column.in_(ids), Control.deleted.is_(False))
+        .order_by(Control.reference)
+    )).all()
+    out: dict = {}
+    for owner_id, cid, ref, name in rows:
+        out.setdefault(owner_id, []).append(GraphRef(id=cid, reference=ref or "", name=name or ""))
+    return out
+
+
+def _org_delete_refusal(label: str, plural: str, rule_label: str) -> str:
+    """The four-eyes refusal for archiving an organisation register entry, saying what
+    to do next (the shared wording names a rule key an administrator has to decode)."""
+    return (
+        f"Segregation of duties: you entered this {label}, so someone else must archive it — "
+        f"{plural} are the organisation's scoping data that risks and controls are recorded "
+        f"against. Ask a "
+        f"colleague who can edit the organisation registers to archive it. If your bank does "
+        f"not require a second person here, an administrator can exempt it in Delegation of "
+        f"Authority → Maker-checker rules (\"{rule_label}\")."
+    )
+
+
+async def _guard_delete(db, user, entity_type: str, obj, label: str, plural: str) -> None:
+    """Four-eyes on archiving a business unit, process or legal register entry
+    (``services/delete_guard.py``, rule key ``<type> / delete``). The three registers
+    are the organisation's scoping master data, so one rule covers all of them."""
+    try:
+        await delete_guard.enforce(db, entity_type=entity_type, record=obj, user=user, label=label)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_org_delete_refusal(label, plural, f"Archiving a {label}"),
+        ) from exc
+
+
 # ------------------------------------------------------------- business units
 async def _bu_name_map(db) -> dict:
     return dict((await db.execute(select(BusinessUnit.id, BusinessUnit.name))).all())
@@ -93,10 +140,13 @@ async def _bu_name_map(db) -> dict:
 
 async def _bu_reads(db, objs) -> list[BusinessUnitRead]:
     names = await _bu_name_map(db)
+    controls = await _controls_map(db, control_business_units, control_business_units.c.business_unit_id,
+                                   [o.id for o in objs])
     items = []
     for obj in objs:
         rd = BusinessUnitRead.model_validate(obj)
         rd.parent_name = names.get(obj.parent_id) if obj.parent_id else None
+        rd.controls = controls.get(obj.id, [])
         items.append(rd)
     await ref_fields.fill_refs(db, list(zip(objs, items)), BU_REFS)
     return items
@@ -195,9 +245,7 @@ async def delete_business_unit(obj_id: uuid.UUID, db: DbSession, user: CurrentUs
     """Archive a business unit. Dual control ``business_unit / delete``: whoever entered
     it cannot also archive it while segregation of duties applies (403)."""
     obj = await _get(db, BusinessUnit, obj_id, "Business unit")
-    await delete_guard.enforce(
-        db, entity_type="business_unit", record=obj, user=user, label="business unit"
-    )
+    await _guard_delete(db, user, "business_unit", obj, "business unit", "business units")
     await _audit(db, user, "delete", "business_unit", obj, "business unit")
     await _soft_delete(db, obj)
 
@@ -227,10 +275,12 @@ async def _process_assets_map(db, process_ids) -> dict:
 
 async def _process_reads(db, objs) -> list[ProcessRead]:
     assets_map = await _process_assets_map(db, [o.id for o in objs])
+    controls = await _controls_map(db, control_processes, control_processes.c.process_id, [o.id for o in objs])
     items = []
     for obj in objs:
         rd = ProcessRead.model_validate(obj)
         rd.assets = assets_map.get(obj.id, [])
+        rd.controls = controls.get(obj.id, [])
         items.append(rd)
     await ref_fields.fill_refs(db, list(zip(objs, items)), PROCESS_REFS)
     return items
@@ -344,7 +394,7 @@ async def delete_process(obj_id: uuid.UUID, db: DbSession, user: CurrentUser) ->
     """Archive a process. Dual control ``process / delete``: whoever entered it cannot
     also archive it while segregation of duties applies (403)."""
     obj = await _get(db, Process, obj_id, "Process")
-    await delete_guard.enforce(db, entity_type="process", record=obj, user=user, label="process")
+    await _guard_delete(db, user, "process", obj, "process", "processes")
     await _audit(db, user, "delete", "process", obj, "process")
     await _soft_delete(db, obj)
 
@@ -475,6 +525,9 @@ async def update_legal(
 
 @router.delete("/legals/{obj_id}", status_code=204, dependencies=[Depends(require("org:write"))])
 async def delete_legal(obj_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    """Archive a legal register entry. Same four-eyes as a business unit or process
+    (``legal / delete``): the three registers are the organisation's scoping data."""
     obj = await _get(db, Legal, obj_id, "Legal")
+    await _guard_delete(db, user, "legal", obj, "legal register entry", "legal register entries")
     await _audit(db, user, "delete", "legal", obj, "legal register entry")
     await _soft_delete(db, obj)

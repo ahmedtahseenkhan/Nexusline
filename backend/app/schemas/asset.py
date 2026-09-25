@@ -20,12 +20,21 @@ from app.models.enums import (
 )
 
 
-class LinkRef(BaseModel):
+class LabelRef(BaseModel):
     id: uuid.UUID
     label: str
 
 
-class RiskExposureRef(LinkRef):
+class LinkRef(LabelRef):
+    """A linked record: ``label`` is what a chip shows (the reference, else the name);
+    ``reference`` and ``name`` carry both parts, as ``GraphRef`` does, so a page can show
+    "SBP-BPRD-05 Outsourcing framework" rather than the reference alone."""
+
+    reference: str = ""
+    name: str = ""
+
+
+class RiskExposureRef(LabelRef):
     """A risk on the asset, with its exposure (spec B8): scores, their bands on the
     tenant's matrix (cell overrides included) and the appetite band of the effective
     score (residual when assessed, else inherent) — the same rules as ``RiskRead`` and
@@ -40,7 +49,7 @@ class RiskExposureRef(LinkRef):
     appetite_status: str | None = None
 
 
-class ExceptionLinkRef(LinkRef):
+class ExceptionLinkRef(LabelRef):
     """A linked exception with its state and expiry (B3); an approved exception past its
     expiry reads ``expired`` (``schemas.common.exception_status``)."""
 
@@ -388,6 +397,10 @@ class AssetRead(BaseModel):
     controls: list[GraphRef] = []
     threats: list[GraphRef] = []
     vulnerabilities: list[GraphRef] = []
+    continuity_plans: list[GraphRef] = []
+    processing_activities: list[GraphRef] = []
+    bia_assessments: list[GraphRef] = []
+    vuln_findings: list[GraphRef] = []
     reviews: list[AssetReviewRead] = []
     risk_count: int = 0
     review_count: int = 0

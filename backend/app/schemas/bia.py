@@ -116,3 +116,5 @@ class BiaRead(BiaBase):
     rto_band: str
     created_at: datetime
     dependencies: list[BiaDependencyRead] = []
+    #: Continuity plans justified by this BIA (linked from the plan; archived plans left out).
+    continuity_plans: list[GraphRef] = []

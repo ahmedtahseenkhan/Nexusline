@@ -62,7 +62,12 @@ def example_row(columns: list["Column"]) -> dict[str, str]:
 
 
 def _example_value(column: "Column") -> str:
-    """A realistic placeholder cell for the template's single example row."""
+    """A realistic placeholder cell for the template's single example row.
+
+    The example row must itself import cleanly — it is the first thing a user checks
+    the file against — so every required cell gets a value that passes validation.
+    A required link is filled by the caller with a real record's reference (see
+    ``dataio.get_template``); left blank here."""
     if column.kind == "enum" and column.enum_values:
         return column.enum_values[0]
     if column.kind == "bool":
@@ -70,7 +75,10 @@ def _example_value(column: "Column") -> str:
     if column.kind == "int":
         return "1"
     if column.kind == "float":
-        return "0.0"
+        # A required amount is usually a positive rate or value (0 would be refused); an
+        # optional one stays blank, since 0 can break a rule between two amounts (a KRI's
+        # warning threshold must sit below its limit).
+        return "1.0" if column.required else ""
     if column.kind == "date":
         return date.today().isoformat()
     if column.kind == "link":
@@ -78,6 +86,10 @@ def _example_value(column: "Column") -> str:
     # text
     if column.field in {"title", "name"}:
         return "Example " + column.field
+    if column.field == "currency" or column.field.endswith("_currency"):
+        return "USD"
+    if column.required:
+        return "Example " + column.field.replace("_", " ")
     return ""
 
 

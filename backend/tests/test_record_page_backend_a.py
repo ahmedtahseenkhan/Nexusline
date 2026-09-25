@@ -160,12 +160,12 @@ async def test_a_missing_record_cannot_be_attested(sod_on):
     assert (ok, why) == (False, "Risk not found")
 
 
-async def test_the_owner_of_a_draft_hears_the_draft_rule(sod_on):
-    """Decision 9: owning the record is no longer a refusal, so the owner of a draft is
-    told the reason that really applies — it is still being written."""
+async def test_the_owner_of_an_unscored_risk_hears_why(sod_on):
+    """Decision 9: owning the record is no longer a refusal, so the owner of an unscored
+    draft is told the reason that really applies — there is no assessment to certify."""
     mine = _risk(owner_id=ME, status=RiskStatus.draft)
     ok, why = await att.attest_eligibility(AttestDB(), _user("risk:write"), "risk", mine.id, mine)
-    assert (ok, why) == (False, att.DRAFT_REFUSAL)
+    assert (ok, why) == (False, att.UNSCORED_REFUSAL)
 
 
 async def test_the_owner_may_attest_their_own_approved_record(sod_on):
@@ -177,10 +177,20 @@ async def test_the_owner_may_attest_their_own_approved_record(sod_on):
     ) == (True, None)
 
 
-async def test_a_draft_is_refused_on_its_business_status(sod_on):
-    draft = _risk(status=RiskStatus.draft, workflow_status=WorkflowState.approved)
-    ok, why = await att.attest_eligibility(AttestDB(), _user("risk:write"), "risk", draft.id, draft)
-    assert (ok, why) == (False, att.DRAFT_REFUSAL)
+async def test_an_approved_risk_is_judged_on_its_approval_not_its_business_draft(sod_on):
+    """2026-09-25: a risk's business status stays Draft until assessed, which is not an
+    approval stage. Approved and scored, it can be attested; approved but still on the
+    placeholder score, it is refused for that reason — never "submit it for review"."""
+    from datetime import datetime, timezone
+
+    scored = _risk(status=RiskStatus.draft, workflow_status=WorkflowState.approved,
+                   last_assessed_at=datetime.now(timezone.utc))
+    assert await att.attest_eligibility(
+        AttestDB(maker=OTHER), _user("risk:write"), "risk", scored.id, scored
+    ) == (True, None)
+    unscored = _risk(status=RiskStatus.draft, workflow_status=WorkflowState.approved)
+    ok, why = await att.attest_eligibility(AttestDB(), _user("risk:write"), "risk", unscored.id, unscored)
+    assert (ok, why) == (False, att.UNSCORED_REFUSAL)
 
 
 async def test_the_lifecycle_rule_is_the_attest_calls_own_b1b_refuses(sod_on):
@@ -313,7 +323,7 @@ async def test_the_attest_call_still_raises_its_refusals(sod_on, audited):
     draft = _risk(status=RiskStatus.draft)
     with pytest.raises(HTTPException) as exc:
         await att.attest("risk", draft.id, AttestationCreate(), AttestDB(record=draft), _user("risk:write"))
-    assert (exc.value.status_code, exc.value.detail) == (409, att.DRAFT_REFUSAL)
+    assert (exc.value.status_code, exc.value.detail) == (409, att.UNSCORED_REFUSAL)
 
     risk = _risk()
     with pytest.raises(HTTPException) as exc:
@@ -368,7 +378,7 @@ async def test_an_assets_attestation_reads_its_own_review_date(sod_on):
 async def test_a_draft_asset_is_refused_on_its_workflow_state(sod_on):
     asset = _asset(workflow_status=WorkflowStatus.draft)
     ok, why = await att.attest_eligibility(AttestDB(maker=OTHER), _user("asset:write"), "asset", asset.id, asset)
-    assert (ok, why) == (False, att.DRAFT_REFUSAL)
+    assert (ok, why) == (False, "Approve this asset before attesting it — its approval is draft.")
 
 
 # ============================================================================ B5 ===
@@ -488,7 +498,7 @@ async def test_the_evaluate_endpoint_returns_the_condition(monkeypatch):
             return SimpleNamespace(id=uuid.uuid4(), inherent_score=16)
 
     monkeypatch.setattr(api, "_rules_for", _rules)
-    out = await api.evaluate_one("risk", uuid.uuid4(), _DB(), None)
+    out = await api.evaluate_one("risk", uuid.uuid4(), _DB(), _user("risk:read"))
     assert [(v.label, v.field, v.operator, v.value) for v in out] == [
         ("High exposure", "inherent_score", "gte", "15"),
     ]

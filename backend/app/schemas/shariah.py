@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
+from app.schemas.common import GraphRef
 from app.models.enums import (
     CharityStatus,
     IslamicProductStatus,
@@ -55,6 +56,9 @@ class RulingRead(RulingBase):
     reference: str
     is_review_overdue: bool
     created_at: datetime
+    # Reverse of IslamicProduct.approving_ruling: the products this fatwa approves.
+    # Filled on the record endpoints (GET/POST/PATCH by id); empty in list pages.
+    products: list[GraphRef] = []
 
 
 # ------------------------------------------------------------------ products ---
@@ -91,6 +95,10 @@ class ProductRead(ProductBase):
     id: uuid.UUID
     reference: str
     created_at: datetime
+    approving_ruling: GraphRef | None = None
+    # Reverse of ShariahReview.product: the Shariah reviews that covered this product.
+    # Filled on the record endpoints (GET/POST/PATCH by id); empty in list pages.
+    reviews: list[GraphRef] = []
 
 
 # ------------------------------------------------------------------ findings ---
@@ -177,6 +185,7 @@ class ReviewRead(ReviewBase):
     snc_income_total: float
     created_at: datetime
     findings: list[ShariahFindingRead] = []
+    product: GraphRef | None = None
 
 
 # ------------------------------------------------------------------- charity ---

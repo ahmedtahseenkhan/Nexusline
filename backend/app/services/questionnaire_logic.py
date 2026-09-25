@@ -323,6 +323,16 @@ def structure_problems(sections: Sequence[Mapping[str, Any]], *, for_publish: bo
     def check_condition(where: str, condition: Mapping[str, Any] | None) -> None:
         if not condition:
             return
+        # Anything but {match, rules} would be read as "no rules" and always show the
+        # question — a silently broken condition — so refuse it.
+        unknown = sorted(str(k) for k in condition if k not in ("match", "rules"))
+        rules = condition.get("rules")
+        if unknown or (rules is not None and not isinstance(rules, list)) \
+                or any(not isinstance(r, Mapping) for r in rules or []):
+            problems.append(
+                f"{where}: a condition is written as {{match: all | any, rules: [...]}}"
+                + (f"; '{', '.join(unknown)}' is not understood." if unknown else ".")
+            )
         if condition.get("match", "all") not in MATCHES:
             problems.append(f"{where}: a condition must match all or any of its rules.")
         for j, rule in enumerate(_rules(condition), start=1):

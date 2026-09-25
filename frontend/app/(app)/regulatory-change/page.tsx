@@ -432,6 +432,10 @@ function RegulatoryChangeInner() {
     loadSummary();
   }, [loadSummary]);
 
+  // Deep link from a policy's or control's linked obligations (`?obligation=<id>`):
+  // open that obligation on the Obligations tab, then drop the param.
+  const [oblParam, setOblParam] = useRecordParam("obligation");
+
   // ------------------------------------------------------------- fetchers (server-driven tables)
   const fetchChanges = useCallback((qs: string) => apiCall<PagedList<RegChange>>("GET", `/regulatory-change?${qs}`), []);
   const fetchObligations = useCallback((qs: string) => apiCall<PagedList<Obligation>>("GET", `/obligations?${qs}`), []);
@@ -557,6 +561,16 @@ function RegulatoryChangeInner() {
     }
     setShowOblForm(true);
   }
+  useEffect(() => {
+    if (!oblParam) return;
+    setSection("obligations");
+    apiCall<Obligation>("GET", `/obligations/${oblParam}`)
+      .then(openEditObl)
+      .catch((e) => setError(e instanceof Error ? e.message : "Obligation not found"))
+      .finally(() => setOblParam(null));
+    // openEditObl reads the open change for its label only; the param is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [oblParam]);
   async function saveObl() {
     setError(null);
     setSavingObl(true);

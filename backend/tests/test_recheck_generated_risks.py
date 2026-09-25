@@ -266,7 +266,7 @@ def _template(ref: str, **kw):
 
 def _asset_row(name, *, media="", asset_class=AssetClass.it_asset, deleted=False):
     return SimpleNamespace(
-        id=_id(), name=name, asset_class=asset_class, criticality=M, business_value=M, confidentiality=M,
+        id=_id(), name=name, asset_class=asset_class, criticality=M, effective_criticality=M, business_value=M, confidentiality=M,
         integrity=M, availability=M, media_type=SimpleNamespace(name=media) if media else None, tags=[],
         hostname="", os_version="", manufacturer="", model_number="", data_categories="", controls=[],
         deleted=deleted,

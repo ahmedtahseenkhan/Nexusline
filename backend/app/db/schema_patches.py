@@ -574,7 +574,32 @@ def recheck_ddl_statements() -> list[str]:
         "CREATE INDEX IF NOT EXISTS ix_requirements_reference_sort_key "
         "ON requirements (framework_id, reference_sort_key)"
     )
+    statements.extend(tag_name_unique_statements())
     return statements
+
+
+# Tags that differ only by case or spacing ("KYC", " kyc ") are one tag: the oldest keeps
+# its id and the others' assignments move onto it, then the index keeps it that way.
+# Merge before trimming — trimming first would collide on the exact-name constraint.
+_TAG_KEY = "lower(btrim(regexp_replace(name, '\\s+', ' ', 'g')))"
+_TAG_DUPLICATES = (
+    "SELECT id, first_value(id) OVER ("
+    f"PARTITION BY tenant_id, {_TAG_KEY} ORDER BY created_at, id) AS keep FROM tags"
+)
+
+
+def tag_name_unique_statements() -> list[str]:
+    """Idempotent: merge case/spacing duplicates, normalise names, add the unique index."""
+    return [
+        "UPDATE entity_tags et SET tag_id = d.keep "
+        f"FROM ({_TAG_DUPLICATES}) d WHERE et.tag_id = d.id AND d.id <> d.keep "
+        "AND NOT EXISTS (SELECT 1 FROM entity_tags x WHERE x.tag_id = d.keep "
+        "AND x.entity_type = et.entity_type AND x.entity_id = et.entity_id)",
+        f"DELETE FROM tags t USING ({_TAG_DUPLICATES}) d WHERE t.id = d.id AND d.id <> d.keep",
+        "UPDATE tags SET name = btrim(regexp_replace(name, '\\s+', ' ', 'g')) "
+        "WHERE name <> btrim(regexp_replace(name, '\\s+', ' ', 'g'))",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_tag_tenant_lower_name ON tags (tenant_id, lower(name))",
+    ]
 
 
 def asset_split_ddl_statements() -> list[str]:

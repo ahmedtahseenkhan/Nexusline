@@ -903,8 +903,9 @@ export interface DataCompleteness {
 
 export interface Dashboard {
   total_risks: number;
-  total_controls: number;
-  total_assets: number;
+  /** null when the reader can't read that register (GET /dashboard needs only risk:read). */
+  total_controls: number | null;
+  total_assets: number | null;
   risks_by_status: Record<string, number>;
   risks_by_inherent_severity: Record<string, number>;
   risks_by_residual_severity: Record<string, number>;

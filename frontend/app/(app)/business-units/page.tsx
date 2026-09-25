@@ -14,6 +14,7 @@ import WorkflowFields from "@/components/WorkflowFields";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import RecordPanels from "@/components/RecordPanels";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
@@ -43,6 +44,9 @@ type BusinessUnit = {
   /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
   legals: Ref[];
+  /** Read-only: risks and controls scoped to it (each owns the link on its own form). */
+  risks?: GraphRef[];
+  controls?: GraphRef[];
 };
 
 const WORKFLOW_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
@@ -367,6 +371,8 @@ function BusinessUnitsInner() {
             <strong style={{ fontSize: 13 }}>Related records</strong>
             <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
               {field("Legal & regulatory obligations", chips(detail.legals))}
+              <RelatedChips label="Risks" items={detail.risks} href="/risks" format="ref-name" />
+              <RelatedChips label="Controls" items={detail.controls} href="/controls" format="ref-name" />
             </div>
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>

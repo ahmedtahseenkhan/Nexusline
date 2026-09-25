@@ -8,12 +8,14 @@ from datetime import date, datetime
 from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, String, Text
 from sqlalchemy import Enum as SAEnum
 
+from app.models.aml import AmlRiskAssessment, ScreeningCase, SuspiciousActivityReport
 from app.models.asset import Asset
 from app.models.compliance import Requirement
 from app.models.continuity import ContinuityPlan
 from app.models.evidence import Evidence
 from app.models.control import Control
 from app.models.exception import ExceptionRecord
+from app.models.fraud import FraudCase, FraudRisk
 from app.models.goal import Goal
 from app.models.incident import Incident
 from app.models.operational_risk import KeyRiskIndicator, RcsaAssessment
@@ -40,6 +42,13 @@ MODEL_MAP: dict[str, type] = {
     "processing_activity": ProcessingActivity,
     "key_risk_indicator": KeyRiskIndicator,
     "rcsa_assessment": RcsaAssessment,
+    # Financial crime: valid entity types and custom-field models, so their registers can
+    # carry status labels too.
+    "aml_risk_assessment": AmlRiskAssessment,
+    "suspicious_activity_report": SuspiciousActivityReport,
+    "screening_case": ScreeningCase,
+    "fraud_risk": FraudRisk,
+    "fraud_case": FraudCase,
 }
 
 OPERATORS = ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "overdue", "is_true", "is_false", "not_empty"]
@@ -80,6 +89,24 @@ def evaluable_fields(model: str) -> list[dict]:
             info["options"] = list(col.type.enums)
         out.append(info)
     return out
+
+
+def field_keys(model: str) -> set[str]:
+    """The field names a rule or saved filter on ``model`` may test."""
+    return {f["key"] for f in evaluable_fields(model)}
+
+
+def condition_problem(model: str, field: str | None, operator: str | None) -> str | None:
+    """Why a condition can't be evaluated on ``model``, or None. Pure apart from the
+    model's columns. A condition on a field the model doesn't have never matches, so
+    accepting it would save a rule or filter that silently does nothing."""
+    if model not in MODEL_MAP:
+        return f"Unsupported model '{model}'"
+    if operator not in OPERATORS:
+        return f"Unsupported operator '{operator}'"
+    if field not in field_keys(model):
+        return f"'{field}' is not a field of {model}. Choose one of GET /status-rules/fields/{model}."
+    return None
 
 
 def _coerce(val):

@@ -11,12 +11,19 @@ exist). Two record types:
   operational-risk capital. From the Business Indicator (BI) and the 10-year
   average internal losses it derives the Business Indicator Component (BIC),
   Loss Component (LC), Internal Loss Multiplier (ILM) and, finally, the
-  Operational Risk Capital (ORC) — all as computed properties.
+  Operational Risk Capital (ORC) — computed by :func:`sma_capital`, never stored.
+
+The BI bucket edges are set by Basel (CRE25) in **euro**: EUR 1bn and EUR 30bn. A
+record in any other currency is bucketed against those edges converted into its
+currency at the organisation's own exchange rates (``api.v1.scenario``), the way
+jurisdictions that adopted the SMA restate them in local currency. Hard-coding a
+local-currency figure silently mis-buckets every record kept in another currency.
 """
 from __future__ import annotations
 
 import enum
 import math
+from dataclasses import dataclass
 from datetime import date
 
 from sqlalchemy import Date, Numeric, String, Text
@@ -51,9 +58,50 @@ class CapitalStatus(str, enum.Enum):
     final = "final"
 
 
-# Basel SMA bucket edges (PKR). Marginal coefficients apply per bucket.
-_BI_BUCKET_1 = 8_000_000_000.0     # up to 8bn  → 12%
-_BI_BUCKET_2 = 240_000_000_000.0   # 8bn–240bn  → 15% (marginal); above → 18%
+# Basel SMA bucket edges (CRE25.4), in euro. Marginal coefficients apply per bucket:
+# BI up to EUR 1bn → 12%; EUR 1bn–30bn → 15%; above EUR 30bn → 18%.
+BASEL_THRESHOLD_CURRENCY = "EUR"
+BASEL_BI_BUCKET_1 = 1_000_000_000.0
+BASEL_BI_BUCKET_2 = 30_000_000_000.0
+
+
+@dataclass(frozen=True)
+class SmaResult:
+    """One SMA calculation. ``ilm`` and ``orc`` keep full precision; round for display."""
+
+    bucket: int
+    bic: float
+    loss_component: float
+    ilm: float
+    orc: float
+
+
+def sma_capital(
+    business_indicator: float, avg_annual_loss: float, bucket_1: float, bucket_2: float
+) -> SmaResult:
+    """Basel III SMA operational-risk capital (CRE25) for BI and the 10-year average
+    annual loss, with the BI bucket edges already expressed in the record's currency.
+
+    * BIC = 12% of BI up to ``bucket_1``, 15% of the part up to ``bucket_2``, 18% above.
+    * LC = 15 × average annual internal losses.
+    * ILM = ln(e − 1 + (LC / BIC) ^ 0.8) — but **1 for a bucket-1 bank** (CRE25.9):
+      below the first edge internal loss experience does not move the charge.
+    * ORC = BIC × ILM, from the unrounded ILM.
+    """
+    bi = max(float(business_indicator or 0), 0.0)
+    lc = 15.0 * max(float(avg_annual_loss or 0), 0.0)
+    if bi <= bucket_1:
+        bucket, bic = 1, 0.12 * bi
+    elif bi <= bucket_2:
+        bucket, bic = 2, 0.12 * bucket_1 + 0.15 * (bi - bucket_1)
+    else:
+        bucket = 3
+        bic = 0.12 * bucket_1 + 0.15 * (bucket_2 - bucket_1) + 0.18 * (bi - bucket_2)
+    if bucket == 1 or bic <= 0:
+        ilm = 1.0
+    else:
+        ilm = math.log(math.e - 1 + (lc / bic) ** 0.8)
+    return SmaResult(bucket=bucket, bic=bic, loss_component=lc, ilm=ilm, orc=bic * ilm)
 
 
 # ======================================================= scenario analysis ===
@@ -108,37 +156,6 @@ class CapitalCalculation(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workf
         SAEnum(CapitalStatus, name="capital_calc_status"),
         default=CapitalStatus.draft, nullable=False,
     )
-
-    @property
-    def bic(self) -> float:
-        """Business Indicator Component — marginal buckets 12% / 15% / 18%."""
-        bi = float(self.business_indicator or 0)
-        if bi <= 0:
-            return 0.0
-        if bi <= _BI_BUCKET_1:
-            comp = 0.12 * bi
-        elif bi <= _BI_BUCKET_2:
-            comp = 0.12 * _BI_BUCKET_1 + 0.15 * (bi - _BI_BUCKET_1)
-        else:
-            comp = (0.12 * _BI_BUCKET_1
-                    + 0.15 * (_BI_BUCKET_2 - _BI_BUCKET_1)
-                    + 0.18 * (bi - _BI_BUCKET_2))
-        return round(comp, 2)
-
-    @property
-    def loss_component(self) -> float:
-        """Loss Component = 15 × average annual internal losses."""
-        return round(15.0 * float(self.avg_annual_loss or 0), 2)
-
-    @property
-    def ilm(self) -> float:
-        """Internal Loss Multiplier = ln(e − 1 + (LC / BIC) ** 0.8); 1.0 when BIC ≤ 0."""
-        bic = self.bic
-        if bic <= 0:
-            return 1.0
-        return round(math.log(math.e - 1 + (self.loss_component / bic) ** 0.8), 2)
-
-    @property
-    def orc(self) -> float:
-        """Operational Risk Capital = BIC × ILM."""
-        return round(self.bic * self.ilm, 2)
+    # BIC / LC / ILM / ORC depend on the bucket edges in this record's currency, which
+    # need the organisation's exchange rates: ``api.v1.scenario._capital_read`` computes
+    # them with :func:`sma_capital`.

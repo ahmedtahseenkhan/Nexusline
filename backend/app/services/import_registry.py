@@ -19,11 +19,20 @@ from enum import Enum
 from typing import Any
 
 from app.models.access_review import AccessReview
-from app.models.asset import Asset
+from app.models.asset import Asset, AssetClassification, AssetLabel, AssetMediaType, AssetTag
 from app.models.bia import BiaAssessment, BiaStatus
 from app.models.awareness import AwarenessProgram
 from app.models.compliance import Framework, Requirement
 from app.models.continuity import ContinuityPlan
+from app.models.data_protection import (
+    ConsentRecord,
+    ConsentStatus,
+    Dpia,
+    DpiaWorkflowStatus,
+    Dsar,
+    DsarStatus,
+    DsarType,
+)
 from app.models.control import Control
 from app.models.evidence import Evidence
 from app.models.exception import ExceptionRecord
@@ -46,6 +55,7 @@ from app.models.outsourcing import (
 from app.models.policy import Policy
 from app.models.governance import Committee  # policies: approving authority
 from app.models.identity import Role, User  # policies: roles; KRIs: data provider
+from app.models.lookup import Lookup  # picked list values (countries, impact dimensions…)
 from app.models.privacy import ProcessingActivity
 from app.models.project import Project
 from app.models.regulatory_change import (
@@ -59,7 +69,7 @@ from app.models.regulatory_change import (
 from app.models.risk import Risk
 from app.models.risk_scenario import RiskScenarioTemplate
 from app.models.threat import Threat, Vulnerability
-from app.models.vendor import Vendor
+from app.models.vendor import Vendor, VendorType
 
 # --- enums -----------------------------------------------------------------
 from app.models.base import WorkflowState
@@ -80,6 +90,7 @@ from app.models.enums import (
     ControlStatus,
     ControlType,
     Criticality,
+    DiscoverySource,
     DpiaStatus,
     EvidenceStatus,
     EvidenceType,
@@ -104,11 +115,12 @@ from app.models.enums import (
 
 # --- Create schemas --------------------------------------------------------
 from app.schemas.access_review import ReviewCreate
-from app.schemas.asset import AssetCreate
+from app.schemas.asset import AssetCreate, AssetDependencyCreate
 from app.schemas.awareness import ProgramCreate
 from app.schemas.bia import BiaCreate
 from app.schemas.compliance import RequirementCreate
 from app.schemas.continuity import PlanCreate
+from app.schemas.data_protection import ConsentRecordCreate, DpiaCreate, DsarCreate
 from app.schemas.control import ControlCreate
 from app.schemas.evidence import EvidenceCreate
 from app.schemas.exception import ExceptionCreate
@@ -136,6 +148,7 @@ from app.api.v1.awareness import create_program
 from app.api.v1.bia import create_bia
 from app.api.v1.compliance import create_requirement
 from app.api.v1.continuity import create_plan
+from app.api.v1.data_protection import create_consent_record, create_dpia, create_dsar
 from app.api.v1.controls import create_control
 from app.api.v1.evidence import create_evidence
 from app.api.v1.exceptions import create_exception
@@ -147,7 +160,7 @@ from app.api.v1.issues import import_issue
 from app.api.v1.model_risk import create_model
 from app.api.v1.operational_risk import create_kri, create_loss_event, create_rcsa
 from app.api.v1.outsourcing import create_arrangement
-from app.api.v1.assets import create_asset
+from app.api.v1.assets import create_asset, create_dependency
 from app.api.v1.organization import (
     create_business_unit,
     create_legal,
@@ -166,6 +179,12 @@ from app.api.v1.vendors import create_vendor
 # ---------------------------------------------------------------------------
 # Spec dataclasses
 # ---------------------------------------------------------------------------
+#: How an export reads a link (``LinkSpec.via``).
+VIA_RELATIONSHIP = "relationship"  # the ORM relationship ``export_attr`` on the model
+VIA_COLUMN = "column"  # the model's own foreign-key column (``create_field``), no relationship
+VIA_JOIN = "join"  # the join table behind the target's relationship back to the model
+
+
 @dataclass(frozen=True)
 class LinkSpec:
     """How a reference column resolves to ids on import and renders on export.
@@ -177,11 +196,27 @@ class LinkSpec:
     ``create_field``  the exact ``*_ids`` (or scalar ``*_id``) field on the
                       Create schema this column feeds.
     ``export_attr``   relationship attribute on the main model holding the linked
-                      object(s) for export rendering.
-    ``exportable``    False when the main model exposes no real ORM relationship
-                      for this link (the link is write-only via a join table that
-                      the create function manages). The column is still emitted on
-                      export for round-trip symmetry, but renders blank.
+                      object(s) for export rendering. A dotted path follows one more
+                      relationship per step (``hosted_dependencies.information_asset``).
+    ``via``           where the export reads the link from. Every link column exports:
+                      what the product exports must re-import to the same record.
+                      ``relationship`` (default) reads ``export_attr``; ``column`` reads
+                      the model's own foreign key (``create_field``) where the model has
+                      no relationship for it (``BusinessUnit.parent_id``); ``join`` reads
+                      the join table behind the *target's* relationship back to this
+                      model (``Asset.legals`` gives ``Legal``'s assets).
+    ``also_match``    further target attributes a cell may name (a user's full name
+                      besides the email the export writes; a lookup's stored value
+                      besides its label).
+    ``scope``         ``(attribute, value)`` pairs every candidate must satisfy — one
+                      lookup list out of the shared ``lookups`` table.
+    ``label``         renders one target for export when neither its reference nor
+                      ``match_field`` is unique on its own (an asset classification is
+                      "Integrity: High", not "High"); the rendered text is indexed too.
+    ``lenient``       an unmatched token is dropped with a row warning instead of
+                      failing the row. For optional people pickers with no free-text
+                      twin (a risk's owner): a legacy register's "Head of Ops (vacant)"
+                      should not block the rest of the row.
     """
 
     target_model: type
@@ -189,11 +224,35 @@ class LinkSpec:
     multi: bool
     create_field: str
     export_attr: str
-    exportable: bool = True
+    via: str = VIA_RELATIONSHIP
+    also_match: tuple[str, ...] = ()
+    scope: tuple[tuple[str, Any], ...] = ()
+    label: Callable[[Any], str] | None = None
+    lenient: bool = False
+
+    @property
+    def exportable(self) -> bool:
+        """True when the link renders through the ORM relationship ``export_attr``.
+
+        Historical name, kept for the registry invariants: a ``column`` / ``join`` link
+        has no relationship to check and renders through ``via`` instead."""
+        return self.via == VIA_RELATIONSHIP
 
 
 @dataclass(frozen=True)
 class Column:
+    """One spreadsheet column.
+
+    ``export_value`` renders the cell from the record where the value is not a plain
+    attribute (a dict, a derived timestamp). ``parse`` turns the cell text into the
+    value the Create schema takes (``kind`` stays ``text``); it is given the link index
+    when the column also carries a ``link`` used only to resolve names inside the cell.
+    ``match_on_field`` False keeps the column-mapping wizard from matching a client's
+    heading against the bare field name — a register's "Consequence" or "Level" column
+    is a score, not our risk statement or hierarchy level — so only the header (and
+    its synonyms) match.
+    """
+
     header: str
     field: str
     required: bool = False
@@ -201,6 +260,44 @@ class Column:
     enum_values: list[str] | None = None
     help: str = ""
     link: LinkSpec | None = None
+    export_value: Callable[[Any], Any] | None = None
+    #: Async ``(db, records) -> {record id: cell}`` for a value that needs a query of
+    #: its own (a risk's per-dimension impact scores); one call per export.
+    export_batch: Callable[[Any, list[Any]], Awaitable[dict[Any, Any]]] | None = None
+    parse: Callable[..., Any] | None = None
+    match_on_field: bool = True
+
+
+@dataclass(frozen=True)
+class StateRule:
+    """A status value the product reaches only through a workflow action.
+
+    Creating a record through the UI starts it in its initial state; approving,
+    publishing, closing or accepting it is a separate decision, taken — where maker-
+    checker applies — by someone other than the person who entered it. An import is a
+    create, so a row asking for one of ``later`` is brought in at ``initial`` with a row
+    warning, unless the importer could have taken the decision alone in the app: they
+    hold ``permissions`` (default: the record type's approve permissions), no four-eyes
+    rule governs any of ``four_eyes`` for the record type, and — for ``routed`` rules —
+    no approval route is configured for it. Values in ``always`` are never carried (an
+    ``in_review`` row cannot join an approval route by import). ``clears`` are fields
+    dropped with the downgrade (a closed issue's ``closed_date``).
+
+    Downgrading rather than failing the row keeps the export of a register importable
+    (approved records re-import as drafts, to be approved again here) and loses none of
+    the row's data; preview shows the same warning before anything is written.
+    """
+
+    field: str
+    later: frozenset[str]
+    initial: str
+    how: str
+    permissions: tuple[str, ...] = ()
+    four_eyes: tuple[str, ...] = ("approve",)
+    module: str = ""  # dual-control / permission module; default the record's entity type
+    routed: bool = False
+    always: frozenset[str] = frozenset()
+    clears: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,6 +322,26 @@ class ResourceIO:
     importable: bool
     columns: list[Column] = field(default_factory=list)
     fixed: dict[str, Any] = field(default_factory=dict)
+    #: Columns whose export is computed (``Column.export_value``) because the value is
+    #: not an attribute of the model — an incident's notification time lives on its
+    #: initial regulatory report. Importable like any other column; kept apart so the
+    #: attribute columns above stay plain ``getattr`` reads.
+    derived: list[Column] = field(default_factory=list)
+    #: Extra export criteria, called at export time. Rows the importer could never take
+    #: back (a finding of an archived audit) are left out rather than exported to fail.
+    export_where: Callable[[], list[Any]] | None = None
+    #: Per-row adjustment of the import payload, before validation, for values the
+    #: product derives and an export carries (a control's tested effectiveness). Returns
+    #: the row warnings to report; runs in preview and import alike.
+    prepare: Callable[[dict[str, Any]], list[str]] | None = None
+    #: Status fields whose later values only a workflow action reaches (see StateRule).
+    #: ``workflow_status`` gets its rule automatically (``_with_workflow_rule``).
+    state_rules: tuple[StateRule, ...] = ()
+
+    @property
+    def all_columns(self) -> list[Column]:
+        """Every spreadsheet column, attribute columns first."""
+        return [*self.columns, *self.derived]
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +386,11 @@ def link_col(
     *,
     match_field: str = "name",
     multi: bool = True,
-    exportable: bool = True,
+    via: str = VIA_RELATIONSHIP,
+    also_match: tuple[str, ...] = (),
+    scope: tuple[tuple[str, Any], ...] = (),
+    label: Callable[[Any], str] | None = None,
+    lenient: bool = False,
     help: str = "",
 ) -> Column:
     return Column(
@@ -283,9 +404,169 @@ def link_col(
             multi=multi,
             create_field=create_field,
             export_attr=export_attr,
-            exportable=exportable,
+            via=via,
+            also_match=also_match,
+            scope=scope,
+            label=label,
+            lenient=lenient,
         ),
     )
+
+
+def user_col(
+    header: str,
+    create_field: str,
+    export_attr: str = "",
+    *,
+    via: str = VIA_COLUMN,
+    lenient: bool = True,
+    help: str = "",
+) -> Column:
+    """A person picked by id with no free-text twin (a risk's owner, a control's operator).
+
+    Exports the user's email — unique, so it always resolves back — and accepts the
+    email or full name on import. Lenient by default: an unmatched name is a row warning
+    and the field stays empty, as for the text-backed people fields."""
+    return link_col(
+        header, create_field, User, export_attr or header, match_field="email", multi=False,
+        via=via, also_match=("full_name",), lenient=lenient,
+        help=help or "Email or full name of a user; unmatched text is skipped with a warning",
+    )
+
+
+def lookup_col(
+    header: str,
+    create_field: str,
+    list_key: str,
+    export_attr: str = "",
+    *,
+    multi: bool = False,
+    via: str = VIA_COLUMN,
+    help: str = "",
+) -> Column:
+    """A value picked from one list of the shared ``lookups`` table (countries, data
+    classifications…). Exports the label; accepts the label or the stored value."""
+    return link_col(
+        header, create_field, Lookup, export_attr or header, match_field="label", multi=multi,
+        via=via, also_match=("value",), scope=(("key", list_key),),
+        help=help or f"Label from the {list_key.replace('_', ' ')} list"
+        + ("; comma-separated" if multi else ""),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cell renderers / parsers for values that are not a single scalar
+# ---------------------------------------------------------------------------
+def _iso_attributes_cell(control: Any) -> str:
+    """``{"control_type": ["preventive"], …}`` as ``control_type: preventive; …``."""
+    attrs = getattr(control, "iso27002_attributes", None) or {}
+    return "; ".join(f"{key}: {' '.join(values)}" for key, values in attrs.items() if values)
+
+
+def _parse_iso_attributes(text: str) -> dict[str, str]:
+    """The reverse of :func:`_iso_attributes_cell`. Values stay a string per attribute:
+    the Create schema normalises them (``#Asset_management`` and commas included) and
+    names the first unknown attribute or value."""
+    out: dict[str, str] = {}
+    for part in text.split(";"):
+        if not part.strip():
+            continue
+        key, sep, values = part.partition(":")
+        if not sep:
+            raise ValueError(
+                f"iso27002_attributes: '{part.strip()}' needs the form 'attribute: value value'"
+            )
+        out[key.strip()] = values.strip()
+    return out
+
+
+def _ignore_derived_effectiveness(payload: dict[str, Any]) -> list[str]:
+    """A control's effectiveness is derived from its reviewed tests; an export carries it.
+
+    On import it is a manual override only when the row says why
+    (``effectiveness_override_reason``). Without a reason the value is the source
+    record's test result, which a new control does not have, so it is dropped (the
+    control starts as not assessed) with a row warning rather than failing the row."""
+    value = payload.get("effectiveness")
+    if value is None or str(payload.get("effectiveness_override_reason") or "").strip():
+        return []
+    del payload["effectiveness"]
+    if str(value) == ControlEffectiveness.not_assessed.value:
+        return []
+    return [
+        f"effectiveness: '{value}' comes from reviewed tests, so the new control starts as "
+        "not assessed. Give effectiveness_override_reason to set it by hand."
+    ]
+
+
+_BASES = ("inherent", "residual", "target")
+
+
+def _dimension_scores_decide_impact(payload: dict[str, Any]) -> list[str]:
+    """Where a row scores a basis per dimension, that basis' overall impact is derived
+    from the dimension scores (the organisation's impact mode), so the row's own
+    ``<basis>_impact`` is left out rather than contradicting them — a stored impact that
+    has drifted from its dimensions would otherwise fail the row. The column's help says so; no per-row warning, as an exported file carries
+    both on every such row."""
+    bases = {d.get("basis") for d in payload.get("impact_dimensions") or ()}
+    for basis in _BASES:
+        if basis in bases:
+            payload.pop(f"{basis}_impact", None)
+    return []
+
+
+async def _impact_dimension_cells(db: Any, risks: list[Any]) -> dict[Any, str]:
+    """``risk id -> "inherent: Financial=4, Reputational=3; residual: Financial=2"``."""
+    from sqlalchemy import select
+
+    from app.models.risk import RiskImpactDimension
+
+    ids = [r.id for r in risks]
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(RiskImpactDimension.risk_id, RiskImpactDimension.basis,
+                   RiskImpactDimension.score, Lookup.label)
+            .join(Lookup, Lookup.id == RiskImpactDimension.dimension_id)
+            .where(RiskImpactDimension.risk_id.in_(ids))
+            .order_by(Lookup.sort_order, Lookup.label)
+        )
+    ).all()
+    grouped: dict[Any, dict[str, list[str]]] = {}
+    for risk_id, basis, score, label in rows:
+        grouped.setdefault(risk_id, {}).setdefault(basis, []).append(f"{label}={score}")
+    return {
+        risk_id: "; ".join(f"{b}: {', '.join(by_basis[b])}" for b in _BASES if b in by_basis)
+        for risk_id, by_basis in grouped.items()
+    }
+
+
+def _parse_impact_dimensions(text: str, resolve: Callable[[str], Any]) -> list[dict[str, Any]]:
+    """The reverse of :func:`_impact_dimension_cells`; ``resolve`` turns a dimension's
+    label or value into its id (raising ``ValueError`` naming an unknown one)."""
+    out: list[dict[str, Any]] = []
+    for part in text.split(";"):
+        if not part.strip():
+            continue
+        basis, sep, pairs = part.partition(":")
+        basis = basis.strip().lower()
+        if not sep or basis not in _BASES:
+            raise ValueError(
+                f"impact_dimensions: '{part.strip()}' should start with inherent:, residual: or target:"
+            )
+        for pair in pairs.split(","):
+            if not pair.strip():
+                continue
+            name, eq, score = pair.rpartition("=")
+            try:
+                value = int(score.strip())
+            except ValueError:
+                value = None
+            if not eq or not name.strip() or value is None:
+                raise ValueError(f"impact_dimensions: '{pair.strip()}' should read Dimension=score")
+            out.append({"dimension_id": resolve(name.strip()), "basis": basis, "score": value})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -295,15 +576,100 @@ REGISTRY: dict[str, ResourceIO] = {}
 
 
 def _register(res: ResourceIO) -> None:
-    REGISTRY[res.resource] = _importing_workflow_status(_with_workflow_column(res))
+    REGISTRY[res.resource] = _importing_workflow_status(_with_workflow_rule(_with_workflow_column(res)))
+
+
+WORKFLOW_RULE = StateRule(
+    field="workflow_status",
+    later=frozenset({"in_review", "approved", "retired"}),
+    initial="draft",
+    how="Submit it for review after the import; an approver decides it here.",
+    routed=True,
+    always=frozenset({"in_review"}),
+)
+
+
+def _with_workflow_rule(res: ResourceIO) -> ResourceIO:
+    """Every register with an approval lifecycle gates its imported ``workflow_status``."""
+    if not any(c.field == "workflow_status" for c in res.all_columns):
+        return res
+    if any(r.field == "workflow_status" for r in res.state_rules):
+        return res
+    from dataclasses import replace
+
+    return replace(res, state_rules=(*res.state_rules, WORKFLOW_RULE))
+
+
+@dataclass(frozen=True)
+class ImportGate:
+    """The state rules of one resource, resolved for one importer (see StateRule).
+
+    Built once per preview / import by :func:`import_gate`; :meth:`apply` is pure, so
+    preview and import take exactly the same decision for every row."""
+
+    decisions: tuple[tuple[StateRule, str], ...] = ()  # (rule, "" = may carry | why not)
+
+    def apply(self, payload: dict[str, Any]) -> list[str]:
+        warnings: list[str] = []
+        for rule, blocked in self.decisions:
+            raw = payload.get(rule.field)
+            value = str(getattr(raw, "value", raw) or "")
+            if value not in rule.later:
+                continue
+            if value in rule.always:
+                reason = "an import cannot put a record into an approval route"
+            elif blocked:
+                reason = blocked
+            else:
+                continue
+            payload[rule.field] = rule.initial
+            dropped = [f for f in rule.clears if payload.pop(f, None) is not None]
+            note = f" ({', '.join(dropped)} left blank)" if dropped else ""
+            warnings.append(
+                f"{rule.field}: imported as '{rule.initial}', not '{value}'{note} — {reason}. {rule.how}"
+            )
+        return warnings
+
+
+async def import_gate(db: Any, res: ResourceIO, user: Any) -> ImportGate:
+    """Resolve ``res.state_rules`` for ``user``: may they bring a record in past its
+    initial state, i.e. could they have taken that decision alone in the app?"""
+    if not res.state_rules:
+        return ImportGate()
+    from app.services import dual_control, record_workflow, workflow_engine
+    from app.services.record_registry import entity_type_for_model
+
+    entity_type = entity_type_for_model(res.model) or res.resource
+    held = set(getattr(user, "permission_codes", []) or [])
+    decisions: list[tuple[StateRule, str]] = []
+    for rule in res.state_rules:
+        module = rule.module or entity_type
+        needed = rule.permissions or record_workflow.required_permissions(module, "approve")
+        blocked = ""
+        if not set(needed) <= held:
+            blocked = f"that takes approval rights ({', '.join(needed)})"
+        if not blocked:
+            for action in rule.four_eyes:
+                required, _ = await dual_control.dual_control_required(db, module, action)
+                if required:
+                    blocked = (
+                        "maker-checker applies, so the person importing a record cannot "
+                        "also be the one who approves it"
+                    )
+                    break
+        if not blocked and rule.routed and await workflow_engine.definition_for(db, entity_type):
+            blocked = "these records go through a configured approval route"
+        decisions.append((rule, blocked))
+    return ImportGate(tuple(decisions))
 
 
 def _with_workflow_column(res: ResourceIO) -> ResourceIO:
     """Give every register with an approval lifecycle a ``workflow_status`` import column.
 
-    The phase-1 registers dropped it when the state left their forms; a migration from a
-    legacy tool still needs it (see :func:`_importing_workflow_status`, which also gates
-    who may import a record past Draft)."""
+    The phase-1 registers dropped it when the state left their forms; a round-tripped
+    export and a migration from a legacy tool still carry it (see
+    :func:`_importing_workflow_status`, and :class:`StateRule` for who may import a
+    record past Draft)."""
     column = res.model.__table__.c.get("workflow_status")
     enum_cls = getattr(getattr(column, "type", None), "enum_class", None)
     if enum_cls is None or any(c.field == "workflow_status" for c in res.columns):
@@ -334,13 +700,19 @@ def _importing_workflow_status(res: ResourceIO) -> ResourceIO:
 
     The lifecycle state is no longer a form field (``services/record_workflow.py`` is
     the only thing that moves it), so Create schemas are dropping it. A CSV import is
-    different: a bank migrating from a legacy tool legitimately brings records that were
-    approved there, and re-approving thousands of them by hand is not a control, it is
-    busywork. So on *create* only, the importer still accepts the column: the row is
-    validated against the Create schema plus ``workflow_status``, created through the
-    module's own create function (all its rules apply), and the imported state is then
-    written in an explicit ``record_workflow.system_write()`` block. A resource whose
-    Create schema still carries the field is left untouched.
+    different: the column carries the state an export wrote, or a legacy tool's. Which
+    states may come in is decided before this wrapper runs, by the resource's
+    :class:`ImportGate` (``WORKFLOW_RULE``): past Draft only when the importer could have
+    approved the record alone in the app — approval rights, no four-eyes rule and no
+    approval route for the record type — which is how a single-operator installation
+    migrates its approved records. Otherwise the row arrives as a draft with a warning.
+    On *create* only, the row is validated against the Create schema plus
+    ``workflow_status``, created through the module's own create function (all its rules
+    apply), and a carried state is then written in an explicit
+    ``record_workflow.system_write()`` block with an ``import_state`` audit entry. The
+    approval-rights check below stays as a second line of defence for callers that
+    bypass the gate. A resource whose Create schema still carries the field is left
+    untouched.
     """
     if not any(c.field == "workflow_status" for c in res.columns):
         return res
@@ -417,6 +789,7 @@ def _pick_help(list_name: str) -> str:
 # Issues, incidents, KRIs, loss events, RCSA and vendors resolve the same way through
 # services.ref_fields, and also report each unmatched value as a row warning.
 _UNIT_HELP = "Name of a business unit; unmatched text is kept as a note"
+_CURRENCY_HELP = "ISO 4217 three-letter code such as PKR or USD"
 
 
 # ----- policies ------------------------------------------------------------
@@ -451,7 +824,18 @@ _register(ResourceIO(
         link_col("business_units", "business_unit_ids", BusinessUnit, "business_units", match_field="name"),
         link_col("roles", "role_ids", Role, "roles", match_field="name",
                  help="Comma-separated role names; their members are asked to acknowledge the policy"),
+        link_col("classification_label", "label_id", AssetLabel, "label", match_field="name", multi=False,
+                 help="Information classification label, e.g. Internal or Confidential"),
+        boolean("use_attachments", help="true when the policy text is an attached document"),
     ],
+    state_rules=(
+        StateRule(
+            field="status", later=frozenset({"under_review", "approved", "published"}),
+            initial="draft", four_eyes=("approve", "publish"), routed=True,
+            how="A policy is approved through Submit for review and Approve, then published "
+            "with Publish.",
+        ),
+    ),
 ))
 
 # ----- risks ---------------------------------------------------------------
@@ -465,9 +849,11 @@ _register(ResourceIO(
         text("description"),
         text("cause", help="Risk statement: what could cause the event"),
         text("event", help="Risk statement: what could happen"),
-        # No "consequence" column: in bank registers that header is the impact score
-        # (likelihood x consequence), and the mapper matches our field name first, so a
-        # statement column would swallow the scores. Add it in the form after import.
+        # In bank registers a "Consequence" heading is usually the impact score
+        # (likelihood x consequence), so the statement column carries a heading of its own
+        # and is never matched on its bare field name: the scores keep going to impact.
+        Column(header="consequence_statement", field="consequence", match_on_field=False,
+               help="Risk statement: what the event would lead to"),
         text("category", help=_pick_help("risk category")),
         Column(header="risk_type", field="risk_type", kind="enum", enum_values=list(RISK_TYPES)),
         Column(header="velocity", field="velocity", kind="enum", enum_values=list(RISK_VELOCITIES),
@@ -475,6 +861,12 @@ _register(ResourceIO(
         Column(header="source", field="source", kind="enum", enum_values=list(RISK_SOURCES),
                help="Where the risk was identified"),
         date_col("identified_date"),
+        user_col("identified_by", "identified_by_id",
+                 help="Email or full name of the user who identified it; blank = the importer"),
+        # The accountable owner. A risk leaves Draft only with one (services.risk_integrity).
+        # Headed risk_owner, not owner: a register's "Process Owner" is not the risk owner.
+        user_col("risk_owner", "owner_id", "owner", help="Email or full name of the risk owner (a user). "
+                 "Needed for any status beyond draft; unmatched text is skipped with a warning"),
         enum_col("status", RiskStatus,
                  help="Any status beyond draft needs both inherent scores and an assessment_rationale"),
         # The scale is per-tenant (3x3 up to 10x10), so the help names the range the
@@ -486,6 +878,8 @@ _register(ResourceIO(
         integer("target_likelihood", help="Where treatment should take it (optional; not above residual)"),
         integer("target_impact", help="Where treatment should take it (optional; not above residual)"),
         text("assessment_rationale", help="Why the scores are what they are"),
+        text("residual_override_reason",
+             help="Why the residual score is above the inherent (required in that case)"),
         enum_col("treatment_strategy", TreatmentStrategy),
         text("treatment_description"),
         text("treatment_owner", help=_PERSON_HELP),
@@ -494,6 +888,11 @@ _register(ResourceIO(
         number("annual_loss_frequency", help="FAIR: events per year"),
         number("single_loss_expectancy", help="FAIR: loss per event, in your organisation's currency"),
         enum_col("review_frequency", ReviewFrequency),
+        # Phase 3 hierarchy: enterprise (1) > category (2) > scenario (3).
+        link_col("parent_risk", "parent_id", Risk, "parent", match_field="title", multi=False,
+                 via=VIA_COLUMN, help="Reference or title of the risk above this one"),
+        Column(header="hierarchy_level", field="level", kind="int", match_on_field=False,
+               help="1 enterprise, 2 category, 3 scenario; blank = one below the parent risk"),
         # Segment scoping. A bank's existing register almost always has a department or
         # process column already, so importing it should land the segment too rather
         # than making someone re-tag several hundred rows by hand.
@@ -507,6 +906,25 @@ _register(ResourceIO(
         link_col("policies", "policy_ids", Policy, "policies", match_field="title"),
         link_col("incidents", "incident_ids", Incident, "incidents", match_field="title"),
     ],
+    derived=[
+        Column(header="impact_dimensions", field="impact_dimensions", parse=_parse_impact_dimensions,
+               export_batch=_impact_dimension_cells,
+               link=LinkSpec(target_model=Lookup, match_field="label", multi=False,
+                             create_field="impact_dimensions", export_attr="impact_dimensions",
+                             via=VIA_COLUMN, also_match=("value",), scope=(("key", "impact_dimension"),)),
+               help="Impact per dimension as 'basis: Dimension=score, …; …', e.g. "
+               "inherent: Financial=4, Reputational=3; residual: Financial=2. A basis scored "
+               "here takes its overall impact from these scores (the impact column is ignored)"),
+    ],
+    prepare=_dimension_scores_decide_impact,
+    state_rules=(
+        # Accepting a risk is a decision (request, then a holder of risk:accept decides).
+        StateRule(
+            field="status", later=frozenset({"accepted"}), initial="assessed",
+            permissions=("risk:read", "risk:accept"), four_eyes=("accept",),
+            how="Request acceptance from the risk; a holder of risk:accept decides it.",
+        ),
+    ),
 ))
 
 # ----- controls ------------------------------------------------------------
@@ -521,6 +939,8 @@ _register(ResourceIO(
         text("description"),
         text("objective"),
         text("owner", help=_PERSON_HELP),
+        user_col("operator", "operator_id", help="Email or full name of the user who performs "
+                 "the control day to day; unmatched text is skipped with a warning"),
         enum_col("control_type", ControlType),
         text("classification", help=_pick_help("control classification")),
         text("documentation_url"),
@@ -536,9 +956,16 @@ _register(ResourceIO(
                             "annual", "per_event", "ad_hoc"]),
         text("test_procedure"),
         text("evidence_expected"),
+        Column(header="iso27002_attributes", field="iso27002_attributes",
+               export_value=_iso_attributes_cell, parse=_parse_iso_attributes,
+               help="ISO/IEC 27002:2022 attributes as 'attribute: value value; …', e.g. "
+               "control_type: preventive; security_properties: confidentiality integrity"),
+        # The export carries the rating the tests produced. Without an override reason it
+        # is ignored on import — a new control has no reviewed tests, so it starts as not
+        # assessed (see _ignore_derived_effectiveness) — rather than failing the row.
         enum_col("effectiveness", ControlEffectiveness,
-                 help="Leave blank to derive it from reviewed tests; a value is a manual override "
-                 "and needs effectiveness_override_reason"),
+                 help="Derived from reviewed tests and ignored on import unless "
+                 "effectiveness_override_reason says why it is set by hand"),
         text("effectiveness_override_reason", help="Why the effectiveness is set by hand"),
         number("opex"),
         number("capex"),
@@ -551,11 +978,13 @@ _register(ResourceIO(
         date_col("next_maintenance_date"),
         link_col("policies", "policy_ids", Policy, "policies", match_field="title"),
         link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
-        # Control has no ORM `risks` relationship (write-only via risk_controls join) -> import-only link.
-        link_col("risks", "risk_ids", Risk, "risks", match_field="title", exportable=False),
+        # Control has no `risks` relationship: exported from the risk_controls join table.
+        link_col("risks", "risk_ids", Risk, "risks", match_field="title", via=VIA_JOIN),
+        link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
         link_col("business_units", "business_unit_ids", BusinessUnit, "business_units", match_field="name"),
         link_col("processes", "process_ids", Process, "processes", match_field="name"),
     ],
+    prepare=_ignore_derived_effectiveness,
 ))
 
 # ----- assets --------------------------------------------------------------
@@ -579,7 +1008,21 @@ _ASSET_SHARED_COLUMNS = [
     enum_col("workflow_status", WorkflowStatus),
 ]
 
+def _classification_label(value: Any) -> str:
+    kind = getattr(getattr(value, "type", None), "name", "") or ""
+    return f"{kind}: {value.name}" if kind else value.name
+
+
 _ASSET_SHARED_LINKS = [
+    link_col("media_type", "media_type_id", AssetMediaType, "media_type", multi=False,
+             help="Asset type, e.g. Hardware, Software, Data Asset"),
+    # RACI business units (owner / guardian / user), as on the form.
+    link_col("owner_business_unit", "owner_id", BusinessUnit, "owner", multi=False,
+             help="Business unit that owns the asset"),
+    link_col("guardian_business_unit", "guardian_id", BusinessUnit, "guardian", multi=False,
+             help="Business unit that looks after the asset"),
+    link_col("user_business_unit", "user_id", BusinessUnit, "user", multi=False,
+             help="Business unit that uses the asset"),
     link_col("processes", "process_ids", Process, "processes", match_field="name"),
     link_col("legals", "legal_ids", Legal, "legals", match_field="name"),
     link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
@@ -604,13 +1047,38 @@ _register(ResourceIO(
         boolean("self_assessed"),
         text("assessed_by"),
         date_col("assessed_date"),
+        link_col("classification_label", "label_id", AssetLabel, "label", multi=False,
+                 help="Handling label, e.g. Internal, Confidential, Restricted"),
+        link_col("classifications", "classification_ids", AssetClassification, "classifications",
+                 label=_classification_label,
+                 help="Comma-separated 'Axis: Value' pairs, e.g. Confidentiality: Restricted"),
         *_ASSET_SHARED_LINKS,
     ],
 ))
 
+class ItAssetImport(AssetCreate):
+    """AssetCreate plus the information assets the IT asset hosts — links the form makes
+    one at a time through ``POST /assets/dependencies`` after the asset exists."""
+
+    hosted_information_asset_ids: list[uuid.UUID] = []
+
+
+async def _create_it_asset_import(body: ItAssetImport, db, user):
+    created = await create_asset(
+        body=AssetCreate.model_validate(body.model_dump(exclude={"hosted_information_asset_ids"})),
+        db=db, user=user,
+    )
+    for info_id in dict.fromkeys(body.hosted_information_asset_ids):
+        await create_dependency(
+            AssetDependencyCreate(information_asset_id=info_id, it_asset_id=created.id),
+            db=db, user=user,
+        )
+    return created
+
+
 _register(ResourceIO(
     resource="it-assets", label="IT Assets", model=Asset,
-    create_schema=AssetCreate, create_func=create_asset,
+    create_schema=ItAssetImport, create_func=_create_it_asset_import,
     read_perm="asset:read", write_perm="asset:write", importable=True,
     fixed={"asset_class": AssetClass.it_asset},
     columns=[
@@ -625,9 +1093,20 @@ _register(ResourceIO(
         text("model_number"),
         text("os_version"),
         number("replacement_cost"),
-        text("currency"),
+        text("currency", help=_CURRENCY_HELP),
+        enum_col("discovery_source", DiscoverySource, help="Where the record came from"),
         text("external_id", help="Identifier in the source CMDB / discovery tool"),
+        boolean("auto_discovered", help="true when a discovery tool found the asset"),
+        date_col("last_seen", help="When the discovery tool last saw the asset"),
+        link_col("tags", "tag_ids", AssetTag, "tags", help="Comma-separated operational tags"),
         *_ASSET_SHARED_LINKS,
+    ],
+    derived=[
+        # An IT asset carries information assets (criticality inherits from the data).
+        link_col("hosted_information_assets", "hosted_information_asset_ids", Asset,
+                 "hosted_dependencies.information_asset",
+                 scope=(("asset_class", AssetClass.information_asset),),
+                 help="Comma-separated names of the information assets this asset hosts"),
     ],
 ))
 
@@ -640,6 +1119,8 @@ _register(ResourceIO(
         text("name", required=True),
         text("description"),
         text("category", help=_pick_help("third-party category")),
+        link_col("type", "type_id", VendorType, "type", multi=False,
+                 help="Third-party type, e.g. Cloud Provider, Processor, Supplier"),
         text("legal_name", help="Registered legal name, if different from the trading name"),
         text("registration_number", help="SECP / company registration number"),
         number("annual_spend"),
@@ -648,9 +1129,13 @@ _register(ResourceIO(
         text("contact_email"),
         text("contact_phone"),
         text("website"),
-        # City or address, free text. The country picker (country_id) is not importable
-        # yet: link columns cannot scope a lookup to one list.
+        # City or address, free text; the country is picked from the country list.
         text("location", help="City or street address (free text)"),
+        lookup_col("country", "country_id", "country"),
+        lookup_col("data_classification", "data_classification_id", "data_classification",
+                   help="Highest classification of bank data the third party accesses"),
+        user_col("relationship_owner", "relationship_owner_id",
+                 help="Email or full name of the bank's accountable owner of the relationship"),
         enum_col("criticality", Criticality),
         enum_col("status", VendorStatus),
         enum_col("risk_rating", Severity),
@@ -664,6 +1149,15 @@ _register(ResourceIO(
         # workflow_status: appended by _with_workflow_column (see policies).
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
         link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
+        link_col("controls", "control_ids", Control, "controls", match_field="name"),
+        link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
+        link_col("processes", "process_ids", Process, "processes", match_field="name",
+                 help="Business processes this third party supports"),
+        link_col("subcontractors", "subcontractor_ids", Vendor, "subcontractors", match_field="name",
+                 help="The third party's own sub-contractors (fourth parties), from the vendor register"),
+        lookup_col("data_residency_countries", "data_residency_country_ids", "country",
+                   "data_residency_countries", multi=True, via=VIA_RELATIONSHIP,
+                   help="Countries where the third party stores or processes our data; comma-separated"),
     ],
 ))
 
@@ -672,6 +1166,27 @@ _INCIDENT_TS_HELP = (
     "YYYY-MM-DD (taken as 00:00 in the organisation's timezone) or an ISO date-time, "
     "e.g. 2026-09-01T14:30 or 2026-09-01T14:30:00+05:00"
 )
+
+
+def _notification_clock(incident: Any) -> Any:
+    """The regulator-notification position, for a reportable incident only: the import
+    records a notification on the initial report, which only a reportable incident has."""
+    from app.services import incident_clock
+
+    if not getattr(incident, "is_reportable", False):
+        return None
+    return incident_clock.notification_clock(incident.regulatory_reports)
+
+
+def _incident_notified_at(incident: Any) -> Any:
+    clock = _notification_clock(incident)
+    return clock.notified_at if clock else None
+
+
+def _incident_regulator_reference(incident: Any) -> str:
+    clock = _notification_clock(incident)
+    return (clock.regulator_reference or "") if clock else ""
+
 _register(ResourceIO(
     resource="incidents", label="Incidents", model=Incident,
     create_schema=IncidentCreate, create_func=create_incident,
@@ -705,6 +1220,15 @@ _register(ResourceIO(
         link_col("vendors", "vendor_ids", Vendor, "vendors", match_field="name"),
         link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+    ],
+    # Stored on the incident's initial regulatory report, not the incident itself.
+    derived=[
+        Column(header="notified_at", field="notified_at", export_value=_incident_notified_at,
+               help="When the regulator was notified (marks the initial report submitted). "
+               + _INCIDENT_TS_HELP),
+        Column(header="regulator_reference", field="regulator_reference",
+               export_value=_incident_regulator_reference,
+               help="The regulator's acknowledgement reference"),
     ],
 ))
 
@@ -748,8 +1272,8 @@ _register(ResourceIO(
         text("countries", help="Comma-separated list of applicable countries"),
         number("risk_magnifier", help="Amplifies linked risk scores (default 1.0)"),
         link_col("business_units", "business_unit_ids", BusinessUnit, "business_units", match_field="name"),
-        # Legal has no ORM `assets` relationship (write-only via assets_legals join) -> import-only link.
-        link_col("assets", "asset_ids", Asset, "assets", match_field="name", exportable=False),
+        # Legal has no `assets` relationship: exported from the assets_legals join table.
+        link_col("assets", "asset_ids", Asset, "assets", match_field="name", via=VIA_JOIN),
     ],
 ))
 
@@ -764,9 +1288,9 @@ _register(ResourceIO(
         text("manager", help=_PERSON_HELP),
         text("email"),
         text("location"),
-        # BusinessUnit exposes parent only as parent_id FK (no `parent` ORM attr) -> import-only link.
+        # BusinessUnit exposes its parent only as the parent_id foreign key.
         link_col("parent", "parent_id", BusinessUnit, "parent", match_field="name", multi=False,
-                 exportable=False, help="Parent business unit name (single value)"),
+                 via=VIA_COLUMN, help="Parent business unit name (single value)"),
         link_col("legals", "legal_ids", Legal, "legals", match_field="name"),
     ],
 ))
@@ -786,8 +1310,8 @@ _register(ResourceIO(
         integer("rpd_hours", help="Max tolerable downtime (hours)"),
         link_col("business_unit", "business_unit_id", BusinessUnit, "business_unit", match_field="name", multi=False,
                  help="Owning business unit name (single value)"),
-        # Process has no ORM `assets` relationship (write-only via assets_processes join) -> import-only link.
-        link_col("assets", "asset_ids", Asset, "assets", match_field="name", exportable=False),
+        # Process has no `assets` relationship: exported from the assets_processes join table.
+        link_col("assets", "asset_ids", Asset, "assets", match_field="name", via=VIA_JOIN),
     ],
 ))
 
@@ -800,6 +1324,7 @@ _register(ResourceIO(
         text("name", required=True),
         text("description"),
         text("category"),
+        link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
     ],
 ))
 
@@ -811,9 +1336,10 @@ _register(ResourceIO(
     create_schema=FindingCreate, create_func=create_finding,
     read_perm="internal_audit:read", write_perm="internal_audit:write", importable=True,
     columns=[
-        link_col("engagement", "engagement_id", AuditEngagement, "engagement",
-                 match_field="title", multi=False,
-                 help="Reference or title of the audit this finding belongs to"),
+        Column(header="engagement", field="engagement_id", required=True, kind="link",
+               help="Reference or title of the audit this finding belongs to",
+               link=LinkSpec(target_model=AuditEngagement, match_field="title", multi=False,
+                             create_field="engagement_id", export_attr="engagement")),
         text("title", required=True),
         text("description"),
         enum_col("rating", Severity),
@@ -824,7 +1350,13 @@ _register(ResourceIO(
         date_col("due_date"),
         enum_col("status", AuditFindingStatus),
         date_col("closed_date"),
+        link_col("controls", "control_ids", Control, "controls", match_field="name"),
+        link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
+        link_col("requirements", "requirement_ids", Requirement, "requirements", match_field="title"),
     ],
+    # A finding of an archived audit cannot be imported (its engagement no longer
+    # resolves), so it is not exported either; archiving the audit archived its findings.
+    export_where=lambda: [AuditFinding.engagement.has(AuditEngagement.deleted.is_(False))],
 ))
 
 # ----- risk scenario library ------------------------------------------------
@@ -838,6 +1370,8 @@ _register(ResourceIO(
         text("description"),
         text("category"),
         text("asset_classes", help="information_asset and/or it_asset, comma-separated; blank = all assets"),
+        text("asset_kinds", help="Comma-separated asset kinds the scenario applies to "
+             "(GET /risk-scenarios/asset-kinds); blank = every kind"),
         text("threat"),
         text("vulnerability"),
         integer("likelihood", help="1-5 base likelihood; rescaled to your matrix"),
@@ -845,6 +1379,7 @@ _register(ResourceIO(
         text("impact_property", help="confidentiality | integrity | availability (with impact_rule=from_property)"),
         integer("fixed_impact", help="1-5, only with impact_rule=fixed"),
         text("treatment_hint"),
+        text("control_references", help="Comma-separated control references that treat the scenario"),
         boolean("enabled"),
     ],
 ))
@@ -858,6 +1393,7 @@ _register(ResourceIO(
         text("name", required=True),
         text("description"),
         text("category"),
+        link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
     ],
 ))
 
@@ -904,6 +1440,13 @@ _register(ResourceIO(
         text("recipients"),
         text("security_measures"),
         text("accuracy"),
+        # Data-subject rights: how each is honoured for this activity.
+        text("right_to_be_informed"),
+        text("right_to_access"),
+        text("right_to_rectification"),
+        text("right_to_erasure"),
+        text("right_to_object"),
+        text("right_to_portability"),
         text("controller"),
         text("processor"),
         text("dpo"),
@@ -921,6 +1464,63 @@ _register(ResourceIO(
         link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
         link_col("processes", "process_ids", Process, "processes", match_field="name"),
         link_col("policies", "policy_ids", Policy, "policies", match_field="title"),
+    ],
+))
+
+# ----- data protection: DPIAs, DSARs, consent ledger -------------------------
+# The DPO's operational registers (Pakistan PDPA readiness). Each goes through the
+# module's own create: references are numbered, a DSAR without a due date gets the
+# statutory 30 days from receipt.
+_register(ResourceIO(
+    resource="dpias", label="Data Protection Impact Assessments", model=Dpia,
+    create_schema=DpiaCreate, create_func=create_dpia,
+    read_perm="dpo:read", write_perm="dpo:write", importable=True,
+    columns=[
+        text("title", required=True),
+        text("processing_activity", help="Name of the processing activity assessed"),
+        text("description"),
+        text("necessity_justification"),
+        text("risks_identified"),
+        text("mitigations"),
+        enum_col("residual_risk", Criticality),
+        enum_col("status", DpiaWorkflowStatus),
+        text("owner"),
+        text("dpo_reviewer"),
+        date_col("review_date"),
+        # workflow_status: appended by _with_workflow_column (see policies).
+    ],
+))
+
+_register(ResourceIO(
+    resource="dsars", label="Data Subject Requests", model=Dsar,
+    create_schema=DsarCreate, create_func=create_dsar,
+    read_perm="dpo:read", write_perm="dpo:write", importable=True,
+    columns=[
+        text("subject_name"),
+        text("subject_contact"),
+        enum_col("request_type", DsarType),
+        date_col("received_date", help="Starts the response clock"),
+        date_col("due_date", help="Blank = the statutory deadline from the received date"),
+        date_col("response_date"),
+        text("handler"),
+        text("notes"),
+        enum_col("status", DsarStatus),
+    ],
+))
+
+_register(ResourceIO(
+    resource="consent-records", label="Consent Records", model=ConsentRecord,
+    create_schema=ConsentRecordCreate, create_func=create_consent_record,
+    read_perm="dpo:read", write_perm="dpo:write", importable=True,
+    columns=[
+        text("subject_name"),
+        text("purpose"),
+        boolean("consent_given"),
+        date_col("consent_date"),
+        date_col("withdrawal_date"),
+        text("channel", help="Where consent was captured, e.g. branch form, mobile app"),
+        enum_col("lawful_basis", LawfulBasis),
+        enum_col("status", ConsentStatus),
     ],
 ))
 
@@ -946,6 +1546,11 @@ _register(ResourceIO(
                  help="Owning business unit name (single value)"),
         link_col("process", "process_id", Process, "process", match_field="name", multi=False,
                  help="Related process name (single value)"),
+        link_col("business_impact_analysis", "bia_id", BiaAssessment, "bia_assessment",
+                 match_field="process_name", multi=False,
+                 help="Reference or process name of the BIA this plan answers"),
+        link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
+        link_col("risks", "risk_ids", Risk, "risks", match_field="title"),
     ],
 ))
 
@@ -988,8 +1593,10 @@ _register(ResourceIO(
     create_schema=RequirementImport, create_func=_create_requirement_import,
     read_perm="compliance:read", write_perm="compliance:write", importable=True,
     columns=[
-        link_col("framework", "framework_id", Framework, "framework", match_field="name",
-                 multi=False, help="Framework this requirement belongs to (required)"),
+        Column(header="framework", field="framework_id", required=True, kind="link",
+               help="Name of the framework this requirement belongs to",
+               link=LinkSpec(target_model=Framework, match_field="name", multi=False,
+                             create_field="framework_id", export_attr="framework")),
         text("title", required=True),
         text("reference", help="Requirement reference, e.g. A.5.1 / CC6.1"),
         text("domain"),
@@ -998,6 +1605,7 @@ _register(ResourceIO(
         text("audit_questionnaire", help="How to test compliance"),
         enum_col("status", ComplianceStatus),
         enum_col("treatment", ComplianceTreatment),
+        text("applicability_justification", help="Why the requirement is (not) applicable"),
         integer("efficacy", help="0-100 %"),
         text("owner"),
         enum_col("workflow_status", WorkflowState),
@@ -1023,8 +1631,10 @@ _register(ResourceIO(
         date_col("collected_at"),
         date_col("valid_until"),
         # control_id is required on EvidenceCreate -> a blank cell fails the row.
-        link_col("control", "control_id", Control, "control", match_field="name", multi=False,
-                 help="Control this evidence supports (single value, required)"),
+        Column(header="control", field="control_id", required=True, kind="link",
+               help="Reference or name of the control this evidence supports",
+               link=LinkSpec(target_model=Control, match_field="name", multi=False,
+                             create_field="control_id", export_attr="control")),
     ],
 ))
 
@@ -1094,6 +1704,7 @@ _register(ResourceIO(
         # api.v1.issues.import_issue); in the app the server sets it on Close.
         date_col("closed_date", help="Only for rows imported closed; set by the server otherwise"),
         text("root_cause"),
+        lookup_col("root_cause_category", "root_cause_category_id", "root_cause_category"),
         text("management_response"),
         boolean("repeat_finding"),
         boolean("regulator_related"),
@@ -1103,6 +1714,14 @@ _register(ResourceIO(
         link_col("assets", "asset_ids", Asset, "assets", match_field="name"),
         link_col("third_parties", "vendor_ids", Vendor, "vendors", match_field="name"),
     ],
+    state_rules=(
+        StateRule(
+            field="status", later=frozenset({"remediated", "closed", "risk_accepted"}),
+            initial="open", four_eyes=("validate", "close"), clears=("closed_date",),
+            how="Close it from the issue: its remediation is validated and the issue closed "
+            "by someone other than whoever raised it.",
+        ),
+    ),
 ))
 
 # ----- operational risk: RCSA ----------------------------------------------
@@ -1329,10 +1948,9 @@ _register(ResourceIO(
         enum_col("status", OutsourcingStatus),
         text("owner"),
         enum_col("workflow_status", WorkflowState),
-        # OutsourcingArrangement holds vendor_id but exposes no ORM relationship, so the
-        # column imports the link and stays blank on export (round-trip symmetry).
+        # OutsourcingArrangement holds vendor_id with no relationship: read off the column.
         link_col("vendor", "vendor_id", Vendor, "vendor", match_field="name", multi=False,
-                 exportable=False),
+                 via=VIA_COLUMN),
     ],
 ))
 
@@ -1353,7 +1971,7 @@ _register(ResourceIO(
         text("peak_periods"),
         number("financial_impact_24h"),
         number("financial_impact_1week"),
-        text("currency"),
+        text("currency", help=_CURRENCY_HELP),
         text("operational_impact"),
         text("reputational_impact"),
         text("regulatory_impact"),

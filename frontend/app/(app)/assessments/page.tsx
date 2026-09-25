@@ -113,11 +113,12 @@ function AssessmentsInner() {
   const state = detail?.status || "";
   const answering = ["draft", "sent", "in_progress"].includes(state);
   const reviewing = state === "submitted";
-  const reopened = useMemo(() => {
-    if (!detail?.submitted_at) return null;
-    const ids = detail.answers.filter((a) => a.review_state === "returned").map((a) => a.question_id);
-    return ids.length ? new Set(ids) : null;
-  }, [detail]);
+  // The server says what may change in a returned round: the returned answers, those
+  // revised since, and the follow-up questions they show.
+  const reopened = useMemo(
+    () => (detail?.reopened_question_ids ? new Set(detail.reopened_question_ids) : null),
+    [detail],
+  );
 
   async function act<T>(fn: () => Promise<T>, ok?: string): Promise<T | undefined> {
     setError(null);
@@ -470,7 +471,7 @@ function AssessmentsInner() {
 
             {view === "answers" && (
               <>
-                {reopened && answering && <p className="muted" style={{ fontSize: 13 }}>Only the returned answers can change until the respondent resubmits.</p>}
+                {reopened && answering && <p className="muted" style={{ fontSize: 13 }}>Only the returned answers and the follow-up questions they show can change until the respondent resubmits.</p>}
                 <QuestionnaireForm
                   sections={sections} drafts={drafts} readOnly={!answering} editableIds={reopened} fileCounts={fileCounts}
                   onChange={(id, d) => { setDrafts((x) => ({ ...x, [id]: d })); setDirty(true); }} extra={extra} showScores

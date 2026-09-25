@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import uuid
 from collections import Counter
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -51,7 +51,7 @@ async def _get(db, model, obj_id, name):
 async def _soft_delete(db, model, obj_id, name):
     obj = await _get(db, model, obj_id, name)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -180,9 +180,85 @@ async def list_sars(
     return Page(items=[SarRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
+#: The audit-trail / record type of an STR/SAR — the same key approvals, comments, custom
+#: fields and the Activity Log filter use. Entries written before this was aligned carry
+#: the legacy ``"sar"``; migration 0038 renames them, and the maker lookup still reads
+#: both so a database that has not been migrated yet keeps its four-eyes.
+SAR_ENTITY = "suspicious_activity_report"
+_LEGACY_SAR_ENTITY = "sar"
+
+_SAR_SELF_FILE = (
+    "Segregation of duties: an STR/SAR cannot be filed by the person who prepared it. "
+    "Save it as a draft or under review; an independent checker (the MLRO or deputy) "
+    "marks it filed."
+)
+
+
+async def _sar_maker(db, sar: SuspiciousActivityReport) -> uuid.UUID | None:
+    """Who prepared this STR/SAR — the actor of its ``create`` entry (either entity key)."""
+    return (
+        await dual_control.maker_of(db, SAR_ENTITY, sar.id, record=sar)
+        or await dual_control.maker_of(db, _LEGACY_SAR_ENTITY, sar.id, record=sar)
+    )
+
+
+async def _apply_sar_filing(
+    db, data: dict, user, sar: SuspiciousActivityReport | None = None,
+) -> None:
+    """Gate every path to ``filed`` and keep ``filed_date`` honest. Mutates ``data``.
+
+    Filing an STR with the FMU is a regulator-facing act that the AML/CFT Regulations
+    expect the compliance function to take independently of whoever raised the
+    suspicion, so four-eyes applies to the *transition*, whatever keys the client sends:
+
+    * moving to ``filed`` (on create or update) runs the ``aml / file_sar`` dual-control
+      check — on create the maker is the caller, so while the control applies a report
+      can never be born filed;
+    * ``filed_date`` is stamped on filing (today, or the date the checker records — not
+      in the future) and is only ever set through that transition: a date typed onto an
+      unfiled report is refused, and a blank sent for a filed one is ignored, not a wipe;
+    * a filed report cannot be returned to draft or review — it can only be closed.
+    """
+    if "status" in data and data["status"] is None:
+        del data["status"]  # "no change", not a blank status
+    was_filed = sar is not None and (sar.status == SarStatus.filed or sar.filed_date is not None)
+    new_status = data.get("status") or (sar.status if sar is not None else SarStatus.draft)
+    filing = new_status == SarStatus.filed and not (sar is not None and sar.status == SarStatus.filed)
+
+    if was_filed:
+        if new_status in (SarStatus.draft, SarStatus.under_review):
+            raise HTTPException(
+                status_code=422,
+                detail="This STR/SAR has been filed with the FMU and cannot be reopened — close it instead.",
+            )
+        if "filed_date" in data and data["filed_date"] is None:
+            del data["filed_date"]  # a blank from the edit form never erases the filing date
+    elif not filing and data.get("filed_date") is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="A filing date is recorded by marking the STR/SAR as filed.",
+        )
+
+    if data.get("filed_date") is not None and data["filed_date"] > date.today():
+        raise HTTPException(
+            status_code=422,
+            detail="The filing date cannot be in the future.",
+        )
+
+    if filing:
+        maker_id = user.id if sar is None else await _sar_maker(db, sar)
+        await dual_control.enforce_maker_checker(
+            db, module="aml", action="file_sar", maker_id=maker_id, checker_id=user.id,
+            subject="STR/SAR", message=_SAR_SELF_FILE,
+        )
+        if data.get("filed_date") is None:
+            data["filed_date"] = date.today()
+
+
 @router.post("/aml/sars", response_model=SarRead, status_code=201, dependencies=[_WRITE])
 async def create_sar(body: SarCreate, db: DbSession, user: CurrentUser) -> SarRead:
     data = body.model_dump()
+    await _apply_sar_filing(db, data, user)
     # Default the FMU filing deadline from the detection date when not supplied.
     if data.get("deadline") is None and data.get("detected_date") is not None:
         data["deadline"] = data["detected_date"] + timedelta(days=settings.aml_str_filing_days)
@@ -190,7 +266,7 @@ async def create_sar(body: SarCreate, db: DbSession, user: CurrentUser) -> SarRe
     obj.reference = await _next_ref(db, SuspiciousActivityReport, "STR")
     db.add(obj)
     await db.flush()
-    await audit_log.record(db, actor=user, action="create", entity_type="sar",
+    await audit_log.record(db, actor=user, action="create", entity_type=SAR_ENTITY,
                            entity_id=obj.id, summary=f"STR/SAR {obj.reference}: {obj.subject}")
     return SarRead.model_validate(obj)
 
@@ -204,22 +280,19 @@ async def get_sar(sid: uuid.UUID, db: DbSession) -> SarRead:
 async def update_sar(sid: uuid.UUID, body: SarUpdate, db: DbSession, user: CurrentUser) -> SarRead:
     obj = await _get(db, SuspiciousActivityReport, sid, "SAR")
     data = body.model_dump(exclude_unset=True)
-    # Stamp the filing date when marked filed and none supplied.
-    if data.get("status") == SarStatus.filed and not obj.filed_date and "filed_date" not in data:
-        # Filing an STR/SAR with the FMU is a regulator-facing act: whoever prepared the
-        # report cannot also be the one who files it.
-        await dual_control.enforce_record_maker_checker(
-            db, module="aml", action="file_sar", entity_type="sar", entity_id=obj.id,
-            checker_id=user.id, subject="STR/SAR filing",
-        )
-        obj.filed_date = date.today()
+    before = obj.status
+    await _apply_sar_filing(db, data, user, obj)
     for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
-    if data.get("status") is not None:
+    if data:
+        summary = (
+            f"STR/SAR {obj.reference} moved to {obj.status.value}" if obj.status != before
+            else f"Updated STR/SAR {obj.reference}"
+        )
         await audit_log.record(
-            db, actor=user, action="update", entity_type="sar", entity_id=obj.id,
-            summary=f"STR/SAR {obj.reference} moved to {obj.status.value}", changes=data,
+            db, actor=user, action="update", entity_type=SAR_ENTITY, entity_id=obj.id,
+            summary=summary, changes=data,
         )
     return SarRead.model_validate(obj)
 

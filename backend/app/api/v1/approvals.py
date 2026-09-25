@@ -383,7 +383,7 @@ async def cancel_approval(approval_id: uuid.UUID, db: DbSession, user: CurrentUs
     approval routes (``automation:manage``), may. A request that is a stage of an approval
     route cancels the whole route, and the record goes back to draft."""
     from app.models.workflow import WorkflowInstance, WorkflowInstanceStage, WorkflowInstanceStatus
-    from app.services import workflow_engine
+    from app.services import record_workflow, workflow_engine
 
     obj = await _load(db, approval_id)
     if obj.status != ApprovalStatus.pending:
@@ -402,6 +402,13 @@ async def cancel_approval(approval_id: uuid.UUID, db: DbSession, user: CurrentUs
         await workflow_engine.cancel(db, instance, actor=user)
     obj.status = ApprovalStatus.cancelled
     await db.flush()
+    if instance is None and obj.entity_id is not None:
+        # A single request withdrawn: the record leaves review exactly as a route
+        # cancellation would leave it, instead of sitting "submitted" with nothing pending.
+        await record_workflow.write_back(
+            db, entity_type=obj.entity_type, entity_id=obj.entity_id, approved=False,
+            via="approvals", actor=user, action="withdraw",
+        )
     await audit.record(
         db, actor=user, action="cancel", entity_type="approval", entity_id=obj.id,
         summary=f"Cancelled approval {obj.reference}"

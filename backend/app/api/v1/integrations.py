@@ -221,7 +221,7 @@ async def update_connector(cid: uuid.UUID, body: ConnectorUpdate, db: DbSession,
 async def delete_connector(cid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_connector(db, cid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     # An archived connector's feed stops for good: restoring it needs a new token.
     had_token = bool(obj.ingest_token_hash)
     obj.ingest_token_hash = ""
@@ -347,7 +347,7 @@ async def update_test(tid: uuid.UUID, body: CctUpdate, db: DbSession, user: Curr
 async def delete_test(tid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_test(db, tid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
     await audit_log.record(db, actor=user, action="delete", entity_type="automated_control_test",
                            entity_id=obj.id, summary=f"Archived continuous control test {obj.reference}: {obj.name}")

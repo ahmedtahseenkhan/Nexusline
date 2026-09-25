@@ -423,6 +423,9 @@ class AssessmentRead(BaseModel):
     active_links: int = 0
     #: Why the signed-in user can't give the final review (segregation of duties), if so.
     review_blocked_reason: str | None = None
+    #: In a returned round, the questions that may still change (the returned answers,
+    #: those revised since and their follow-up questions); null when nothing is locked.
+    reopened_question_ids: list[uuid.UUID] | None = None
 
 
 class AssessmentSummary(BaseModel):

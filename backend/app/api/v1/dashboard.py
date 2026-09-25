@@ -80,12 +80,18 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
         if status:
             appetite_counts[status] += 1
 
-    total_controls = await db.scalar(
-        select(func.count()).select_from(Control).where(Control.deleted.is_(False))
-    ) or 0
-    total_assets = await db.scalar(
-        select(func.count()).select_from(Asset).where(Asset.deleted.is_(False))
-    ) or 0
+    # The endpoint needs only risk:read, so the other registers' sizes are given only to
+    # a reader of those registers — None ("not yours to see"), never a misleading 0.
+    held = set(user.permission_codes)
+    total_controls = total_assets = None
+    if "control:read" in held:
+        total_controls = await db.scalar(
+            select(func.count()).select_from(Control).where(Control.deleted.is_(False))
+        ) or 0
+    if "asset:read" in held:
+        total_assets = await db.scalar(
+            select(func.count()).select_from(Asset).where(Asset.deleted.is_(False))
+        ) or 0
     pending = (
         await db.scalar(
             select(func.count())
@@ -162,6 +168,7 @@ from app.models.lookup import Lookup  # noqa: E402
 from app.models.risk import RiskTreatmentAction  # noqa: E402
 from app.schemas.dashboard import CategoryPosture, DataCompleteness  # noqa: E402
 from app.services import control_assurance, governance_health  # noqa: E402
+from app.services import modules as module_service  # noqa: E402
 from app.services import drill_through as dt  # noqa: E402
 
 # "Open" issues, incidents and in-force policies, overdue tests and reviews: every
@@ -472,10 +479,15 @@ async def get_overview(
     # ------------------------------------------------------------------- KRIs
     kri_counts: Counter[str] = Counter()
     red_items: list[KriItem] = []
+    # The red indicators are named records of the Operational Risk module: listed only for
+    # a reader of KRIs whose organisation uses that module (the tallies stay, as posture).
+    kri_detail = "oprisk:read" in set(user.permission_codes) and await module_service.module_refusal(
+        "operational_risk", user.tenant_id
+    ) is None
     for k in (await db.scalars(select(KeyRiskIndicator).where(KeyRiskIndicator.deleted.is_(False)))).all():
         status_val = k.status.value if hasattr(k.status, "value") else str(k.status)
         kri_counts[status_val] += 1
-        if status_val == "red" and len(red_items) < 6:
+        if kri_detail and status_val == "red" and len(red_items) < 6:
             red_items.append(KriItem(
                 id=k.id, reference=k.reference or "", name=k.name, current_value=k.current_value,
                 warning_threshold=k.warning_threshold, limit_threshold=k.limit_threshold,

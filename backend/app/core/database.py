@@ -12,24 +12,51 @@ across pooled connections.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, ORMExecuteState, Session, lazyload
 
 from app.core.config import settings
+
+def _json_default(value: object) -> object:
+    """JSON columns (audit-trail changes, snapshots, settings) routinely receive the
+    values a request carried — dates, ids, amounts, enum members. Without this every
+    update whose changes included one crashed on commit."""
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (UUID, Decimal)):
+        return str(value)
+    if isinstance(value, (set, frozenset, tuple)):
+        return list(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def json_dumps(value: object) -> str:
+    return json.dumps(value, default=_json_default)
+
 
 # Runtime engine connects as the least-privilege app role so RLS is enforced.
 engine = create_async_engine(
     settings.app_database_url,
     pool_pre_ping=True,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+    pool_timeout=settings.db_pool_timeout,
+    json_serializer=json_dumps,
     echo=False,
 )
 
@@ -43,6 +70,34 @@ SessionLocal = async_sessionmaker(
 
 class Base(DeclarativeBase):
     """Declarative base for all ORM models."""
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _cap_eager_depth(state: ORMExecuteState) -> None:
+    """Stop eager loading ``settings.orm_eager_depth`` relationships away from the record
+    that was asked for.
+
+    Links are mapped ``lazy="selectin"`` so a record arrives with its related records
+    ready to serialise. But the links form one connected graph — a policy's risks have
+    controls, whose risks have assets, whose risks... — and uncapped, every list or
+    detail request walked all of it: 1,600+ queries to list 27 risks, growing with the
+    bank's data until pages timed out. Responses read a record's links and, for a few
+    computed badges, the links' own links; nothing reads further, so objects loaded at
+    the cap load their relationships only if asked.
+    """
+    if not state.is_relationship_load:
+        return
+    path = state.loader_strategy_path
+    depth = len(path.path) // 2 if path is not None else 0
+    if depth >= settings.orm_eager_depth:
+        # A refresh (populate_existing, re-reading a record after a write) would also
+        # repopulate objects already in the session — the signed-in user's roles among
+        # them — and the cap would leave their relationships unloaded, so the next
+        # permission check did IO outside the async context. Past the cap, objects the
+        # session already holds are kept as they are.
+        state.statement = state.statement.options(lazyload("*")).execution_options(
+            populate_existing=False
+        )
 
 
 async def set_session_tenant(session: AsyncSession, tenant_id: UUID | str | None) -> None:

@@ -46,8 +46,8 @@ export default function SlaPoliciesPage() {
     api.slaBreaches().then(setSummary).catch(() => {});
     // Role names power the escalation picker; a free-text fallback keeps the field
     // usable if the caller cannot read the role list.
-    apiCall<{ items: { name: string }[] }>("GET", "/roles?limit=100")
-      .then((r) => setRoles(r.items.map((x) => x.name)))
+    apiCall<{ name: string }[]>("GET", "/users/roles")
+      .then((r) => setRoles(r.map((x) => x.name)))
       .catch(() => {});
   }, []);
 

@@ -231,6 +231,8 @@ class EngagementRead(EngagementBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     reference: str
+    auditable_unit_name: str = ""
+    auditable_unit_archived: bool = False
     finding_count: int
     open_finding_count: int
     is_overdue: bool

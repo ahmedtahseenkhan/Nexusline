@@ -479,6 +479,33 @@ def write_back_target(current: Any, approved: bool) -> str | None:
     return DRAFT if value == IN_REVIEW else None
 
 
+def _decide_audit_plan(plan: Any, approved: bool) -> tuple[str, str] | None:
+    """Board / audit-committee sign-off of an annual audit plan, from the approvals inbox.
+
+    The plan has no ``workflow_status``: its own ``status`` (draft → submitted →
+    approved) *is* the sign-off lifecycle, so the decision lands there, and approval is
+    dated because "approved by the audit committee on …" is what the plan must show.
+    """
+    from datetime import date
+
+    from app.models.audit_plan import plan_decision_target
+
+    current = plan.status
+    target = plan_decision_target(current, approved)
+    if target is None:
+        return None
+    plan.status = target
+    plan.approved_on = date.today() if approved else None
+    return current.value, target.value
+
+
+#: Records whose sign-off moves a business ``status`` instead of ``workflow_status``,
+#: by table: ``(record, approved) -> (from, to)``, or None when the decision moves nothing.
+_STATUS_DECISIONS: dict[str, Any] = {
+    "audit_plans": _decide_audit_plan,
+}
+
+
 async def write_back(
     db: AsyncSession,
     *,
@@ -496,7 +523,9 @@ async def write_back(
     Called by ``approvals.decide_approval`` for a single-stage request and by
     ``workflow_engine.on_approval_decided`` when a route finishes. Returns the new state,
     or None when nothing changed (no record, no lifecycle, or not a state the decision
-    moves). Audited as the deciding user, or as the platform when there is none.
+    moves). A record whose sign-off is its own business ``status`` rather than
+    ``workflow_status`` (the annual audit plan) is moved by its :data:`_STATUS_DECISIONS`
+    entry instead. Audited as the deciding user, or as the platform when there is none.
     ``action`` overrides the audit verb (``withdraw`` when a route is cancelled).
     """
     from app.services import audit
@@ -504,17 +533,30 @@ async def write_back(
     if not entity_type or entity_id is None:
         return None
     model = record_registry.model_for(entity_type)
-    if model is None or not record_registry.has_workflow(model):
+    if model is None:
         return None
-    record = await db.get(model, entity_id)
-    if record is None or getattr(record, "deleted", False):
-        return None
-    current = state_value(record.workflow_status)
-    target = write_back_target(current, approved)
-    if target is None:
-        return None
+    if not record_registry.has_workflow(model):
+        decide = _STATUS_DECISIONS.get(getattr(model, "__tablename__", ""))
+        if decide is None:
+            return None
+        record = await db.get(model, entity_id)
+        if record is None or getattr(record, "deleted", False):
+            return None
+        moved = decide(record, approved)
+        if moved is None:
+            return None
+        current, target = moved
+        await db.flush()
+    else:
+        record = await db.get(model, entity_id)
+        if record is None or getattr(record, "deleted", False):
+            return None
+        current = state_value(record.workflow_status)
+        target = write_back_target(current, approved)
+        if target is None:
+            return None
+        await _set_state(db, record, target)
 
-    await _set_state(db, record, target)
     action = action or ("approve" if approved else "reject")
     reason = (comment or "").strip()
     summary = _summary(action, entity_type, record, reason)

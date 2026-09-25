@@ -1,4 +1,9 @@
-"""Awareness Training API — program/quiz builder, participant assignment, quiz scoring."""
+"""Awareness Training API — program/quiz builder, participant assignment, quiz scoring.
+
+Every change is on the activity trail against the programme: its edits and archive,
+each participant assigned, changed or removed, and each quiz result with its score and
+whether it met the pass mark — SBP expects a bank to evidence who was trained when.
+"""
 from __future__ import annotations
 
 import uuid
@@ -32,6 +37,21 @@ from app.services import audit
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/awareness-programs", tags=["awareness"])
+
+
+def _plain(value):
+    return getattr(value, "value", value)
+
+
+def _changes(obj, data: dict) -> dict:
+    return {k: {"from": _plain(getattr(obj, k)), "to": _plain(v)}
+            for k, v in data.items() if getattr(obj, k) != v}
+
+
+async def _trail(db, user, program, action: str, summary: str, changes: dict | None = None) -> None:
+    await audit.record(db, actor=user, action=action, entity_type="awareness_program",
+                       entity_id=program.id if hasattr(program, "id") else program,
+                       summary=summary[:500], changes=changes or None)
 
 
 async def _load(db, program_id: uuid.UUID) -> AwarenessProgram:
@@ -141,26 +161,38 @@ async def update_program(
 ) -> ProgramRead:
     program = await _load(db, program_id)
     data = body.model_dump(exclude_unset=True)
+    changes: dict = {}
     # When `questions` is supplied, fully replace the quiz (delete-orphan cascade handles removals).
     if "questions" in data:
         data.pop("questions")
         if body.questions is not None:
+            before = len(program.questions)
             program.questions = _build_questions(program.tenant_id, body.questions)
+            changes["questions"] = {"from": before, "to": len(body.questions)}
+    data = {k: v for k, v in data.items() if v is not None or k == "due_date"}
+    changes.update(_changes(program, data))
     for f, v in data.items():
         setattr(program, f, v)
     if "frequency" in data:
         program.next_due_date = next_review_date(program.frequency)
     await db.flush()
+    if changes:
+        await _trail(db, user, program, "update",
+                     f"Updated awareness program {program.reference}: {', '.join(changes)}", changes)
     return ProgramRead.model_validate(await _fresh(db, program.id))
 
 
 @router.delete("/{program_id}", status_code=204, dependencies=[Depends(require("awareness:write"))])
-async def delete_program(program_id: uuid.UUID, db: DbSession) -> None:
+async def delete_program(program_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     from datetime import datetime, timezone
 
     obj = await _load(db, program_id)
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await _trail(db, user, obj, "delete",
+                 f"Archived awareness program {obj.reference}: {obj.name} "
+                 f"({obj.participant_count} participant record(s) kept with it)")
 
 
 # ---------------------------------------------------------------- participants
@@ -171,9 +203,14 @@ async def delete_program(program_id: uuid.UUID, db: DbSession) -> None:
     dependencies=[Depends(require("awareness:write"))],
 )
 async def add_participant(program_id: uuid.UUID, body: ParticipantCreate, db: DbSession, user: CurrentUser) -> ProgramRead:
-    await _load(db, program_id)
-    db.add(TrainingRecord(tenant_id=user.tenant_id, program_id=program_id, **body.model_dump()))
+    program = await _load(db, program_id)
+    record = TrainingRecord(tenant_id=user.tenant_id, program_id=program_id, **body.model_dump())
+    db.add(record)
     await db.flush()
+    await _trail(db, user, program, "update",
+                 f"Assigned {record.participant_name} to awareness program {program.reference}",
+                 {"participant": {"from": None, "to": record.participant_name},
+                  "participant_email": record.participant_email, "status": _plain(record.status)})
     return ProgramRead.model_validate(await _fresh(db, program_id))
 
 
@@ -184,8 +221,10 @@ async def add_participant(program_id: uuid.UUID, body: ParticipantCreate, db: Db
     summary="Edit a training record (status / score / completion date)",
 )
 async def update_participant(
-    program_id: uuid.UUID, participant_id: uuid.UUID, body: ParticipantUpdate, db: DbSession
+    program_id: uuid.UUID, participant_id: uuid.UUID, body: ParticipantUpdate, db: DbSession,
+    user: CurrentUser,
 ) -> ProgramRead:
+    program = await _load(db, program_id)
     record = await db.scalar(
         select(TrainingRecord).where(
             TrainingRecord.id == participant_id, TrainingRecord.program_id == program_id
@@ -193,9 +232,16 @@ async def update_participant(
     )
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
-    for f, v in body.model_dump(exclude_unset=True).items():
+    data = {k: v for k, v in body.model_dump(exclude_unset=True).items()
+            if v is not None or k in ("score", "completed_at")}
+    changes = _changes(record, data)
+    for f, v in data.items():
         setattr(record, f, v)
     await db.flush()
+    if changes:
+        await _trail(db, user, program, "update",
+                     f"Updated {record.participant_name}'s training record in {program.reference}: "
+                     f"{', '.join(changes)}", {f"participant.{k}": v for k, v in changes.items()})
     return ProgramRead.model_validate(await _fresh(db, program_id))
 
 
@@ -206,7 +252,7 @@ async def update_participant(
     summary="Submit a participant's quiz answers; auto-scores and marks completed",
 )
 async def submit_quiz(
-    program_id: uuid.UUID, participant_id: uuid.UUID, body: QuizSubmit, db: DbSession
+    program_id: uuid.UUID, participant_id: uuid.UUID, body: QuizSubmit, db: DbSession, user: CurrentUser
 ) -> ProgramRead:
     program = await _load(db, program_id)
     record = await db.scalar(
@@ -231,6 +277,12 @@ async def submit_quiz(
     record.status = TrainingStatus.completed
     record.completed_at = date.today()
     await db.flush()
+    passed = record.score >= (program.passing_score or 0)
+    await _trail(db, user, program, "update",
+                 f"{record.participant_name} scored {record.score}% on the {program.reference} quiz "
+                 f"({'passed' if passed else 'below the pass mark of ' + str(program.passing_score) + '%'})",
+                 {"participant": record.participant_name, "score": record.score, "passed": passed,
+                  "correct": correct, "questions": len(questions)})
     return ProgramRead.model_validate(await _fresh(db, program_id))
 
 
@@ -239,7 +291,10 @@ async def submit_quiz(
     status_code=204,
     dependencies=[Depends(require("awareness:write"))],
 )
-async def delete_participant(program_id: uuid.UUID, participant_id: uuid.UUID, db: DbSession) -> None:
+async def delete_participant(
+    program_id: uuid.UUID, participant_id: uuid.UUID, db: DbSession, user: CurrentUser
+) -> None:
+    program = await _load(db, program_id)
     record = await db.scalar(
         select(TrainingRecord).where(
             TrainingRecord.id == participant_id, TrainingRecord.program_id == program_id
@@ -247,4 +302,10 @@ async def delete_participant(program_id: uuid.UUID, participant_id: uuid.UUID, d
     )
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
+    label = (f"{record.participant_name} ({_plain(record.status)}"
+             + (f", score {record.score}%" if record.score is not None else "") + ")")
     await db.delete(record)
+    await db.flush()
+    await _trail(db, user, program, "update",
+                 f"Removed {label} from awareness program {program.reference}",
+                 {"participant": {"from": record.participant_name, "to": None}})

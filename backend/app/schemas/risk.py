@@ -403,6 +403,12 @@ class RiskRead(BaseModel):
     loss_events: list[GraphRef] = []
     # Live issues raised against this risk (issue_risks).
     issues: list[GraphRef] = []
+    # Filled on the single-record read only (``_linked_records``): RCSAs with a line that
+    # assesses this risk (one entry per RCSA; ``title`` names the lines), FAIR
+    # quantifications that size it, and continuity plans that mitigate it.
+    rcsa_assessments: list[GraphRef] = []
+    quantifications: list[GraphRef] = []
+    continuity_plans: list[GraphRef] = []
 
     # Live rollup: health of the mitigating controls (none | ok | untested | issues).
     control_health: str = "none"

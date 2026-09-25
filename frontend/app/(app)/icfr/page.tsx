@@ -61,6 +61,9 @@ type IcfrControl = {
   tests: IcfrTest[];
   // additive FK to the enterprise controls register (nullable)
   control?: Ref | null;
+  /** "tests" (latest conclusive test), "design" (capped by an ineffective design) or "manual". */
+  design_basis?: string;
+  operating_basis?: string;
 };
 
 type IcfrProcess = {
@@ -248,6 +251,30 @@ const BLANK_CONTROL: ControlDraft = {
   control_label: "",
 };
 
+function controlDraftFrom(c: IcfrControl): ControlDraft {
+  return {
+    title: c.title,
+    control_objective: c.control_objective || "",
+    risk_description: c.risk_description || "",
+    assertion: c.assertion,
+    control_type: c.control_type,
+    nature: c.nature,
+    frequency: c.frequency,
+    is_key: !!c.is_key,
+    owner: c.owner || "",
+    design_effectiveness: c.design_effectiveness,
+    operating_effectiveness: c.operating_effectiveness,
+    control_id: c.control?.id || "",
+    control_label: c.control ? refLabel(c.control) : "",
+  };
+}
+
+const BASIS_TEXT: Record<string, string> = {
+  tests: "From the latest test",
+  design: "Ineffective because the design is ineffective",
+  manual: "Entered by hand (no conclusive test yet)",
+};
+
 /* ------------------------------------------------------------------ test draft */
 type TestDraft = {
   test_type: string;
@@ -271,6 +298,29 @@ const BLANK_TEST: TestDraft = {
   status: "planned",
   conclusion: "",
 };
+
+function testDraftFrom(t: IcfrTest): TestDraft {
+  return {
+    test_type: t.test_type,
+    period: t.period || "",
+    tester: t.tester || "",
+    sample_size: String(t.sample_size ?? 0),
+    exceptions_found: String(t.exceptions_found ?? 0),
+    test_date: t.test_date || "",
+    result: t.result,
+    status: t.status,
+    conclusion: t.conclusion || "",
+  };
+}
+
+/** Why a test's figures do not hang together (the server says the same), or null. */
+function testProblem(t: TestDraft): string | null {
+  const sample = Number(t.sample_size || 0);
+  const exceptions = Number(t.exceptions_found || 0);
+  if (exceptions > sample) return `${exceptions} exceptions cannot come from a sample of ${sample}. Record the sample size tested.`;
+  if (exceptions > 0 && t.result === "passed") return "A test that found exceptions did not simply pass. Record it as passed with exceptions or failed.";
+  return null;
+}
 
 /* ------------------------------------------------------------------ deficiency form */
 type DefForm = {
@@ -367,6 +417,8 @@ function IcfrInner() {
 
   // ---- control expand (per control row) + test draft ----
   const [openControlId, setOpenControlId] = useState<string | null>(null);
+  const [editingControl, setEditingControl] = useState<IcfrControl | null>(null);
+  const [editingTestId, setEditingTestId] = useState<string | null>(null);
   const [td, setTd] = useState<TestDraft>(BLANK_TEST);
   const setTD = <K extends keyof TestDraft>(k: K, v: TestDraft[K]) => setTd((p) => ({ ...p, [k]: v }));
 
@@ -404,6 +456,7 @@ function IcfrInner() {
     } else {
       setDetail(null);
       setOpenControlId(null);
+      setEditingControl(null);
       setCd(BLANK_CONTROL);
     }
   }, [openId, loadDetail]);
@@ -465,9 +518,45 @@ function IcfrInner() {
   }
 
   // ------------------------------------------------------------- RCM controls (drawer)
+  function startEditControl(c: IcfrControl) {
+    setEditingControl(c);
+    setCd(controlDraftFrom(c));
+    setError(null);
+  }
+  function cancelEditControl() {
+    setEditingControl(null);
+    setCd(BLANK_CONTROL);
+  }
   async function addControl() {
     if (!detail) return;
     setError(null);
+    if (editingControl) {
+      // Ratings a test decides are not sent: they follow the tests.
+      const payload: Record<string, unknown> = {
+        title: cd.title,
+        control_objective: cd.control_objective,
+        risk_description: cd.risk_description,
+        assertion: cd.assertion,
+        control_type: cd.control_type,
+        nature: cd.nature,
+        frequency: cd.frequency,
+        is_key: cd.is_key,
+        owner: cd.owner,
+        control_id: cd.control_id || null,
+      };
+      if (editingControl.design_basis !== "tests") payload.design_effectiveness = cd.design_effectiveness;
+      if (editingControl.operating_basis === "manual") payload.operating_effectiveness = cd.operating_effectiveness;
+      try {
+        await apiCall("PATCH", `/icfr-controls/${editingControl.id}`, payload);
+        cancelEditControl();
+        await refreshProcess(detail.id);
+        await loadSummary();
+        toast("Control updated");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to update control");
+      }
+      return;
+    }
     try {
       await apiCall("POST", `/icfr/${detail.id}/controls`, {
         title: cd.title,
@@ -507,13 +596,64 @@ function IcfrInner() {
   }
   function toggleControl(controlId: string) {
     setTd(BLANK_TEST);
+    setEditingTestId(null);
     setOpenControlId(openControlId === controlId ? null : controlId);
   }
 
   // ------------------------------------------------------------- control tests (drawer)
+  function startEditTest(t: IcfrTest) {
+    setEditingTestId(t.id);
+    setTd(testDraftFrom(t));
+    setError(null);
+  }
+  function cancelEditTest() {
+    setEditingTestId(null);
+    setTd(BLANK_TEST);
+  }
+  async function removeTest(t: IcfrTest) {
+    if (!detail) return;
+    if (!(await confirmDialog({ title: `Delete test ${t.reference}?`, message: "The control's ratings are worked out again from the tests that remain.", danger: true }))) return;
+    setError(null);
+    try {
+      await apiCall("DELETE", `/icfr-tests/${t.id}`);
+      if (editingTestId === t.id) cancelEditTest();
+      await refreshProcess(detail.id);
+      await loadSummary();
+      toast("Test deleted");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete test");
+    }
+  }
   async function addTest(controlId: string) {
     if (!detail) return;
+    const problem = testProblem(td);
+    if (problem) {
+      setError(problem);
+      return;
+    }
     setError(null);
+    if (editingTestId) {
+      try {
+        await apiCall("PATCH", `/icfr-tests/${editingTestId}`, {
+          test_type: td.test_type,
+          period: td.period,
+          tester: td.tester,
+          sample_size: td.sample_size === "" ? 0 : Number(td.sample_size),
+          exceptions_found: td.exceptions_found === "" ? 0 : Number(td.exceptions_found),
+          test_date: td.test_date || null,
+          result: td.result,
+          status: td.status,
+          conclusion: td.conclusion,
+        });
+        cancelEditTest();
+        await refreshProcess(detail.id);
+        await loadSummary();
+        toast("Test updated; the control's ratings follow it");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to update test");
+      }
+      return;
+    }
     try {
       await apiCall("POST", `/icfr-controls/${controlId}/tests`, {
         test_type: td.test_type,
@@ -867,7 +1007,7 @@ function IcfrInner() {
               <div className="card-head"><h3>Risk-Control Matrix</h3></div>
               <div className="card-pad">
                 <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
-                  Each control maps a risk to a financial-statement assertion, with design and operating effectiveness. Click a control to record tests.
+                  Each control maps a risk to a financial-statement assertion. Design and operating effectiveness come from the latest conclusive test of each kind (a failed test makes the control ineffective). Click a control to record tests.
                 </p>
                 <form
                   style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
@@ -917,13 +1057,15 @@ function IcfrInner() {
                   </div>
                   <div style={{ width: 170 }}>
                     <label className="label">Design eff.</label>
-                    <select className="select" value={cd.design_effectiveness} onChange={(ev) => setCD("design_effectiveness", ev.target.value)}>
+                    <select className="select" value={cd.design_effectiveness} onChange={(ev) => setCD("design_effectiveness", ev.target.value)}
+                      disabled={editingControl?.design_basis === "tests"} title={editingControl?.design_basis === "tests" ? "Set by the latest design test" : undefined}>
                       {CONTROL_EFF.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
                     </select>
                   </div>
                   <div style={{ width: 170 }}>
                     <label className="label">Operating eff.</label>
-                    <select className="select" value={cd.operating_effectiveness} onChange={(ev) => setCD("operating_effectiveness", ev.target.value)}>
+                    <select className="select" value={cd.operating_effectiveness} onChange={(ev) => setCD("operating_effectiveness", ev.target.value)}
+                      disabled={!!editingControl && editingControl.operating_basis !== "manual"} title={editingControl && editingControl.operating_basis !== "manual" ? BASIS_TEXT[editingControl.operating_basis || "tests"] : undefined}>
                       {CONTROL_EFF.map((c) => (<option key={c} value={c}>{cap(c)}</option>))}
                     </select>
                   </div>
@@ -938,8 +1080,14 @@ function IcfrInner() {
                   <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 8 }}>
                     <input type="checkbox" checked={cd.is_key} onChange={(ev) => setCD("is_key", ev.target.checked)} /> Key
                   </label>
-                  <button className="btn">Add control</button>
+                  <button className="btn">{editingControl ? `Save ${editingControl.reference}` : "Add control"}</button>
+                  {editingControl && <button type="button" className="btn secondary" onClick={cancelEditControl}>Cancel</button>}
                 </form>
+                {editingControl && (
+                  <p className="muted" style={{ margin: "-6px 0 12px", fontSize: 12 }}>
+                    Editing {editingControl.reference}. Design and operating effectiveness follow the latest conclusive test of each kind; they can be set by hand only until a test concludes.
+                  </p>
+                )}
 
                 <div className="table-wrap">
                   <table>
@@ -972,8 +1120,8 @@ function IcfrInner() {
                             <td><Badge tone="info">{cap(c.assertion)}</Badge></td>
                             <td className="muted">{cap(c.control_type)}</td>
                             <td>{c.is_key ? <Badge tone="info">Key</Badge> : <span className="muted">—</span>}</td>
-                            <td><EffBadge value={c.design_effectiveness} /></td>
-                            <td><EffBadge value={c.operating_effectiveness} /></td>
+                            <td title={BASIS_TEXT[c.design_basis || "manual"]}><EffBadge value={c.design_effectiveness} /></td>
+                            <td title={BASIS_TEXT[c.operating_basis || "manual"]}><EffBadge value={c.operating_effectiveness} /></td>
                             <td className="muted">
                               {c.test_count}
                               {c.latest_result ? (
@@ -985,6 +1133,7 @@ function IcfrInner() {
                                 <button className="btn secondary sm" onClick={() => toggleControl(c.id)}>
                                   {openControlId === c.id ? "Hide" : "Tests"}
                                 </button>
+                                <button className="btn secondary sm" onClick={() => startEditControl(c)}>Edit</button>
                                 <button className="btn secondary sm" onClick={() => removeControl(c.id)}>Remove</button>
                               </div>
                             </td>
@@ -995,7 +1144,7 @@ function IcfrInner() {
                                 <div style={{ padding: "4px 0 8px" }}>
                                   <strong style={{ fontSize: 13 }}>Control testing — {c.reference}</strong>
                                   <p className="muted" style={{ margin: "4px 0 10px", fontSize: 12 }}>
-                                    Record design and operating-effectiveness tests, sample sizes and exceptions.
+                                    Record design and operating-effectiveness tests, sample sizes and exceptions. A result other than &quot;not tested&quot; completes the test and sets the control&apos;s rating for that kind of test.
                                   </p>
                                   <form
                                     style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}
@@ -1043,7 +1192,8 @@ function IcfrInner() {
                                       <label className="label">Conclusion</label>
                                       <input className="input" value={td.conclusion} onChange={(ev) => setTD("conclusion", ev.target.value)} placeholder="Test conclusion" />
                                     </div>
-                                    <button className="btn">Add test</button>
+                                    <button className="btn">{editingTestId ? "Save test" : "Add test"}</button>
+                                    {editingTestId && <button type="button" className="btn secondary" onClick={cancelEditTest}>Cancel</button>}
                                   </form>
 
                                   <div className="table-wrap">
@@ -1059,6 +1209,7 @@ function IcfrInner() {
                                           <th>Result</th>
                                           <th>Status</th>
                                           <th>Date</th>
+                                          <th></th>
                                         </tr>
                                       </thead>
                                       <tbody>
@@ -1073,10 +1224,16 @@ function IcfrInner() {
                                             <td><Badge tone={TEST_RESULT_TONE[t.result] || "neutral"}>{cap(t.result)}</Badge></td>
                                             <td><Badge tone={TEST_STATUS_TONE[t.status] || "neutral"}>{cap(t.status)}</Badge></td>
                                             <td className="muted">{formatDate(t.test_date)}</td>
+                                            <td>
+                                              <div style={{ display: "flex", gap: 6 }}>
+                                                <button type="button" className="btn secondary sm" onClick={() => startEditTest(t)}>Edit</button>
+                                                <button type="button" className="btn secondary sm" onClick={() => removeTest(t)}>Delete</button>
+                                              </div>
+                                            </td>
                                           </tr>
                                         ))}
                                         {c.tests.length === 0 && (
-                                          <tr><td colSpan={9}><span className="muted">No tests recorded yet.</span></td></tr>
+                                          <tr><td colSpan={10}><span className="muted">No tests recorded yet.</span></td></tr>
                                         )}
                                       </tbody>
                                     </table>

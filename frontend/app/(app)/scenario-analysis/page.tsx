@@ -51,10 +51,18 @@ type CapitalCalculation = {
   notes: string;
   status: string;
   workflow_status: string;
-  bic: number;
+  /** Null when the Basel bucket edges cannot be put in this currency (no exchange rate). */
+  bucket: number | null;
+  bic: number | null;
   loss_component: number;
-  ilm: number;
-  orc: number;
+  ilm: number | null;
+  orc: number | null;
+  /** The BI bucket edges applied, in the record's currency (EUR 1bn / 30bn converted). */
+  bucket_1_threshold: number | null;
+  bucket_2_threshold: number | null;
+  threshold_basis: string;
+  /** Why the capital is not computed (the missing exchange rate). */
+  threshold_note: string;
   created_at: string;
 };
 
@@ -69,11 +77,13 @@ type ScenarioSummary = {
   latest_capital: {
     reference: string;
     period: string;
-    bic: number;
+    bucket: number | null;
+    bic: number | null;
     loss_component: number;
-    ilm: number;
-    orc: number;
+    ilm: number | null;
+    orc: number | null;
     currency: string;
+    threshold_note: string;
   } | null;
 };
 
@@ -396,10 +406,13 @@ function ScenarioAnalysisInner() {
     { key: "period", header: "Period", sortable: true, render: (c) => <span className="cell-title">{c.period || "—"}</span> },
     { key: "business_indicator", header: "Business Indicator", sortable: true, render: (c) => <span className="muted">{formatMoney(c.business_indicator, c.currency)}</span> },
     { key: "avg_annual_loss", header: "Avg annual loss", sortable: true, render: (c) => <span className="muted">{formatMoney(c.avg_annual_loss, c.currency)}</span> },
-    { key: "bic", header: "BIC", render: (c) => <span className="muted">{formatMoney(c.bic, c.currency)}</span> },
+    { key: "bucket", header: "Bucket", render: (c) => <span className="muted" title={c.threshold_basis || c.threshold_note}>{c.bucket ?? "—"}</span> },
+    { key: "bic", header: "BIC", render: (c) => <span className="muted">{c.bic == null ? "—" : formatMoney(c.bic, c.currency)}</span> },
     { key: "loss_component", header: "Loss Component", render: (c) => <span className="muted">{formatMoney(c.loss_component, c.currency)}</span> },
-    { key: "ilm", header: "ILM", render: (c) => <span className="muted">{num(c.ilm)}</span> },
-    { key: "orc", header: "ORC", render: (c) => <Badge tone="critical">{formatMoney(c.orc, c.currency)}</Badge> },
+    { key: "ilm", header: "ILM", render: (c) => <span className="muted">{c.ilm == null ? "—" : c.ilm.toFixed(2)}</span> },
+    { key: "orc", header: "ORC", render: (c) => c.orc == null
+      ? <span className="muted" title={c.threshold_note}>Needs {c.currency === "EUR" ? "a" : "an EUR"} rate</span>
+      : <Badge tone="critical">{formatMoney(c.orc, c.currency)}</Badge> },
     { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CAPITAL_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
     { key: "workflow_status", header: "Approval", render: (c) => <WorkflowBadge state={c.workflow_status} /> },
     { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCapital(c)}>Delete</button></div> },
@@ -497,7 +510,22 @@ function ScenarioAnalysisInner() {
       </Field>
       <p className="muted" style={{ fontSize: 13 }}>
         BIC, Loss Component, ILM and ORC are computed server-side under the Basel III Standardised Approach.
+        The bucket edges are Basel&apos;s EUR 1bn and EUR 30bn, converted into the calculation&apos;s currency at
+        your latest exchange rates; a bank whose BI is in the first bucket uses an ILM of 1.
       </p>
+      {editingCapital && (editingCapital.threshold_note || editingCapital.threshold_basis) && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          {editingCapital.threshold_note ? (
+            <>{editingCapital.threshold_note} <Link href="/organisation-settings#exchange-rates">Add a rate</Link>.</>
+          ) : (
+            <>
+              Last computed: bucket {editingCapital.bucket}, edges {formatMoney(editingCapital.bucket_1_threshold, editingCapital.currency, { compact: "auto" })}
+              {" / "}{formatMoney(editingCapital.bucket_2_threshold, editingCapital.currency, { compact: "auto" })}
+              {" — "}{editingCapital.threshold_basis}.
+            </>
+          )}
+        </p>
+      )}
     </>
   );
 
@@ -542,7 +570,9 @@ function ScenarioAnalysisInner() {
           <div className="stat-top">
             <span className="n">{latestOrc != null ? formatMoney(latestOrc, summary?.latest_capital?.currency, { compact: "auto" }) : "—"}</span>
           </div>
-          <span className="l">Latest ORC</span>
+          <span className="l" title={summary?.latest_capital?.threshold_note || undefined}>
+            Latest ORC{summary?.latest_capital && latestOrc == null ? " (needs an exchange rate)" : ""}
+          </span>
         </div>
         <div className="card stat">
           <div className="stat-top">
@@ -607,8 +637,9 @@ function ScenarioAnalysisInner() {
       {section === "capital" && (
         <>
           <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
-            ORC = BIC × ILM, where BIC uses the 12% / 15% / 18% marginal buckets and the ILM scales it by internal
-            loss experience (Loss Component = 15 × average annual loss).
+            ORC = BIC × ILM, where BIC uses the 12% / 15% / 18% marginal buckets (Basel edges EUR 1bn / EUR 30bn,
+            converted at your exchange rates) and the ILM scales it by internal loss experience (Loss Component =
+            15 × average annual loss); in the first bucket the ILM is 1.
           </p>
           <DataTable<CapitalCalculation>
             columns={capitalColumns}

@@ -15,9 +15,9 @@ import enum
 import uuid
 from datetime import date
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, Text, Uuid, and_, select
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, backref, foreign, mapped_column, relationship
 
 from app.models.base import (
     Base,
@@ -179,6 +179,19 @@ class IcfrControl(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         back_populates="control", cascade="all, delete-orphan", lazy="selectin",
         order_by="IcfrTest.created_at",
     )
+    # The enterprise control this RCM line relies on, and the reverse
+    # ``Control.icfr_controls`` so the control's page lists the ICFR lines that depend on
+    # it. Not loaded by default in this direction: a Control arrives with a dozen eager
+    # relationships of its own, and an RCM needs only its id, reference and name — the
+    # ICFR API asks for exactly those (``api/v1/icfr.py::_with_control``). The reverse is
+    # eager (a control page shows it) and filtered to live processes.
+    control: Mapped["Control | None"] = relationship(  # noqa: F821
+        "Control", lazy="noload", viewonly=True,
+        backref=backref(
+            "icfr_controls", lazy="selectin", viewonly=True,
+            primaryjoin=lambda: _live_rcm_join(), order_by="IcfrControl.reference",
+        ),
+    )
 
     @property
     def test_count(self) -> int:
@@ -187,6 +200,15 @@ class IcfrControl(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     @property
     def latest_result(self) -> IcfrTestResult | None:
         return self.tests[-1].result if self.tests else None
+
+
+def _live_rcm_join():
+    """Control ↔ its RCM lines, leaving out lines of an archived ICFR process (the
+    register does not show them either)."""
+    from app.models.control import Control
+
+    live = select(IcfrProcess.id).where(IcfrProcess.deleted.is_(False))
+    return and_(Control.id == foreign(IcfrControl.control_id), IcfrControl.process_id.in_(live))
 
 
 # ============================================================ control tests ===
@@ -249,3 +271,61 @@ class IcfrDeficiency(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, SoftDelet
     remediation_plan: Mapped[str] = mapped_column(Text, default="")
     target_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     remediated_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+
+# ===================================================== effectiveness from tests ===
+#: Test results that conclude a test, and the rating each one gives the control.
+RESULT_RATING: dict[IcfrTestResult, ControlEffectiveness] = {
+    IcfrTestResult.passed: ControlEffectiveness.effective,
+    IcfrTestResult.passed_with_exceptions: ControlEffectiveness.partially_effective,
+    IcfrTestResult.failed: ControlEffectiveness.ineffective,
+}
+
+
+def _plain(value):
+    return getattr(value, "value", value)
+
+
+def latest_conclusive(tests, test_type: IcfrTestType):
+    """The newest test of ``test_type`` with a conclusive result (by test date, then
+    when it was recorded), or None. Works on ORM rows and read models alike."""
+    wanted = _plain(test_type)
+    done = [t for t in tests if _plain(t.test_type) == wanted
+            and _plain(t.result) in {_plain(r) for r in RESULT_RATING}]
+    if not done:
+        return None
+    return max(done, key=lambda t: (t.test_date or date.min, str(t.created_at or "")))
+
+
+def derive_effectiveness(tests, design_manual, operating_manual):
+    """``(design, operating, design_basis, operating_basis)`` for an RCM control.
+
+    SOX / SBP ICFR practice (PCAOB AS 2201 ¶42-44; COSO 2013): a control's design and
+    operating effectiveness are the conclusions of its latest design and operating tests
+    — passed → effective, passed with exceptions → partially effective, failed →
+    ineffective. A control that is not designed effectively cannot operate effectively,
+    so an ineffective design caps the operating rating at ineffective. Without a
+    conclusive test of a kind the rating entered by hand stands (basis "manual")."""
+    design_test = latest_conclusive(tests, IcfrTestType.design)
+    operating_test = latest_conclusive(tests, IcfrTestType.operating)
+    design = (RESULT_RATING[IcfrTestResult(_plain(design_test.result))] if design_test
+              else ControlEffectiveness(_plain(design_manual)))
+    operating = (RESULT_RATING[IcfrTestResult(_plain(operating_test.result))] if operating_test
+                 else ControlEffectiveness(_plain(operating_manual)))
+    operating_basis = "tests" if operating_test else "manual"
+    if design == ControlEffectiveness.ineffective and operating != ControlEffectiveness.not_assessed:
+        if operating != ControlEffectiveness.ineffective:
+            operating_basis = "design"
+        operating = ControlEffectiveness.ineffective
+    return design, operating, ("tests" if design_test else "manual"), operating_basis
+
+
+def figures_problem(sample_size: int, exceptions_found: int, result) -> str | None:
+    """Why a test's figures do not hang together, or None."""
+    if exceptions_found > sample_size:
+        return (f"exceptions_found: {exceptions_found} exceptions cannot come from a sample of "
+                f"{sample_size}. Record the sample size tested.")
+    if exceptions_found > 0 and _plain(result) == IcfrTestResult.passed.value:
+        return ("result: a test that found exceptions did not simply pass. Record it as "
+                "passed with exceptions or failed.")
+    return None

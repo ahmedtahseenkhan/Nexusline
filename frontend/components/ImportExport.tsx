@@ -48,6 +48,8 @@ interface ImportResult {
   created: number;
   skipped: number;
   errors: ImportError[];
+  /** Rows that were imported, but not exactly as written (see PreviewRow.warnings). */
+  warnings?: ImportError[];
 }
 
 interface MappingSuggestion {
@@ -79,6 +81,9 @@ interface PreviewRow {
   row: number;
   values: Record<string, string>;
   error: string;
+  /** What the import will say about this row without skipping it: a status brought in
+   *  at its initial state, text kept as a note, a derived value not carried over. */
+  warnings?: string[];
 }
 
 interface PreviewResponse {
@@ -571,9 +576,16 @@ function ImportWizard({
     }
   }
 
+  const previewNoted = preview ? preview.rows.filter((r) => !r.error && (r.warnings?.length ?? 0) > 0).length : 0;
+  const resultNotes = result?.warnings ?? [];
+
   function downloadErrors() {
     if (!result) return;
-    const rows = [["row", "message"], ...result.errors.map((e) => [String(e.row), e.message])];
+    const rows = [
+      ["row", "kind", "message"],
+      ...result.errors.map((e) => [String(e.row), "skipped", e.message]),
+      ...(result.warnings ?? []).map((w) => [String(w.row), "imported with a note", w.message]),
+    ];
     const csv = rows
       .map((r) => r.map((cell) => (/[",\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell)).join(","))
       .join("\n");
@@ -840,12 +852,18 @@ function ImportWizard({
                 <Badge tone={preview.valid === preview.previewed ? "low" : "medium"}>
                   {preview.valid} of {preview.previewed} shown rows are valid
                 </Badge>
+                {previewNoted > 0 && (
+                  <Badge tone="medium">
+                    {previewNoted} will import with a note
+                  </Badge>
+                )}
                 <Badge tone="info">{preview.total} rows in the file</Badge>
               </div>
               <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
-                Nothing has been saved yet. This is exactly how the first {preview.previewed} row
-                {preview.previewed !== 1 ? "s" : ""} will be read — including references that
-                point at records which do not exist yet.
+                Nothing has been saved yet. The first {preview.previewed} row
+                {preview.previewed !== 1 ? "s were" : " was"} run through the same checks as the
+                real import — references, the register&apos;s own rules and its approval workflow —
+                so a problem or note here is what the import will report.
               </p>
 
               <div className="table-wrap" style={{ maxHeight: 400, overflowY: "auto" }}>
@@ -866,8 +884,14 @@ function ImportWizard({
                             {truncate(row.values[col] ?? "", 40)}
                           </td>
                         ))}
-                        <td style={{ color: row.error ? "var(--red)" : undefined, fontSize: 12.5 }}>
-                          {row.error || "—"}
+                        <td style={{ fontSize: 12.5 }}>
+                          {row.error ? (
+                            <span style={{ color: "var(--red)" }}>{row.error}</span>
+                          ) : row.warnings?.length ? (
+                            <span style={{ color: "var(--amber)" }}>{row.warnings.join(" ")}</span>
+                          ) : (
+                            "—"
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -932,6 +956,11 @@ function ImportWizard({
                 >
                   Import complete — {result.created} record{result.created !== 1 ? "s" : ""} created
                   {result.skipped ? `, ${result.skipped} skipped` : ""}.
+                  {resultNotes.length > 0 && (
+                    <button className="btn secondary sm" type="button" onClick={downloadErrors} style={{ marginLeft: 10 }}>
+                      Download notes
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div style={{ marginTop: 14 }}>
@@ -960,6 +989,40 @@ function ImportWizard({
                           <tr key={`${err.row}-${i}`}>
                             <td className="ref" style={{ color: "var(--red)" }}>{err.row}</td>
                             <td style={{ color: "var(--red)" }}>{err.message}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {resultNotes.length > 0 && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 560, marginBottom: 6 }}>
+                    Imported with a note ({resultNotes.length})
+                  </div>
+                  <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                    These rows were saved, but not exactly as written — for example an approved
+                    record comes in as a draft to be approved here, or a name that matched no user
+                    is kept as text.
+                  </p>
+                  <div
+                    className="table-wrap"
+                    style={{ maxHeight: 200, overflowY: "auto", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)" }}
+                  >
+                    <table>
+                      <thead>
+                        <tr>
+                          <th style={{ width: 80 }}>Row</th>
+                          <th>Note</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {resultNotes.map((note, i) => (
+                          <tr key={`${note.row}-${i}`}>
+                            <td className="ref" style={{ color: "var(--amber)" }}>{note.row}</td>
+                            <td style={{ color: "var(--amber)" }}>{note.message}</td>
                           </tr>
                         ))}
                       </tbody>

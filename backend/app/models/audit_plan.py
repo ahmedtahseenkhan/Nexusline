@@ -53,6 +53,69 @@ class AuditPlanStatus(str, enum.Enum):
     closed = "closed"
 
 
+# ---------------------------------------------------------------------------
+# Plan lifecycle rules (pure, so they are unit-tested without a database)
+# ---------------------------------------------------------------------------
+#: The only status moves an editor may make by hand. Draft → submitted → approved is
+#: the board's sign-off and goes through ``/submit`` and the approvals inbox; letting a
+#: form set "approved" would record a board approval nobody gave. After sign-off the
+#: department runs the plan (active) and closes it at year end.
+MANUAL_PLAN_TRANSITIONS: dict[AuditPlanStatus, frozenset[AuditPlanStatus]] = {
+    AuditPlanStatus.approved: frozenset({AuditPlanStatus.active, AuditPlanStatus.closed}),
+    AuditPlanStatus.active: frozenset({AuditPlanStatus.closed}),
+}
+
+
+def manual_status_refusal(current: AuditPlanStatus, target: AuditPlanStatus) -> str | None:
+    """Why an edit may not move the plan from ``current`` to ``target``, or None. Pure."""
+    if target == current:
+        return None
+    if target in MANUAL_PLAN_TRANSITIONS.get(current, frozenset()):
+        return None
+    if target in (AuditPlanStatus.submitted, AuditPlanStatus.approved) or current in (
+        AuditPlanStatus.draft, AuditPlanStatus.submitted,
+    ):
+        return (
+            "A plan is approved only through board / audit-committee sign-off: use "
+            "Submit for approval, and the decision is taken in the Approvals inbox."
+        )
+    return f"An audit plan cannot move from {current.value} to {target.value}."
+
+
+def plan_decision_target(current: AuditPlanStatus, approved: bool) -> AuditPlanStatus | None:
+    """The status an approvals-inbox decision moves a plan to, or None to leave it. Pure.
+
+    Only a plan waiting for sign-off is moved: approval makes it approved, rejection
+    returns it to draft for rework. A stale decision on a plan that has since moved on
+    changes nothing.
+    """
+    if current != AuditPlanStatus.submitted:
+        return None
+    return AuditPlanStatus.approved if approved else AuditPlanStatus.draft
+
+
+def content_edit_refusal(status: AuditPlanStatus) -> str | None:
+    """Why the plan's content (lines, year, budget) may not be edited now, or None. Pure.
+
+    While the board is deciding, the plan it is deciding on must not change underneath
+    it. After sign-off, amendments remain possible (IIA Standard 2020 expects significant
+    interim changes to be reported rather than forbidden) and every one is audit-logged.
+    """
+    if status == AuditPlanStatus.submitted:
+        return (
+            "This plan is awaiting board / audit-committee approval and cannot be changed "
+            "until the approval is decided."
+        )
+    if status == AuditPlanStatus.closed:
+        return "This plan is closed and can no longer be changed."
+    return None
+
+
+def quarter_of_month(month: int) -> int:
+    """1–12 → 1–4. Pure."""
+    return (month - 1) // 3 + 1
+
+
 class AuditPlan(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, SoftDeleteMixin, Base):
     __tablename__ = "audit_plans"
     __table_args__ = (

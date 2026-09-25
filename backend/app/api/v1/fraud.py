@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -135,7 +135,7 @@ async def update_fraud_risk(rid: uuid.UUID, body: FraudRiskUpdate, db: DbSession
 async def delete_fraud_risk(rid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, FraudRisk, rid, "Fraud risk")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -220,7 +220,7 @@ async def update_fraud_case(cid: uuid.UUID, body: FraudCaseUpdate, db: DbSession
 async def delete_fraud_case(cid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, FraudCase, cid, "Fraud case")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -299,7 +299,7 @@ async def update_fraud_control_check(kid: uuid.UUID, body: FraudControlCheckUpda
 async def delete_fraud_control_check(kid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, FraudControlCheck, kid, "Fraud control check")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 

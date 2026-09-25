@@ -303,6 +303,12 @@ def stub(monkeypatch):
     monkeypatch.setattr(risks_api, "_reconcile_title_flag", _no_alert_refresh)
     monkeypatch.setattr(risks_api, "get_or_create_residual_policy", policy)
     monkeypatch.setattr(risks_api, "policy_spec", lambda p: ResidualPolicySpec())
+
+    async def no_dimensions(db, risk_id):
+        return []
+
+    # The residual is not scored by dimension here (see test_fix_risk_residual_dimensions).
+    monkeypatch.setattr(risks_api, "_stored_dimensions", no_dimensions)
     return state
 
 
@@ -579,6 +585,7 @@ def _asset(risks):
         classifications=[], tags=[], hosted_dependencies=[], hosting_dependencies=[], processes=[], legals=[],
         requirements=[], incidents=[], exceptions=[], related_assets=[], risks=risks, vendors=[],
         access_reviews=[], controls=[], threats=[], vulnerabilities=[], reviews=[],
+        continuity_plans=[], processing_activities=[], bia_assessments=[], vuln_findings=[],
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 

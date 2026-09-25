@@ -417,18 +417,21 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [df, setDf] = useState<DpiaForm>(BLANK_DPIA);
   const setD = <K extends keyof DpiaForm>(k: K, v: DpiaForm[K]) => setDf((p) => ({ ...p, [k]: v }));
+  const cfForm = useCustomFieldForm("dpia");
 
   const fetcher = useCallback((qs: string) => apiCall<PagedList<Dpia>>("GET", `/dpias?${qs}`), []);
 
   function openNew() {
     setEditing(null);
     setDf(BLANK_DPIA);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(d: Dpia) {
     setEditing(d);
     setDf(fromDpia(d));
+    cfForm.start(d.id);
     setError(null);
     setShowForm(true);
   }
@@ -437,8 +440,10 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
     setSaving(true);
     try {
       const payload = dpiaPayload(df);
-      if (editing) await apiCall("PATCH", `/dpias/${editing.id}`, payload);
-      else await apiCall("POST", "/dpias", payload);
+      const saved = editing
+        ? await apiCall<Dpia>("PATCH", `/dpias/${editing.id}`, payload)
+        : await apiCall<Dpia>("POST", "/dpias", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       onChanged();
@@ -546,6 +551,7 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
             { id: "general", label: "General", content: general, required: true },
             { id: "assessment", label: "Assessment", content: assessment },
             { id: "review", label: "Review", content: review },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}
@@ -574,18 +580,21 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [sf, setSf] = useState<DsarForm>(BLANK_DSAR);
   const setS = <K extends keyof DsarForm>(k: K, v: DsarForm[K]) => setSf((p) => ({ ...p, [k]: v }));
+  const cfForm = useCustomFieldForm("dsar");
 
   const fetcher = useCallback((qs: string) => apiCall<PagedList<Dsar>>("GET", `/dsars?${qs}`), []);
 
   function openNew() {
     setEditing(null);
     setSf(BLANK_DSAR);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(d: Dsar) {
     setEditing(d);
     setSf(fromDsar(d));
+    cfForm.start(d.id);
     setError(null);
     setShowForm(true);
   }
@@ -594,8 +603,10 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
     setSaving(true);
     try {
       const payload = dsarPayload(sf);
-      if (editing) await apiCall("PATCH", `/dsars/${editing.id}`, payload);
-      else await apiCall("POST", "/dsars", payload);
+      const saved = editing
+        ? await apiCall<Dsar>("PATCH", `/dsars/${editing.id}`, payload)
+        : await apiCall<Dsar>("POST", "/dsars", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       onChanged();
@@ -692,6 +703,7 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
           tabs={[
             { id: "general", label: "General", content: general },
             { id: "timing", label: "Timing & notes", content: timing },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}
@@ -1008,18 +1020,21 @@ function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary
   const [error, setError] = useState<string | null>(null);
   const [cf, setCf] = useState<ConsentForm>(BLANK_CONSENT);
   const setC = <K extends keyof ConsentForm>(k: K, v: ConsentForm[K]) => setCf((p) => ({ ...p, [k]: v }));
+  const cfForm = useCustomFieldForm("consent_record");
 
   const fetcher = useCallback((qs: string) => apiCall<PagedList<ConsentRecord>>("GET", `/consent-records?${qs}`), []);
 
   function openNew() {
     setEditing(null);
     setCf(BLANK_CONSENT);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(c: ConsentRecord) {
     setEditing(c);
     setCf(fromConsent(c));
+    cfForm.start(c.id);
     setError(null);
     setShowForm(true);
   }
@@ -1028,8 +1043,10 @@ function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary
     setSaving(true);
     try {
       const payload = consentPayload(cf);
-      if (editing) await apiCall("PATCH", `/consent-records/${editing.id}`, payload);
-      else await apiCall("POST", "/consent-records", payload);
+      const saved = editing
+        ? await apiCall<ConsentRecord>("PATCH", `/consent-records/${editing.id}`, payload)
+        : await apiCall<ConsentRecord>("POST", "/consent-records", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       onChanged();
@@ -1127,7 +1144,7 @@ function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary
         <FormModal
           title={editing ? `Edit consent — ${editing.reference || editing.subject_name}` : "New consent"}
           wide
-          tabs={[{ id: "general", label: "General", content: general }]}
+          tabs={[{ id: "general", label: "General", content: general }, ...cfForm.tabs]}
           onClose={() => setShowForm(false)}
           onSave={save}
           saving={saving}

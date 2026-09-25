@@ -66,7 +66,9 @@ class RiskQuantification(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workf
     owner: Mapped[str] = mapped_column(String(200), default="")
     notes: Mapped[str] = mapped_column(Text, default="")
 
-    # Cache of the last Monte Carlo run (drives dashboards without re-simulating).
+    # Cache of the last Monte Carlo run (drives dashboards without re-simulating). It
+    # always describes the current inputs: editing any input clears it (and moves a
+    # simulated record back to draft) until the simulation is run again.
     last_mean_ale: Mapped[float] = mapped_column(Numeric(18, 2), default=0, nullable=False)
     last_p90: Mapped[float] = mapped_column(Numeric(18, 2), default=0, nullable=False)
     last_simulated: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -74,6 +76,11 @@ class RiskQuantification(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workf
     status: Mapped[QuantStatus] = mapped_column(
         SAEnum(QuantStatus, name="risk_quant_status"), default=QuantStatus.draft, nullable=False
     )
+
+    @property
+    def needs_simulation(self) -> bool:
+        """No simulation of the current inputs: never run, or cleared by an input edit."""
+        return self.last_simulated is None
 
     @property
     def ale_point(self) -> float:

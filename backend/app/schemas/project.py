@@ -106,4 +106,6 @@ class ProjectRead(ProjectBase):
     risks: list[Ref] = []
     controls: list[Ref] = []
     policies: list[Ref] = []
+    #: Strategic goals this project delivers (read-only; linked from the goal).
+    goals: list[Ref] = []
     created_at: datetime

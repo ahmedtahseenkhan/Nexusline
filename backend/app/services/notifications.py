@@ -27,7 +27,8 @@ Three rules keep the feed readable once real data is in it:
   record's drawer rather than the whole register.
 
 Who sees a row (:func:`visible_clause`): the user it names, the members of the role it
-names, or — when it names neither — everyone in the organisation. A row may name both a
+names, or — when it names neither — everyone in the organisation who may read the record
+it concerns (:func:`readable_entity_types`). A row may name both a
 person and a role (a KRI escalation to "Jane Doe and the CRO role" is one event).
 """
 from __future__ import annotations
@@ -529,10 +530,58 @@ def reconcile_plan(
 AUDIENCE_ME, AUDIENCE_ROLE, AUDIENCE_EVERYONE = "me", "role", "everyone"
 
 
-def is_visible(row: Any, user_id: Any, role_names: Iterable[str], *, mine: bool = False) -> bool:
+#: Notification entity types that are not polymorphic record types, with the permission
+#: a reader needs to see one addressed to everyone (None: anyone in the organisation).
+NOTIFICATION_READ_PERMS: dict[str, str | None] = {
+    "": None,  # an organisation-wide notice names no record
+    "licence": None,  # the licence notice concerns the whole installation
+    "approval": "workflow:read",
+    "board_pack": "board:read",
+    "sar": "aml:read",  # rows raised before the SAR alert used its registry type
+}
+
+
+def readable_entity_types(permissions: Iterable[str], modules: Iterable[str] | None = None) -> list[str]:
+    """The notification entity types a reader may see when an alert is addressed to
+    everyone: the record types whose module *read* permission they hold (and, when
+    ``modules`` is given, whose module the organisation can use), plus the non-record
+    notices of :data:`NOTIFICATION_READ_PERMS`. Pure.
+
+    "Everyone" means everyone *entitled to the record*: an alert's title and body carry
+    the record's reference and substance ("RoPA entry P-004 has an unlawful transfer"),
+    so a risk-only reader must not receive the privacy team's alerts just because the
+    scanner could not resolve a named owner.
+    """
+    from app.services import modules as module_service
+    from app.services.entity_types import ENTITY_TYPES
+
+    held = set(permissions)
+    usable = set(modules) if modules is not None else None
+
+    def module_ok(etype: str, perm: str | None) -> bool:
+        key = module_service.module_for_permission(perm)
+        return usable is None or key is None or key in usable
+
+    out = [
+        etype for etype, found in ENTITY_TYPES.items()
+        if found.read_perm in held and module_ok(etype, found.read_perm)
+    ]
+    out += [
+        etype for etype, perm in NOTIFICATION_READ_PERMS.items()
+        if (perm is None or perm in held) and module_ok(etype, perm)
+    ]
+    return sorted(set(out))
+
+
+def is_visible(
+    row: Any, user_id: Any, role_names: Iterable[str], *, mine: bool = False,
+    readable_types: Iterable[str] | None = None,
+) -> bool:
     """Whether a notification is for this user. Pure — the rule :func:`visible_clause`
     puts in SQL. ``mine`` narrows it to rows addressed to the user or one of their roles
-    (leaving out what is addressed to everyone)."""
+    (leaving out what is addressed to everyone). ``readable_types``
+    (:func:`readable_entity_types`) narrows what is addressed to everyone to the records
+    the user may read; None keeps every such row (callers that already filtered)."""
     row_user = getattr(row, "user_id", None)
     row_role = getattr(row, "role_name", "") or ""
     if row_user is not None and row_user == user_id:
@@ -541,10 +590,15 @@ def is_visible(row: Any, user_id: Any, role_names: Iterable[str], *, mine: bool 
         return True
     if mine:
         return False
-    return row_user is None and not row_role
+    if row_user is not None or row_role:
+        return False
+    return readable_types is None or (getattr(row, "entity_type", "") or "") in set(readable_types)
 
 
-def visible_clause(user_id: Any, role_names: Iterable[str], *, mine: bool = False):
+def visible_clause(
+    user_id: Any, role_names: Iterable[str], *, mine: bool = False,
+    readable_types: Iterable[str] | None = None,
+):
     """SQL filter for the notifications a user sees (see :func:`is_visible`)."""
     roles = sorted(set(role_names))
     addressed = [Notification.user_id == user_id]
@@ -552,7 +606,10 @@ def visible_clause(user_id: Any, role_names: Iterable[str], *, mine: bool = Fals
         addressed.append(Notification.role_name.in_(roles))
     if mine:
         return or_(*addressed)
-    return or_(*addressed, and_(Notification.user_id.is_(None), Notification.role_name == ""))
+    everyone = [Notification.user_id.is_(None), Notification.role_name == ""]
+    if readable_types is not None:
+        everyone.append(Notification.entity_type.in_(sorted(set(readable_types))))
+    return or_(*addressed, and_(*everyone))
 
 
 def audience_of(row: Any, user_id: Any) -> str:
@@ -1569,7 +1626,7 @@ async def scan_alerts(db: AsyncSession, tenant_id, directory: Directory | None =
     )
     for sar in (await db.scalars(_sar_stmt)).all():
         add(f"sar-overdue:{sar.id}", f"STR/SAR filing overdue: {sar.reference}",
-            f"{sar.subject} — filing was due {sar.deadline}", _C, "sar", sar.id,
+            f"{sar.subject} — filing was due {sar.deadline}", _C, "suspicious_activity_report", sar.id,
             with_id("/aml", sar.id, param="sar"),
             named(sar.analyst) or directory.first_active(sar.workflow_owner_id))
 

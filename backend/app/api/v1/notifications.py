@@ -2,7 +2,7 @@
 
 ``GET /notifications`` returns what this user should see: alerts addressed to them,
 alerts addressed to a role they hold, and alerts addressed to everyone (the record named
-nobody the scanner could resolve). ``?mine=true`` narrows it to the first two. A user
+nobody the scanner could resolve) — the last only for records the user may read. ``?mine=true`` narrows it to the first two. A user
 who is reached twice for one condition (as the owner and as a member of the escalation
 role, say) sees it once — the row addressed to them personally.
 """
@@ -18,6 +18,7 @@ from app.core.deps import CurrentUser, DbSession, require
 from app.models.notification import Notification, NotificationView
 from app.schemas.notification import NotificationList, NotificationRead
 from app.services import email as email_service
+from app.services import modules as module_service
 from app.services import notifications as notif_service
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -25,7 +26,7 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 _ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 
-def _feed_ids(user_id, role_names, *, mine: bool):
+def _feed_ids(user_id, role_names, *, mine: bool, readable_types=None):
     """Ids of the rows this user sees — one per alert condition (``dedup_key`` without
     its recipient), preferring the row addressed to the user personally, then the
     oldest (so a condition's unread state doesn't flip between rows)."""
@@ -33,7 +34,7 @@ def _feed_ids(user_id, role_names, *, mine: bool):
     personal_first = case((Notification.user_id == user_id, 0), else_=1)
     return (
         select(Notification.id)
-        .where(notif_service.visible_clause(user_id, role_names, mine=mine))
+        .where(notif_service.visible_clause(user_id, role_names, mine=mine, readable_types=readable_types))
         .distinct(condition)
         .order_by(condition, personal_first, Notification.created_at.asc())
     ).subquery()
@@ -61,7 +62,12 @@ async def list_notifications(
         await notif_service.refresh_if_stale(db, user.tenant_id)
 
     roles = list(user.role_names)
-    ids = _feed_ids(user.id, roles, mine=mine)
+    # An alert addressed to everyone reaches only those who may read its record, in a
+    # module the organisation uses — never the text of another team's register.
+    readable = notif_service.readable_entity_types(
+        user.permission_codes, await module_service.usable_modules(user.tenant_id)
+    )
+    ids = _feed_ids(user.id, roles, mine=mine, readable_types=readable)
     in_feed = Notification.id.in_(select(ids.c.id))
 
     view = await db.scalar(select(NotificationView).where(NotificationView.user_id == user.id))

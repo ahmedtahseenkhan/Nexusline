@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -46,13 +46,6 @@ _WRITE = Depends(require("declaration:write"))
 
 async def _next_ref(db, model, prefix: str) -> str:
     return await next_reference(db, model, prefix)
-
-
-async def _get(db, model, obj_id, name):
-    obj = await db.scalar(select(model).where(model.id == obj_id))
-    if obj is None or getattr(obj, "deleted", False):
-        raise HTTPException(status_code=404, detail=f"{name} not found")
-    return obj
 
 
 async def _load_campaign(db, cid) -> DeclarationCampaign:
@@ -126,21 +119,77 @@ async def get_campaign(cid: uuid.UUID, db: DbSession) -> CampaignRead:
     return CampaignRead.model_validate(await _load_campaign(db, cid))
 
 
+def _plain(value):
+    return getattr(value, "value", value)
+
+
+def _changes(obj, data: dict) -> dict:
+    """``{field: {"from", "to"}}`` for the fields ``data`` actually changes."""
+    out = {}
+    for k, v in data.items():
+        before = getattr(obj, k)
+        if before is not None and v is not None and isinstance(v, (int, float)) and not isinstance(v, bool):
+            same = float(before) == float(v)
+        else:
+            same = before == v
+        if not same:
+            out[k] = {"from": _plain(before), "to": _plain(v)}
+    return out
+
+
 @router.patch("/declaration-campaigns/{cid}", response_model=CampaignRead, dependencies=[_WRITE])
-async def update_campaign(cid: uuid.UUID, body: CampaignUpdate, db: DbSession) -> CampaignRead:
+async def update_campaign(cid: uuid.UUID, body: CampaignUpdate, db: DbSession, user: CurrentUser) -> CampaignRead:
     obj = await _load_campaign(db, cid)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None or k == "due_date"}
+    changes = _changes(obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if changes:
+        status_change = changes.get("status")
+        verb = ({"closed": "Closed", "open": "Opened"}.get(status_change["to"], "Updated")
+                if status_change else "Updated")
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="declaration_campaign", entity_id=obj.id,
+            summary=f"{verb} declaration campaign {obj.reference}: {', '.join(changes)}"[:500], changes=changes,
+        )
     return CampaignRead.model_validate(await _load_campaign(db, cid))
 
 
 @router.delete("/declaration-campaigns/{cid}", status_code=204, dependencies=[_WRITE])
-async def delete_campaign(cid: uuid.UUID, db: DbSession) -> None:
+async def delete_campaign(cid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_campaign(db, cid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="declaration_campaign", entity_id=obj.id,
+        summary=f"Archived declaration campaign {obj.reference}: {obj.title} "
+                f"({len(obj.declarations)} declaration(s))"[:500],
+    )
+
+
+def declaration_edit_refusal(campaign) -> str | None:
+    """Why a declaration in ``campaign`` may not be added, changed or removed, or None.
+    A closed campaign is the record of what staff declared for that period (and what
+    compliance concluded); an archived one is out of the register. Reopen the campaign
+    — itself on the trail — to correct it."""
+    if campaign is None or getattr(campaign, "deleted", False):
+        return "This declaration's campaign has been archived; restore the campaign before changing its declarations."
+    if campaign.status == CampaignStatus.closed:
+        return "The campaign is closed; reopen it before changing its declarations."
+    return None
+
+
+async def _editable_declaration(db, did) -> Declaration:
+    obj = await db.scalar(select(Declaration).where(Declaration.id == did))
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Declaration not found")
+    campaign = await db.scalar(select(DeclarationCampaign).where(DeclarationCampaign.id == obj.campaign_id))
+    refusal = declaration_edit_refusal(campaign)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
+    return obj
 
 
 # ------------------------------------------------- nested declaration lines ---
@@ -148,33 +197,68 @@ async def delete_campaign(cid: uuid.UUID, db: DbSession) -> None:
              status_code=201, dependencies=[_WRITE])
 async def add_declaration(cid: uuid.UUID, body: DeclarationCreate, db: DbSession, user: CurrentUser) -> CampaignRead:
     campaign = await _load_campaign(db, cid)
-    if campaign.status == CampaignStatus.closed:
-        raise HTTPException(
-            status_code=409,
-            detail="Campaign is closed; reopen it before adding declarations.",
-        )
-    obj = Declaration(tenant_id=user.tenant_id, campaign_id=cid, **body.model_dump())
+    refusal = declaration_edit_refusal(campaign)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
+    data = body.model_dump()
+    _stamp_submitted(data, None)
+    obj = Declaration(tenant_id=user.tenant_id, campaign_id=cid, **data)
     obj.reference = await _next_ref(db, Declaration, "DCL")
     db.add(obj)
     await db.flush()
+    await audit_log.record(
+        db, actor=user, action="create", entity_type="declaration", entity_id=obj.id,
+        summary=(f"Recorded declaration {obj.reference} by {obj.declarant_name or 'unnamed declarant'} "
+                 f"in campaign {campaign.reference}"
+                 + (" (with a disclosure)" if obj.has_disclosure else ""))[:500],
+    )
     return CampaignRead.model_validate(await _load_campaign(db, cid))
 
 
+def _stamp_submitted(data: dict, obj) -> None:
+    """A declaration that leaves "pending" was submitted on some day: today, unless the
+    request (or the record) already says when."""
+    status_value = data.get("status")
+    if status_value is None or DeclarationStatus(status_value) == DeclarationStatus.pending:
+        return
+    if data.get("submitted_date") is None and (obj is None or obj.submitted_date is None):
+        data["submitted_date"] = date.today()
+
+
 @router.patch("/declarations/{did}", response_model=DeclarationRead, dependencies=[_WRITE])
-async def update_declaration(did: uuid.UUID, body: DeclarationUpdate, db: DbSession) -> DeclarationRead:
-    obj = await _get(db, Declaration, did, "Declaration")
-    for k, v in body.model_dump(exclude_unset=True).items():
+async def update_declaration(did: uuid.UUID, body: DeclarationUpdate, db: DbSession, user: CurrentUser) -> DeclarationRead:
+    obj = await _editable_declaration(db, did)
+    data = {k: v for k, v in body.model_dump(exclude_unset=True).items()
+            if v is not None or k in ("amount", "submitted_date")}
+    _stamp_submitted(data, obj)
+    changes = _changes(obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if changes:
+        # A compliance officer clearing or escalating a disclosure is the decision an
+        # examiner samples: who, when, from what to what.
+        status_change = changes.get("status")
+        verb = f"Marked {status_change['to']}" if status_change else "Updated"
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="declaration", entity_id=obj.id,
+            summary=f"{verb} declaration {obj.reference} ({obj.declarant_name or 'unnamed'}): {', '.join(changes)}"[:500],
+            changes=changes,
+        )
     return DeclarationRead.model_validate(obj)
 
 
 @router.delete("/declarations/{did}", status_code=204, dependencies=[_WRITE])
-async def delete_declaration(did: uuid.UUID, db: DbSession) -> None:
-    obj = await db.scalar(select(Declaration).where(Declaration.id == did))
-    if obj is None:
-        raise HTTPException(status_code=404, detail="Record not found")
+async def delete_declaration(did: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _editable_declaration(db, did)
+    label = f"{obj.reference} ({obj.declarant_name or 'unnamed'}, {_plain(obj.status)})"
     await db.delete(obj)
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="declaration", entity_id=did,
+        summary=f"Deleted declaration {label}"[:500],
+        changes={"campaign_id": str(obj.campaign_id), "has_disclosure": obj.has_disclosure},
+    )
 
 
 # =============================================== standalone declarations list ===
@@ -201,7 +285,7 @@ async def list_declarations(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[DeclarationRead]:
     stmt: Select = (
-        select(Declaration)
+        select(Declaration, DeclarationCampaign.reference, DeclarationCampaign.title)
         .join(DeclarationCampaign, Declaration.campaign_id == DeclarationCampaign.id)
         .where(DeclarationCampaign.deleted.is_(False))
     )
@@ -214,14 +298,18 @@ async def list_declarations(
         stmt = stmt.where(
             Declaration.declarant_name.ilike(like) | Declaration.reference.ilike(like)
         )
-    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    total = await db.scalar(select(func.count()).select_from(stmt.with_only_columns(Declaration.id).subquery())) or 0
     if sort_by:
         params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
         stmt = apply_sort(stmt, params, _DECLARATION_SORTABLE, default=Declaration.created_at)
     else:
         stmt = stmt.order_by(Declaration.created_at.desc())
-    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    return Page(items=[DeclarationRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
+    items = []
+    for decl, campaign_ref, campaign_title in (await db.execute(stmt.limit(limit).offset(offset))).all():
+        row = DeclarationRead.model_validate(decl)
+        row.campaign_reference, row.campaign_title = campaign_ref or "", campaign_title or ""
+        items.append(row)
+    return Page(items=items, total=total, limit=limit, offset=offset)
 
 
 # ==================================================================== summary ===

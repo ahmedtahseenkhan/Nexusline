@@ -5,7 +5,8 @@
    No sign-in: the link is the credential (only its hash is stored on the server; it expires
    and can be withdrawn). The page shows the bank's name, the sections with live conditional
    display, saves drafts, takes evidence uploads and submits. It never shows scores or which
-   answers raise findings. After the reviewer returns answers, only those can change. */
+   answers raise findings. After the reviewer returns answers, only those (and the follow-up
+   questions they show) can change, and each must change before the answers go back. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
@@ -135,6 +136,16 @@ export default function RespondPage() {
       setError(`${progress.missingMandatory.length} required question${progress.missingMandatory.length === 1 ? " is" : "s are"} unanswered.`);
       const first = progress.missingMandatory[0];
       document.getElementById(`q-${idsByKey.get(first)}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    // A returned answer goes back as it was only by mistake: the reviewer asked for a
+    // change, and the server refuses the resubmission until each one has one.
+    const unchanged = (view?.answers || []).filter((a) => a.review_state === "returned"
+      && JSON.stringify(drafts[a.question_id] ?? null) === JSON.stringify(draftFromAnswer(a)));
+    if (unchanged.length) {
+      setMissing(new Set(unchanged.map((a) => a.question_id)));
+      setError(`${unchanged.length} answer${unchanged.length === 1 ? "" : "s"} the reviewer returned ${unchanged.length === 1 ? "has" : "have"} not been updated. Change ${unchanged.length === 1 ? "it" : "each one"} (the answer, its comment or its evidence) as the reviewer asked, then submit again.`);
+      document.getElementById(`q-${unchanged[0].question_id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
     if (!window.confirm("Submit your answers? You won't be able to change them unless the reviewer returns them.")) return;

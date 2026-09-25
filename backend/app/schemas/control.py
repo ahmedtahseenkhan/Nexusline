@@ -344,6 +344,9 @@ class ControlRead(ControlBase):
     audit_findings: list[GraphRef] = []
     assets: list[GraphRef] = []
     vendors: list[GraphRef] = []
+    obligations: list[GraphRef] = []
+    #: ICFR Risk-Control Matrix lines that rely on this control (``IcfrControl.control_id``).
+    icfr_controls: list[GraphRef] = []
 
 
 class ControlRef(BaseModel):

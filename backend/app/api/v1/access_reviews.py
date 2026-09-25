@@ -1,4 +1,11 @@
-"""Account Reviews / Access Certification API."""
+"""Account Reviews / Access Certification API.
+
+A user-access recertification is evidence an SBP inspection samples (IT Governance and
+Cyber Security framework: periodic review of user rights), so every step is on the
+activity trail against the review: edits, archive, each account added / changed /
+removed, each keep-or-revoke decision with who took it, and completion. A completed
+review is the signed-off record; set it back to in progress (itself logged) to change it.
+"""
 from __future__ import annotations
 
 import uuid
@@ -26,6 +33,32 @@ from app.services import audit
 from app.services.risk_scoring import next_review_date
 
 router = APIRouter(prefix="/access-reviews", tags=["access reviews"])
+
+
+def _plain(value):
+    return getattr(value, "value", value)
+
+
+def _changes(obj, data: dict) -> dict:
+    return {k: {"from": _plain(getattr(obj, k)), "to": _plain(v)}
+            for k, v in data.items() if getattr(obj, k) != v}
+
+
+async def _trail(db, user, review, action: str, summary: str, changes: dict | None = None) -> None:
+    await audit.record(db, actor=user, action=action, entity_type="access_review", entity_id=review.id,
+                       summary=summary[:500], changes=changes or None)
+
+
+COMPLETED_REFUSAL = ("This access review is completed, so its accounts and decisions are the signed-off "
+                     "record. Set the review back to in progress to change them.")
+
+
+_DECISION_VERB = {"keep": "Kept", "revoke": "Revoked", "pending": "Reset the decision on"}
+
+
+def _open_or_409(review) -> None:
+    if review.status == AccessReviewStatus.completed:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=COMPLETED_REFUSAL)
 
 
 async def _load(db, review_id: uuid.UUID) -> AccessReview:
@@ -120,34 +153,57 @@ async def get_review(review_id: uuid.UUID, db: DbSession) -> ReviewRead:
 
 
 @router.patch("/{review_id}", response_model=ReviewRead, dependencies=[Depends(require("review:write"))])
-async def update_review(review_id: uuid.UUID, body: ReviewUpdate, db: DbSession) -> ReviewRead:
+async def update_review(review_id: uuid.UUID, body: ReviewUpdate, db: DbSession, user: CurrentUser) -> ReviewRead:
     obj = await _load(db, review_id)
-    data = body.model_dump(exclude_unset=True)
+    data = {k: v for k, v in body.model_dump(exclude_unset=True).items()
+            if v is not None or k in ("asset_id", "due_date")}
+    changes = _changes(obj, data)
+    if changes.get("status", {}).get("to") == AccessReviewStatus.completed.value:
+        # Completion checks every account is decided and records the sign-off; an edit
+        # of the status field must not skip that.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Use Complete review to complete it: every account must be decided first.")
     for f, v in data.items():
         setattr(obj, f, v)
     if "frequency" in data:
         obj.next_review_date = next_review_date(obj.frequency)
+    reopened = ("status" in changes and changes["status"]["from"] == AccessReviewStatus.completed.value)
+    if reopened:
+        obj.completed_at = None
     await db.flush()
+    if changes:
+        await _trail(db, user, obj, "update",
+                     f"{'Reopened' if reopened else 'Updated'} access review {obj.reference}: {', '.join(changes)}",
+                     changes)
     return ReviewRead.model_validate(await _fresh(db, obj.id))
 
 
 @router.delete("/{review_id}", status_code=204, dependencies=[Depends(require("review:write"))])
-async def delete_review(review_id: uuid.UUID, db: DbSession) -> None:
+async def delete_review(review_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     from datetime import datetime, timezone
 
     obj = await _load(db, review_id)
     obj.deleted = True
     obj.deleted_date = datetime.now(timezone.utc)
+    await db.flush()
+    await _trail(db, user, obj, "delete",
+                 f"Archived access review {obj.reference}: {obj.name} ({_plain(obj.status)}, "
+                 f"{obj.reviewed_count}/{obj.total_items} accounts decided)")
 
 
 # -------------------------------------------------------------------- items
 @router.post("/{review_id}/items", response_model=ReviewRead, status_code=201, dependencies=[Depends(require("review:write"))])
 async def add_item(review_id: uuid.UUID, body: ItemCreate, db: DbSession, user: CurrentUser) -> ReviewRead:
     review = await _load(db, review_id)
-    db.add(AccessReviewItem(tenant_id=user.tenant_id, review_id=review_id, **body.model_dump()))
+    _open_or_409(review)
+    item = AccessReviewItem(tenant_id=user.tenant_id, review_id=review_id, **body.model_dump())
+    db.add(item)
     if review.status == AccessReviewStatus.draft:
         review.status = AccessReviewStatus.in_progress
     await db.flush()
+    await _trail(db, user, review, "update",
+                 f"Added account {item.username} to access review {review.reference}",
+                 {"account": item.username, "access": item.access})
     return ReviewRead.model_validate(await _fresh(db, review_id))
 
 
@@ -155,30 +211,55 @@ async def add_item(review_id: uuid.UUID, body: ItemCreate, db: DbSession, user: 
 async def decide_item(
     review_id: uuid.UUID, item_id: uuid.UUID, body: ItemDecision, db: DbSession, user: CurrentUser
 ) -> ReviewRead:
+    review = await _load(db, review_id)
+    _open_or_409(review)
     item = await _item_or_404(db, review_id, item_id)
+    before = {"decision": _plain(item.decision), "comment": item.comment, "decided_by": item.decided_by}
     item.decision = body.decision
     item.comment = body.comment
     item.decided_by = user.email
     item.decided_at = date.today() if body.decision != AccessDecision.pending else None
     await db.flush()
+    # The certification decision itself: who kept or revoked which account, and why.
+    await _trail(db, user, review, "decide",
+                 f"{_DECISION_VERB[_plain(body.decision)]} access for {item.username} in access review "
+                 f"{review.reference}" + (f": {body.comment}" if body.comment else ""),
+                 {"account": item.username, "access": item.access,
+                  "decision": {"from": before["decision"], "to": _plain(body.decision)},
+                  "comment": body.comment, "previously_decided_by": before["decided_by"] or None})
     return ReviewRead.model_validate(await _fresh(db, review_id))
 
 
 @router.put("/{review_id}/items/{item_id}", response_model=ReviewRead, dependencies=[Depends(require("review:write"))])
 async def update_item(
-    review_id: uuid.UUID, item_id: uuid.UUID, body: ItemUpdate, db: DbSession
+    review_id: uuid.UUID, item_id: uuid.UUID, body: ItemUpdate, db: DbSession, user: CurrentUser
 ) -> ReviewRead:
     """Edit a line item's username / display name / access / comment (not its decision)."""
+    review = await _load(db, review_id)
+    _open_or_409(review)
     item = await _item_or_404(db, review_id, item_id)
-    for f, v in body.model_dump(exclude_unset=True).items():
+    data = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    changes = _changes(item, data)
+    for f, v in data.items():
         setattr(item, f, v)
     await db.flush()
+    if changes:
+        await _trail(db, user, review, "update",
+                     f"Edited account {item.username} in access review {review.reference}: {', '.join(changes)}",
+                     {f"account.{k}": v for k, v in changes.items()})
     return ReviewRead.model_validate(await _fresh(db, review_id))
 
 
 @router.delete("/{review_id}/items/{item_id}", status_code=204, dependencies=[Depends(require("review:write"))])
-async def delete_item(review_id: uuid.UUID, item_id: uuid.UUID, db: DbSession) -> None:
-    await db.delete(await _item_or_404(db, review_id, item_id))
+async def delete_item(review_id: uuid.UUID, item_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    review = await _load(db, review_id)
+    _open_or_409(review)
+    item = await _item_or_404(db, review_id, item_id)
+    label = f"{item.username} ({_plain(item.decision)})"
+    await db.delete(item)
+    await db.flush()
+    await _trail(db, user, review, "update", f"Removed account {label} from access review {review.reference}",
+                 {"account": item.username, "decision": _plain(item.decision)})
 
 
 @router.post(
@@ -189,6 +270,7 @@ async def delete_item(review_id: uuid.UUID, item_id: uuid.UUID, db: DbSession) -
 )
 async def complete_review(review_id: uuid.UUID, db: DbSession, user: CurrentUser) -> ReviewRead:
     review = await _load(db, review_id)
+    _open_or_409(review)
     pending = [i for i in review.items if i.decision == AccessDecision.pending]
     if pending:
         raise HTTPException(
@@ -201,6 +283,9 @@ async def complete_review(review_id: uuid.UUID, db: DbSession, user: CurrentUser
     await db.flush()
     await audit.record(
         db, actor=user, action="complete", entity_type="access_review", entity_id=review.id,
-        summary=f"Completed access review {review.reference} ({review.revoke_count} revoked)",
+        summary=f"Completed access review {review.reference} ({review.keep_count} kept, "
+                f"{review.revoke_count} revoked)",
+        changes={"kept": review.keep_count, "revoked": review.revoke_count,
+                 "revoked_accounts": [i.username for i in review.items if i.decision == AccessDecision.revoke]},
     )
     return ReviewRead.model_validate(await _fresh(db, review_id))

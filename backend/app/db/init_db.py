@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from app.core.config import settings
-from app.core.database import Base
+from app.core.database import Base, json_dumps
 from app.db.rls import apply_rls_policies
 from app.db.phase4 import all_ddl_statements as phase4_ddl_statements
 from app.db.phase5 import all_ddl_statements as phase5_ddl_statements
@@ -38,7 +38,9 @@ import app.models  # noqa: F401
 logger = logging.getLogger("nexusline.init")
 
 # Owner/superuser engine for DDL + role provisioning only.
-admin_engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+admin_engine = create_async_engine(
+    settings.database_url, pool_pre_ping=True, json_serializer=json_dumps
+)
 
 
 async def wait_for_db(retries: int = 30, delay: float = 1.0) -> None:

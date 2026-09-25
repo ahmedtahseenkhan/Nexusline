@@ -8,6 +8,8 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordApproval from "@/components/RecordApproval";
+import RecordPanels from "@/components/RecordPanels";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -443,6 +445,10 @@ function FraudInner() {
     else setDetail(null);
   }, [recordId, loadDetail]);
 
+  // ---- custom fields (one set per register) ----
+  const riskCfForm = useCustomFieldForm("fraud_risk");
+  const caseCfForm = useCustomFieldForm("fraud_case");
+
   // ---- checklist dialog ----
   const [editingCheck, setEditingCheck] = useState<FraudControlCheck | null>(null);
   const [showCheckForm, setShowCheckForm] = useState(false);
@@ -454,11 +460,13 @@ function FraudInner() {
   function openNewRisk() {
     setEditingRisk(null);
     setRf(BLANK_RISK);
+    riskCfForm.start(null);
     setShowRiskForm(true);
   }
   function openEditRisk(r: FraudRisk) {
     setEditingRisk(r);
     setRf(fromRisk(r));
+    riskCfForm.start(r.id);
     setShowRiskForm(true);
   }
   async function saveRisk() {
@@ -466,8 +474,10 @@ function FraudInner() {
     setSavingRisk(true);
     try {
       const payload = riskPayload(rf);
-      if (editingRisk) await apiCall<FraudRisk>("PATCH", `/fraud-risks/${editingRisk.id}`, payload);
-      else await apiCall<FraudRisk>("POST", "/fraud-risks", payload);
+      const saved = editingRisk
+        ? await apiCall<FraudRisk>("PATCH", `/fraud-risks/${editingRisk.id}`, payload)
+        : await apiCall<FraudRisk>("POST", "/fraud-risks", payload);
+      await riskCfForm.save(saved.id);
       setShowRiskForm(false);
       reloadRisks();
       loadSummary();
@@ -496,11 +506,13 @@ function FraudInner() {
   function openNewCase() {
     setEditingCase(null);
     setCf({ ...BLANK_CASE, currency });
+    caseCfForm.start(null);
     setShowCaseForm(true);
   }
   function openEditCase(c: FraudCase) {
     setEditingCase(c);
     setCf(fromCase(c, currency));
+    caseCfForm.start(c.id);
     setShowCaseForm(true);
   }
   async function saveCase() {
@@ -508,8 +520,10 @@ function FraudInner() {
     setSavingCase(true);
     try {
       const payload = casePayload(cf);
-      if (editingCase) await apiCall<FraudCase>("PATCH", `/fraud-cases/${editingCase.id}`, payload);
-      else await apiCall<FraudCase>("POST", "/fraud-cases", payload);
+      const saved = editingCase
+        ? await apiCall<FraudCase>("PATCH", `/fraud-cases/${editingCase.id}`, payload)
+        : await apiCall<FraudCase>("POST", "/fraud-cases", payload);
+      await caseCfForm.save(saved.id);
       setShowCaseForm(false);
       reloadCases();
       loadSummary();
@@ -937,7 +951,12 @@ function FraudInner() {
 
       {/* ===================== FRAUD CASE — read-only detail view (?id=) */}
       <RecordDrawer
-        aside={detail ? <RecordApproval entityType="fraud_case" entityId={detail.id} onChanged={() => { reloadCases(); loadDetail(detail.id); }} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="fraud_case" entityId={detail.id} onChanged={() => { reloadCases(); loadDetail(detail.id); }} />
+            <RecordPanels model="fraud_case" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!recordId && !!detail}
         onClose={() => setRecordId(null)}
         title={detail ? `${detail.reference || "—"} — ${detail.title}` : "…"}
@@ -1019,6 +1038,7 @@ function FraudInner() {
           tabs={[
             { id: "general", label: "General", content: riskGeneral, required: true },
             { id: "assessment", label: "Assessment", content: riskAssessment },
+            ...riskCfForm.tabs,
           ]}
           onClose={() => setShowRiskForm(false)}
           onSave={saveRisk}
@@ -1043,6 +1063,7 @@ function FraudInner() {
             { id: "general", label: "General", content: caseGeneral, required: true },
             { id: "loss", label: "Loss & Dates", content: caseLoss },
             { id: "investigation", label: "Investigation", content: caseInvestigation },
+            ...caseCfForm.tabs,
           ]}
           onClose={() => setShowCaseForm(false)}
           onSave={saveCase}

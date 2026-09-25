@@ -82,6 +82,18 @@ const CATEGORY = opts([
 const CHANNEL = opts(["web_portal", "hotline", "email", "in_person", "letter"]);
 const SEVERITY = opts(["low", "medium", "high", "critical"]);
 const STATUS = opts(["received", "triage", "investigating", "substantiated", "unsubstantiated", "closed"]);
+/** The case lifecycle — mirrors WHISTLE_TRANSITIONS in api/v1/whistleblowing.py. */
+const NEXT_STATUS: Record<string, string[]> = {
+  received: ["triage", "investigating", "closed"],
+  triage: ["investigating", "closed"],
+  investigating: ["substantiated", "unsubstantiated", "closed"],
+  substantiated: ["closed", "investigating"],
+  unsubstantiated: ["closed", "investigating"],
+  closed: ["investigating"],
+};
+/** The current status plus the steps it may move to (a form's status choices). */
+const statusChoices = (current: string | null | undefined): Option[] =>
+  current ? STATUS.filter((o) => o.value === current || (NEXT_STATUS[current] ?? []).includes(o.value)) : STATUS;
 
 // ------------------------------------------------------------------ tones
 const STATUS_TONE: Record<string, Tone> = {
@@ -247,8 +259,9 @@ function WhistleblowingInner() {
     if (!detail) return; setError(null);
     try {
       await apiCall<WhistleReport>("POST", `/whistleblowing/${detail.id}/updates`, {
-        note: ud.note, author: ud.author, update_date: ud.update_date || null, status_change: ud.status_change,
+        note: ud.note, author: ud.author, update_date: ud.update_date || null, status_change: ud.status_change || null,
       });
+      if (ud.status_change) toast(`Case moved to ${cap(ud.status_change)}`);
       setUd(BLANK_UPDATE); loadDetail(detail.id); reload(); loadSummary();
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to add case-log entry"); }
   }
@@ -333,7 +346,7 @@ function WhistleblowingInner() {
     <>
       <div className="field-row">
         <Field label="Status" help="Case lifecycle from intake to closure.">
-          <Select value={rf.status} onChange={(v) => setR("status", v)} options={STATUS} />
+          <Select value={rf.status} onChange={(v) => setR("status", v)} options={statusChoices(editingReport?.status)} />
         </Field>
         <Field label="Assigned to" help="Case handler / investigator.">
           <TextInput value={rf.assigned_to} onChange={(v) => setR("assigned_to", v)} placeholder="Investigator" />
@@ -457,9 +470,12 @@ function WhistleblowingInner() {
                     <label className="label">Author</label>
                     <input className="input" value={ud.author} onChange={(e) => setU("author", e.target.value)} placeholder="Handler" />
                   </div>
-                  <div style={{ width: 150 }}>
-                    <label className="label">Status change</label>
-                    <input className="input" value={ud.status_change} onChange={(e) => setU("status_change", e.target.value)} placeholder="investigating" />
+                  <div style={{ width: 170 }}>
+                    <label className="label">Move case to</label>
+                    <select className="select" value={ud.status_change} onChange={(e) => setU("status_change", e.target.value)} title="Moves the case itself; leave as “No change” for a plain note.">
+                      <option value="">No change</option>
+                      {(NEXT_STATUS[detail.status] ?? []).map((s) => <option key={s} value={s}>{cap(s)}</option>)}
+                    </select>
                   </div>
                   <div style={{ width: 140 }}>
                     <label className="label">Date</label>

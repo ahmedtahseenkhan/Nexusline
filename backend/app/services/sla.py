@@ -19,7 +19,7 @@ overwrites the other.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +44,7 @@ __all__ = [
     "reconcile",
     "state_of",
     "summary",
+    "breached_on",
 ]
 
 ON_TRACK = "on_track"
@@ -67,6 +68,11 @@ class EntitySla:
     is_open: object
     #: Human label for an alert body.
     label_of: object
+    #: The record's own "this started" dates, tried in order before ``created_at``: the
+    #: day an issue or risk was identified, an incident detected. A record imported from
+    #: a legacy tool keeps its history this way — clocked from creation it would get a
+    #: fresh window on import day and could never show as breached.
+    started_fields: tuple[str, ...] = ()
 
 
 def _risk_severity(risk: Risk, scale) -> Severity:
@@ -89,6 +95,7 @@ ENTITIES: dict[str, EntitySla] = {
         severity_of=_risk_severity,
         is_open=lambda r: r.status.value not in ("closed", "accepted"),
         label_of=lambda r: f"{r.reference}: {r.title}",
+        started_fields=("identified_date",),
     ),
     "issue": EntitySla(
         key="issue", label="Issue", model=Issue, link="/issues",
@@ -97,6 +104,7 @@ ENTITIES: dict[str, EntitySla] = {
             IssueStatus2.closed, IssueStatus2.remediated, IssueStatus2.risk_accepted
         ),
         label_of=lambda i: f"{i.reference}: {i.title}",
+        started_fields=("identified_date",),
     ),
     "audit_finding": EntitySla(
         key="audit_finding", label="Audit finding", model=AuditFinding, link="/internal-audit",
@@ -111,6 +119,9 @@ ENTITIES: dict[str, EntitySla] = {
         severity_of=lambda i, _bands: i.severity,
         is_open=lambda i: i.status not in (IncidentStatus.closed, IncidentStatus.resolved),
         label_of=lambda i: f"{i.reference}: {i.title}",
+        # Response is measured from detection (SBP and ISO 27035 alike), not from when
+        # the incident happened — a late detection is a separate finding, not a TAT miss.
+        started_fields=("detected_at",),
     ),
 }
 
@@ -248,7 +259,7 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
 
             severity = spec.severity_of(row, bands)
             target, warn_pct, _role = target_for(policies, spec.key, severity)
-            started = _started_on(row)
+            started = _started_on(row, spec.started_fields)
             if target is None or started is None:
                 row.tat_due_date = None
                 continue
@@ -259,7 +270,7 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
 
             if state.state == BREACHED:
                 if row.tat_breached_at is None:
-                    row.tat_breached_at = today
+                    row.tat_breached_at = breached_on(due, today)
             elif row.tat_breached_at is not None:
                 row.tat_breached_at = None
 
@@ -282,12 +293,30 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
     return flagged
 
 
-def _started_on(row) -> date | None:
-    """When the clock started — the record's creation date."""
-    created = getattr(row, "created_at", None)
-    if created is None:
+def _as_day(value) -> date | None:
+    if value is None:
         return None
-    return created.date() if hasattr(created, "date") else created
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _started_on(row, fields: tuple[str, ...] = ()) -> date | None:
+    """When the clock started: the first of the record's own start dates that is set
+    (``EntitySla.started_fields``), else its creation date. Pure.
+
+    A start date later than the record's creation (a typo, or a date entered ahead) is
+    taken as given — the window then simply runs from it."""
+    for name in fields:
+        own = _as_day(getattr(row, name, None))
+        if own is not None:
+            return own
+    return _as_day(getattr(row, "created_at", None))
+
+
+def breached_on(due: date, today: date) -> date:
+    """The first day a window lapsed: the day after it was due. A record backdated past
+    its window (an import) is stamped with when it really breached, not the day the
+    sweep noticed. Pure."""
+    return min(today, due + timedelta(days=1))
 
 
 async def summary(db: AsyncSession, tenant_id) -> dict:

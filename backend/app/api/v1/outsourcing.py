@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -252,7 +252,7 @@ async def update_arrangement(
 async def delete_arrangement(aid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_arrangement(db, aid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
     await audit_log.record(db, actor=user, action="delete", entity_type="outsourcing_arrangement",
                          entity_id=obj.id, summary=f"Archived outsourcing arrangement {obj.reference}")

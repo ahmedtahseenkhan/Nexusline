@@ -3,10 +3,10 @@ Shariah compliance reviews with SNC findings, and the purification (charity) led
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
@@ -19,7 +19,7 @@ from app.models.shariah import (
     ShariahReview,
     ShariahRuling,
 )
-from app.schemas.common import Page
+from app.schemas.common import GraphRef, Page
 from app.schemas.shariah import (
     CharityCreate,
     CharityRead,
@@ -56,6 +56,34 @@ async def _get(db, model, obj_id, name: str):
     if obj is None or getattr(obj, "deleted", False):
         raise HTTPException(status_code=404, detail=f"{name} not found")
     return obj
+
+
+async def _ruling_read(db, ruling: ShariahRuling) -> RulingRead:
+    """A ruling with the live products it approves — the reverse of the product's
+    "approving ruling", so the Shariah Board's fatwa shows what rests on it."""
+    products = (await db.scalars(
+        select(IslamicProduct)
+        .where(IslamicProduct.approving_ruling_id == ruling.id, IslamicProduct.deleted.is_(False))
+        .order_by(IslamicProduct.name)
+    )).all()
+    out = RulingRead.model_validate(ruling)
+    out.products = [GraphRef.model_validate(p) for p in products]
+    return out
+
+
+async def _product_read(db, product: IslamicProduct) -> ProductRead:
+    """A product with its approving ruling and the Shariah reviews that covered it."""
+    await db.refresh(product, attribute_names=["approving_ruling"])
+    reviews = (await db.scalars(
+        select(ShariahReview)
+        .where(ShariahReview.product_id == product.id, ShariahReview.deleted.is_(False))
+        .order_by(ShariahReview.created_at.desc())
+    )).all()
+    out = ProductRead.model_validate(product)
+    ruling = product.approving_ruling
+    out.approving_ruling = None if ruling is None or ruling.deleted else GraphRef.model_validate(ruling)
+    out.reviews = [GraphRef.model_validate(r) for r in reviews]
+    return out
 
 
 # =============================================================== rulings / fatwas ===
@@ -100,7 +128,7 @@ async def list_rulings(
 
 @router.get("/shariah-rulings/{rid}", response_model=RulingRead, dependencies=[_READ])
 async def get_ruling(rid: uuid.UUID, db: DbSession) -> RulingRead:
-    return RulingRead.model_validate(await _get(db, ShariahRuling, rid, "Ruling"))
+    return await _ruling_read(db, await _get(db, ShariahRuling, rid, "Ruling"))
 
 
 @router.post("/shariah-rulings", response_model=RulingRead, status_code=201, dependencies=[_WRITE])
@@ -111,7 +139,7 @@ async def create_ruling(body: RulingCreate, db: DbSession, user: CurrentUser) ->
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="shariah_ruling",
                            entity_id=obj.id, summary=f"Issued Shariah ruling {obj.reference}: {obj.title}")
-    return RulingRead.model_validate(obj)
+    return await _ruling_read(db, obj)
 
 
 @router.patch("/shariah-rulings/{rid}", response_model=RulingRead, dependencies=[_WRITE])
@@ -120,14 +148,14 @@ async def update_ruling(rid: uuid.UUID, body: RulingUpdate, db: DbSession) -> Ru
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(obj, k, v)
     await db.flush()
-    return RulingRead.model_validate(obj)
+    return await _ruling_read(db, obj)
 
 
 @router.delete("/shariah-rulings/{rid}", status_code=204, dependencies=[_WRITE])
 async def delete_ruling(rid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, ShariahRuling, rid, "Ruling")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -172,7 +200,7 @@ async def list_products(
 
 @router.get("/islamic-products/{pid}", response_model=ProductRead, dependencies=[_READ])
 async def get_product(pid: uuid.UUID, db: DbSession) -> ProductRead:
-    return ProductRead.model_validate(await _get(db, IslamicProduct, pid, "Product"))
+    return await _product_read(db, await _get(db, IslamicProduct, pid, "Product"))
 
 
 @router.post("/islamic-products", response_model=ProductRead, status_code=201, dependencies=[_WRITE])
@@ -185,7 +213,7 @@ async def create_product(body: ProductCreate, db: DbSession, user: CurrentUser) 
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="islamic_product",
                            entity_id=obj.id, summary=f"Registered Islamic product {obj.reference}: {obj.name}")
-    return ProductRead.model_validate(obj)
+    return await _product_read(db, obj)
 
 
 @router.patch("/islamic-products/{pid}", response_model=ProductRead, dependencies=[_WRITE])
@@ -197,14 +225,14 @@ async def update_product(pid: uuid.UUID, body: ProductUpdate, db: DbSession) -> 
     for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
-    return ProductRead.model_validate(obj)
+    return await _product_read(db, obj)
 
 
 @router.delete("/islamic-products/{pid}", status_code=204, dependencies=[_WRITE])
 async def delete_product(pid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, IslamicProduct, pid, "Product")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -290,7 +318,7 @@ async def update_review(rid: uuid.UUID, body: ReviewUpdate, db: DbSession) -> Re
 async def delete_review(rid: uuid.UUID, db: DbSession) -> None:
     obj = await _load_review(db, rid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -387,10 +415,28 @@ async def list_charity(
     return Page(items=[CharityRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
+#: Statuses that release purification money — each a four-eyes decision.
+_CHARITY_GATED = (CharityStatus.approved, CharityStatus.disbursed)
+
+
 @router.post("/charity-ledger", response_model=CharityRead, status_code=201, dependencies=[_WRITE])
 async def create_charity(body: CharityCreate, db: DbSession, user: CurrentUser) -> CharityRead:
     if body.source_finding_id is not None:
         await _get(db, ShariahFinding, body.source_finding_id, "Finding")
+    if body.status in _CHARITY_GATED:
+        # Recording an entry already approved or disbursed would make the recorder their
+        # own checker. While the control applies (by rule, threshold or the global
+        # switch) the entry must start pending and be approved by someone else.
+        await dual_control.enforce_maker_checker(
+            db, module="shariah", action=f"charity_{body.status.value}",
+            maker_id=user.id, checker_id=user.id, amount=float(body.amount or 0),
+            subject="charity disbursement",
+            message=(
+                "Segregation of duties: a purification disbursement cannot be recorded "
+                f"as {body.status.value} by the person entering it. Record it as pending; "
+                "an independent checker approves and releases it."
+            ),
+        )
     obj = CharityDisbursement(tenant_id=user.tenant_id, **body.model_dump())
     obj.reference = await _next_ref(db, CharityDisbursement, "CHR")
     db.add(obj)
@@ -406,15 +452,19 @@ async def update_charity(
 ) -> CharityRead:
     obj = await _get(db, CharityDisbursement, cid, "Disbursement")
     data = body.model_dump(exclude_unset=True)
+    if "status" in data and data["status"] is None:
+        del data["status"]  # "no change", not a blank status
     new_status = data.get("status")
-    if new_status in (CharityStatus.approved, CharityStatus.disbursed) and obj.status != new_status:
+    if new_status in _CHARITY_GATED and obj.status != new_status:
         # Purification money leaves the bank: whoever recorded the disbursement cannot
         # also approve or release it. The amount is passed so a configured threshold
-        # rule can exempt small sums.
+        # rule can exempt small sums — the larger of the old and new amount, so an
+        # edit in the same request cannot slip a large sum under the threshold.
+        amount = max(float(obj.amount or 0), float(data.get("amount") or 0))
         await dual_control.enforce_record_maker_checker(
             db, module="shariah", action=f"charity_{new_status.value}",
             entity_type="charity_disbursement", entity_id=obj.id,
-            checker_id=user.id, amount=float(obj.amount or 0),
+            checker_id=user.id, amount=amount,
             subject="charity disbursement",
         )
     for k, v in data.items():
@@ -432,5 +482,5 @@ async def update_charity(
 async def delete_charity(cid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, CharityDisbursement, cid, "Disbursement")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()

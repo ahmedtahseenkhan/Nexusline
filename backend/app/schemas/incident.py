@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
 from app.models.enums import (
+    AssetClass,
     BaselEventType,
     IncidentStatus,
     RegulatoryReportStatus,
@@ -94,6 +95,13 @@ class IncRef(BaseModel):
     reference: str = ""
     title: str = ""
     name: str = ""
+
+
+class IncAssetRef(IncRef):
+    """A linked asset, with its class so the UI opens the right register
+    (``it_asset`` → IT assets, ``information_asset`` → information assets)."""
+
+    asset_class: AssetClass | None = None
 
 
 class IncidentLossRef(BaseModel):
@@ -234,7 +242,7 @@ class IncidentRead(IncidentBase):
     regulatory_reports: list[RegReportRead] = []
     controls: list[IncRef] = []
     vendors: list[IncRef] = []
-    assets: list[IncRef] = []
+    assets: list[IncAssetRef] = []
     risks: list[IncRef] = []
     loss_events: list[IncidentLossRef] = []
     data_breaches: list[GraphRef] = []

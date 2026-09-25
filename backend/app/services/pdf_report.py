@@ -183,38 +183,118 @@ def _d(value) -> str:
 
 
 # ==================================================================== generators ===
+_AUDIT_TYPE_LABEL = {
+    "internal": "Internal audit",
+    "external_statutory": "External (statutory) audit",
+    "regulatory": "Regulatory inspection",
+    "certification": "Certification audit",
+}
+
+
+def _esc(value) -> str:
+    """Plain user text as safe Paragraph markup: a ``<`` or ``&`` typed into a field is
+    printed, not parsed (it would otherwise break, or restyle, the report)."""
+    from xml.sax.saxutils import escape
+
+    text = str(value or "").strip()
+    return escape(text).replace("\n", "<br/>") if text else "—"
+
+
+def _range(start, end) -> str:
+    return "—" if start is None and end is None else f"{_d(start)} – {_d(end)}"
+
+
+def _plain_text(value) -> str:
+    """Rich-text HTML (the conclusion editor) as safe Paragraph markup: block tags become
+    line breaks, list items bullets, everything else is escaped text."""
+    import html
+    import re
+    from xml.sax.saxutils import escape
+
+    text = str(value or "")
+    text = re.sub(r"(?i)<br\s*/?>|</p>|</li>|</h[1-6]>", "\n", text)
+    text = re.sub(r"(?i)<li[^>]*>", "• ", text)
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return escape(text).replace("\n", "<br/>") if text else "—"
+
+
 def audit_engagement_pdf(eng, org_name: str) -> bytes:
-    """Internal-audit engagement report (audit-committee pack)."""
+    """Audit engagement report (audit-committee pack).
+
+    Carries what an audit report is judged on (IIA Standard 2410, and what an SBP
+    inspection report is read for): who performed it and under what reference, when
+    fieldwork actually ran, and — per finding — the recommendation, management's
+    response, the action owner and the agreed date.
+    """
     _require_reportlab()
-    from reportlab.platypus import Spacer
+    from reportlab.platypus import KeepTogether, Spacer
     ss = _styles()
-    story = _title_block(ss, f"Internal Audit Report — {eng.reference}",
-                         eng.title, org_name)
+    audit_type = getattr(getattr(eng, "audit_type", None), "value", "internal")
+    kind = _AUDIT_TYPE_LABEL.get(audit_type, "Audit")
+    story = _title_block(ss, f"{kind} Report — {_esc(eng.reference)}",
+                         _esc(eng.title), _esc(org_name))
     story += [_kpis(ss, [("Findings", str(eng.finding_count)),
                          ("Open", str(eng.open_finding_count)),
                          ("Status", eng.status.value.replace("_", " ").title())]), Spacer(1, 4)]
-    story += [_h2(ss, "Engagement details"), _kv(ss, [
-        ("Reference", eng.reference), ("Lead auditor", eng.lead_auditor),
-        ("Audit team", eng.audit_team), ("Status", eng.status.value),
-        ("Period", f"{_d(eng.period_start)} – {_d(eng.period_end)}"),
-        ("Planned", f"{_d(eng.planned_start)} – {_d(eng.planned_end)}"),
+    unit = getattr(eng, "auditable_unit", None)
+    details = [
+        ("Reference", eng.reference),
+        ("Audit type", kind),
+    ]
+    if audit_type != "internal" or getattr(eng, "auditor_firm", ""):
+        details.append(("Audit firm / regulator", _esc(eng.auditor_firm)))
+    details += [
+        ("Report reference", _esc(eng.report_reference)),
+        ("Report date", _d(eng.report_date)),
+        ("Auditable unit", _esc(unit.name if unit is not None else "")),
+        ("Lead auditor", _esc(eng.lead_auditor)),
+        ("Audit team", _esc(eng.audit_team)),
+        ("Status", eng.status.value.replace("_", " ").title()),
+        ("Period under review", _range(eng.period_start, eng.period_end)),
+        ("Planned fieldwork", _range(eng.planned_start, eng.planned_end)),
+        ("Actual fieldwork", _range(eng.actual_start, eng.actual_end)),
         ("Overall opinion", eng.rating.value.title() if eng.rating else "—"),
-    ])]
-    story += [_h2(ss, "Scope"), _body(ss, eng.scope), _h2(ss, "Objectives"), _body(ss, eng.objectives)]
-    if eng.procedures:
-        story += [_h2(ss, "Working papers")]
-        rows = [[p.title, p.result.value.replace("_", " ").title(), p.workpaper_ref or "—", p.performed_by or "—"]
-                for p in eng.procedures]
-        story += [_table(ss, ["Procedure", "Result", "WP ref", "By"], rows,
-                         col_widths=[240, 70, 70, 90])]
+    ]
+    story += [_h2(ss, "Engagement details"), _kv(ss, details)]
+    story += [_h2(ss, "Scope"), _body(ss, _esc(eng.scope)),
+              _h2(ss, "Objectives"), _body(ss, _esc(eng.objectives))]
+    if eng.conclusion:
+        story += [_h2(ss, "Conclusion"), _body(ss, _plain_text(eng.conclusion))]
     if eng.findings:
-        story += [_h2(ss, "Findings")]
-        rows = [[f.reference, f.title, _sev_chip(ss, f.rating.value), f.action_owner or "—",
+        story += [_h2(ss, "Summary of findings")]
+        rows = [[_esc(f.reference), _esc(f.title), _sev_chip(ss, f.rating.value),
+                 _esc(f.action_owner),
                  _d(f.due_date), f.status.value.replace("_", " ").title()] for f in eng.findings]
         story += [_table(ss, ["Ref", "Finding", "Rating", "Owner", "Due", "Status"], rows,
                          col_widths=[52, 190, 55, 80, 60, 65])]
-    if eng.conclusion:
-        story += [_h2(ss, "Conclusion"), _body(ss, eng.conclusion)]
+        for index, f in enumerate(eng.findings):
+            # The section heading travels with the first finding, so it is never left
+            # alone at the foot of a page.
+            block = [_h2(ss, "Detailed findings and management responses")] if index == 0 else []
+            block += [
+                _body(ss, f"<b>{_esc(f.reference)} — {_esc(f.title)}</b>"),
+                _kv(ss, [
+                    ("Rating", f.rating.value.title()),
+                    ("Observation", _esc(f.description)),
+                    ("Risk implication", _esc(f.risk_implication)),
+                    ("Recommendation", _esc(f.recommendation)),
+                    ("Management response", _esc(f.management_response)),
+                    ("Action owner", _esc(f.action_owner)),
+                    ("Agreed date", _d(f.due_date)),
+                    ("Status", f.status.value.replace("_", " ").title()
+                     + (f" ({_d(f.closed_date)})" if f.closed_date else "")),
+                ]),
+                Spacer(1, 8),
+            ]
+            story.append(KeepTogether(block))
+    if eng.procedures:
+        story += [_h2(ss, "Working papers")]
+        rows = [[_esc(p.title), p.result.value.replace("_", " ").title(),
+                 _esc(p.workpaper_ref), _esc(p.performed_by)]
+                for p in eng.procedures]
+        story += [_table(ss, ["Procedure", "Result", "WP ref", "By"], rows,
+                         col_widths=[240, 70, 70, 90])]
     return _render(story, org_name)
 
 

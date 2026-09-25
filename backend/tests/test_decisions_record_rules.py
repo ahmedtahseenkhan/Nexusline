@@ -146,12 +146,19 @@ def test_the_approval_state_comes_from_the_lifecycle_registry():
     assert att.approval_state(SimpleNamespace(workflow_status="draft")) is None
 
 
-def test_the_business_draft_rule_is_still_applied_first():
-    """A draft risk hears the older, more specific refusal, not the approval one."""
+def test_a_type_with_an_approval_workflow_is_judged_on_its_approval():
+    """2026-09-25: for a type registered for approval the approval state is the gate — a
+    risk's business Draft (not yet assessed) is not an approval stage, so it no longer
+    answers first with "submit it for review"."""
     refusal = att.attest_refusal(
         attester_id=ME, owner_id=OTHER, workflow_status=RiskStatus.draft, approval="draft", label="risk",
     )
-    assert refusal == (409, att.DRAFT_REFUSAL)
+    assert refusal == (409, "Approve this risk before attesting it — its approval is draft.")
+    assert att.attest_refusal(
+        attester_id=ME, owner_id=OTHER, workflow_status=RiskStatus.draft, approval="approved", label="risk",
+    ) is None
+    # Without an approval workflow, the record's own draft status still decides.
+    assert att.attest_refusal(workflow_status=RiskStatus.draft, approval=None) == (409, att.DRAFT_REFUSAL)
 
 
 def test_the_owner_hears_the_approval_rule_like_anyone_else():

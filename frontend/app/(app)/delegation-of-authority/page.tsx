@@ -53,7 +53,12 @@ type DualControlRule = {
   status: string;
   workflow_status: string;
   created_at: string;
+  /** False when nothing in the system checks this module/action — the rule governs nothing. */
+  enforced?: boolean;
 };
+
+/** A decision a maker-checker rule can govern (GET /dual-control-rules/keys). */
+type EnforcedKey = { module: string; action: string; label: string; group: string };
 
 type AuthoritySummary = {
   matrix_total: number;
@@ -175,6 +180,9 @@ function DelegationOfAuthorityInner() {
   const [savingRule, setSavingRule] = useState(false);
   const [rf, setRf] = useState<RuleForm>(BLANK_RULE);
   const setR = <K extends keyof RuleForm>(k: K, v: RuleForm[K]) => setRf((p) => ({ ...p, [k]: v }));
+  const [keys, setKeys] = useState<EnforcedKey[]>([]);
+  useEffect(() => { apiCall<EnforcedKey[]>("GET", "/dual-control-rules/keys").then(setKeys).catch(() => setKeys([])); }, []);
+  const keyLabel = useCallback((r: { module: string; action: string }) => keys.find((k) => k.module === r.module && k.action === r.action)?.label, [keys]);
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const fetchMatrix = useCallback((qs: string) => apiCall<PagedList<AuthorityMatrix>>("GET", `/authority-matrix?${qs}`), []);
@@ -190,6 +198,10 @@ function DelegationOfAuthorityInner() {
   function openNewMatrix() { setEditingMatrix(null); setMf({ ...BLANK_MATRIX, currency }); matrixCfForm.start(null); setError(null); setShowMatrixForm(true); }
   function openEditMatrix(m: AuthorityMatrix) { setEditingMatrix(m); setMf(fromMatrix(m, currency)); matrixCfForm.start(m.id); setError(null); setShowMatrixForm(true); }
   async function saveMatrix() {
+    if (mf.amount_to !== "" && Number(mf.amount_to) < Number(mf.amount_from || 0)) {
+      setError("The upper limit (Amount to) is below the lower limit. Leave it blank for no upper limit.");
+      return;
+    }
     setError(null); setSavingMatrix(true);
     try {
       const payload = matrixPayload(mf);
@@ -213,6 +225,10 @@ function DelegationOfAuthorityInner() {
 
   // ------------------------------------------------------------- rule CRUD
   function openNewRule() { setEditingRule(null); setRf({ ...BLANK_RULE, currency }); setError(null); setShowRuleForm(true); }
+  function pickKey(value: string) {
+    const [module, action] = value.split("|");
+    setRf((p) => ({ ...p, module: module || "", action: action || "" }));
+  }
   function openEditRule(r: DualControlRule) { setEditingRule(r); setRf(fromRule(r, currency)); setError(null); setShowRuleForm(true); }
   async function saveRule() {
     setError(null); setSavingRule(true);
@@ -258,8 +274,13 @@ function DelegationOfAuthorityInner() {
 
   const ruleColumns: Column<DualControlRule>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
-    { key: "module", header: "Module", sortable: true, render: (r) => <span className="cell-title">{r.module}</span> },
-    { key: "action", header: "Action", sortable: true, render: (r) => <span className="muted">{cap(r.action)}</span> },
+    { key: "module", header: "Module", sortable: true, render: (r) => (
+      <span>
+        <span className="cell-title">{r.module}</span>
+        {r.enforced === false && <> <Badge tone="high">Not enforced</Badge></>}
+      </span>
+    ) },
+    { key: "action", header: "Action", sortable: true, render: (r) => <span className="muted" title={r.enforced === false ? "Nothing in the system checks this module/action, so this rule governs nothing. Edit it to pick a listed decision, or delete it." : undefined}>{keyLabel(r) || cap(r.action)}</span> },
     { key: "makerchecker", header: "Maker → Checker", render: (r) => <span className="muted">{(r.maker_role || "—")} → {(r.checker_role || "—")}{!r.requires_dual_control && <span className="muted"> (single)</span>}</span> },
     { key: "threshold_amount", header: "Threshold", sortable: true, render: (r) => <span className="muted">{r.threshold_amount != null ? formatMoney(r.threshold_amount, r.currency) : "Always"}</span> },
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={DUAL_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
@@ -321,14 +342,24 @@ function DelegationOfAuthorityInner() {
   // ------------------------------------------------------------- rule form tabs
   const ruleGeneral = (
     <>
-      <div className="field-row">
-        <Field label="Module" required help='The module the control applies to, e.g. "payments", "vendor", "policy_publish".'>
-          <TextInput value={rf.module} onChange={(v) => setR("module", v)} placeholder="payments" required />
-        </Field>
-        <Field label="Action" required help='The action being controlled, e.g. "create", "approve", "disburse".'>
-          <TextInput value={rf.action} onChange={(v) => setR("action", v)} placeholder="disburse" required />
-        </Field>
-      </div>
+      <Field label="Decision" required help="The decision this rule governs. Only decisions the system checks are listed; a rule on anything else would enforce nothing.">
+        <select className="select" value={rf.module && rf.action ? `${rf.module}|${rf.action}` : ""} onChange={(e) => pickKey(e.target.value)} required>
+          <option value="">Choose a decision…</option>
+          {rf.module && rf.action && !keys.some((k) => k.module === rf.module && k.action === rf.action) && (
+            <option value={`${rf.module}|${rf.action}`}>{`${rf.module} / ${rf.action} (not enforced — pick a listed decision)`}</option>
+          )}
+          {Array.from(new Set(keys.map((k) => k.group))).map((g) => (
+            <optgroup key={g} label={g}>
+              {keys.filter((k) => k.group === g).map((k) => (
+                <option key={`${k.module}|${k.action}`} value={`${k.module}|${k.action}`}>{`${k.label} (${k.module} / ${k.action})`}</option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </Field>
+      <p className="muted" style={{ fontSize: 12, margin: "-4px 0 10px" }}>
+        Switching a rule off, exempting a decision, adding or raising a threshold, or deleting a rule needs an administrator — the people a rule binds cannot relax it. Every change is recorded in the activity trail.
+      </p>
       <div className="field-row">
         <Field label="Maker role" help="The role that initiates / prepares the transaction.">
           <TextInput value={rf.maker_role} onChange={(v) => setR("maker_role", v)} placeholder="Payments Officer" />

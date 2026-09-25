@@ -422,8 +422,10 @@ def _score(source: str, column: "Column", drop: frozenset[str]) -> tuple[float, 
     if not source_norm:
         return None
 
-    # Tier 2 — same name once punctuation and case are ignored.
-    if source_norm in (header_norm, field_norm):
+    # Tier 2 — same name once punctuation and case are ignored. A column that opts out
+    # of field matching (``match_on_field``) answers to its header only: a register's
+    # "Consequence" is a score, not our risk statement's consequence.
+    if source_norm == header_norm or (getattr(column, "match_on_field", True) and source_norm == field_norm):
         return 0.97, "matches after normalising case and punctuation"
 
     # Tier 3 — a known phrasing for this field. Link columns carry a friendly header
@@ -441,6 +443,11 @@ def _score(source: str, column: "Column", drop: frozenset[str]) -> tuple[float, 
     source_tokens = _tokens(source_norm)
     if identity_tokens and identity_tokens <= source_tokens:
         return 0.85, f"contains every word of '{target_header}'"
+
+    # A guarded column (``match_on_field`` False) is not guessed at on partial overlap:
+    # "Level" sharing a word with "hierarchy_level" is exactly the wrong guess.
+    if not getattr(column, "match_on_field", True):
+        return None
 
     # Tier 4 — token overlap once the register's own noun is discounted, so
     # "Risk Category" and "Category" agree in a risk import.

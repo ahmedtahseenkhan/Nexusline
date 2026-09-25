@@ -4,12 +4,19 @@ An attestation is the record **owner's own certification** (decision 9, 2026-09-
 way a control owner certifies design and operation under SOX 302/404, ISO 27001 A.5.36
 and a ServiceNow/Archer attestation campaign. It is not a checkbox:
 
-* The record must exist, be live, and be out of draft. A draft is still being written;
-  certifying it certifies nothing.
+* The record must exist and be live.
 * Its approval must be complete (decision 6, 2026-09-17): for a type registered for
   approval (it carries ``workflow_status``), only an ``approved`` record may be attested
   — draft and in review are refused with "Approve this <type> before attesting it", and
-  retired is final. Types without an approval workflow are judged on the rules above.
+  retired is final. **The approval state is the gate** for these types (fixed
+  2026-09-25): a risk's business status stays "Draft" until it is assessed, which is not
+  an approval stage, so reading it as one refused approved risks with "Submit it for
+  review first" — an instruction the user had already carried out.
+* Types without an approval workflow must be out of their own draft status: a draft is
+  still being written, and certifying it certifies nothing.
+* A risk must carry a real assessment (:func:`risk_scoring.is_scored`): the statement
+  certifies "this risk assessment is current and complete", which a risk still on the
+  1×1 placeholder score can't be, whoever approved it.
 * The signer needs the owning module's **write permission** (``entity_types.require_write``).
   The owner is the expected signer; anyone else with that permission may sign, and the
   attestation then records whose certification it stands in for ("attested by X on
@@ -55,6 +62,7 @@ from app.models.attestation import Attestation
 from app.models.identity import User
 from app.schemas.attestation import AttestationCreate, AttestationRead, AttestationStatus
 from app.services import audit, dual_control, entity_types
+from app.services import modules as module_service
 from app.services.notifications import NATIVE_REVIEW_ENTITY_TYPES
 # Resolving a type to its class is shared with archive/restore, impact and the record
 # lifecycle, so it lives in one service (re-exported here for existing callers).
@@ -120,7 +128,12 @@ def owner_user_id(record: Any) -> uuid.UUID | None:
 
 
 # ------------------------------------------------------ the decision rule ---
-DRAFT_REFUSAL = "A draft record can't be attested. Submit it for review first."
+#: For types without an approval workflow, judged on their own business status.
+DRAFT_REFUSAL = "A draft record can't be attested. Complete it and move it out of Draft first."
+UNSCORED_REFUSAL = (
+    "This risk hasn't been scored yet, so there is no assessment to certify. "
+    "Score its likelihood and impact first."
+)
 #: Decision 6 (2026-09-17): a record whose approval is not complete can't be attested.
 APPROVAL_REFUSAL = "Approve this {label} before attesting it — its approval is {state}."
 RETIRED_REFUSAL = "This {label} is retired, so it can't be attested."
@@ -133,12 +146,10 @@ PERMISSION_REFUSAL = "You don't have permission to attest {label} records."
 def lifecycle_state(record: Any) -> Any:
     """The state that says whether a record is still a draft.
 
-    A record's own business ``status`` (a risk's Draft → Assessed …, a policy's Draft →
-    Published) when it has one; the generic ``workflow_status`` only for records without
-    one. Since phase 1 ``workflow_status`` does advance (Submit / Approve through
-    ``services/record_workflow.py``), but records created before that were never
-    submitted, so the business status stays the primary signal; the reviewer's case, a
-    risk still in Draft, is caught by it.
+    A record's own business ``status`` (a policy's Draft → Published …) when it has one;
+    the generic ``workflow_status`` only for records without one. :func:`attest_refusal`
+    reads it only for types without an approval workflow — for the others the approval
+    state (:func:`approval_state`) is the gate.
     """
     business = getattr(record, "status", None)
     if business is not None:
@@ -187,12 +198,16 @@ def attest_refusal(
     workflow_status: Any,
     approval: str | None = None,
     label: str = "record",
+    unscored: bool = False,
 ) -> tuple[int, str] | None:
     """Why this person may not attest this record, as ``(status code, message)``.
 
-    Pure: the record's lifecycle state (:func:`lifecycle_state`) and approval state
-    (:func:`approval_state`) are passed in. Order: a business draft, then the approval
-    gate (decision 6).
+    Pure: the record's lifecycle state (:func:`lifecycle_state`), approval state
+    (:func:`approval_state`) and, for a risk, whether it is still unscored are passed in.
+
+    A type with an approval workflow (``approval`` is not None) is judged on its approval
+    alone — decision 6: approved passes, anything else is told what approval is missing.
+    A type without one is judged on its own draft status. Then a risk must be scored.
 
     Decision 9: owning the record is no longer a refusal — the owner *is* the expected
     signer, and independence comes from the approval and the second signature.
@@ -201,9 +216,24 @@ def attest_refusal(
     Maker-checker, where an administrator configured it, needs the audit trail and is
     applied separately (:func:`attest_maker_checker_refusal`).
     """
-    if getattr(workflow_status, "value", workflow_status) == "draft":
+    if approval is not None:
+        refusal = approval_refusal(approval, label)
+        if refusal is not None:
+            return refusal
+    elif getattr(workflow_status, "value", workflow_status) == "draft":
         return status.HTTP_409_CONFLICT, DRAFT_REFUSAL
-    return approval_refusal(approval, label)
+    if unscored:
+        return status.HTTP_409_CONFLICT, UNSCORED_REFUSAL
+    return None
+
+
+def risk_unscored(entity_type: str, record: Any) -> bool:
+    """Whether this is a risk still on the placeholder score (never assessed). Pure."""
+    if entity_type != "risk" or record is None:
+        return False
+    from app.services.risk_scoring import is_scored
+
+    return not is_scored(getattr(record, "status", None), getattr(record, "last_assessed_at", None))
 
 
 def confirm_refusal(
@@ -379,10 +409,9 @@ async def attest_eligibility(
     """``(can_attest, blocked_reason)`` for this user and record, without raising.
 
     The attest call's own gates, in its order: the module's write permission
-    (``entity_types.require_write``), the record still existing, the draft rule
-    (:func:`attest_refusal` over :func:`lifecycle_state` — the business status first,
-    exactly as ``attest()`` judges it), the approval gate (decision 6,
-    :func:`approval_refusal` over :func:`approval_state`), then four-eyes against whoever
+    (``entity_types.require_write``), the record still existing, :func:`attest_refusal`
+    (the approval gate of decision 6 for types with an approval workflow, the draft rule
+    for the others, then an unscored risk), then four-eyes against whoever
     entered the record where an administrator configured it
     (:func:`attest_maker_checker_refusal`). The first refusal wins and its text is the one
     the attest call would answer with, so the panel can print it beside a disabled button.
@@ -402,6 +431,7 @@ async def attest_eligibility(
         workflow_status=lifecycle_state(record),
         approval=approval_state(record),
         label=label_in_text(found.label),
+        unscored=risk_unscored(entity_type, record),
     )
     if refusal is not None:
         return False, refusal[1]
@@ -582,6 +612,7 @@ async def confirm(attestation_id: uuid.UUID, db: DbSession, user: CurrentUser) -
     if row is None or row.tenant_id != user.tenant_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attestation not found")
     entity_types.require_write(user, row.entity_type)
+    await module_service.require_entity_module(row.entity_type, user.tenant_id)
     _raise(confirm_refusal(
         confirmer_id=user.id, attester_id=row.attested_by_id, already_confirmed=row.confirmed_by_id is not None,
     ))
@@ -605,14 +636,16 @@ async def enforce_attestable(
     db, user: User, entity_type: str, entity_id: uuid.UUID, record: Any, found: Any
 ) -> None:
     """Raise the attest call's refusals, in :func:`attest_eligibility`'s order (after the
-    permission check the caller has already made): draft, approval (decision 6), then
-    four-eyes against whoever entered the record where a rule is configured."""
+    permission check the caller has already made): approval (decision 6) or, for a type
+    without one, draft; an unscored risk; then four-eyes against whoever entered the
+    record where a rule is configured."""
     _raise(attest_refusal(
         attester_id=user.id,
         owner_id=owner_user_id(record),
         workflow_status=lifecycle_state(record),
         approval=approval_state(record),
         label=label_in_text(found.label),
+        unscored=risk_unscored(entity_type, record),
     ))
     # Four-eyes: whoever entered the record may not certify it — only where an
     # administrator configured "<entity_type>/attest" dual control (decision 9).

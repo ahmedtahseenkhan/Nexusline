@@ -88,11 +88,11 @@ import { titleCase } from "@/lib/text";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
-type LinkRef = { id: string; label: string };
-// Relation refs from GET /assets/{id} arrive as {id, label}; adapt to the
-// {id, name} shape the linked-record chips render.
+type LinkRef = { id: string; label: string; reference?: string; name?: string };
+// Relation refs from GET /assets/{id} arrive as {id, label, reference, name}; adapt to
+// the {id, reference, name} shape the linked-record chips render ("SBP-05 Outsourcing").
 const asRefs = (items?: LinkRef[]): GraphRef[] | undefined =>
-  items?.map((x) => ({ id: x.id, name: x.label }));
+  items?.map((x) => ({ id: x.id, reference: x.reference || undefined, name: x.name || x.label }));
 /** Risk refs carry their reference separately and the risk's name as the label (an older API sent the reference as the label). */
 const riskRefs = (items?: AssetRiskRef[]): (GraphRef & AssetRiskRef)[] | undefined =>
   items?.map((x) => ({ ...x, reference: x.reference || x.label, name: x.reference && x.label !== x.reference ? x.label : "" }));
@@ -130,6 +130,11 @@ type Asset = {
   controls?: GraphRef[];
   threats?: GraphRef[];
   vulnerabilities?: GraphRef[];
+  // linked from the other side: continuity plans, RoPA entries, BIAs, scanner findings
+  continuity_plans?: GraphRef[];
+  processing_activities?: GraphRef[];
+  bia_assessments?: GraphRef[];
+  vuln_findings?: GraphRef[];
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
 type Summary = {
@@ -408,9 +413,9 @@ function ITAssetsInner() {
   const columns: Column<Asset>[] = [
     { key: "name", header: "Name", sortable: true, locked: true, render: (a) => <span className="cell-title">{a.name}</span> },
     { key: "environment", header: "Environment", sortable: true, render: (a) => <Badge tone="neutral" plain>{cap(a.environment)}</Badge>, text: (a) => cap(a.environment) },
-    { key: "availability", header: "Availability", render: (a) => <CritBadge value={a.availability} />, text: (a) => cap(a.availability) },
+    { key: "availability", header: "Availability", sortable: true, render: (a) => <CritBadge value={a.availability} />, text: (a) => cap(a.availability) },
     { key: "replacement_cost", header: "Cost band", sortable: true, render: (a) => <CritBadge value={a.cost_band} />, text: (a) => cap(a.cost_band) },
-    { key: "effective_criticality", header: "Effective criticality", render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
+    { key: "effective_criticality", header: "Effective criticality", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
     { key: "hosted", header: "Hosted data", align: "center", render: (a) => <span className="muted">{a.dependencies?.length || "—"}</span>, text: (a) => String(a.dependencies?.length ?? 0) },
     { key: "hostname", header: "Hostname", hidden: true, render: (a) => <span className="ref">{a.hostname || "—"}</span> },
     { key: "ip_address", header: "IP address", hidden: true, render: (a) => <span className="ref">{a.ip_address || "—"}</span> },
@@ -638,6 +643,9 @@ function ITAssetsInner() {
         { key: "related", label: "Related assets", items: asRefs(a.related_assets), href: "/it-assets" },
         { key: "vendors", label: "Third parties", items: a.vendors, href: "/vendors" },
         { key: "access", label: "Access reviews", items: a.access_reviews, href: "/access-reviews" },
+        { key: "continuity", label: "Continuity plans", items: a.continuity_plans, href: "/continuity" },
+        { key: "bia", label: "Business impact analyses", items: a.bia_assessments, href: "/bia" },
+        { key: "vuln_findings", label: "Vulnerability findings", items: a.vuln_findings, href: "/vulnerabilities" },
       ]
     : [];
 

@@ -195,6 +195,7 @@ DEFAULT_RULES: tuple[RuleSpec, ...] = (
              "Amending a delegation-of-authority line: not whoever entered it."),
     _delete_rule("business_unit", "business unit"),
     _delete_rule("process", "process"),
+    _delete_rule("legal", "legal register entry"),
     _delete_rule("incident", "incident"),
     _delete_rule("vendor", "third party"),
     RuleSpec("assessment", "review", "", "",

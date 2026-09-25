@@ -92,11 +92,11 @@ import { titleCase } from "@/lib/text";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
-type LinkRef = { id: string; label: string };
-// Relation refs from GET /assets/{id} arrive as {id, label}; adapt to the
-// {id, name} shape the linked-record chips render.
+type LinkRef = { id: string; label: string; reference?: string; name?: string };
+// Relation refs from GET /assets/{id} arrive as {id, label, reference, name}; adapt to
+// the {id, reference, name} shape the linked-record chips render ("SBP-05 Outsourcing").
 const asRefs = (items?: LinkRef[]): GraphRef[] | undefined =>
-  items?.map((x) => ({ id: x.id, name: x.label }));
+  items?.map((x) => ({ id: x.id, reference: x.reference || undefined, name: x.name || x.label }));
 /** Risk refs carry their reference separately and the risk's name as the label (an older API sent the reference as the label). */
 const riskRefs = (items?: AssetRiskRef[]): (GraphRef & AssetRiskRef)[] | undefined =>
   items?.map((x) => ({ ...x, reference: x.reference || x.label, name: x.reference && x.label !== x.reference ? x.label : "" }));
@@ -154,6 +154,11 @@ type Asset = {
   controls?: GraphRef[];
   threats?: GraphRef[];
   vulnerabilities?: GraphRef[];
+  // linked from the other side: continuity plans, RoPA entries, BIAs, scanner findings
+  continuity_plans?: GraphRef[];
+  processing_activities?: GraphRef[];
+  bia_assessments?: GraphRef[];
+  vuln_findings?: GraphRef[];
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
 type LabelRow = { id: string; name: string; description: string; color: string };
@@ -475,8 +480,9 @@ function InformationAssetsInner() {
   const columns: Column<Asset>[] = [
     { key: "name", header: "Name", sortable: true, locked: true, render: (a) => <span className="cell-title">{a.name}</span> },
     { key: "information_owner", header: "Information owner", render: (a) => <span className="muted">{a.information_owner || "—"}</span> },
-    { key: "owner", header: "Owning unit", hidden: true, render: (a) => <span className="muted">{a.owner?.label || "—"}</span>, text: (a) => a.owner?.label ?? "" },
-    { key: "business_value", header: "Business value", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
+    { key: "owner", header: "Owning unit", hidden: true, sortable: true, render: (a) => <span className="muted">{a.owner?.label || "—"}</span>, text: (a) => a.owner?.label ?? "" },
+    // Sorted server-side on the same effective criticality the badge shows.
+    { key: "effective_criticality", header: "Business value", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
     // The highest of the three quick C/I/A ratings — not the tenant's classification scheme.
     { key: "classification", header: "Highest CIA rating", render: (a) => <CritBadge value={maxCia(a)} />, text: (a) => cap(maxCia(a)) },
     { key: "cia", header: "C / I / A", hidden: true, render: (a) => <div className="chips"><span className="chip" title="Confidentiality">C {cap(a.confidentiality)}</span><span className="chip" title="Integrity">I {cap(a.integrity)}</span><span className="chip" title="Availability">A {cap(a.availability)}</span></div>, text: (a) => `${cap(a.confidentiality)} / ${cap(a.integrity)} / ${cap(a.availability)}` },
@@ -733,6 +739,9 @@ function InformationAssetsInner() {
         { key: "related", label: "Related assets", items: asRefs(a.related_assets), href: "/information-assets" },
         { key: "vendors", label: "Third parties", items: a.vendors, href: "/vendors" },
         { key: "access", label: "Access reviews", items: a.access_reviews, href: "/access-reviews" },
+        { key: "continuity", label: "Continuity plans", items: a.continuity_plans, href: "/continuity" },
+        { key: "bia", label: "Business impact analyses", items: a.bia_assessments, href: "/bia" },
+        { key: "ropa", label: "Processing activities (RoPA)", items: a.processing_activities, href: "/privacy" },
       ]
     : [];
 

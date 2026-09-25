@@ -13,7 +13,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy import case, delete, func, insert, literal, select
 from sqlalchemy.orm import aliased, selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
@@ -33,7 +34,7 @@ from app.models.enums import AssetClass, AssetEnvironment, AssetReviewStatus
 from app.models.exception import ExceptionRecord
 from app.models.incident import Incident
 from app.models.compliance import Requirement
-from app.models.organization import Legal, Process
+from app.models.organization import BusinessUnit, Legal, Process
 from app.models.risk import risk_assets
 from app.schemas.asset import (
     AssetClassificationCreate,
@@ -109,14 +110,19 @@ def _loads():
         selectinload(Asset.controls),
         selectinload(Asset.threats),
         selectinload(Asset.vulnerabilities),
+        selectinload(Asset.continuity_plans),
+        selectinload(Asset.processing_activities),
+        selectinload(Asset.bia_assessments),
+        selectinload(Asset.vuln_findings),
     )
 
 
 def _ref(obj) -> LinkRef | None:
     if obj is None:
         return None
-    label = getattr(obj, "reference", None) or getattr(obj, "name", None) or getattr(obj, "title", None) or str(obj.id)[:8]
-    return LinkRef(id=obj.id, label=str(label))
+    reference = str(getattr(obj, "reference", None) or "")
+    name = str(getattr(obj, "name", None) or getattr(obj, "title", None) or "")
+    return LinkRef(id=obj.id, label=reference or name or str(obj.id)[:8], reference=reference, name=name)
 
 
 def _info_ref(obj) -> InformationAssetRef | None:
@@ -124,7 +130,7 @@ def _info_ref(obj) -> InformationAssetRef | None:
     ref = _ref(obj)
     if ref is None:
         return None
-    return InformationAssetRef(id=ref.id, label=ref.label, business_value=getattr(obj, "business_value", None))
+    return InformationAssetRef(**ref.model_dump(), business_value=getattr(obj, "business_value", None))
 
 
 def _dep_ref(dep: AssetDependency) -> AssetDependencyRead:
@@ -268,6 +274,12 @@ def _serialize(a: Asset, exposure: Exposure = None, *, can_read_risks: bool = Fa
         controls=[GraphRef.model_validate(x) for x in a.controls],
         threats=[GraphRef.model_validate(x) for x in a.threats],
         vulnerabilities=[GraphRef.model_validate(x) for x in a.vulnerabilities],
+        continuity_plans=[GraphRef.model_validate(x) for x in a.continuity_plans],
+        processing_activities=[GraphRef.model_validate(x) for x in a.processing_activities],
+        # One BIA can list the asset as several dependencies; show it once.
+        bia_assessments=[GraphRef(id=b.id, reference=b.reference or "", name=b.process_name or "")
+                         for b in {b.id: b for b in a.bia_assessments}.values()],
+        vuln_findings=[GraphRef.model_validate(x) for x in a.vuln_findings],
         reviews=[AssetReviewRead.model_validate(r) for r in a.reviews],
         risk_count=len(a.risks),
         review_count=len(a.reviews),
@@ -332,12 +344,46 @@ async def _apply_relations(db, asset: Asset, data: dict) -> None:
         await _set_risk_links(db, asset.id, data["risk_ids"])
 
 
+def _crit(value: Criticality):
+    return literal(value, SAEnum(Criticality, name="criticality", create_type=False))
+
+
+def effective_criticality_expr():
+    """``Asset.effective_criticality`` in SQL, so the register sorts by the badge it shows.
+
+    Postgres orders the ``criticality`` enum low → critical, so GREATEST/MAX rank it:
+    an information asset is its business value; an IT asset the highest of its cost band
+    (the ``cost_band`` thresholds), its availability requirement and the business value
+    of the live information assets it carries."""
+    cost_band = case(
+        (Asset.replacement_cost >= 10_000_000, _crit(Criticality.critical)),
+        (Asset.replacement_cost >= 2_000_000, _crit(Criticality.high)),
+        (Asset.replacement_cost >= 250_000, _crit(Criticality.medium)),
+        else_=_crit(Criticality.low),
+    )
+    info = aliased(Asset)
+    hosted = (
+        select(func.max(info.business_value))
+        .select_from(AssetDependency)
+        .join(info, AssetDependency.information_asset_id == info.id)
+        .where(AssetDependency.it_asset_id == Asset.id, info.deleted.is_(False))
+        .correlate(Asset)
+        .scalar_subquery()
+    )
+    it_value = func.greatest(cost_band, Asset.availability, func.coalesce(hosted, _crit(Criticality.low)))
+    return case((Asset.asset_class == AssetClass.it_asset, it_value), else_=Asset.business_value)
+
+
 # Columns a client may sort the asset list by (allow-list — keeps the API and any
-# future index in agreement and blocks sorting by arbitrary/unindexed columns).
+# future index in agreement and blocks sorting by arbitrary/unindexed columns). Computed
+# columns the registers show (effective criticality, owning unit) sort by the same value.
 _ASSET_SORTABLE = {
     "name": Asset.name,
     "created_at": Asset.created_at,
     "business_value": Asset.business_value,
+    "effective_criticality": effective_criticality_expr(),
+    "owner": select(BusinessUnit.name).where(BusinessUnit.id == Asset.owner_id).correlate(Asset).scalar_subquery(),
+    "availability": Asset.availability,
     "next_review_date": Asset.next_review_date,
     "self_assessed": Asset.self_assessed,
     "replacement_cost": Asset.replacement_cost,

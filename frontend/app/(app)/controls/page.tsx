@@ -153,6 +153,9 @@ type Control = {
   // reverse graph links (read-only, from GET /controls/{id})
   assets?: LinkRef[]; vendors?: LinkRef[];
   incidents?: LinkRef[]; exceptions?: ExceptionRef[]; projects?: LinkRef[]; audit_findings?: LinkRef[];
+  obligations?: LinkRef[];
+  /** ICFR Risk-Control Matrix lines that rely on this control (read-only). */
+  icfr_controls?: LinkRef[];
 };
 /** A control test workpaper (backend: ControlAuditRead). */
 type ControlTest = {
@@ -1364,6 +1367,8 @@ function ControlsInner() {
       { key: "exceptions", label: "Exceptions", items: c.exceptions, href: "/exceptions", meta: (x: ExceptionRef) => exceptionMeta(x, ctx.fmt) },
       { key: "projects", label: "Projects", items: c.projects, href: "/projects" },
       { key: "findings", label: "Audit findings", items: c.audit_findings, href: "/internal-audit" },
+      { key: "obligations", label: "Regulatory obligations", items: c.obligations, href: (x) => `/regulatory-change?obligation=${x.id}` },
+      { key: "icfr", label: "ICFR (RCM lines)", items: c.icfr_controls, href: "/icfr" },
     ];
     return (
       <RecordSection

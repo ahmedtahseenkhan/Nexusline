@@ -7,6 +7,7 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import ArchivedRecords from "@/components/ArchivedRecords";
 import FormModal from "@/components/FormModal";
 import CustomFieldsPanel from "@/components/CustomFieldsPanel";
 import { useCustomFieldForm } from "@/components/useCustomFieldForm";
@@ -170,7 +171,7 @@ function AccessReviewsInner() {
   }
 
   async function remove(r: AccessReview) {
-    if (!(await confirmDialog({ title: `Delete access review ${r.reference}?`, message: "This removes all its line items.", danger: true }))) return;
+    if (!(await confirmDialog({ title: `Delete access review ${r.reference}?`, message: "The review is archived with its accounts and decisions kept, and leaves the register. You can restore it from Archived.", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/access-reviews/${r.id}`);
@@ -303,6 +304,7 @@ function AccessReviewsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<AccessReview>
+        toolbarRight={<ArchivedRecords entityType="access_review" noun="access reviews" onRestored={reload} refreshKey={refreshKey} />}
         columns={columns}
         fetcher={fetchReviews}
         rowKey={(r) => r.id}
@@ -356,12 +358,17 @@ function AccessReviewsInner() {
                   )}
                 </div>
 
-                <form className="field-row" style={{ alignItems: "flex-end", marginBottom: 14 }} onSubmit={addItem}>
+                {detail.status === "completed" && (
+                  <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+                    This review is completed: its accounts and decisions are the signed-off record. To change them, edit the review and set its status back to in progress (the reopening is recorded in the activity trail).
+                  </p>
+                )}
+                {detail.status !== "completed" && <form className="field-row" style={{ alignItems: "flex-end", marginBottom: 14 }} onSubmit={addItem}>
                   <Field label="Username"><TextInput value={newUser} onChange={setNewUser} placeholder="jdoe" /></Field>
                   <Field label="Display name"><TextInput value={newDisplay} onChange={setNewDisplay} placeholder="Jane Doe" /></Field>
                   <Field label="Access / roles held"><TextInput value={newAccess} onChange={setNewAccess} placeholder="AdministratorAccess" /></Field>
                   <button className="btn sm" type="submit" disabled={!newUser.trim()} style={{ marginBottom: 2 }}><IconPlus width={14} height={14} /> Add</button>
-                </form>
+                </form>}
 
                 <div className="table-wrap">
                   <table>
@@ -376,14 +383,14 @@ function AccessReviewsInner() {
                           <td><Badge tone={DECISION_TONE[it.decision] || "neutral"}>{cap(it.decision)}</Badge></td>
                           <td className="muted">{it.decided_by || "—"}{it.decided_at && <div className="when">{formatDate(it.decided_at)}</div>}</td>
                           <td>
-                            <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                            {detail.status !== "completed" && <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                               <button className="btn secondary sm" type="button" disabled={busyItem === it.id} onClick={() => decideItem(it.id, "keep")}>Keep</button>
                               <button className="btn secondary sm" type="button" disabled={busyItem === it.id} onClick={() => decideItem(it.id, "revoke")}>Revoke</button>
                               {it.decision !== "pending" && (
                                 <button className="btn secondary sm" type="button" disabled={busyItem === it.id} onClick={() => decideItem(it.id, "pending")}>Reset</button>
                               )}
                               <button className="btn secondary sm" type="button" disabled={busyItem === it.id} onClick={() => removeItem(it.id)}>Remove</button>
-                            </div>
+                            </div>}
                           </td>
                         </tr>
                       ))}

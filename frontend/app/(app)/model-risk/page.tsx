@@ -418,7 +418,7 @@ function ModelRiskInner() {
         <Field label="Last validation date" help="When the model was last independently validated.">
           <TextInput type="date" value={mf.last_validation_date} onChange={(v) => setM("last_validation_date", v)} />
         </Field>
-        <Field label="Next validation date" help="Target for the next validation — drives the overdue flag.">
+        <Field label="Next validation date" help="Drives the overdue flag. A completed validation that passes sets it from the materiality tier: critical and high every 12 months, medium 24, low 36.">
           <TextInput type="date" value={mf.next_validation_date} onChange={(v) => setM("next_validation_date", v)} />
         </Field>
       </div>
@@ -529,6 +529,9 @@ function ModelRiskInner() {
                 <strong>Validation cycles</strong>
                 <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
                   Independent validation exercises (initial / periodic / targeted) with outcome, findings and recommendations.
+                  A completed validation updates the last validation date; one that passes also sets the next — 12 months
+                  on for critical and high materiality, 24 for medium, 36 for low. After a fail the next date stays until
+                  the model is revalidated.
                 </p>
                 <form
                   style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}

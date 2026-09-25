@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import Select, func, or_, select
 
@@ -119,7 +119,7 @@ async def update_esg_assessment(aid: uuid.UUID, body: EsgAssessmentUpdate, db: D
 async def delete_esg_assessment(aid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, EsgAssessment, aid, "ESG assessment")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -191,7 +191,7 @@ async def update_env_rating(rid: uuid.UUID, body: EnvRatingUpdate, db: DbSession
 async def delete_env_rating(rid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, EnvironmentalRiskRating, rid, "Environmental risk rating")
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 

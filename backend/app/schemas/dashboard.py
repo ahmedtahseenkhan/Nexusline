@@ -7,8 +7,9 @@ from pydantic import BaseModel
 
 class DashboardStats(BaseModel):
     total_risks: int
-    total_controls: int
-    total_assets: int
+    #: None when the reader can't read that register (the endpoint needs only risk:read).
+    total_controls: int | None = None
+    total_assets: int | None = None
     risks_by_status: dict[str, int]
     risks_by_inherent_severity: dict[str, int]
     risks_by_residual_severity: dict[str, int]

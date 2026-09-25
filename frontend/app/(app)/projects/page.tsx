@@ -7,6 +7,8 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import ArchivedRecords from "@/components/ArchivedRecords";
+import RelatedChips from "@/components/RelatedChips";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
@@ -63,6 +65,8 @@ type Project = {
   risks: Ref[];
   controls: Ref[];
   policies: Ref[];
+  /** Strategic goals this project delivers (read-only; linked on the goal). */
+  goals?: Ref[];
   created_at: string;
 };
 
@@ -193,7 +197,7 @@ function ProjectsInner() {
     finally { setSaving(false); }
   }
   async function remove(p: Project) {
-    if (!(await confirmDialog({ title: `Delete project ${p.reference}?`, message: "This cannot be undone.", danger: true }))) return;
+    if (!(await confirmDialog({ title: `Delete project ${p.reference}?`, message: "The project is archived with its tasks, expenses and links, and leaves the register. You can restore it from Archived.", danger: true }))) return;
     setError(null);
     try {
       await apiCall<void>("DELETE", `/projects/${p.id}`);
@@ -306,6 +310,7 @@ function ProjectsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <DataTable<Project>
+        toolbarRight={<ArchivedRecords entityType="project" noun="projects" onRestored={reload} refreshKey={refreshKey} />}
         columns={columns}
         fetcher={fetchProjects}
         rowKey={(p) => p.id}
@@ -393,13 +398,13 @@ function ProjectsInner() {
               </div>
             </div>
 
-            {(detail.risks.length > 0 || detail.controls.length > 0 || detail.policies.length > 0) && (
-              <div style={{ marginBottom: 16, fontSize: 13 }}>
-                {detail.risks.length > 0 && <div><span className="muted">Risks: </span>{detail.risks.map((r) => r.reference || r.title || r.name).join(", ")}</div>}
-                {detail.controls.length > 0 && <div><span className="muted">Controls: </span>{detail.controls.map((c) => c.reference || c.name || c.title).join(", ")}</div>}
-                {detail.policies.length > 0 && <div><span className="muted">Policies: </span>{detail.policies.map((p) => p.reference || p.title || p.name).join(", ")}</div>}
-              </div>
-            )}
+            <strong style={{ fontSize: 13 }}>Related records</strong>
+            <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 16 }}>
+              <RelatedChips label="Risks" items={detail.risks} href="/risks" format="ref-name" />
+              <RelatedChips label="Controls" items={detail.controls} href="/controls" format="ref-name" />
+              <RelatedChips label="Policies" items={detail.policies} href="/policies" format="ref-name" />
+              <RelatedChips label="Strategic goals" items={detail.goals} href="/goals" format="ref-name" />
+            </div>
 
           </>
         )}

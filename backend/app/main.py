@@ -70,6 +70,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Constraint violations are refused input (duplicate, missing, dangling link), not 500s.
+from sqlalchemy.exc import IntegrityError  # noqa: E402
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError  # noqa: E402
+
+from app.core.db_errors import integrity_error_handler, pool_timeout_handler  # noqa: E402
+
+app.add_exception_handler(IntegrityError, integrity_error_handler)
+app.add_exception_handler(PoolTimeoutError, pool_timeout_handler)
+
 # Read-only mode after the licence grace period (decision 1). Added before CORS so CORS
 # stays the outer layer and a refused write still carries the CORS headers the browser
 # needs to read the message.

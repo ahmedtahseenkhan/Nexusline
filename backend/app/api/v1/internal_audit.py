@@ -6,8 +6,9 @@ track them through remediation follow-up to closure.
 """
 from __future__ import annotations
 
+import enum
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,10 +21,12 @@ from app.models.control import Control
 from app.models.enums import AuditEngagementStatus, AuditFindingStatus, AuditType
 from app.models.risk import Risk
 from app.models.internal_audit import (
+    RESOLVED_FINDING_STATES,
     AuditableUnit,
     AuditEngagement,
     AuditFinding,
     AuditProcedure,
+    derive_next_audit_due,
 )
 from app.schemas.common import Page
 from app.schemas.internal_audit import (
@@ -54,6 +57,36 @@ _WRITE = Depends(require("internal_audit:write"))
 
 async def _next_ref(db, model, prefix: str) -> str:
     return await next_reference(db, model, prefix)
+
+
+def _plain(value):
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, (date, datetime, uuid.UUID)):
+        return str(value)
+    if isinstance(value, str) and len(value) > 300:
+        return value[:300] + "…"
+    return value
+
+
+def field_changes(obj, data: dict) -> dict:
+    """``{field: {"from": old, "to": new}}`` for the fields ``data`` actually changes.
+
+    Taken *before* the values are applied. The trail records what a field was as well as
+    what it became — "who moved this finding's due date, and from when?" is the question
+    an examiner asks.
+    """
+    out = {}
+    for key, value in data.items():
+        before = getattr(obj, key, None)
+        if before != value:
+            out[key] = {"from": _plain(before), "to": _plain(value)}
+    return out
+
+
+def snapshot(obj, fields) -> dict:
+    """The values being removed, for a delete's audit entry."""
+    return {f: _plain(getattr(obj, f, None)) for f in fields}
 
 
 # ============================================================ audit universe ===
@@ -99,6 +132,8 @@ async def list_units(
 @router.post("/audit-universe", response_model=AuditableUnitRead, status_code=201, dependencies=[_WRITE])
 async def create_unit(body: AuditableUnitCreate, db: DbSession, user: CurrentUser) -> AuditableUnitRead:
     obj = AuditableUnit(tenant_id=user.tenant_id, **body.model_dump())
+    if obj.next_audit_due is None:
+        obj.next_audit_due = derive_next_audit_due(obj.audit_frequency, obj.last_audited_date)
     obj.reference = await _next_ref(db, AuditableUnit, "AU")
     db.add(obj)
     await db.flush()
@@ -114,21 +149,61 @@ async def _load_unit(db, unit_id: uuid.UUID) -> AuditableUnit:
     return obj
 
 
+def next_due_after_edit(obj: AuditableUnit, data: dict) -> dict:
+    """``data`` with ``next_audit_due`` derived where the edit leaves it to the cycle. Pure.
+
+    The date is derived (last audited + one audit cycle) when the edit blanks it, or when
+    the last-audited date or the frequency changes and the caller did not also change the
+    due date itself — the form echoes the stored date back, so "sent unchanged" means
+    "not overridden". A due date typed in by hand is always kept.
+    """
+    out = dict(data)
+    frequency = out.get("audit_frequency", obj.audit_frequency)
+    last = out.get("last_audited_date", obj.last_audited_date)
+    sent_due = "next_audit_due" in out
+    due = out.get("next_audit_due", obj.next_audit_due)
+    cycle_moved = (
+        ("last_audited_date" in out and out["last_audited_date"] != obj.last_audited_date)
+        or ("audit_frequency" in out and out["audit_frequency"] != obj.audit_frequency)
+    )
+    overridden = sent_due and due is not None and due != obj.next_audit_due
+    if (sent_due and due is None) or (cycle_moved and not overridden):
+        derived = derive_next_audit_due(frequency, last)
+        if derived is not None or (sent_due and due is None):
+            out["next_audit_due"] = derived
+    return out
+
+
 @router.patch("/audit-universe/{unit_id}", response_model=AuditableUnitRead, dependencies=[_WRITE])
-async def update_unit(unit_id: uuid.UUID, body: AuditableUnitUpdate, db: DbSession) -> AuditableUnitRead:
+async def update_unit(
+    unit_id: uuid.UUID, body: AuditableUnitUpdate, db: DbSession, user: CurrentUser
+) -> AuditableUnitRead:
     obj = await _load_unit(db, unit_id)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = next_due_after_edit(obj, body.model_dump(exclude_unset=True))
+    changes = field_changes(obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if changes:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="auditable_unit", entity_id=obj.id,
+            summary=f"Updated auditable unit {obj.reference}: {', '.join(sorted(changes))}"[:500],
+            changes=changes,
+        )
     return AuditableUnitRead.model_validate(obj)
 
 
 @router.delete("/audit-universe/{unit_id}", status_code=204, dependencies=[_WRITE])
-async def delete_unit(unit_id: uuid.UUID, db: DbSession) -> None:
+async def delete_unit(unit_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_unit(db, unit_id)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="auditable_unit", entity_id=obj.id,
+        summary=f"Archived auditable unit {obj.reference}: {obj.name}"[:500],
+        changes=snapshot(obj, ("name", "category", "owner", "inherent_risk", "audit_frequency")),
+    )
 
 
 # ============================================================== engagements ===
@@ -200,51 +275,143 @@ async def get_engagement(eid: uuid.UUID, db: DbSession) -> EngagementRead:
     return EngagementRead.model_validate(await _load_engagement(db, eid))
 
 
+def audited_on(engagement: AuditEngagement, today: date) -> date:
+    """The date a closed engagement counts as the unit's audit. Pure.
+
+    The end of fieldwork when recorded, else the report date, else the day it closed.
+    """
+    return engagement.actual_end or engagement.report_date or today
+
+
+async def _roll_universe_forward(db, engagement: AuditEngagement, user) -> None:
+    """Closing an audit moves its unit's cycle on: last audited, and the next due date.
+
+    This is what keeps the risk-based plan honest without anyone re-keying dates — the
+    next plan is generated from when each unit was actually last covered.
+    """
+    if engagement.auditable_unit_id is None:
+        return
+    unit = await db.scalar(select(AuditableUnit).where(AuditableUnit.id == engagement.auditable_unit_id))
+    if unit is None or unit.deleted:
+        return
+    when = audited_on(engagement, date.today())
+    if unit.last_audited_date is not None and unit.last_audited_date >= when:
+        return
+    data = {"last_audited_date": when, "next_audit_due": derive_next_audit_due(unit.audit_frequency, when)}
+    changes = field_changes(unit, data)
+    for k, v in data.items():
+        setattr(unit, k, v)
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="auditable_unit", entity_id=unit.id,
+        summary=f"Audit cycle moved on by {engagement.reference} closing: {unit.reference}"[:500],
+        changes=changes,
+    )
+
+
 @router.patch("/audit-engagements/{eid}", response_model=EngagementRead, dependencies=[_WRITE])
-async def update_engagement(eid: uuid.UUID, body: EngagementUpdate, db: DbSession) -> EngagementRead:
+async def update_engagement(
+    eid: uuid.UUID, body: EngagementUpdate, db: DbSession, user: CurrentUser
+) -> EngagementRead:
     obj = await _load_engagement(db, eid)
     data = body.model_dump(exclude_unset=True)
-    if data.get("auditable_unit_id") is not None:
-        await _load_unit(db, data["auditable_unit_id"])
+    unit_id = data.get("auditable_unit_id")
+    # A unit archived after the audit was opened stays linked: the engagement is history
+    # and must remain editable. Only a *new* link has to point at a live unit.
+    if unit_id is not None and unit_id != obj.auditable_unit_id:
+        await _load_unit(db, unit_id)
+    was_closed = obj.status == AuditEngagementStatus.closed
+    changes = field_changes(obj, data)
     for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if changes:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="audit_engagement", entity_id=obj.id,
+            summary=f"Updated audit {obj.reference}: {', '.join(sorted(changes))}"[:500],
+            changes=changes,
+        )
+    if obj.status == AuditEngagementStatus.closed and not was_closed:
+        await _roll_universe_forward(db, obj, user)
     return EngagementRead.model_validate(await _load_engagement(db, eid))
 
 
 @router.delete("/audit-engagements/{eid}", status_code=204, dependencies=[_WRITE])
-async def delete_engagement(eid: uuid.UUID, db: DbSession) -> None:
+async def delete_engagement(eid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    from app.models.audit_plan import AuditPlanItem
+
     obj = await _load_engagement(db, eid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
+    # An archived audit no longer delivers the plan line it was started from, so the
+    # line goes back to "not started" and plan coverage stops counting it.
+    lines = (await db.scalars(select(AuditPlanItem).where(AuditPlanItem.engagement_id == eid))).all()
+    for line in lines:
+        line.engagement_id = None
     await db.flush()
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="audit_engagement", entity_id=obj.id,
+        summary=f"Archived audit {obj.reference}: {obj.title}"[:500],
+        changes={
+            **snapshot(obj, ("title", "status", "audit_type", "lead_auditor")),
+            "findings": len(obj.findings),
+            "plan_lines_unlinked": len(lines),
+        },
+    )
 
 
 # ------------------------------------------------------------- procedures ---
 @router.post("/audit-engagements/{eid}/procedures", response_model=EngagementRead, status_code=201, dependencies=[_WRITE])
 async def add_procedure(eid: uuid.UUID, body: ProcedureCreate, db: DbSession, user: CurrentUser) -> EngagementRead:
-    await _load_engagement(db, eid)
-    db.add(AuditProcedure(tenant_id=user.tenant_id, engagement_id=eid, **body.model_dump()))
+    engagement = await _load_engagement(db, eid)
+    procedure = AuditProcedure(tenant_id=user.tenant_id, engagement_id=eid, **body.model_dump())
+    db.add(procedure)
     await db.flush()
+    # Working papers are part of the engagement file, so they are logged on it.
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="audit_engagement", entity_id=eid,
+        summary=f"Added working paper to {engagement.reference}: {procedure.title}"[:500],
+        changes={"procedure_added": snapshot(procedure, ("title", "result", "workpaper_ref"))},
+    )
     return EngagementRead.model_validate(await _load_engagement(db, eid))
 
 
-@router.patch("/audit-procedures/{pid}", response_model=ProcedureRead, dependencies=[_WRITE])
-async def update_procedure(pid: uuid.UUID, body: ProcedureUpdate, db: DbSession) -> ProcedureRead:
+async def _load_procedure(db, pid: uuid.UUID) -> AuditProcedure:
     obj = await db.scalar(select(AuditProcedure).where(AuditProcedure.id == pid))
     if obj is None:
         raise HTTPException(status_code=404, detail="Procedure not found")
-    for k, v in body.model_dump(exclude_unset=True).items():
+    return obj
+
+
+@router.patch("/audit-procedures/{pid}", response_model=ProcedureRead, dependencies=[_WRITE])
+async def update_procedure(
+    pid: uuid.UUID, body: ProcedureUpdate, db: DbSession, user: CurrentUser
+) -> ProcedureRead:
+    obj = await _load_procedure(db, pid)
+    data = body.model_dump(exclude_unset=True)
+    changes = field_changes(obj, data)
+    for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
+    if changes:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="audit_engagement",
+            entity_id=obj.engagement_id,
+            summary=f"Updated working paper {obj.title}: {', '.join(sorted(changes))}"[:500],
+            changes={"procedure": str(obj.id), **changes},
+        )
     return ProcedureRead.model_validate(obj)
 
 
 @router.delete("/audit-procedures/{pid}", status_code=204, dependencies=[_WRITE])
-async def delete_procedure(pid: uuid.UUID, db: DbSession) -> None:
-    obj = await db.scalar(select(AuditProcedure).where(AuditProcedure.id == pid))
-    if obj is None:
-        raise HTTPException(status_code=404, detail="Record not found")
+async def delete_procedure(pid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    obj = await _load_procedure(db, pid)
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="audit_engagement",
+        entity_id=obj.engagement_id,
+        summary=f"Removed working paper {obj.title}"[:500],
+        changes={"procedure_removed": snapshot(obj, ("title", "result", "workpaper_ref", "performed_by"))},
+    )
     await db.delete(obj)
 
 
@@ -285,12 +452,14 @@ async def _load_finding(db, fid: uuid.UUID) -> AuditFinding:
     return obj
 
 
+@router.post("/audit-findings", response_model=FindingRead, status_code=201, dependencies=[_WRITE])
 async def create_finding(body: FindingCreate, db: DbSession, user: CurrentUser) -> FindingRead:
     """Create a finding naming its engagement in the body.
 
     Used by the bulk importer so an external firm's or a regulator's finding list loads
     into the same remediation pipeline internal findings run through, with references,
-    links and audit logging behaving identically.
+    links and audit logging behaving identically. Also what the engagement page calls,
+    because it answers with the new finding — whose id its custom fields are saved on.
     """
     if body.engagement_id is None:
         raise HTTPException(status_code=400, detail="engagement is required")
@@ -309,35 +478,66 @@ async def create_finding(body: FindingCreate, db: DbSession, user: CurrentUser) 
     await db.flush()
     await audit_log.record(db, actor=user, action="create", entity_type="audit_finding",
                            entity_id=finding.id, summary=f"Raised finding {finding.reference}: {finding.title}")
-    return FindingRead.model_validate(finding)
+    return FindingRead.model_validate(await _load_finding(db, finding.id))
+
+
+def _link_change(current: list, new: list) -> dict | None:
+    before = {str(x.id) for x in current}
+    after = {str(x.id) for x in new}
+    if before == after:
+        return None
+    return {"added": sorted(after - before), "removed": sorted(before - after)}
 
 
 @router.patch("/audit-findings/{fid}", response_model=FindingRead, dependencies=[_WRITE])
-async def update_finding(fid: uuid.UUID, body: FindingUpdate, db: DbSession) -> FindingRead:
+async def update_finding(
+    fid: uuid.UUID, body: FindingUpdate, db: DbSession, user: CurrentUser
+) -> FindingRead:
     obj = await _load_finding(db, fid)
     data = body.model_dump(exclude_unset=True, exclude={"control_ids", "risk_ids", "requirement_ids"})
     # Auto-stamp closure date when a finding is closed and none was supplied.
-    if data.get("status") in (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted) and not obj.closed_date and "closed_date" not in data:
-        obj.closed_date = date.today()
-    if data.get("status") == AuditFindingStatus.open:
-        obj.closed_date = None
+    if data.get("status") in RESOLVED_FINDING_STATES and not obj.closed_date and "closed_date" not in data:
+        data["closed_date"] = date.today()
+    if data.get("status") in (AuditFindingStatus.open, AuditFindingStatus.in_progress) and "closed_date" not in data:
+        data["closed_date"] = None  # reopened: it is no longer resolved
+    changes = field_changes(obj, data)
     for k, v in data.items():
         setattr(obj, k, v)
-    if body.control_ids is not None:
-        obj.controls = await _resolve(db, Control, body.control_ids)
-    if body.risk_ids is not None:
-        obj.risks = await _resolve(db, Risk, body.risk_ids)
-    if body.requirement_ids is not None:
-        obj.requirements = await _resolve(db, Requirement, body.requirement_ids)
+    for field, model, ids in (
+        ("controls", Control, body.control_ids),
+        ("risks", Risk, body.risk_ids),
+        ("requirements", Requirement, body.requirement_ids),
+    ):
+        if ids is None:
+            continue
+        resolved = await _resolve(db, model, ids)
+        moved = _link_change(getattr(obj, field), resolved)
+        setattr(obj, field, resolved)
+        if moved:
+            changes[field] = moved
     await db.flush()
+    if changes:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="audit_finding", entity_id=obj.id,
+            summary=f"Updated finding {obj.reference}: {', '.join(sorted(changes))}"[:500],
+            changes=changes,
+        )
     return FindingRead.model_validate(await _load_finding(db, fid))
 
 
 @router.delete("/audit-findings/{fid}", status_code=204, dependencies=[_WRITE])
-async def delete_finding(fid: uuid.UUID, db: DbSession) -> None:
+async def delete_finding(fid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await db.scalar(select(AuditFinding).where(AuditFinding.id == fid))
     if obj is None:
         raise HTTPException(status_code=404, detail="Record not found")
+    await audit_log.record(
+        db, actor=user, action="delete", entity_type="audit_finding", entity_id=obj.id,
+        summary=f"Removed finding {obj.reference}: {obj.title}"[:500],
+        changes={
+            **snapshot(obj, ("title", "rating", "status", "action_owner", "due_date")),
+            "engagement_id": str(obj.engagement_id),
+        },
+    )
     await db.delete(obj)
 
 
@@ -353,7 +553,7 @@ _FINDING_SORTABLE = {
 
 # "Open" in the follow-up view means not yet resolved: not closed and not risk-accepted
 # (matches AuditFinding.is_overdue and the UI's open/overdue stat cards).
-_OPEN_STATES = [AuditFindingStatus.closed, AuditFindingStatus.risk_accepted]
+_OPEN_STATES = list(RESOLVED_FINDING_STATES)
 
 
 def _open_pred():

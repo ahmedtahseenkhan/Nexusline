@@ -349,9 +349,11 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         "Risk", secondary="risk_assets", lazy="selectin", viewonly=True,
         secondaryjoin="and_(risk_assets.c.risk_id == Risk.id, Risk.deleted == False)",
     )
-    # Reverse (read-only) links into the graph.
+    # Reverse (read-only) links into the graph. Archived records drop out, as they do
+    # from every other record's related lists.
     vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
         "Vendor", secondary="vendor_assets", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(vendor_assets.c.vendor_id == Vendor.id, Vendor.deleted == False)",
     )
     access_reviews: Mapped[list["AccessReview"]] = relationship(  # noqa: F821
         "AccessReview", primaryjoin="AccessReview.asset_id == Asset.id",
@@ -359,6 +361,28 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     )
     controls: Mapped[list["Control"]] = relationship(  # noqa: F821
         "Control", secondary="control_assets", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(control_assets.c.control_id == Control.id, Control.deleted == False)",
+    )
+    # Continuity plans that recover this asset, RoPA entries that process it (information
+    # assets), BIAs that list it as a dependency, and scanner findings raised on it (IT
+    # assets) — each written on the other record, shown here too.
+    continuity_plans: Mapped[list["ContinuityPlan"]] = relationship(  # noqa: F821
+        "ContinuityPlan", secondary="continuity_plan_assets", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(continuity_plan_assets.c.continuity_plan_id == ContinuityPlan.id, "
+                      "ContinuityPlan.deleted == False)",
+    )
+    processing_activities: Mapped[list["ProcessingActivity"]] = relationship(  # noqa: F821
+        "ProcessingActivity", secondary="ropa_assets", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(ropa_assets.c.ropa_id == ProcessingActivity.id, ProcessingActivity.deleted == False)",
+    )
+    bia_assessments: Mapped[list["BiaAssessment"]] = relationship(  # noqa: F821
+        "BiaAssessment", secondary="bia_dependencies", lazy="selectin", viewonly=True,
+        primaryjoin="Asset.id == bia_dependencies.c.asset_id",
+        secondaryjoin="and_(bia_dependencies.c.bia_id == BiaAssessment.id, BiaAssessment.deleted == False)",
+    )
+    vuln_findings: Mapped[list["VulnFinding"]] = relationship(  # noqa: F821
+        "VulnFinding", primaryjoin="and_(VulnFinding.asset_id == Asset.id, VulnFinding.deleted == False)",
+        foreign_keys="VulnFinding.asset_id", lazy="selectin", viewonly=True,
     )
     threats: Mapped[list["Threat"]] = relationship(  # noqa: F821
         "Threat", secondary="asset_threats", lazy="selectin", viewonly=True,
@@ -397,12 +421,14 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
         """Highest business value among the information assets this IT asset carries.
 
         This is the "backup server" rule: a device inherits criticality from the DATA it
-        stores, not its purchase price. Returns ``low`` when nothing depends on it.
+        stores, not its purchase price. Returns ``low`` when nothing depends on it. An
+        archived information asset no longer counts (as in the register's stat card and
+        its sort).
         """
         best = 0
         for dep in self.hosted_dependencies:
             info = dep.information_asset
-            if info is not None:
+            if info is not None and not info.deleted:
                 best = max(best, _CRIT_RANK[info.business_value])
         return _RANK_CRIT.get(best, Criticality.low)
 

@@ -48,6 +48,10 @@ class DeclarationRead(DeclarationBase):
     campaign_id: uuid.UUID
     reference: str
     created_at: datetime
+    # The campaign's reference and title, filled on the flat list (GET /declarations)
+    # so each row can name its campaign however many campaigns there are.
+    campaign_reference: str = ""
+    campaign_title: str = ""
 
 
 # ------------------------------------------------------------ declaration campaigns ---
