@@ -31,7 +31,7 @@ from app.models.asset import (
     AssetReview,
     AssetTag,
 )
-from app.models.enums import AssetClass, AssetEnvironment, AssetReviewStatus
+from app.models.enums import AssetClass, AssetEnvironment, AssetReviewStatus, WorkflowStatus
 from app.models.exception import ExceptionRecord
 from app.models.incident import Incident
 from app.models.compliance import Requirement
@@ -68,7 +68,7 @@ from app.schemas.asset import (
     RiskExposureRef,
 )
 from app.schemas.common import GraphRef, Page, exception_status
-from app.services import audit, fx, risk_integrity
+from app.services import asset_review, audit, fx, record_workflow, risk_integrity
 from app.services.risk_scoring import AppetiteBook, SeverityScale, effective_score, next_review_date
 from app.services.risk_settings import get_or_create_settings, load_appetite_book, scale_for
 
@@ -207,8 +207,11 @@ async def _exposure(db, asset: Asset, user) -> Exposure:
 
 
 async def _read(db, asset: Asset, user) -> AssetRead:
-    """The single-asset read (and every write response): risks carry their exposure."""
-    return _serialize(asset, await _exposure(db, asset, user), can_read_risks=_can_read_risks(user))
+    """The single-asset read (and every write response): risks carry their exposure.
+    Serialised where a link the loader left out can still be lazy-loaded."""
+    exposure = await _exposure(db, asset, user)
+    can_read_risks = _can_read_risks(user)
+    return (await serialize_all(db, [asset], lambda a: _serialize(a, exposure, can_read_risks=can_read_risks)))[0]
 
 
 def _serialize(a: Asset, exposure: Exposure = None, *, can_read_risks: bool = False) -> AssetRead:
@@ -294,9 +297,17 @@ def _serialize(a: Asset, exposure: Exposure = None, *, can_read_risks: bool = Fa
     )
 
 
+def _record_loads() -> tuple:
+    """What one asset's read and writes load: every link the record shows (so writes can
+    assign collections without a lazy load) and nothing behind those links. ``_loads()``
+    alone let each linked risk bring its own assets and theirs — a single asset loaded
+    thousands, and PATCH, review and delete took seconds to minutes at bank scale."""
+    return (*_loads(), *options_for(Asset, AssetRead, _SERIALIZE_ALSO))
+
+
 async def _get_or_404(db, asset_id: uuid.UUID) -> Asset:
     asset = await db.scalar(
-        select(Asset).where(Asset.id == asset_id, Asset.deleted.is_(False)).options(*_loads())
+        select(Asset).where(Asset.id == asset_id, Asset.deleted.is_(False)).options(*_record_loads())
     )
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
@@ -305,7 +316,8 @@ async def _get_or_404(db, asset_id: uuid.UUID) -> Asset:
 
 async def _fresh(db, asset_id: uuid.UUID) -> Asset:
     return await db.scalar(
-        select(Asset).where(Asset.id == asset_id).options(*_loads()).execution_options(populate_existing=True)
+        select(Asset).where(Asset.id == asset_id).options(*_record_loads())
+        .execution_options(populate_existing=True)
     )
 
 
@@ -398,6 +410,36 @@ _ASSET_SORTABLE = {
 }
 
 
+def asset_filters(
+    *, search: str | None = None, asset_class: AssetClass | None = None,
+    media_type_id: uuid.UUID | None = None, review_overdue: bool | None = None,
+    environment: AssetEnvironment | None = None, effective_criticality: Criticality | None = None,
+    workflow_status: WorkflowStatus | None = None,
+) -> list:
+    """The register's filters as WHERE clauses — shared by the list and the export, so
+    "export what I'm looking at" exports exactly the rows on screen."""
+    where: list = []
+    if search:
+        like = f"%{search}%"
+        where.append(
+            Asset.name.ilike(like) | Asset.information_owner.ilike(like)
+            | Asset.hostname.ilike(like) | Asset.ip_address.ilike(like)
+        )
+    if asset_class:
+        where.append(Asset.asset_class == asset_class)
+    if media_type_id:
+        where.append(Asset.media_type_id == media_type_id)
+    if review_overdue:
+        where.append(Asset.next_review_date < date.today())
+    if environment:
+        where.append(Asset.environment == environment)
+    if effective_criticality:
+        where.append(effective_criticality_expr() == _crit(effective_criticality))
+    if workflow_status:
+        where.append(Asset.workflow_status == workflow_status)
+    return where
+
+
 @router.get("", response_model=Page[AssetRead], dependencies=[Depends(require("asset:read"))])
 async def list_assets(
     db: DbSession,
@@ -406,23 +448,22 @@ async def list_assets(
     asset_class: Annotated[AssetClass | None, Query(description="Filter by IT vs Information asset")] = None,
     media_type_id: Annotated[uuid.UUID | None, Query()] = None,
     review_overdue: Annotated[bool | None, Query()] = None,
+    # The narrowing a 6,000-row register needs beyond search: where it runs, how
+    # critical it is (the value the register shows, not the stored input) and where it
+    # is in its approval lifecycle.
+    environment: Annotated[AssetEnvironment | None, Query()] = None,
+    effective_criticality: Annotated[Criticality | None, Query()] = None,
+    workflow_status: Annotated[WorkflowStatus | None, Query()] = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[AssetRead]:
-    stmt = select(Asset).where(Asset.deleted.is_(False))
-    if search:
-        like = f"%{search}%"
-        stmt = stmt.where(
-            Asset.name.ilike(like) | Asset.information_owner.ilike(like) | Asset.hostname.ilike(like)
-        )
-    if asset_class:
-        stmt = stmt.where(Asset.asset_class == asset_class)
-    if media_type_id:
-        stmt = stmt.where(Asset.media_type_id == media_type_id)
-    if review_overdue:
-        stmt = stmt.where(Asset.next_review_date < date.today())
+    stmt = select(Asset).where(Asset.deleted.is_(False), *asset_filters(
+        search=search, asset_class=asset_class, media_type_id=media_type_id,
+        review_overdue=review_overdue, environment=environment,
+        effective_criticality=effective_criticality, workflow_status=workflow_status,
+    ))
     params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = apply_sort(stmt, params, _ASSET_SORTABLE, default=Asset.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
@@ -476,20 +517,13 @@ async def asset_summary(
     # Decision 4: replacement cost is summed per currency, then converted to the reporting
     # currency at today's rate (a stock figure: what replacing the estate costs now).
     replacement = await replacement_value(db, filters)
-    # effective criticality == critical iff cost band critical (>=10M) OR availability
-    # critical OR it hosts an information asset whose business value is critical.
-    info = aliased(Asset)
-    hosts_critical = (
-        select(AssetDependency.it_asset_id)
-        .join(info, AssetDependency.information_asset_id == info.id)
-        .where(info.business_value == Criticality.critical, info.deleted.is_(False))
-    )
+    # The same expression the register sorts and filters by, so the tile agrees with the
+    # column: an information asset is critical by its business value, an IT asset by
+    # cost band, availability or the data it carries. The tile used the IT formula for
+    # both classes, so on the information register it counted availability instead of
+    # business value and disagreed with every row beneath it.
     effective_critical = await db.scalar(
-        _count(
-            (Asset.replacement_cost >= 10_000_000)
-            | (Asset.availability == Criticality.critical)
-            | Asset.id.in_(hosts_critical)
-        )
+        _count(effective_criticality_expr() == _crit(Criticality.critical))
     ) or 0
     return {
         "total": total,
@@ -530,17 +564,107 @@ async def get_asset(asset_id: uuid.UUID, db: DbSession, user: CurrentUser) -> As
     return await _read(db, await _get_or_404(db, asset_id), user)
 
 
+#: Changes to what an approver signed off: the asset's classification, the inputs its
+#: criticality is computed from, and who owns it. On an approved asset they send it back
+#: for review, with the editor as its submitter — so someone else approves the new
+#: classification (maker-checker; ISO/IEC 27001 A.5.9, A.5.12). Technical details
+#: (hostname, IP, OS, location), links and the review schedule don't.
+MATERIAL_FIELDS: frozenset[str] = frozenset({
+    "asset_class", "confidentiality", "integrity", "availability", "business_value",
+    "replacement_cost", "currency", "environment", "rto_hours", "rpo_hours",
+    "owner_id", "guardian_id", "user_id", "information_owner", "label_id",
+    "data_categories", "classification_ids",
+})
+
+#: Scalar reference fields, shown in the trail by the name they point at.
+_NAMED_REFS = {
+    "owner_id": BusinessUnit, "guardian_id": BusinessUnit, "user_id": BusinessUnit,
+    "media_type_id": AssetMediaType, "label_id": AssetLabel,
+}
+
+
+def _text(value) -> str | None:
+    """A value as the activity trail shows it."""
+    if value is None:
+        return None
+    if hasattr(value, "value"):
+        return str(value.value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _link_label(obj) -> str:
+    return (getattr(obj, "reference", "") or getattr(obj, "name", "") or getattr(obj, "title", "") or str(obj.id))
+
+
+def _link_names(asset: Asset, field: str) -> list[str]:
+    """The names behind a ``*_ids`` field, as currently loaded on the asset."""
+    rel = next((r for r, (_m, f) in _REL.items() if f == field), None)
+    rel = rel or {"related_ids": "related_assets", "risk_ids": "risks"}.get(field)
+    if rel is None:
+        return []
+    return sorted(_link_label(o) for o in (getattr(asset, rel, None) or []))
+
+
+async def _ref_name(db, model, ref_id) -> str | None:
+    if ref_id is None:
+        return None
+    obj = await db.get(model, ref_id)
+    return getattr(obj, "name", None) or str(ref_id)
+
+
 @router.patch("/{asset_id}", response_model=AssetRead, dependencies=[Depends(require("asset:write"))])
 async def update_asset(asset_id: uuid.UUID, body: AssetUpdate, db: DbSession, user: CurrentUser) -> AssetRead:
+    """Update the asset. The trail records each changed field's old and new value. A
+    material change to an approved asset (``MATERIAL_FIELDS``) reopens it and submits
+    it for review. The review date moves only within the rules of
+    ``services.asset_review``: an overdue review is cleared by completing it."""
     asset = await _get_or_404(db, asset_id)
     data = body.model_dump(exclude_unset=True)
     rel_data = {k: data.pop(k) for k in list(data) if k.endswith("_ids")}
+    if "next_review_date" in data:
+        problem = asset_review.date_change_problem(
+            asset.next_review_date, data["next_review_date"],
+            data.get("review_frequency", asset.review_frequency), date.today(),
+        )
+        if problem:
+            raise HTTPException(status_code=422, detail=f"The review date can't change: {problem}.")
+
+    fields: dict[str, dict] = {}
     for field, value in data.items():
+        old = getattr(asset, field)
+        if _text(old) != _text(value):
+            if field in _NAMED_REFS:
+                fields[field] = {"from": await _ref_name(db, _NAMED_REFS[field], old),
+                                 "to": await _ref_name(db, _NAMED_REFS[field], value)}
+            else:
+                fields[field] = {"from": _text(old), "to": _text(value)}
         setattr(asset, field, value)
+    links_before = {f: _link_names(asset, f) for f, ids in rel_data.items() if ids is not None}
     await _apply_relations(db, asset, rel_data)
     await db.flush()
+    if links_before:
+        asset = await _fresh(db, asset.id)
+        for f, before in links_before.items():
+            after = _link_names(asset, f)
+            if after != before:
+                fields[f] = {"from": ", ".join(before) or None, "to": ", ".join(after) or None}
+    if "next_review_date" in fields:
+        await asset_review.sync_schedule(db, asset)
+
+    changed = ", ".join(f.removesuffix("_ids").removesuffix("_id").replace("_", " ") for f in fields)
     await audit.record(db, actor=user, action="update", entity_type="asset", entity_id=asset.id,
-                       summary=f"Updated asset {asset.name}")
+                       summary=(f"Updated asset {asset.name}: {changed}" if changed else f"Updated asset {asset.name}")[:500],
+                       changes={"fields": fields} if fields else None)
+
+    material = [f for f in fields if f in MATERIAL_FIELDS]
+    if material and record_workflow.state_value(asset.workflow_status) == record_workflow.APPROVED:
+        what = ", ".join(f.removesuffix("_ids").removesuffix("_id").replace("_", " ") for f in material)
+        await record_workflow.apply(
+            db, user, asset, "asset", "revise", f"Changed {what} on the approved asset"[:500]
+        )
+        await record_workflow.apply(db, user, asset, "asset", "submit")
     return await _read(db, await _fresh(db, asset.id), user)
 
 
@@ -590,10 +714,27 @@ async def list_reviews(asset_id: uuid.UUID, db: DbSession) -> list[AssetReviewRe
 @router.post("/{asset_id}/reviews", response_model=AssetRead, status_code=201, dependencies=[Depends(require("asset:write"))])
 async def schedule_review(asset_id: uuid.UUID, body: AssetReviewCreate, db: DbSession, user: CurrentUser) -> AssetRead:
     asset = await _get_or_404(db, asset_id)
-    db.add(AssetReview(tenant_id=asset.tenant_id, asset_id=asset.id, reviewer=body.reviewer,
-                       scheduled_date=body.scheduled_date, comments=body.comments,
-                       status=AssetReviewStatus.scheduled))
+    # Scheduling sets the next review date, so it follows the same rule as editing it:
+    # an overdue review is cleared by completing it, not by scheduling a later one.
+    problem = asset_review.date_change_problem(
+        asset.next_review_date, body.scheduled_date, asset.review_frequency, date.today()
+    )
+    if problem:
+        raise HTTPException(status_code=422, detail=f"The review can't be scheduled then: {problem}.")
     before = asset.next_review_date
+    pending = await asset_review.pending_review(db, asset.id)
+    if pending is not None:
+        # One pending review carries the next date; a second would leave the first
+        # sitting on the old date. Reschedule it instead.
+        pending.scheduled_date = body.scheduled_date
+        if body.reviewer:
+            pending.reviewer = body.reviewer
+        if body.comments:
+            pending.comments = body.comments
+    else:
+        db.add(AssetReview(tenant_id=asset.tenant_id, asset_id=asset.id, reviewer=body.reviewer,
+                           scheduled_date=body.scheduled_date, comments=body.comments,
+                           status=AssetReviewStatus.scheduled))
     asset.next_review_date = body.scheduled_date
     await db.flush()
     await audit.record(
@@ -612,16 +753,26 @@ async def complete_review(asset_id: uuid.UUID, review_id: uuid.UUID, body: Asset
     review = await db.scalar(select(AssetReview).where(AssetReview.id == review_id, AssetReview.asset_id == asset_id))
     if review is None:
         raise HTTPException(status_code=404, detail="Review not found")
+    if review.status == AssetReviewStatus.completed:
+        raise HTTPException(status_code=409, detail="That review is already completed.")
     today = date.today()
     review.status = AssetReviewStatus.completed
     review.actual_date = today
     review.outcome = body.outcome
+    review.completed_by = asset_review.completer_name(user)
+    review.completed_by_id = user.id
     if body.comments:
         review.comments = body.comments
     asset.last_review_date = today
     asset.next_review_date = next_review_date(asset.review_frequency, today)
+    await db.flush()
+    # The next cycle is scheduled now, for whoever was planned for this one.
+    await asset_review.sync_schedule(db, asset, reviewer=review.reviewer)
     await audit.record(db, actor=user, action="review", entity_type="asset", entity_id=asset.id,
-                       summary=f"Reviewed asset {asset.name} ({body.outcome})")
+                       summary=f"Reviewed asset {asset.name} ({body.outcome})",
+                       changes={"completed_by": review.completed_by,
+                                "planned_reviewer": review.reviewer or None,
+                                "next_review_date": _text(asset.next_review_date)})
     await db.flush()
     return await _read(db, await _fresh(db, asset.id), user)
 

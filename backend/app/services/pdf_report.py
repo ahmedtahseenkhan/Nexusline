@@ -414,7 +414,8 @@ def _asset_line(asset) -> str:
         axis = getattr(classification, "type", None)
         axis_name = getattr(axis, "name", "") if axis is not None else ""
         bits.append(f"{axis_name}: {classification.name}" if axis_name else classification.name)
-    criticality = getattr(asset, "criticality", None)
+    # The criticality the register shows (computed), not the stored input no form sets.
+    criticality = getattr(asset, "effective_criticality", None)
     if criticality is not None:
         bits.append(f"criticality {criticality.value.title()}")
     return f"{asset.name} — {', '.join(bits)}" if bits else asset.name

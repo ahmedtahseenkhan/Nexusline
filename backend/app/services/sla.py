@@ -18,13 +18,15 @@ overwrites the other.
 """
 from __future__ import annotations
 
+import time
+
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
+from app.core.schema_loading import options_for
 from app.models.enums import (
     AuditFindingStatus,
     IncidentStatus,
@@ -76,7 +78,10 @@ class EntitySla:
     #: A dotted name (``engagement.report_date``) reads the date off a related record.
     started_fields: tuple[str, ...] = ()
     #: Loader options the sweep needs to read ``started_fields`` without lazy loads.
-    load_options: tuple = ()
+    #: Relationships the clock reads, as dotted paths (``started_fields`` may step through
+    #: one). Only these are loaded: a risk's linked assets are not the clock's business,
+    #: and loading them with the risks put thousands of assets in every reconcile.
+    load_paths: tuple[str, ...] = ()
 
 
 def _risk_severity(risk: Risk, scale) -> Severity:
@@ -125,7 +130,7 @@ ENTITIES: dict[str, EntitySla] = {
         # agreed); only then at creation. An SBP inspection or statutory audit logged
         # after the fact keeps its real age this way instead of a fresh window.
         started_fields=("engagement.report_date", "engagement.actual_end"),
-        load_options=(selectinload(AuditFinding.engagement),),
+        load_paths=("engagement",),
     ),
     "incident": EntitySla(
         key="incident", label="Incident", model=Incident, link="/incidents",
@@ -242,7 +247,15 @@ def target_for(
 # ---------------------------------------------------------------------------
 # Reconciliation
 # ---------------------------------------------------------------------------
-async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
+#: How long one organisation's reconcile result is reused. The sign-in reminder asks on
+#: every page load and the dashboard asks again, and each ask re-derived every open
+#: record's window and rewrote its due date — at bank scale the slowest call on every
+#: page of the app. A policy edit forces a fresh pass, so the grid never reads stale.
+RECONCILE_TTL_SECONDS = 60
+_recent: dict[str, tuple[float, list[TatRecord]]] = {}
+
+
+async def reconcile(db: AsyncSession, tenant_id, *, force: bool = False) -> list[TatRecord]:
     """Recompute every open record's TAT window; return those now at risk or breached.
 
     Idempotent. ``tat_breached_at`` is stamped only the first time a window lapses, so
@@ -250,8 +263,17 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
     cleared if the record's due date moves back into the future (a severity downgrade,
     or a longer policy), because a record that is no longer late should not keep
     reporting as historically late.
+
+    A pass within the last :data:`RECONCILE_TTL_SECONDS` is reused unless ``force`` —
+    per worker process, so two workers reconcile at most twice a minute between them.
     """
     from app.services.risk_settings import get_or_create_settings, scale_for
+
+    key = str(tenant_id)
+    if not force:
+        hit = _recent.get(key)
+        if hit is not None and time.monotonic() - hit[0] < RECONCILE_TTL_SECONDS:
+            return hit[1]
 
     policies = await policy_map(db)
     bands = scale_for(await get_or_create_settings(db, tenant_id))
@@ -259,7 +281,7 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
     flagged: list[TatRecord] = []
 
     for spec in ENTITIES.values():
-        stmt = select(spec.model).options(*spec.load_options)
+        stmt = select(spec.model).options(*options_for(spec.model, None, spec.load_paths))
         if hasattr(spec.model, "deleted"):
             stmt = stmt.where(spec.model.deleted.is_(False))
         for row in (await db.scalars(stmt)).all():
@@ -303,6 +325,7 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
 
     await db.flush()
     flagged.sort(key=lambda r: (-r.days_overdue, r.due or today))
+    _recent[key] = (time.monotonic(), flagged)
     return flagged
 
 

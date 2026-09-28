@@ -171,6 +171,12 @@ const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const CRIT = opts(["low", "medium", "high", "critical"]);
+// Register filter: approval state, beside criticality (see the IT register).
+const WORKFLOW_FILTER: Option[] = [
+  { value: "draft", label: "Draft" }, { value: "in_review", label: "In review" },
+  { value: "approved", label: "Approved" }, { value: "retired", label: "Retired" },
+];
+const REVIEW_FILTER: Option[] = [{ value: "overdue", label: "Review overdue" }];
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const RELATIONSHIP = opts(["hosts", "stores", "processes", "transmits", "backs_up"]);
 const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
@@ -259,6 +265,25 @@ function InformationAssetsInner() {
   const [detail, setDetail] = useState<Asset | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [critFilter, setCritFilter] = useState("");
+  const [wfFilter, setWfFilter] = useState("");
+  const [overdueFilter, setOverdueFilter] = useState("");
+  // What the table shows, so Export carries exactly those rows.
+  const [view, setView] = useState<{ search: string; filters: Record<string, string | number | boolean | undefined>; total: number } | null>(null);
+  const exportQuery = useMemo(() => {
+    const p = new URLSearchParams();
+    if (view?.search) p.set("search", view.search);
+    for (const [k, v] of Object.entries(view?.filters ?? {})) if (v !== undefined && v !== "" && v !== false) p.set(k, String(v));
+    return p.toString();
+  }, [view]);
+  // Filters arrive in the link too — "1,560 IT assets have reviews overdue" opens the
+  // register filtered to them (?review_overdue=true). Read once, on arrival.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("effective_criticality")) setCritFilter(p.get("effective_criticality") as string);
+    if (p.get("workflow_status")) setWfFilter(p.get("workflow_status") as string);
+    if (p.get("review_overdue") === "true") setOverdueFilter("overdue");
+  }, []);
   const [summary, setSummary] = useState<Summary | null>(null);
   const { formatDate } = useFormat();
 
@@ -467,10 +492,13 @@ function InformationAssetsInner() {
   );
 
   /* Inline relation chips. The asset list returns {id,label} refs for its links. */
+  // At most a dozen links per row; the rest is a count.
+  const MAX_CHIPS = 12;
   const linkChips = (items: LinkRef[] | undefined, href: string) =>
     items && items.length ? (
       <div className="chips" onClick={(e) => e.stopPropagation()}>
-        {items.map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{x.label}</Link>)}
+        {items.slice(0, MAX_CHIPS).map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{x.label}</Link>)}
+        {items.length > MAX_CHIPS && <span className="chip">+{(items.length - MAX_CHIPS).toLocaleString()} more</span>}
       </div>
     ) : <span className="muted">—</span>;
   const names = (items: LinkRef[] | undefined) => (items ?? []).map((x) => x.label).join(", ");
@@ -760,7 +788,7 @@ function InformationAssetsInner() {
           <p>Primary assets — data and applications. Criticality is business value, set by the business owner, with CIA classification, handling labels and owner self-assessment.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <ImportExport resource="information-assets" label="Information Assets"
+          <ImportExport resource="information-assets" label="Information Assets" exportQuery={exportQuery} exportCount={view?.total}
             onDone={() => { setRefreshKey((k) => k + 1); loadSummary(); }} />
           <GenerateRisks assetClass="information_asset" label="information assets" />
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add information asset</button>
@@ -770,15 +798,25 @@ function InformationAssetsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <div className="grid stat-grid">
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.total ?? 0).toLocaleString()}</span></div><span className="l">Information assets</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.high_or_critical_value ?? 0).toLocaleString()}</span></div><span className="l">High / critical value</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{summary?.self_assessed_pct ?? 0}%</span></div><span className="l">Self-assessed</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.with_pii ?? 0).toLocaleString()}</span></div><span className="l">Assets with PII</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.total.toLocaleString() : "…"}</span></div><span className="l">Information assets</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.high_or_critical_value.toLocaleString() : "…"}</span></div><span className="l">High / critical value</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? `${summary.self_assessed_pct}%` : "…"}</span></div><span className="l">Self-assessed</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.with_pii.toLocaleString() : "…"}</span></div><span className="l">Assets with PII</span></div>
       </div>
 
       <DataTable<Asset>
         toolbarRight={<ArchivedRecords entityType="asset" noun="assets" onRestored={() => { setRefreshKey((k) => k + 1); loadSummary(); }} refreshKey={refreshKey} />}
         tableKey="information-assets"
+        filters={{ effective_criticality: critFilter || undefined, workflow_status: wfFilter || undefined, review_overdue: overdueFilter ? true : undefined }}
+        onApplyFilters={(f) => { setCritFilter(String(f.effective_criticality ?? "")); setWfFilter(String(f.workflow_status ?? "")); setOverdueFilter(f.review_overdue ? "overdue" : ""); }}
+        onViewChange={setView}
+        toolbarLeft={
+          <>
+            <Select value={critFilter} onChange={setCritFilter} options={CRIT} placeholder="Any business value" />
+            <Select value={wfFilter} onChange={setWfFilter} options={WORKFLOW_FILTER} placeholder="Any approval state" />
+            <Select value={overdueFilter} onChange={setOverdueFilter} options={REVIEW_FILTER} placeholder="Any review state" />
+          </>
+        }
         statusModel="asset"
         bulkActions={(rows, clear) => (
           <>

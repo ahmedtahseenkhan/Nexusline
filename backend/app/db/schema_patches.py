@@ -577,6 +577,7 @@ def recheck_ddl_statements() -> list[str]:
     statements.extend(tag_name_unique_statements())
     statements.extend(capital_snapshot_ddl_statements())
     statements.extend(vuln_acceptance_ddl_statements())
+    statements.extend(asset_review_completion_ddl_statements())
     return statements
 
 
@@ -717,3 +718,19 @@ def vuln_acceptance_ddl_statements() -> list[str]:
         "CREATE INDEX IF NOT EXISTS ix_vuln_findings_acceptance_status ON vuln_findings (acceptance_status)"
     )
     return statements
+
+
+def asset_review_completion_ddl_statements() -> list[str]:
+    """Idempotent DDL: who actually completed an asset review. ``reviewer`` is the name
+    planned when the review was scheduled; the person who completed it was recorded only
+    in the activity trail, so the review record itself — the evidence an auditor samples
+    — did not say who did the work."""
+    name = "fk_asset_reviews_completed_by_id"
+    return [
+        "ALTER TABLE asset_reviews ADD COLUMN IF NOT EXISTS completed_by VARCHAR(200) NOT NULL DEFAULT ''",
+        "ALTER TABLE asset_reviews ADD COLUMN IF NOT EXISTS completed_by_id UUID",
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+        f"WHERE conname = '{name}') THEN ALTER TABLE asset_reviews ADD CONSTRAINT {name} "
+        "FOREIGN KEY (completed_by_id) REFERENCES users(id) ON DELETE SET NULL NOT VALID; "
+        "END IF; END $$;",
+    ]

@@ -39,6 +39,8 @@ type MyWorkSection = {
   label: string;
   hint: string;
   count: number;
+  /** count is only what one capped read returned — shown as "500+". */
+  count_is_floor?: boolean;
   overdue: number;
   items: MyWorkItem[];
   truncated: boolean;
@@ -171,7 +173,7 @@ export default function MyWorkPage() {
         <nav aria-label="Jump to a section" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
           {sections.map((s) => (
             <a key={s.kind} href={`#${s.kind}`} className="chip" style={{ textDecoration: "none" }}>
-              {s.label} · {s.count}
+              {s.label} · {s.count}{s.count_is_floor ? "+" : ""}
               {s.overdue > 0 && <span style={{ color: "var(--red)", fontWeight: 650 }}>&nbsp;({s.overdue} overdue)</span>}
             </a>
           ))}
@@ -196,7 +198,7 @@ export default function MyWorkPage() {
         <section key={s.kind} id={s.kind} className="card" style={{ marginBottom: 16, scrollMarginTop: 80 }} aria-labelledby={`h-${s.kind}`}>
           <div className="card-head" style={{ flexWrap: "wrap", gap: 8 }}>
             <h3 id={`h-${s.kind}`}>{s.label}</h3>
-            <Badge tone="neutral">{s.count}</Badge>
+            <Badge tone="neutral">{`${s.count}${s.count_is_floor ? "+" : ""}`}</Badge>
             {s.overdue > 0 && <Badge tone="critical">{`${s.overdue} overdue`}</Badge>}
             <span className="sub" style={{ flexBasis: "100%" }}>{s.hint}</span>
           </div>
@@ -241,7 +243,7 @@ export default function MyWorkPage() {
             ))}
             {s.truncated && (
               <div className="muted" style={{ fontSize: 12.5, padding: "8px 0" }}>
-                Showing the first {s.items.length} of {s.count}, most urgent first.
+                Showing the first {s.items.length} of {s.count}{s.count_is_floor ? "+" : ""}, most urgent first.
               </div>
             )}
           </div>

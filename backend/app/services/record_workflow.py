@@ -355,6 +355,36 @@ async def carry_state(db: AsyncSession, record: Any, value: str) -> None:
     await _set_state(db, record, value)
 
 
+#: Why an approval is refused when nobody is recorded as the record's maker.
+UNATTRIBUTED_REFUSAL = (
+    "Nobody is recorded as having entered or submitted this {label} — it was loaded "
+    "outside the application — so an approval here can't be shown to be independent. "
+    "Return it to draft; once someone submits it, a different person can approve it."
+)
+
+
+async def unattributed_refusal(db: AsyncSession, entity_type: str, record: Any) -> str | None:
+    """Why four-eyes can't be verified for approving ``record``, or None.
+
+    Four-eyes compares the approver with the record's maker (the trail's ``create``, else
+    the record's own user reference) and its submitter. A record written straight into
+    review or approval by a script or a direct load has neither, and the comparison then
+    passed for everyone — its creator included. Under dual control that fails closed:
+    approving is refused, returning it to draft is not, and the resubmission names a
+    maker the next approval is checked against."""
+    from app.services import dual_control
+
+    required, _rule = await dual_control.dual_control_required(db, entity_type, "approve")
+    if not required:
+        return None
+    if await dual_control.maker_of(db, entity_type, record.id, record=record) is not None:
+        return None
+    if await last_submitter(db, entity_type, record.id) is not None:
+        return None
+    label = record_registry.type_label(entity_type, type(record)).lower()
+    return UNATTRIBUTED_REFUSAL.format(label=label)
+
+
 async def last_submitter(db: AsyncSession, entity_type: str, entity_id: uuid.UUID) -> uuid.UUID | None:
     """Who most recently submitted this record for review, from the audit trail."""
     from app.models.audit import AuditLog
@@ -473,6 +503,9 @@ async def apply(
             checker_id=user.id, subject=subject,
         )
         if action == "approve":
+            unattributed = await unattributed_refusal(db, entity_type, record)
+            if unattributed:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=unattributed)
             # What the record needs before its sign-off (a current simulation, a passed
             # validation…), then the delegation of authority, where the record carries an
             # amount (a loss event's gross loss, an outsourcing contract's value, an

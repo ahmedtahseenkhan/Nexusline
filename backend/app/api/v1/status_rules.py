@@ -14,6 +14,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
+from app.core.schema_loading import serialize_all
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.models.status_rule import StatusRule
@@ -162,14 +163,19 @@ async def evaluate_one(model: str, entity_id: uuid.UUID, db: DbSession, user: Cu
         # record page asks, so answer "none" rather than 404 on each view.
         return []
     cls = engine.MODEL_MAP[model]
-    stmt = select(cls).where(cls.id == entity_id)
+    rules = await _rules_for(db, model)
+    if not rules:
+        return []
+    stmt = select(cls).where(cls.id == entity_id).options(*engine.load_options(cls, rules))
     if hasattr(cls, "deleted"):
         stmt = stmt.where(cls.deleted.is_(False))
     record = await db.scalar(stmt)
     if record is None:
         return []
-    rules = await _rules_for(db, model)
-    return [StatusLabel(**lbl) for lbl in engine.evaluate(record, rules)]
+    # Evaluated where a relationship the loader left out can still be lazy-loaded: a
+    # rule on a computed field not yet in ``PROPERTY_READS`` is slower, never a 500.
+    labels = (await serialize_all(db, [record], lambda rec: engine.evaluate(rec, rules)))[0]
+    return [StatusLabel(**lbl) for lbl in labels]
 
 
 @router.post("/evaluate/{model}", response_model=dict[uuid.UUID, list[StatusLabel]])
@@ -183,11 +189,9 @@ async def evaluate_bulk(
     rules = await _rules_for(db, model)
     if not rules or not body.ids:
         return {}
-    stmt = select(cls).where(cls.id.in_(body.ids))
+    stmt = select(cls).where(cls.id.in_(body.ids)).options(*engine.load_options(cls, rules))
     if hasattr(cls, "deleted"):
         stmt = stmt.where(cls.deleted.is_(False))
     records = (await db.scalars(stmt)).all()
-    return {
-        rec.id: [StatusLabel(**lbl) for lbl in engine.evaluate(rec, rules)]
-        for rec in records
-    }
+    evaluated = await serialize_all(db, records, lambda rec: (rec.id, engine.evaluate(rec, rules)))
+    return {rid: [StatusLabel(**lbl) for lbl in labels] for rid, labels in evaluated}

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import and_, select, update
 
+from app.core.schema_loading import options_for
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.lookup import Lookup
 from app.models.risk import Risk, RiskAppetite, RiskImpactDimension, RiskMatrixLevel
@@ -506,7 +507,8 @@ async def risk_matrix(
         total = len(plotted)
     else:
         where = board_register_clause() if scope == "board" else and_(Risk.deleted.is_(False), scored_clause())
-        risks = (await db.scalars(select(Risk).where(where))).all()
+        # Plotted from scores and the reference: load none of the risks' links.
+        risks = (await db.scalars(select(Risk).where(where).options(*options_for(Risk, None)))).all()
         total = len(risks)
     for r in risks:
         il, ii = getattr(r, "inherent_likelihood", None), getattr(r, "inherent_impact", None)

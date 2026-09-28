@@ -216,6 +216,8 @@ class AssetReviewRead(BaseModel):
     status: AssetReviewStatus
     outcome: str
     comments: str
+    #: Who completed it — ``reviewer`` is who was planned.
+    completed_by: str = ""
     created_at: datetime
 
 

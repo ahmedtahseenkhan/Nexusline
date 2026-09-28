@@ -123,6 +123,11 @@ type Props = {
   label: string;
   /** Optional: pages pass this to refresh their data after a successful import. */
   onDone?: () => void;
+  /** The register's current search and filters as a query string (no leading "?"):
+   *  export then carries exactly the rows on screen. Empty = every row. */
+  exportQuery?: string;
+  /** How many rows that is — shown on the buttons while a filter is active. */
+  exportCount?: number;
 };
 
 /** Where a client column goes: one of our fields, a custom field, or nowhere. */
@@ -228,7 +233,7 @@ export type ImportExportHandle = {
  *  is set, in which case the page drives it through the ref — the buttons then live in
  *  a menu rather than crowding the page head. */
 const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: boolean }>(function ImportExport(
-  { resource, label, onDone, hideButtons }, ref,
+  { resource, label, onDone, hideButtons, exportQuery = "", exportCount }, ref,
 ) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<"export" | "excel" | "template" | null>(null);
@@ -239,7 +244,8 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
     setBarError(null);
     setBusy(kind === "export" && format === "xlsx" ? "excel" : kind);
     try {
-      downloadFile(await apiCall<FilePayload>("GET", `/io/${resource}/${kind}?format=${format}`));
+      const scoped = kind === "export" && exportQuery ? `&${exportQuery}` : "";
+      downloadFile(await apiCall<FilePayload>("GET", `/io/${resource}/${kind}?format=${format}${scoped}`));
     } catch (e) {
       setBarError(errorText(e, `Failed to download ${kind}`));
     } finally {
@@ -256,6 +262,10 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
   // With the buttons hidden there is nowhere to show a download error inline.
   useEffect(() => { if (hideButtons && barError) toast(barError); }, [hideButtons, barError]);
 
+  // While a filter is active the buttons say how many rows they will export.
+  const filteredCount = exportQuery && exportCount != null ? `${exportCount.toLocaleString()} ` : "";
+  const countSuffix = exportQuery && exportCount != null ? ` · ${exportCount.toLocaleString()}` : "";
+
   return (
     <>
       {!hideButtons && (
@@ -265,17 +275,17 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
             className="btn secondary sm"
             onClick={() => doDownload("export", "xlsx")}
             disabled={busy !== null}
-            title={`Download all ${label} as an Excel workbook`}
+            title={exportQuery ? `Download the ${filteredCount}${label} shown (the current search and filters) as an Excel workbook` : `Download all ${label} as an Excel workbook`}
           >
-            {busy === "excel" ? "Exporting…" : "Export Excel"}
+            {busy === "excel" ? "Exporting…" : `Export Excel${countSuffix}`}
           </button>
           <button
             className="btn secondary sm"
             onClick={() => doDownload("export", "csv")}
             disabled={busy !== null}
-            title={`Download all ${label} as CSV`}
+            title={exportQuery ? `Download the ${filteredCount}${label} shown (the current search and filters) as CSV` : `Download all ${label} as CSV`}
           >
-            {busy === "export" ? "Exporting…" : "CSV"}
+            {busy === "export" ? "Exporting…" : `CSV${countSuffix}`}
           </button>
           <button
             className="btn secondary sm"

@@ -50,6 +50,7 @@ from typing import Any, Iterable
 from fastapi import HTTPException, status
 from sqlalchemy import select
 
+from app.core.database import shallow_loads
 from app.db.fk_backfill import FK_LOOKUP_KEYS
 from app.models.enums import ControlStatus, IncidentStatus, ReviewFrequency, VendorStatus
 from app.models.issue import IssueStatus2
@@ -370,7 +371,26 @@ def _risk_rules(record: Any, values: dict[str, Value], out: dict[str, Any], *, t
     return out
 
 
+def _asset_rules(record: Any, values: dict[str, Value], out: dict[str, Any], *, today: date,
+                 **_: Any) -> dict[str, Any]:
+    """An asset's review date moves only as ``PATCH /assets/{id}`` lets it: an overdue
+    review is cleared by completing it, and never past one cycle out
+    (``services.asset_review``). Setting a date across a selection turned 1,560 overdue
+    reviews green in one click without a single review."""
+    from app.services.asset_review import date_change_problem
+
+    if "next_review_date" in out:
+        problem = date_change_problem(
+            record.next_review_date, out["next_review_date"],
+            out.get("review_frequency", record.review_frequency), today,
+        )
+        if problem:
+            raise Skip(problem)
+    return out
+
+
 _RULES = {
+    "asset": _asset_rules,
     "control": _control_rules,
     "issue": _issue_rules,
     "incident": _incident_rules,
@@ -476,7 +496,20 @@ async def run(db, user: Any, entity_type: str, ids: list[uuid.UUID], patch: dict
         context = {"scale": scale_for(settings), "cadence": dict(settings.review_cadence or {})}
 
     wanted = list(dict.fromkeys(ids))
-    rows = {r.id: r for r in (await db.scalars(select(model).where(model.id.in_(wanted)))).all()}
+    # The records' own columns and links, not their links' links (``shallow_loads``).
+    with shallow_loads(1):
+        rows = {r.id: r for r in (await db.scalars(select(model).where(model.id.in_(wanted)))).all()}
+    # An approved asset whose owner changes goes back for review (see
+    # ``api.v1.assets.MATERIAL_FIELDS``), submitted by this user — who must be allowed to
+    # submit. Checked once, before anything changes.
+    resubmit_refusal: str | None = None
+    if entity_type == "asset":
+        from app.services import dual_control
+
+        try:
+            await dual_control.enforce_maker_role(db, module="asset", action="approve", maker_id=user.id)
+        except HTTPException as refused:
+            resubmit_refusal = str(refused.detail)
     results: list[BulkResultItem] = []
     asked = "; ".join(f"{register.field(k).label.lower()} → {v.text}" for k, v in values.items())
     for rid in wanted:
@@ -493,9 +526,20 @@ async def run(db, user: Any, entity_type: str, ids: list[uuid.UUID], patch: dict
         except Skip as why:
             results.append(BulkResultItem(id=rid, reference=ref, label=label, outcome="skipped", reason=str(why)))
             continue
+        material = entity_type == "asset" and _is_approved(record) and bool(set(changes) & _asset_material())
+        if material and resubmit_refusal:
+            results.append(BulkResultItem(
+                id=rid, reference=ref, label=label, outcome="skipped",
+                reason=f"approved — the change would send it for review, and {resubmit_refusal}",
+            ))
+            continue
         before = {c: getattr(record, c, None) for c in changes}
         for column, value in changes.items():
             setattr(record, column, value)
+        if entity_type == "asset" and "next_review_date" in changes:
+            from app.services.asset_review import sync_schedule
+
+            await sync_schedule(db, record)
         changed = words_for(register, changes)
         await audit.record(
             db, actor=user, action="update", entity_type=entity_type, entity_id=record.id,
@@ -506,6 +550,13 @@ async def run(db, user: Any, entity_type: str, ids: list[uuid.UUID], patch: dict
                 "fields": {c: {"from": _text(before[c]), "to": _text(v)} for c, v in changes.items()},
             },
         )
+        if material:
+            from app.services import record_workflow
+
+            await db.flush()
+            await record_workflow.apply(db, user, record, entity_type, "revise",
+                                        "Changed owner on the approved asset (bulk edit)")
+            await record_workflow.apply(db, user, record, entity_type, "submit")
         results.append(BulkResultItem(id=rid, reference=ref, label=label, outcome="updated", changed=changed))
     await db.flush()
     updated = sum(1 for r in results if r.outcome == "updated")
@@ -513,6 +564,16 @@ async def run(db, user: Any, entity_type: str, ids: list[uuid.UUID], patch: dict
         entity_type=entity_type, batch_id=batch, updated=updated, skipped=len(results) - updated,
         summary=summarize(results), results=results,
     )
+
+
+def _is_approved(record: Any) -> bool:
+    return str(getattr(getattr(record, "workflow_status", None), "value", getattr(record, "workflow_status", ""))) == "approved"
+
+
+def _asset_material() -> frozenset[str]:
+    from app.api.v1.assets import MATERIAL_FIELDS
+
+    return MATERIAL_FIELDS
 
 
 def fields_for(user: Any, entity_type: str):

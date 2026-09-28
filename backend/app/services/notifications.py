@@ -33,6 +33,8 @@ person and a role (a KRI escalation to "Jane Doe and the CRO role" is one event)
 """
 from __future__ import annotations
 
+import logging
+
 import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
@@ -85,6 +87,8 @@ from app.services.risk_query import board_register_clause, on_board_register
 from app.services.risk_scoring import effective_score
 from app.services.risk_settings import get_or_create_settings, load_appetite_book
 
+_log = logging.getLogger(__name__)
+
 _W = NotificationCategory.warning
 _C = NotificationCategory.critical
 _I = NotificationCategory.info
@@ -123,8 +127,9 @@ GROUPABLE_FAMILIES: dict[str, tuple[str, str, str, str]] = {
     "policy-review": ("policy", "policies", "reviews overdue", "/policies"),
     "vendor-review": ("third party", "third parties", "reviews overdue", "/vendors"),
     # Assets (record-page B4): one family per register, so a grouped row links to it.
-    "asset-review": ("information asset", "information assets", "reviews overdue", "/information-assets"),
-    "itasset-review": ("IT asset", "IT assets", "reviews overdue", "/it-assets"),
+    # The grouped row opens the register filtered to the overdue reviews it counts.
+    "asset-review": ("information asset", "information assets", "reviews overdue", "/information-assets?review_overdue=true"),
+    "itasset-review": ("IT asset", "IT assets", "reviews overdue", "/it-assets?review_overdue=true"),
     # Third-party certifications (phase 2), one alert per certificate: warned
     # CERT_EXPIRY_WARNING_DAYS out, then flagged once lapsed.
     "vendor-cert-expiring": ("third-party certification", "third-party certifications", "less than 60 days left", "/vendors"),
@@ -1726,6 +1731,27 @@ REFRESH_MIN_INTERVAL_SECONDS = 60.0
 _LAST_REFRESH: dict[str, float] = {}
 
 
+async def _scan_shallow(db: AsyncSession, tenant_id, directory: Directory) -> list[dict]:
+    """:func:`scan_alerts` with each loaded record's links loaded one deep only.
+
+    The scan reads records' columns and their direct links. At the default depth an
+    overdue control also brought every protected asset and each asset its twenty-eight
+    links — ~900 statements and 5-10 seconds a scan at bank scale, blocking the worker
+    for every page behind it; one deep it is under a second with identical alerts. The
+    scan writes nothing, so if a family ever reads further (a lazy load outside the
+    greenlet) it is rescanned at the default depth and logged, rather than failing."""
+    from sqlalchemy.exc import MissingGreenlet
+
+    from app.core.database import shallow_loads
+
+    try:
+        with shallow_loads(1):
+            return await scan_alerts(db, tenant_id, directory=directory)
+    except MissingGreenlet:
+        _log.warning("Alert scan read a link two deep; rescanning at the default depth", exc_info=True)
+        return await scan_alerts(db, tenant_id, directory=directory)
+
+
 async def refresh(db: AsyncSession, tenant_id) -> list[Notification]:
     """Reconcile current alerts into the notifications table.
 
@@ -1742,7 +1768,7 @@ async def refresh(db: AsyncSession, tenant_id) -> list[Notification]:
     event and are never swept: this reconciler runs whenever the feed is opened.
     """
     directory = await load_directory(db)
-    alerts = group_alerts(address_alerts(await scan_alerts(db, tenant_id, directory=directory), directory))
+    alerts = group_alerts(address_alerts(await _scan_shallow(db, tenant_id, directory), directory))
 
     existing: dict[str, Notification] = {}
     for n in (await db.scalars(select(Notification).order_by(Notification.created_at))).all():

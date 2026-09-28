@@ -18,6 +18,27 @@ export function clearToken() {
   window.localStorage.removeItem(TOKEN_KEY);
 }
 
+export const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
+
+/** Sign-in calls answer a wrong password or code with 401 too — that is not a lapsed session. */
+const SIGN_IN_PATH = /^\/auth\/(login|mfa\/verify|sso\/[^/]+\/(login|callback|status))\b/;
+let signingOut = false;
+
+/** A 401 on a request that carried a session token means the token expired, the server's
+ *  signing key changed, or the account was switched off. Clear it and send the person to
+ *  sign in again, coming back to this page afterwards — instead of leaving every action
+ *  on the page failing with "Could not validate credentials". */
+function sessionLapsed(path: string, token: string | null, res: Response): boolean {
+  if (res.status !== 401 || !token || SIGN_IN_PATH.test(path)) return false;
+  clearToken();
+  if (!signingOut && window.location.pathname !== "/") {
+    signingOut = true;
+    const here = `${window.location.pathname}${window.location.search}`;
+    window.location.replace(`/?expired=1&next=${encodeURIComponent(here)}`);
+  }
+  return true;
+}
+
 /** Turn a FastAPI/Pydantic error `detail` into a readable message.
  *  A 422 returns `detail` as an array of {loc, msg, type}; render it as
  *  "Title is required" / "Field: message" instead of raw JSON. */
@@ -55,6 +76,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     },
   });
   if (!res.ok) {
+    if (sessionLapsed(path, token, res)) throw new Error(SESSION_EXPIRED_MESSAGE);
     let message = res.statusText;
     try {
       const body = await res.json();
@@ -91,6 +113,7 @@ export async function uploadMultipart<T>(path: string, file: File): Promise<T> {
     body: form,
   });
   if (!res.ok) {
+    if (sessionLapsed(path, token, res)) throw new Error(SESSION_EXPIRED_MESSAGE);
     let message = res.statusText;
     try {
       const b = await res.json();
@@ -169,6 +192,7 @@ export async function downloadBlobPost(path: string, body: unknown, fallback = "
     body: JSON.stringify(body),
   });
   if (!res.ok) {
+    if (sessionLapsed(path, token, res)) throw new Error(SESSION_EXPIRED_MESSAGE);
     let message = `Export failed (${res.status})`;
     try { message = formatDetail((await res.json()).detail, message); } catch { /* ignore */ }
     throw new Error(message);
@@ -182,6 +206,7 @@ export async function downloadBlob(path: string, filename: string): Promise<void
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!res.ok) {
+    if (sessionLapsed(path, token, res)) throw new Error(SESSION_EXPIRED_MESSAGE);
     let message = `Download failed (${res.status})`;
     try { message = formatDetail((await res.json()).detail, message); } catch { /* ignore */ }
     throw new Error(message);
@@ -814,7 +839,29 @@ export interface RiskAcceptance {
   status: "pending" | "approved" | "rejected" | "expired";
   expires_at: string | null;
   decided_at: string | null;
+  /** The exposure being accepted, fixed on the request (checked against the approver's mandate). */
+  exposure_amount?: number | null;
+  exposure_currency?: string;
+  exposure_basis?: string;
   created_at: string;
+}
+
+/** GET /authority-matrix/mandate/{entity_type}/{id}: may the current user approve this
+ *  record under the delegation-of-authority matrix? `governed` false = no lines in the
+ *  category, so the matrix does not restrict it. */
+export interface RecordMandate {
+  entity_type: string;
+  record_id: string;
+  category: string;
+  governed: boolean;
+  allowed: boolean;
+  reason: string;
+  amount: number | null;
+  currency: string;
+  basis: string;
+  compared_amount: number | null;
+  compared_currency: string;
+  lines: { reference: string; role_title: string; approval_level: number; amount_from: number; amount_to: number | null; currency: string }[];
 }
 
 export interface RiskAggregateRow {
@@ -839,31 +886,9 @@ export interface Page<T> {
   limit: number;
   offset: number;
 }
-  /** The exposure being accepted, fixed on the request (checked against the approver's mandate). */
-  exposure_amount?: number | null;
-  exposure_currency?: string;
-  exposure_basis?: string;
 
 // --- dashboard overview (the redesigned page's single payload) ---------------------
 /** `value` is null and `population` 0 when a measure has no data: it is left out of the score. */
-/** GET /authority-matrix/mandate/{entity_type}/{id}: may the current user approve this
- *  record under the delegation-of-authority matrix? `governed` false = no lines in the
- *  category, so the matrix does not restrict it. */
-export interface RecordMandate {
-  entity_type: string;
-  record_id: string;
-  category: string;
-  governed: boolean;
-  allowed: boolean;
-  reason: string;
-  amount: number | null;
-  currency: string;
-  basis: string;
-  compared_amount: number | null;
-  compared_currency: string;
-  lines: { reference: string; role_title: string; approval_level: number; amount_from: number; amount_to: number | null; currency: string }[];
-}
-
 export interface HealthComponent { key: string; label: string; value: number | null; weight: number; detail: string; population: number; formula: string }
 export interface HealthCoverage { scored: number; total: number; weight_pct: number }
 export interface TopRisk {
@@ -1270,6 +1295,10 @@ export interface ApprovalRequest {
   can_cancel?: boolean;
   can_decide?: boolean;
   decide_blocked_reason?: string | null;
+  /** May decide but not approve: the record isn't ready, or its amount is above the
+   *  user's delegation-of-authority mandate. They can still reject; this says why. */
+  can_approve?: boolean;
+  approve_blocked_reason?: string | null;
 }
 
 export interface CustomField {
@@ -1295,10 +1324,6 @@ export interface MetricInfo {
   description: string;
   kind: string;
   category: string;
-  /** May decide but not approve: the record isn't ready, or its amount is above the
-   *  user's delegation-of-authority mandate. They can still reject; this says why. */
-  can_approve?: boolean;
-  approve_blocked_reason?: string | null;
 }
 export interface Widget {
   id: string;
@@ -2549,6 +2574,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** The delegation-of-authority check on one pending decision, for the current user. */
+  recordMandate: (entityType: string, recordId: string) =>
+    request<RecordMandate>(`/authority-matrix/mandate/${entityType}/${recordId}`),
+
   suggestedResidual: (riskId: string) =>
     request<SuggestedResidual>(`/risks/${riskId}/suggested-residual`),
   acceptResidual: (riskId: string, payload: { likelihood?: number; impact?: number; override_reason?: string }) =>
@@ -2574,10 +2603,6 @@ export const api = {
     request<AmlRisk>("/aml/risk-assessments", { method: "POST", body: JSON.stringify(p) }),
   updateAmlRisk: (id: string, p: Record<string, unknown>) =>
     request<AmlRisk>(`/aml/risk-assessments/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
-  /** The delegation-of-authority check on one pending decision, for the current user. */
-  recordMandate: (entityType: string, recordId: string) =>
-    request<RecordMandate>(`/authority-matrix/mandate/${entityType}/${recordId}`),
-
   deleteAmlRisk: (id: string) => request<void>(`/aml/risk-assessments/${id}`, { method: "DELETE" }),
 
   // Operational risk — RCSA, KRIs, loss database

@@ -44,7 +44,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import String, Uuid, and_, cast, exists, false, literal, null, or_, select, union_all
+from sqlalchemy import String, Uuid, and_, cast, exists, false, func, literal, null, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -144,19 +144,32 @@ def sort_items(items: Iterable[MyWorkItem]) -> list[MyWorkItem]:
     )
 
 
-def build_section(kind: str, items: Sequence[MyWorkItem], *, max_items: int = MAX_ITEMS) -> MyWorkSection:
+def build_section(
+    kind: str, items: Sequence[MyWorkItem], *, max_items: int = MAX_ITEMS, exact_count: int | None = None,
+) -> MyWorkSection:
+    """``count`` is the kind's full size: the exact count when the builder measured it,
+    else the items read — which stops at :data:`ROW_CAP`, so a section that reached the
+    cap without an exact count reports its count as a floor ("500+")."""
     ordered = sort_items(items)
     label, hint = next(((label, hint) for k, label, hint in KINDS if k == kind), (kind, ""))
+    count = max(exact_count, len(ordered)) if exact_count is not None else len(ordered)
     return MyWorkSection(
-        kind=kind, label=label, hint=hint, count=len(ordered),
+        kind=kind, label=label, hint=hint, count=count,
         overdue=sum(1 for i in ordered if i.overdue),
-        items=ordered[:max_items], truncated=len(ordered) > max_items,
+        items=ordered[:max_items], truncated=count > max_items,
+        count_is_floor=exact_count is None and len(ordered) >= ROW_CAP,
     )
 
 
-def assemble(user_id: uuid.UUID, today: date, found: dict[str, list[MyWorkItem]]) -> MyWorkRead:
+def assemble(
+    user_id: uuid.UUID, today: date, found: dict[str, list[MyWorkItem]],
+    exact_counts: dict[str, int] | None = None,
+) -> MyWorkRead:
     """The response from each kind's items, in :data:`KINDS` order. Pure."""
-    sections = [build_section(kind, found.get(kind, [])) for kind, _l, _h in KINDS]
+    exact_counts = exact_counts or {}
+    sections = [
+        build_section(kind, found.get(kind, []), exact_count=exact_counts.get(kind)) for kind, _l, _h in KINDS
+    ]
     return MyWorkRead(
         user_id=user_id, as_of=today, horizon_days=HORIZON_DAYS,
         total=sum(s.count for s in sections), overdue=sum(s.overdue for s in sections),
@@ -232,6 +245,9 @@ class Ctx:
     modules_off: set[str] = field(default_factory=set)
     #: The signed-in user (role names, tenant) — what the delegation-of-authority check reads.
     user: Any = None
+    #: A kind's true size when its builder read only the first :data:`ROW_CAP` rows, so
+    #: the section says "981" rather than the 500 it happened to read.
+    exact_counts: dict[str, int] = field(default_factory=dict)
 
     def holds(self, *codes: str) -> bool:
         return set(codes) <= self.permissions
@@ -413,15 +429,23 @@ async def records_in_review(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
     from app.models.asset import Asset
     from app.models.audit import AuditLog
     from app.models.workflow import WorkflowInstance, WorkflowInstanceStatus
-    from app.services import dual_control, lifecycle_gates, record_registry
+    from app.services import dual_control, lifecycle_gates, record_registry, record_workflow
     from app.services.notifications import link_to
 
     types = [(t, m) for t, m in review_types(ctx.permissions) if not _entity_off(ctx, t)]
     if not types:
         return []
-    rows = (await db.execute(union_all(*[in_review_select(t, m) for t, m in types]).limit(ROW_CAP))).all()
+    branches = union_all(*[in_review_select(t, m) for t, m in types])
+    rows = (await db.execute(branches.limit(ROW_CAP))).all()
     if not rows:
         return []
+    if len(rows) >= ROW_CAP:
+        # The register holds more than we read: an approver's queue must say how many
+        # are waiting, not how many fitted in one read. The count is of records in
+        # review the user may see; segregation of duties may still exclude a few.
+        ctx.exact_counts["record_review"] = int(
+            await db.scalar(select(func.count()).select_from(branches.subquery())) or 0
+        )
     ids = [r.id for r in rows]
     present = sorted({r.entity_type for r in rows})
     routed = {
@@ -462,8 +486,13 @@ async def records_in_review(db: AsyncSession, ctx: Ctx) -> list[MyWorkItem]:
             db, ctx, rules[r.entity_type][1], r.entity_type, "approve", (makers[0],),
         ):
             continue
-        # Approving may still be refused (not ready, or above the mandate); returning isn't.
-        note = _approve_note(await lifecycle_gates.write_back_refusal(db, r.entity_type, r.id, ctx.user))
+        # Approving may still be refused (not ready, or above the mandate, or nobody is
+        # recorded as its maker); returning isn't.
+        if required[r.entity_type] and makers == (None, None):
+            note = _approve_note(record_workflow.UNATTRIBUTED_REFUSAL.format(
+                label=record_registry.type_label(r.entity_type).lower()))
+        else:
+            note = _approve_note(await lifecycle_gates.write_back_refusal(db, r.entity_type, r.id, ctx.user))
         out.append(ctx.mk(
             "record_review", id=r.id, title=r.title or r.reference or "Untitled record",
             reference=r.reference or "", subtitle=record_registry.type_label(r.entity_type),
@@ -1553,7 +1582,7 @@ async def my_work(db: AsyncSession, user: Any, today: date | None = None) -> MyW
     # Backstop for every section: an item about a record in a module this organisation
     # can't use would deep-link to a locked page, so it is not work it can do.
     found = {kind: [i for i in items if not _entity_off(ctx, i.entity_type)] for kind, items in found.items()}
-    return assemble(user.id, today, found)
+    return assemble(user.id, today, found, ctx.exact_counts)
 
 
 # ================================================================ quick action ===

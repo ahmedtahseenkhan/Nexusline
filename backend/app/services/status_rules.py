@@ -11,6 +11,7 @@ from sqlalchemy import Enum as SAEnum
 from app.models.aml import AmlRiskAssessment, ScreeningCase, SuspiciousActivityReport
 from app.models.asset import Asset
 from app.models.compliance import Requirement
+from app.models.enums import Criticality
 from app.models.continuity import ContinuityPlan
 from app.models.evidence import Evidence
 from app.models.control import Control
@@ -59,6 +60,19 @@ VALUELESS_OPERATORS: frozenset[str] = frozenset({"overdue", "is_true", "is_false
 
 _SKIP = {"id", "tenant_id", "created_at", "updated_at"}
 
+#: Computed values a rule may test beside the table's own columns — the figure the
+#: register shows rather than a stored input. An asset's stored ``criticality`` is set by
+#: no form, so a rule on it never agreed with the "Effective criticality" column; the
+#: shipped "Critical Asset" label tests this instead. Same shape as a column entry.
+EXTRA_FIELDS: dict[str, list[dict]] = {
+    "asset": [
+        {
+            "key": "effective_criticality", "type": "enum", "label": "Effective Criticality",
+            "options": [c.value for c in Criticality],
+        },
+    ],
+}
+
 
 def _field_type(col) -> str | None:
     t = col.type
@@ -88,7 +102,23 @@ def evaluable_fields(model: str) -> list[dict]:
         if ftype == "enum" and isinstance(col.type, SAEnum):
             info["options"] = list(col.type.enums)
         out.append(info)
+    out.extend(dict(f) for f in EXTRA_FIELDS.get(model, []))
     return out
+
+
+def load_options(cls: type, rules) -> tuple:
+    """Loader options for reading ``cls`` rows only to evaluate ``rules``: every eagerly
+    mapped relationship left unloaded except what a computed field a rule tests reads
+    (``schema_loading.PROPERTY_READS``). Evaluating a page of assets otherwise loaded all
+    twenty-eight of each asset's relationships — seconds per list page at bank scale."""
+    from app.core.schema_loading import PROPERTY_READS, options_for
+
+    reads: set[str] = set()
+    for klass in cls.__mro__:
+        table = PROPERTY_READS.get(klass.__name__, {})
+        for rule in rules:
+            reads.update(table.get(rule.field, ()))
+    return options_for(cls, None, tuple(sorted(reads)))
 
 
 def field_keys(model: str) -> set[str]:

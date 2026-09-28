@@ -13,8 +13,9 @@ across pooled connections.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
@@ -72,6 +73,27 @@ class Base(DeclarativeBase):
     """Declarative base for all ORM models."""
 
 
+#: A tighter cap for the code inside :func:`shallow_loads`, else None (the setting).
+_EAGER_DEPTH: ContextVar[int | None] = ContextVar("eager_depth", default=None)
+
+
+@contextmanager
+def shallow_loads(depth: int = 1) -> Iterator[None]:
+    """Cap eager loading ``depth`` links from each record loaded inside the block.
+
+    For code that loads whole records but reads only their columns and their direct
+    links — the alert scan, a workflow transition, an archive or restore. Under the
+    default cap such a load walked the link graph: an overdue control brought its
+    protected assets and every asset brought its twenty-eight links, so one scan ran
+    ~900 statements. At depth 1 a record's own links load and their links do not (read
+    one of those and it is a lazy load, which must happen inside ``run_sync``)."""
+    token = _EAGER_DEPTH.set(depth)
+    try:
+        yield
+    finally:
+        _EAGER_DEPTH.reset(token)
+
+
 @event.listens_for(Session, "do_orm_execute")
 def _cap_eager_depth(state: ORMExecuteState) -> None:
     """Stop eager loading ``settings.orm_eager_depth`` relationships away from the record
@@ -89,7 +111,8 @@ def _cap_eager_depth(state: ORMExecuteState) -> None:
         return
     path = state.loader_strategy_path
     depth = len(path.path) // 2 if path is not None else 0
-    if depth >= settings.orm_eager_depth:
+    cap = _EAGER_DEPTH.get()
+    if depth >= (cap if cap is not None else settings.orm_eager_depth):
         # A refresh (populate_existing, re-reading a record after a write) would also
         # repopulate objects already in the session — the signed-in user's roles among
         # them — and the cap would leave their relationships unloaded, so the next

@@ -230,6 +230,11 @@ ACTION_LINKS: dict[str, str] = {
     "acceptances_expiring": "/risks",
     "reviews_overdue": href("/risks", review="overdue"),
     "policies_overdue": href("/policies", review="overdue"),
+    # The asset registers read the same filters from the link as from their toolbars.
+    "it_asset_reviews_overdue": href("/it-assets", review_overdue=True),
+    "info_asset_reviews_overdue": href("/information-assets", review_overdue=True),
+    "it_assets_in_review": href("/it-assets", workflow_status="in_review"),
+    "info_assets_in_review": href("/information-assets", workflow_status="in_review"),
     "acceptances_pending": "/approvals",
     "not_assessed": href("/controls", assurance="not_assessed"),
 }

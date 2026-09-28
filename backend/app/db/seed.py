@@ -1253,7 +1253,7 @@ async def _seed_sample_data(db: AsyncSession, tenant_id, admin: User) -> None:
                        value="accepted", label="Accepted", color="#2563eb", priority=3),
             StatusRule(tenant_id=tenant_id, model="control", field="next_audit_date", operator="overdue",
                        value="", label="Audit Overdue", color="#d97706", priority=1),
-            StatusRule(tenant_id=tenant_id, model="asset", field="criticality", operator="eq",
+            StatusRule(tenant_id=tenant_id, model="asset", field="effective_criticality", operator="eq",
                        value="critical", label="Critical Asset", color="#dc2626", priority=1),
             StatusRule(tenant_id=tenant_id, model="asset", field="next_review_date", operator="overdue",
                        value="", label="Review Overdue", color="#d97706", priority=2),

@@ -29,7 +29,7 @@ import csv
 import io
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
@@ -308,10 +308,14 @@ async def _example_reference(db: DbSession, link: LinkSpec) -> str:
 
 @router.get("/{resource}/export")
 async def export_resource(
-    resource: str, db: DbSession, user: CurrentUser, format: str = _FORMAT
+    resource: str, db: DbSession, user: CurrentUser, request: Request, format: str = _FORMAT,
 ) -> dict:
+    """Every row of the register — or, given the register's own list filters in the
+    query string (``search``, ``environment`` …) or ``ids`` (comma-separated), only the
+    rows the user is looking at."""
     res = _get_resource(resource)
     _require_perm(user, res.read_perm)
+    params = dict(request.query_params)
 
     model = res.model
     stmt = select(model)
@@ -322,16 +326,26 @@ async def export_resource(
         stmt = stmt.where(getattr(model, attr) == value)
     if res.export_where is not None:
         stmt = stmt.where(*res.export_where())
-    # Eager-load every relationship a link column reads so rendering avoids lazy IO.
-    options = []
-    for col in res.all_columns:
-        link = col.link
-        if link is not None and link.exportable and col.export_batch is None:
-            first = link.export_attr.split(".")[0]
-            if _is_relationship(model, first):
-                options.append(selectinload(getattr(model, first)))
-    if options:
-        stmt = stmt.options(*options)
+    if res.export_filters is not None:
+        stmt = stmt.where(*res.export_filters(params))
+    if params.get("ids"):
+        try:
+            wanted = [uuid.UUID(v.strip()) for v in params["ids"].split(",") if v.strip()]
+        except ValueError:
+            raise HTTPException(status_code=422, detail="ids must be comma-separated record ids.") from None
+        stmt = stmt.where(model.id.in_(wanted))
+    # Load the relationships the link columns read — each one's whole dotted path, so
+    # ``hosted_dependencies.information_asset`` brings the information assets and not
+    # just the dependencies — and nothing else: a register's rows map twenty-odd eager
+    # relationships, and loading all of them for every exported row made a 6,000-asset
+    # export take over a minute. Anything a column reads beyond these paths is
+    # lazy-loaded while the rows are built (below), never a failed request.
+    paths = tuple(sorted({
+        col.link.export_attr for col in res.all_columns
+        if col.link is not None and col.link.exportable and col.export_batch is None
+        and _is_relationship(model, col.link.export_attr.split(".")[0])
+    }))
+    stmt = stmt.options(*options_for(model, None, paths))
 
     records = (await db.scalars(stmt)).all()
     linked = await _prefetch_links(db, res, records)
@@ -343,24 +357,29 @@ async def export_resource(
     custom = await _custom_columns(db, res)
     values = await _custom_values(db, custom, [obj.id for obj in records])
 
-    rows: list[dict] = []
-    for obj in records:
-        row: dict[str, object] = {}
-        for col in res.all_columns:
-            if col.export_batch is not None:
-                row[col.header] = batches[col.header].get(obj.id, "")
-            elif col.export_value is not None:
-                row[col.header] = col.export_value(obj)
-            elif col.link is not None:
-                row[col.header] = _export_link(
-                    obj, col.link, linked.get(col.header), shared.get(col.link.target_model, frozenset())
-                )
-            else:
-                row[col.header] = getattr(obj, col.field, None)
-        for col, cf in custom:
-            raw = values.get((cf.id, obj.id), "")
-            row[col.header] = _typed_custom(col, raw) if format == "xlsx" else raw
-        rows.append(row)
+    def build_rows(_session) -> list[dict]:
+        rows: list[dict] = []
+        for obj in records:
+            row: dict[str, object] = {}
+            for col in res.all_columns:
+                if col.export_batch is not None:
+                    row[col.header] = batches[col.header].get(obj.id, "")
+                elif col.export_value is not None:
+                    row[col.header] = col.export_value(obj)
+                elif col.link is not None:
+                    row[col.header] = _export_link(
+                        obj, col.link, linked.get(col.header), shared.get(col.link.target_model, frozenset())
+                    )
+                else:
+                    row[col.header] = getattr(obj, col.field, None)
+            for col, cf in custom:
+                raw = values.get((cf.id, obj.id), "")
+                row[col.header] = _typed_custom(col, raw) if format == "xlsx" else raw
+            rows.append(row)
+        return rows
+
+    # Built where a relationship the options left unloaded can still be lazy-loaded.
+    rows = await db.run_sync(build_rows)
 
     columns = [*res.all_columns, *(col for col, _ in custom)]
     return _file_payload(res, "export", format, columns, rows)
@@ -388,7 +407,16 @@ async def _prefetch_links(
         target_ids = {tid for _, tid in pairs}
         found = {}
         if target_ids:
-            rows = (await db.scalars(_scoped(select(target), target, link).where(target.id.in_(target_ids)))).all()
+            # The targets are rendered by one column (``match_field``), so load none of
+            # their relationships: a control's protected assets arrived with every one of
+            # each asset's twenty-eight links, and ninety controls exported in eighty
+            # seconds. Anything a label reads beyond the row lazy-loads while rows build.
+            stmt = (
+                _scoped(select(target), target, link)
+                .where(target.id.in_(target_ids))
+                .options(*options_for(target, None, ()))
+            )
+            rows = (await db.scalars(stmt)).all()
             found = {t.id: t for t in rows}
         per_record: dict[object, list] = {}
         for rid, tid in pairs:

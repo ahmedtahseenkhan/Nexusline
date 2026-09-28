@@ -151,6 +151,14 @@ const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey]
 const CRIT = opts(["low", "medium", "high", "critical"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const ENVIRONMENT = opts(["production", "dr", "uat", "staging", "development", "not_applicable"]);
+// Register filters. Six thousand rows need narrowing beyond search: where an asset
+// runs, how critical it is (the effective value the column shows) and its approval state.
+const CRIT_FILTER = opts(["low", "medium", "high", "critical"]);
+const WORKFLOW_FILTER: Option[] = [
+  { value: "draft", label: "Draft" }, { value: "in_review", label: "In review" },
+  { value: "approved", label: "Approved" }, { value: "retired", label: "Retired" },
+];
+const REVIEW_FILTER: Option[] = [{ value: "overdue", label: "Review overdue" }];
 const DISCOVERY = opts(["manual", "active_directory", "intune_mdm", "cmdb", "network_scan", "cloud_connector", "edr", "import_csv"]);
 const RELATIONSHIP = opts(["hosts", "stores", "processes", "transmits", "backs_up"]);
 const CRIT_TONE: Record<string, Tone> = { low: "low", medium: "medium", high: "high", critical: "critical" };
@@ -233,6 +241,27 @@ function ITAssetsInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [envFilter, setEnvFilter] = useState("");
+  const [critFilter, setCritFilter] = useState("");
+  const [wfFilter, setWfFilter] = useState("");
+  const [overdueFilter, setOverdueFilter] = useState("");
+  // What the table shows, so Export carries exactly those rows.
+  const [view, setView] = useState<{ search: string; filters: Record<string, string | number | boolean | undefined>; total: number } | null>(null);
+  const exportQuery = useMemo(() => {
+    const p = new URLSearchParams();
+    if (view?.search) p.set("search", view.search);
+    for (const [k, v] of Object.entries(view?.filters ?? {})) if (v !== undefined && v !== "" && v !== false) p.set(k, String(v));
+    return p.toString();
+  }, [view]);
+  // Filters arrive in the link too — "1,560 IT assets have reviews overdue" opens the
+  // register filtered to them (?review_overdue=true). Read once, on arrival.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("environment")) setEnvFilter(p.get("environment") as string);
+    if (p.get("effective_criticality")) setCritFilter(p.get("effective_criticality") as string);
+    if (p.get("workflow_status")) setWfFilter(p.get("workflow_status") as string);
+    if (p.get("review_overdue") === "true") setOverdueFilter("overdue");
+  }, []);
   const { currency, currencyOptions, formatDate, formatMoney } = useFormat();
 
   const [mediaTypes, setMediaTypes] = useState<MediaType[]>([]);
@@ -664,7 +693,7 @@ function ITAssetsInner() {
           <p>Supporting assets — hardware, software and network. Judged on cost and availability, with criticality inheriting from the information assets they host.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <ImportExport resource="it-assets" label="IT Assets"
+          <ImportExport resource="it-assets" label="IT Assets" exportQuery={exportQuery} exportCount={view?.total}
             onDone={() => { setRefreshKey((k) => k + 1); loadSummary(); }} />
           <GenerateRisks assetClass="it_asset" label="IT assets" />
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add IT asset</button>
@@ -674,10 +703,10 @@ function ITAssetsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <div className="grid stat-grid">
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.total ?? 0).toLocaleString()}</span></div><span className="l">IT assets</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.effective_critical ?? 0).toLocaleString()}</span></div><span className="l">Effective-critical</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.production ?? 0).toLocaleString()}</span></div><span className="l">Production assets</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{formatMoney(summary?.total_replacement_value ?? 0, summary?.replacement_value?.reporting_currency, { compact: "auto" })}</span></div><span className="l">Total replacement value</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.total.toLocaleString() : "…"}</span></div><span className="l">IT assets</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.effective_critical.toLocaleString() : "…"}</span></div><span className="l">Effective-critical</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.production.toLocaleString() : "…"}</span></div><span className="l">Production assets</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_replacement_value ?? 0, summary.replacement_value?.reporting_currency, { compact: "auto" }) : "…"}</span></div><span className="l">Total replacement value</span></div>
       </div>
 
       {unconvertedNote(summary?.replacement_value) && (
@@ -689,6 +718,17 @@ function ITAssetsInner() {
       <DataTable<Asset>
         toolbarRight={<ArchivedRecords entityType="asset" noun="assets" onRestored={() => { setRefreshKey((k) => k + 1); loadSummary(); }} refreshKey={refreshKey} />}
         tableKey="it-assets"
+        filters={{ environment: envFilter || undefined, effective_criticality: critFilter || undefined, workflow_status: wfFilter || undefined, review_overdue: overdueFilter ? true : undefined }}
+        onApplyFilters={(f) => { setEnvFilter(String(f.environment ?? "")); setCritFilter(String(f.effective_criticality ?? "")); setWfFilter(String(f.workflow_status ?? "")); setOverdueFilter(f.review_overdue ? "overdue" : ""); }}
+        onViewChange={setView}
+        toolbarLeft={
+          <>
+            <Select value={envFilter} onChange={setEnvFilter} options={ENVIRONMENT} placeholder="All environments" />
+            <Select value={critFilter} onChange={setCritFilter} options={CRIT_FILTER} placeholder="Any criticality" />
+            <Select value={wfFilter} onChange={setWfFilter} options={WORKFLOW_FILTER} placeholder="Any approval state" />
+            <Select value={overdueFilter} onChange={setOverdueFilter} options={REVIEW_FILTER} placeholder="Any review state" />
+          </>
+        }
         statusModel="asset"
         bulkActions={(rows, clear) => (
           <>
@@ -701,7 +741,7 @@ function ITAssetsInner() {
         rowKey={(a) => a.id}
         onRowClick={(a) => setOpenId(a.id)}
         activeKey={openId}
-        searchPlaceholder="Search IT assets by name, hostname or owner…"
+        searchPlaceholder="Search IT assets by name, hostname, IP address or owner…"
         defaultSort={{ by: "name", dir: "asc" }}
         emptyMessage="No IT assets yet. Add hardware, software and network assets to build the supporting-asset inventory."
         refreshKey={refreshKey}

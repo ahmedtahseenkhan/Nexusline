@@ -457,12 +457,16 @@ async def clear_asset_removed(db, asset) -> int:
 
     from app.models.risk import Risk, risk_assets
 
+    from app.core.schema_loading import options_for
+
     reason = ASSET_REMOVED_REASON.format(name=asset.name)
+    # Only the review columns change: load none of the risks' links (each risk's linked
+    # assets, with theirs, made restoring one asset take tens of seconds).
     risks = (
         await db.scalars(
             select(Risk).join(risk_assets, risk_assets.c.risk_id == Risk.id).where(
                 risk_assets.c.asset_id == asset.id, Risk.deleted.is_(False)
-            )
+            ).options(*options_for(Risk, None))
         )
     ).all()
     changed = 0
@@ -736,6 +740,10 @@ async def scan_orphans(db) -> OrphanScan:
 
 # ------------------------------------------------------------- asset removal
 async def live_risks_for_assets(db, asset_ids: Sequence[uuid.UUID]) -> list:
+    """Live risks written against any of ``asset_ids``, without their links — callers
+    flag them (columns) and name them. Loading each risk's linked assets, and theirs,
+    made archiving one asset take minutes when a risk sat on the whole estate."""
+    from app.core.schema_loading import options_for
     from app.models.risk import Risk, risk_assets
 
     if not asset_ids:
@@ -747,6 +755,7 @@ async def live_risks_for_assets(db, asset_ids: Sequence[uuid.UUID]) -> list:
                 .join(risk_assets, risk_assets.c.risk_id == Risk.id)
                 .where(risk_assets.c.asset_id.in_(list(asset_ids)), Risk.deleted.is_(False))
                 .distinct()
+                .options(*options_for(Risk, None))
             )
         ).all()
     )

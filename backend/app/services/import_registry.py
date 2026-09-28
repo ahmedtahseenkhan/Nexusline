@@ -308,6 +308,9 @@ class ResourceIO:
     #: Extra export criteria, called at export time. Rows the importer could never take
     #: back (a finding of an archived audit) are left out rather than exported to fail.
     export_where: Callable[[], list[Any]] | None = None
+    #: The register's own list filters, from the export request's query string
+    #: (``{name: value}``) — so "export" exports the rows the user filtered to.
+    export_filters: Callable[[dict[str, str]], list[Any]] | None = None
     #: Per-row adjustment of the import payload, before validation, for values the
     #: product derives and an export carries (a control's tested effectiveness). Returns
     #: the row warnings to report; runs in preview and import alike.
@@ -1003,13 +1006,42 @@ _register(ResourceIO(
 # discriminated by `asset_class`. Each gets its own resource so the CSV headers match
 # the register the user is loading, and so `fixed` stamps the class on every imported
 # row — otherwise every import silently lands as information_asset (the column default).
+def _asset_export_filters(params: dict[str, str]) -> list[Any]:
+    """The register's list filters, from the export request's query string (the same
+    names ``GET /assets`` takes), so an export carries exactly the rows on screen. A
+    value that isn't one of the choices is refused rather than ignored."""
+    from fastapi import HTTPException
+
+    from app.api.v1.assets import asset_filters
+    from app.models.enums import WorkflowStatus as _WS
+
+    def choice(key: str, enum_cls: type[Enum]):
+        raw = (params.get(key) or "").strip()
+        if not raw:
+            return None
+        try:
+            return enum_cls(raw)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=(
+                f"'{raw}' is not a {key.replace('_', ' ')}. Use one of: {', '.join(_enum_vals(enum_cls))}."
+            )) from None
+
+    overdue = (params.get("review_overdue") or "").strip().lower()
+    return asset_filters(
+        search=(params.get("search") or "").strip() or None,
+        review_overdue=overdue in ("1", "true", "yes"),
+        environment=choice("environment", AssetEnvironment),
+        effective_criticality=choice("effective_criticality", Criticality),
+        workflow_status=choice("workflow_status", _WS),
+    )
+
+
 _ASSET_SHARED_COLUMNS = [
     text("name", required=True),
     text("description"),
     enum_col("confidentiality", Criticality),
     enum_col("integrity", Criticality),
     enum_col("availability", Criticality),
-    enum_col("criticality", Criticality),
     text("potential_liabilities"),
     text("location"),
     integer("rto_hours", help="Recovery time objective, hours"),
@@ -1018,6 +1050,42 @@ _ASSET_SHARED_COLUMNS = [
     date_col("next_review_date"),
     enum_col("workflow_status", WorkflowStatus),
 ]
+
+def _crit_cell(attr: str) -> Callable[[Any], str]:
+    def cell(asset: Any) -> str:
+        value = getattr(asset, attr, None)
+        return str(getattr(value, "value", value) or "")
+    return cell
+
+
+#: The criticality the register shows, exported as evidence and never imported: it is
+#: computed (an information asset's business value; an IT asset's cost band,
+#: availability and hosted data), so a file cannot set it. The stored ``criticality``
+#: column it replaces was an input no form set, and a workbook handed to an auditor
+#: showed it in place of what the screen calls criticality.
+_EFFECTIVE_CRITICALITY = Column(
+    header="effective_criticality", field="effective_criticality",
+    export_value=_crit_cell("effective_criticality"), match_on_field=False,
+    help="Computed by the platform (read-only): ignored on import.",
+)
+_IT_CRITICALITY_INPUTS = [
+    Column(header="intrinsic_criticality", field="intrinsic_criticality",
+           export_value=_crit_cell("intrinsic_criticality"), match_on_field=False,
+           help="Computed from replacement cost and availability (read-only): ignored on import."),
+    Column(header="derived_criticality", field="derived_criticality",
+           export_value=_crit_cell("derived_criticality"), match_on_field=False,
+           help="Inherited from the information assets it hosts (read-only): ignored on import."),
+]
+_COMPUTED_CRITICALITY = ("effective_criticality", "intrinsic_criticality", "derived_criticality")
+
+
+def _ignore_computed_criticality(payload: dict[str, Any]) -> list[str]:
+    """Drop the exported, computed criticality columns from an import row: the platform
+    derives them. An exported file carries them on every row, so no warning."""
+    for key in _COMPUTED_CRITICALITY:
+        payload.pop(key, None)
+    return []
+
 
 def _classification_label(value: Any) -> str:
     kind = getattr(getattr(value, "type", None), "name", "") or ""
@@ -1048,6 +1116,9 @@ _register(ResourceIO(
     create_schema=AssetCreate, create_func=create_asset,
     read_perm="asset:read", write_perm="asset:write", importable=True,
     fixed={"asset_class": AssetClass.information_asset},
+    derived=[_EFFECTIVE_CRITICALITY],
+    prepare=_ignore_computed_criticality,
+    export_filters=_asset_export_filters,
     columns=[
         *_ASSET_SHARED_COLUMNS,
         # Primary-asset attributes: what the data is worth and who owns it.
@@ -1118,7 +1189,11 @@ _register(ResourceIO(
                  "hosted_dependencies.information_asset",
                  scope=(("asset_class", AssetClass.information_asset),),
                  help="Comma-separated names of the information assets this asset hosts"),
+        _EFFECTIVE_CRITICALITY,
+        *_IT_CRITICALITY_INPUTS,
     ],
+    prepare=_ignore_computed_criticality,
+    export_filters=_asset_export_filters,
 ))
 
 # ----- vendors -------------------------------------------------------------

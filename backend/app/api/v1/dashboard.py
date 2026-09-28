@@ -7,6 +7,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 
+from app.core.database import shallow_loads
 from app.core.deps import DbSession, require
 from app.models.asset import Asset
 from app.models.control import Control
@@ -200,6 +201,11 @@ QUEUE: tuple[tuple[str, str, str, str], ...] = (
     ("acceptances_expiring", "risk acceptance", "expiring within 30 days", "warning"),
     ("reviews_overdue", "risk review", "overdue", "warning"),
     ("policies_overdue", "policy review", "overdue", "warning"),
+    # The asset registers (the dashboard showed none of a bank's 6-10,000 assets).
+    ("it_asset_reviews_overdue", "IT asset review", "overdue", "warning"),
+    ("info_asset_reviews_overdue", "information asset review", "overdue", "warning"),
+    ("it_assets_in_review", "IT asset", "awaiting approval", "info"),
+    ("info_assets_in_review", "information asset", "awaiting approval", "info"),
     ("acceptances_pending", "risk acceptance", "awaiting a decision", "info"),
     ("not_assessed", "control", "never tested", "info"),
 )
@@ -221,6 +227,15 @@ def action_items(counts: dict[str, int]) -> list[ActionItem]:
 async def get_overview(
     db: DbSession, user: CurrentUser, days: int = Query(default=30, ge=7, le=366)
 ) -> DashboardOverview:
+    """The dashboard's single payload. Every record it loads is read for its columns and
+    its direct links (a requirement's coverage reads its controls' ratings), never
+    further: at the default depth a requirement's controls brought their protected
+    assets and each asset its twenty-eight links — 600+ statements, ten seconds."""
+    with shallow_loads(1):
+        return await _overview(db, user, days)
+
+
+async def _overview(db, user, days: int) -> DashboardOverview:
     settings = await get_or_create_settings(db, user.tenant_id)
     # Severity follows the tenant's bands and cell overrides (the heat map's colours);
     # appetite and tolerance follow each risk's level-1 category, else the organisation's.
@@ -450,7 +465,21 @@ async def get_overview(
         + await _count(db, incidents_open_stmt.where(Incident.tat_breached_at.is_not(None)))
         + await _count(db, select(AuditFinding.id).where(AuditFinding.status.in_(_OPEN_FINDING), AuditFinding.tat_breached_at.is_not(None)))
     )
+    # Asset registers — for a reader of assets: overdue reviews and records awaiting
+    # approval per register, each line opening that register filtered to them.
+    asset_counts: dict[str, int] = {}
+    if "asset:read" in set(user.permission_codes):
+        from app.models.asset import Asset
+        from app.models.enums import AssetClass
+
+        for prefix, cls in (("it", AssetClass.it_asset), ("info", AssetClass.information_asset)):
+            live_cls = (Asset.deleted.is_(False), Asset.asset_class == cls)
+            asset_counts[f"{prefix}_asset_reviews_overdue"] = await _count(
+                db, select(Asset.id).where(*live_cls, Asset.next_review_date < today))
+            asset_counts[f"{prefix}_assets_in_review"] = await _count(
+                db, select(Asset.id).where(*live_cls, Asset.workflow_status == "in_review"))
     actions = action_items({
+        **asset_counts,
         "breach": appetite_counts["breach"], "tat": tat_breached, "tests_failed": last_failed,
         "findings_overdue": findings_overdue, "issues_overdue": issues_overdue,
         "treatments_overdue": risks_treatment_overdue, "tests_overdue": tests_overdue,

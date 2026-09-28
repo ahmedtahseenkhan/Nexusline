@@ -28,7 +28,7 @@ from typing import Any
 from pydantic import AliasChoices, BaseModel
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defaultload, joinedload, lazyload, selectinload
+from sqlalchemy.orm import defaultload, joinedload, lazyload, noload, selectinload
 
 # Strategies that load a relationship with its parent: the ones made lazy when nothing
 # reads them.
@@ -147,12 +147,16 @@ def _needs(model: type, schema: type[BaseModel], trail: frozenset) -> _Tree:
     return tree
 
 
-def _options(model: type, tree: _Tree) -> list:
-    """Load the relationships in ``tree`` (and what they need), lazy-load the others."""
+def _options(model: type, tree: _Tree, skip: frozenset[str] = frozenset()) -> list:
+    """Load the relationships in ``tree`` (and what they need), lazy-load the others.
+    A relationship in ``skip`` loads as nothing: reading it gives an empty collection
+    and runs no query."""
     options = []
     for rel in inspect(model).relationships:
         attr = getattr(model, rel.key)
-        if rel.key in tree:
+        if rel.key in skip:
+            options.append(noload(attr))
+        elif rel.key in tree:
             below = _options(rel.mapper.class_, tree[rel.key])
             if rel.lazy == "joined":
                 loader = joinedload(attr)
@@ -167,17 +171,27 @@ def _options(model: type, tree: _Tree) -> list:
 
 
 @cache
-def options_for(model: type, schema: type[BaseModel] | None, also: tuple[str, ...] = ()) -> tuple:
+def options_for(
+    model: type, schema: type[BaseModel] | None, also: tuple[str, ...] = (), skip: tuple[str, ...] = ()
+) -> tuple:
     """Loader options for a query of ``model`` rows that will be serialised as ``schema``.
 
     ``also`` names further relationships, as dotted paths from ``model``, that the
     endpoint reads itself (outside ``serialize_all``), e.g. ``("controls.audit_findings",)``.
     With no ``schema`` only those are loaded — for code that reads rows by hand.
+
+    ``skip`` names relationships the schema reads but this response leaves empty on
+    purpose — a list that reports ``asset_count`` instead of every linked asset. They
+    are loaded as nothing (no query, an empty collection), which is the only way to stop
+    the load: SQLAlchemy refuses a later ``noload`` over the ``selectinload`` the walk
+    would otherwise emit for them.
     """
     tree = _needs(model, schema, frozenset()) if schema is not None else {}
     for dotted in also:
         _merge(tree, _path(dotted))
-    return tuple(_options(model, tree))
+    for name in skip:
+        tree.pop(name, None)
+    return tuple(_options(model, tree, frozenset(skip)))
 
 
 async def serialize_all(

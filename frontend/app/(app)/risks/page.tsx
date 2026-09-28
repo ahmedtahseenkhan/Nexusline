@@ -207,7 +207,10 @@ type RiskRow = {
 
   business_units: Ref[];
   processes: Ref[];
+  /** The register leaves ``assets`` empty and reports the count: a risk on a bank's
+   *  whole estate links thousands, and a list row is not the place to carry them. */
   assets: Ref[];
+  asset_count?: number;
   /** B2: each control's rating, basis and test record on the single-record read. */
   controls: RiskControlRef[];
   threats: Ref[];
@@ -1521,14 +1524,22 @@ function RisksPage() {
   /* Inline relation chips. Each links to the record's own page, the same way the
      drawer's related-record chips do — the list is the workbench, so the graph has to
      be walkable from it. */
+  // A row shows at most a dozen links; the rest is a count. A control on every endpoint
+  // once rendered thousands of chips per row and pushed the row's text off the screen.
+  const MAX_CHIPS = 12;
   const linkChips = (items: Ref[] | undefined, href: string) =>
     items && items.length ? (
       <div className="chips" onClick={(e) => e.stopPropagation()}>
-        {items.map((x) => (
+        {items.slice(0, MAX_CHIPS).map((x) => (
           <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{x.name || x.title || x.reference || x.id}</Link>
         ))}
+        {items.length > MAX_CHIPS && <span className="chip">+{(items.length - MAX_CHIPS).toLocaleString()} more</span>}
       </div>
     ) : <span className="muted">—</span>;
+  const assetCell = (r: RiskRow) =>
+    r.assets?.length ? linkChips(r.assets, "/information-assets")
+      : r.asset_count ? <span className="muted">{r.asset_count.toLocaleString()} {r.asset_count === 1 ? "asset" : "assets"}</span>
+      : <span className="muted">—</span>;
   const names = (items: Ref[] | undefined) => (items ?? []).map((x) => x.name || x.title || x.reference || "").join(", ");
   const rungLabel = (axis: "likelihood" | "impact", n: number | null) => {
     if (!n) return "—";
@@ -1563,7 +1574,7 @@ function RisksPage() {
     { key: "owner", header: "Owner", render: (r) => <span className="muted"><UserName user={r.owner_ref} /></span>, text: (r) => personText(r.owner_ref) },
     { key: "business_units", header: "Business units", render: (r) => linkChips(r.business_units, "/business-units"), text: (r) => names(r.business_units) },
     { key: "processes", header: "Processes", hidden: true, render: (r) => linkChips(r.processes, "/processes"), text: (r) => names(r.processes) },
-    { key: "assets", header: "Assets", render: (r) => linkChips(r.assets, "/information-assets"), text: (r) => names(r.assets) },
+    { key: "assets", header: "Assets", render: assetCell, text: (r) => r.assets?.length ? names(r.assets) : r.asset_count ? `${r.asset_count} assets` : "" },
     { key: "controls", header: "Controls", render: (r) => linkChips(r.controls, "/controls"), text: (r) => names(r.controls) },
     { key: "policies", header: "Policies", hidden: true, render: (r) => linkChips(r.policies, "/policies"), text: (r) => names(r.policies) },
     { key: "threats", header: "Threats", hidden: true, render: (r) => linkChips(r.threats, "/threat-library"), text: (r) => names(r.threats) },

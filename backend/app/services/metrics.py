@@ -69,9 +69,11 @@ async def _count(db: AsyncSession, model, *conds) -> int:
     return await db.scalar(stmt) or 0
 
 
-async def _breakdown(db: AsyncSession, col) -> list[dict]:
-    model = col.class_
-    stmt = select(col, func.count())
+async def _breakdown(db: AsyncSession, col, model: type | None = None) -> list[dict]:
+    """Counts of live rows per value of ``col`` — a column, or an expression over
+    ``model``'s columns."""
+    model = model or col.class_
+    stmt = select(col, func.count()).select_from(model)
     if hasattr(model, "deleted"):
         stmt = stmt.where(model.deleted.is_(False))
     rows = (await db.execute(stmt.group_by(col))).all()
@@ -144,12 +146,18 @@ async def compute(db: AsyncSession, key: str, tenant_id) -> dict:
         model, *conds = scalars[key]
         return {"kind": "scalar", "value": await _count(db, model, *conds), "series": None}
 
+    if key == "assets_by_criticality":
+        # By the criticality the register shows (computed), not the stored input no form
+        # sets — which put every real asset under "medium".
+        from app.api.v1.assets import effective_criticality_expr
+
+        return {"kind": "breakdown", "value": None,
+                "series": await _breakdown(db, effective_criticality_expr(), model=Asset)}
     breakdowns = {
         "risks_by_status": Risk.status,
         "controls_by_status": Control.status,
         "incidents_by_status": Incident.status,
         "compliance_by_status": Requirement.status,
-        "assets_by_criticality": Asset.criticality,
         "projects_by_status": Project.status,
     }
     if key in breakdowns:

@@ -1,6 +1,8 @@
-# NexusLine GRC — Complete User & Administrator Guide
+# NexusLine GRC — User Guide
 
-*How every module works, how to use it, and how the modules connect to each other. Written from a direct code audit on 2026-07-05 — every field, status, and button named below actually exists in the app today. Sections marked ⚠ call out things that look automatic but currently require a manual step, so you don't design a process around a connection that isn't wired up yet.*
+*How every module works, how to use it, and how the modules connect to each other. Written from a direct code audit on 2026-07-05 and updated since — every field, status, and button named below actually exists in the app today. Sections marked ⚠ call out things that look automatic but currently require a manual step, so you don't design a process around a connection that isn't wired up yet.*
+
+> **Setting NexusLine up for a bank?** The [Administrator & Configuration Manual](admin-guide.md) covers installation, the licence and modules, users and roles, sign-in (MFA, SSO, LDAP), e-mail, lists, frameworks, the risk methodology, maker-checker rules, approval routes, turnaround times, integrations, data migration and a go-live checklist, step by step.
 
 ---
 
@@ -9,6 +11,12 @@
 1. [What NexusLine is](#1-what-nexusline-is)
 2. [Getting started](#2-getting-started)
 3. [Concepts that apply to every module](#3-concepts-that-apply-to-every-module)
+    - 3b. [How every register works](#3b-how-every-register-works)
+    - 3c. [The dashboard](#3c-the-dashboard)
+    - 3d. [Rules that keep the numbers honest](#3d-rules-that-keep-the-numbers-honest)
+    - 3e. [Picked, not typed: owners, lists and the approval lifecycle](#3e-picked-not-typed-owners-lists-and-the-approval-lifecycle)
+    - 3f. [Record depth](#3f-record-depth) — issues, controls, risks, third parties, incidents, KRIs, policies
+    - 3g. [Working day to day](#3g-working-day-to-day) — setup, navigation, risk candidates, board packs, crosswalks, monitoring feeds, My Work and alerts
 4. [How the sidebar is organized](#4-how-the-sidebar-is-organized)
 5. [Overview](#5-overview) — Dashboard, Reports & KPIs, Strategy & Goals, AI Assist
 6. [Risk](#6-risk) — 12 modules
@@ -48,25 +56,14 @@ The login screen asks for three things: **Organization** (your bank's short slug
 
 **There is no self-signup.** A brand-new user cannot register themselves. An account is created one of two ways:
 
-1. An **administrator manually creates you** under Users & Roles ([§9.4](#94-users--roles-organization)), typing your email, name, an initial password, and your role(s).
+1. An **administrator manually creates you** under Users & Roles ([§9.4](#users--roles-organization)), typing your email, name, an initial password, and your role(s).
 2. If your bank has LDAP or SSO with **just-in-time provisioning** enabled, your account is created automatically the first time you successfully sign in through the directory/IdP.
 
-New bank (tenant) onboarding itself is done by whoever operates the platform backend — there is currently no in-app "create your organization" page.
+A new bank (organisation) is created by a platform administrator in the **Organisations** console (`/organizations`), or at first start of an on-premise install; its first administrator is then taken through **Organisation setup** (`/onboarding`).
 
-### 2.3 Bootstrap checklist for a brand-new bank deployment
+### 2.3 Setting up a brand-new bank
 
-If you're standing up NexusLine for a new organization, this is the order that avoids rework:
-
-1. **Org + first Admin user** created by the platform operator.
-2. Admin signs in, sets up **SSO/LDAP** if the bank uses one (`/sso-settings`, LDAP card on `/settings`) — otherwise skip and use local accounts.
-3. Create **Users & Roles** (`/organization`) for the compliance/risk/IT team, or import them via LDAP JIT.
-4. Set up **Business Units** (`/business-units`) — your branch/division hierarchy — and **Processes** (`/processes`).
-5. Install the frameworks you need from the **Framework Library** (`/content-library`) — ISO 27001, NIST CSF, SBP ETGRM, PCI DSS, Basel, Shariah — so Compliance has something to assess against.
-6. Build the **Control Catalog** (`/controls`) — either from scratch or by mapping to the requirements the installed frameworks created.
-7. Populate **IT Assets** and **Information Assets** (`/it-assets`, `/information-assets`) and link them so criticality inherits correctly.
-8. Start the **Risk Register** (`/risks`) — set your organization's risk appetite/tolerance first, then add risks and link them to assets/controls/threats.
-9. Onboard **Vendors** (`/vendors`), layering **Outsourcing** records for SBP-material/cloud arrangements.
-10. Turn on the modules relevant to your bank's obligations — AML, Fraud, ICFR, BIA, Shariah, Whistleblowing, Declarations, etc.
+The step-by-step order — setup wizard, organisation settings, sign-in, roles and users, e-mail, lists, structure, frameworks, risk methodology, governance controls, integrations and data import — is in the [Administrator & Configuration Manual, §7](admin-guide.md#7-the-setup-order-at-a-glance), with a go-live checklist in [§24](admin-guide.md#24-go-live-checklist).
 
 ---
 
@@ -88,7 +85,7 @@ It says whether the record itself has been approved, independently of its operat
 
 Open almost any record (risks, controls, vendors, incidents, policies, BIA, continuity, ICFR, issues, model risk, projects, Shariah, vulnerabilities, whistleblowing, DoA, assets, and more — roughly 30 modules) and you'll find the same three panels bundled in:
 
-- **Custom Fields** — any extra fields your admin defined for that record type ([§11.2](#112-custom-fields)) appear automatically here.
+- **Custom Fields** — any extra fields your admin defined for that record type ([Custom Fields](#custom-fields-custom-fields)) appear automatically here.
 - **Review & Attestation** — a periodic sign-off tracker: set a frequency, click "Attest now," and see the history of who confirmed the record and when it's next due. This is where most "management sign-off" and "recovery-strategy sign-off" requirements are actually satisfied, even on modules that don't have a dedicated approval button.
 - **Collaboration** — comments, tags, and file attachments/links, usable on any record that has this panel. This — not the dedicated Evidence module — is the general-purpose "attach a document to this record" mechanism.
 
@@ -155,9 +152,10 @@ These rules were added in September 2026 after a product review found places whe
 - **Maturity frameworks.** ISO 31000, ISO 27005 and the Basel operational-risk principles are guidance a bank measures itself against, not obligations. They carry a *Maturity self-assessment* badge, show clauses self-assessed instead of a compliance percentage, and stay out of the dashboard's compliance figures.
 - **Alerts stay current and readable.** An alert's text is rewritten when the record changes, so it never quotes an old score. When one routine family produces more than five alerts — tests overdue, reviews due — they are shown as one line (*36 controls have tests overdue*) linking to the list. Tolerance breaches, missed turnaround times, approvals, attestations, regulatory deadlines and suspicious-activity reports are never grouped.
 - **One review clock per record.** Attesting a risk, policy or third party uses that record's own review cycle and moves its next review date; it no longer starts a second, separate schedule.
-- **Attestation is independent.** You can't attest a record you own or entered, or a record still in Draft. The attestation records the statement you signed (pre-filled per record type) and an optional scope, and a second person can **Confirm** it.
+- **Attestation is the owner's certification.** The record's **owner** attests it — that is the point of an attestation, and it is how ServiceNow, Archer and a SOX 302/404 certification work. You still can't attest a record that is still in Draft, or one whose approval is not complete (*Approve this control before attesting it*). Anyone else with write access to the module may sign instead, and the record then reads *attested by … on behalf of …*.
+- **The second signature.** Every attestation can be **Confirm**ed by a second person, never by whoever signed it. On a **key control**, a **critical or high residual risk**, a **material outsourcing** relationship and **every policy** that confirmation is *required*: until it arrives the record reads *Attested by … — awaiting independent confirmation*, the attestation does not count, and the review cycle has not restarted. Whoever can confirm sees it in My Work under *Attestations to confirm*. The new review date is counted from the day the attestation was **signed**, not the day it was confirmed.
 - **Approvals.** A request you raised shows *You submitted this — an independent checker must decide* instead of Approve and Reject; the server refuses it too, matching you by account or by email.
-- **Two-factor authentication.** Users with the Admin role, or any permission to approve, must set up two-factor authentication. The first sign-in starts a 7-day grace period with a reminder banner; after it, the session can only open the setup screen. Single sign-on users are exempt, because their identity provider handles it. Administrators set the roles and grace period with `MFA_REQUIRED_ROLES` and `MFA_GRACE_DAYS`.
+- **Two-factor authentication.** Your organisation runs at one of three levels, set by an administrator under **Organisation Settings → Security**: *Off* (nobody is made to enrol; anyone may still set it up), *Privileged roles* (the Admin role, anyone with a permission to approve, and the roles the administrator lists) or *Everyone* (every password sign-in). Where it is required, the first sign-in starts a 7-day grace period with a reminder banner; after it, the session can only open the setup screen. Single sign-on users are exempt, because their identity provider handles it.
 - **Evaluation builds** show a banner saying the build is unlicensed and not for production use.
 
 ## 3e. Picked, not typed: owners, lists and the approval lifecycle
@@ -186,7 +184,7 @@ These changes, added in September 2026, replace free text with governed choices 
 
 **KRI breach alerts** now fire. Before this release a KRI past its limit never raised an alert.
 
-## 3f. Record depth (Phase 2)
+## 3f. Record depth
 
 These changes, added in September 2026, give the core records the depth a bank's reviewers expect.
 
@@ -308,7 +306,7 @@ A policy now records who approves it, when it takes effect, what it replaces and
 - **Importing.** A policy spreadsheet can carry *approving_authority* (a committee's name or reference), *effective_date*, *supersedes* (a policy's reference or title), and *business_units* and *roles* (comma-separated names). Importing a policy that supersedes another doesn't retire it; publishing the new policy does.
 - **Known gaps.** Nobody is reminded to acknowledge a policy yet: the status list shows who is outstanding, but no campaign or reminder is sent.
 
-## 3g. Phase 3
+## 3g. Working day to day
 
 Added in September 2026: tools that help a bank use the platform day to day, not only record things in it.
 
@@ -500,6 +498,7 @@ Alerts now go to the person who has to act, every alert opens the record it is a
   - Incidents assigned to you, dated by their turnaround-time deadline.
   - Tests of controls you own or operate, and tests a reviewer returned to you.
   - Reviews of risks, policies and third parties you own, and attestations due on other records you own.
+  - Attestations waiting for your independent confirmation, under *Attestations to confirm* — a high-stakes record someone has certified, which only counts once a second person signs it (owed within a week of the certification).
   - KRI readings you supply. You supply a KRI's readings when you are its data provider, or its owner when it names no provider. A reading is due one frequency after the last one and is listed from three days before.
   - Actions on open RCSAs where you are the action owner.
 - **Policies to acknowledge.** Published policies that name one of your roles, or no role at all, and that you haven't acknowledged.
@@ -553,26 +552,35 @@ The activity log records it as *Decided by email*. Each link is for you alone, w
 
 ## 4. How the sidebar is organized
 
-The left navigation groups every module into seven sections, which this guide follows exactly: **Overview, Risk, Compliance, Governance, Organization, Operations, System**. **Policy Management sits under Governance**, alongside Board & Committees, Delegation of Authority and the Legal Register.
+**My work** and the **Dashboard** sit at the top. Below them the sidebar groups the modules the way eramba does:
 
-**Not seeing a module described in this guide?** Installations are licensed per module — the sidebar only shows what your license enables (for example, conventional banks typically don't license **Shariah Governance**; Islamic banks do). Administrators can see the full module matrix — *on / hidden / unlicensed* — under **Settings → System → Modules**. Enabling an additional module is a license update from your vendor, not a reinstall: your data model already supports every module, so nothing is lost or migrated when one is switched on later. A licensed module can also be hidden by the deployment's `DISABLED_MODULES` setting; opening its URL directly shows a "module not enabled" notice, and its API rejects calls, so hiding a module genuinely turns it off rather than just removing the menu entry.
+| Group | Pages |
+|---|---|
+| **Program** | Reports & KPIs, Report Builder, Strategy & Goals, Projects, Approvals, AI Assist |
+| **Governance** | Business Units, Processes, Legal Register, Board & Committees, Policy Management, Delegation of Authority, Users & Roles |
+| **Asset Management** | Information Assets, IT Assets, Data Privacy (RoPA), Data Protection |
+| **Risk Management** | Risk Register, Risk candidates, Operational Risk, Scenario & Capital, Model Risk, Risk Quantification, Threat Library, Risk Exceptions |
+| **Third-Party Risk** | Third Parties, Outsourcing & Cloud, Vendor Assessments, Questionnaires |
+| **Controls & Assurance** | Control Catalog, Evidence, Awareness Training, Internal Audit |
+| **Compliance** | Compliance Management, Framework Library, Regulatory Change, ICFR, Declarations, ESG / Green Banking |
+| **Financial Crime** | AML / CFT, Fraud Risk, Whistleblowing |
+| **Shariah Governance** | a single page |
+| **Security Operations** | Incidents, Vulnerabilities, Business Continuity, Business Impact Analysis, Access Reviews, Issues & Actions |
+| **Settings** | General Settings, Organisation Settings, Integrations & CCM, Custom Fields, Lookups & Dropdowns, Status Rules, Turnaround Time (TAT), Approval Workflows, Saved Filters, Import / Export, Webhooks, Single Sign-On, Activity Log, and Organisations for platform administrators |
+
+The chapters of this guide below still follow the older seven-section grouping (Overview, Risk, Compliance, Governance, Organization, Operations, System); use the table above, or ⌘K / Ctrl-K, to find a page. You see only the pages your permissions allow ([Administrator Manual, Appendix C](admin-guide.md#appendix-c--sidebar-map-every-page-and-the-permission-it-needs)).
+
+**Not seeing a module described in this guide?** Installations are licensed per module — the sidebar only shows what your license enables (for example, conventional banks typically don't license **Shariah Governance**; Islamic banks do). Your organisation's administrator can also switch licensed modules off for your organisation. Administrators can see the full module matrix — *on / hidden / unlicensed* — under **Settings → General Settings → System → Modules**. Enabling an additional module is a license update from your vendor, not a reinstall: your data model already supports every module, so nothing is lost or migrated when one is switched on later. A licensed module can also be hidden by the deployment's `DISABLED_MODULES` setting; opening its URL directly shows a "module not enabled" notice, and its API rejects calls, so hiding a module genuinely turns it off rather than just removing the menu entry.
 
 ---
 
 ## 5. Overview
 
 ### Dashboard (`/dashboard`)
-**Purpose:** Read-only executive snapshot of live risk/compliance/control posture — the default landing page.
-**What's on it:**
-- A composite **Governance Health** score (0–100, banded Healthy / Elevated / Critical), blended from the share of risks within tolerance, overall compliance %, and the residual critical/high risk mix.
-- A **"Needs your attention"** queue — auto-generated and prioritized (tolerance breaches, critical inherent risks pending treatment, frameworks below 80% compliant, overdue asset reviews, pending risk acceptances), each row carrying a one-click action button (Escalate / Assign / Review / Approve) that links straight into the relevant module.
-- A 5-tile metric strip: Total risks, Critical inherent, Overall compliant %, Annual exposure (ALE), Tolerance breaches.
-- A **risk matrix** bubble chart with an Inherent/Residual toggle — bubble size is the risk count in that likelihood×impact cell — plus the organization's appetite/tolerance scores.
-- **Compliance** donut rings — one overall ring plus one per framework.
-- An **enterprise risk roll-up** table by category (risk count, max residual, breaches, exposure).
-- A **recent activity** feed, filterable to 30 days / Quarter / YTD.
-**Key action:** "Executive summary" PDF export button.
-**Note:** content is still fixed to risk/compliance metrics — for a customizable dashboard, use Reports & KPIs instead.
+**Purpose:** Read-only executive snapshot of live risk, control and compliance posture — where administrators land after signing in (most other people land on My Work).
+**What's on it:** the Governance health score with its four weighted components and the *Needs a decision or is overdue* queue; a six-tile KPI strip (above tolerance, control assurance, compliance assured, open incidents, KRIs breaching, tests overdue); the risk matrix (residual by default, inherent on the toggle) with Top risks; control assurance and compliance as stacked bars; incidents and KRIs; risks by segment; and Movement for the period. Every number opens the register filtered to exactly those rows. See [3c. The dashboard](#3c-the-dashboard) for how each figure is worked out.
+**Key action:** the 30 days / Quarter / YTD toggle, and the **Executive summary** PDF export.
+**Note:** the dashboard's content is fixed — for a customizable dashboard, use Reports & KPIs instead.
 
 ### Report Builder (`/report-builder`)
 
@@ -803,15 +811,15 @@ Filters let you scope a run: only assets at or above a chosen criticality, and/o
 **Connects to:** Evidence surfaces here via each requirement's mapped Controls; installing a Content Library pack populates this module.
 
 ### Framework Library (`/content-library`)
-**Purpose:** One-click install of 6 preloaded, banking-relevant standards, avoiding manual data entry.
-**How to use it:** Click **Install** on a pack card: ISO/IEC 27001:2022 Annex A (93 controls), NIST CSF 2.0, SBP ETGRM, PCI DSS v4.0, Basel Operational Risk (7 loss types + 11 PSMOR principles), or SBP/AAOIFI Shariah Governance (12 requirements). This creates a Framework + all its Requirements in Compliance in one step — you then map Controls and set up Crosswalks back in the Compliance module.
-**Note:** re-installing an already-installed pack is blocked (idempotent).
+**Purpose:** One-click install of 17 standards, avoiding manual data entry.
+**How to use it:** Click **Install** on a card: ISO/IEC 27001:2022, the four SBP frameworks (ETGRM, Cyber Security, Outsourcing, BCP), PCI DSS v4.0.1, CIS Controls v8, NIST SP 800-53 Rev. 5, NIST CSF 2.0, SOC 2, ISO/IEC 42001, GDPR, HIPAA, SBP/AAOIFI Shariah Governance, and the maturity frameworks ISO 31000, ISO/IEC 27005 and Basel Operational Risk. This creates a Framework and all its Requirements in Compliance in one step; control frameworks can also create their controls in the Control Catalog, reusing any you already have. The full list, with requirement and control counts, is in the [Administrator Manual, §15](admin-guide.md#15-frameworks-and-the-control-catalogue).
+**Note:** installing a framework that is already complete is refused; installing over an older, shallower copy **upgrades** it and keeps every existing status and link.
 
 ### Regulatory Change (`/regulatory-change`)
 **Purpose:** Track SBP circulars/laws from identification through implementation, distill them into obligations, and manage the recurring regulatory-returns calendar.
 **How to use it:** **Regulatory Changes tab** — log a circular (regulator, circular reference, issued/effective dates, summary, applicability, impact assessment, owner, priority) → expand it to add **Obligations** directly underneath (obligation, mapped policies/controls as free text, owner, due date, status). **Obligations tab** — a flat cross-change view. **Returns Calendar tab** — recurring SBP submissions (frequency, submission channel, next/last due dates); overdue ones are auto-flagged.
 **Status flow:** change `identified → under_assessment → in_implementation → implemented → closed`; obligation `open, in_progress, met, not_met, not_applicable`.
-⚠ Mapped policies/controls on an obligation are **free text**, not real links to the Policy/Control modules — type the name/reference, don't expect a clickable link.
+An obligation's requirements, policies and controls are picked from those registers and saved as real links, so they show on the linked record too. Obligations created before the links existed may still carry the old free-text mapping alongside.
 
 ### ICFR (`/icfr`)
 **Purpose:** Run the SBP-mandated annual Internal Control over Financial Reporting cycle.
@@ -841,7 +849,8 @@ Filters let you scope a run: only assets at or above a chosen criticality, and/o
 ### Vulnerabilities (`/vulnerabilities`)
 **Purpose:** Live vulnerability register for scanner findings (Nessus/Qualys-style) and the patch pipeline that remediates them.
 **How to use it:** **Vulnerabilities tab** — log a finding (CVE, CVSS score, severity, asset name/IP, source, discovered date); the remediation deadline is auto-set by severity (critical=7 days, high=30, medium=90, low=180, informational=365) and flagged overdue automatically. **Patches tab** — track a patch through `pending → testing → deploying → deployed` (or `failed`/`rolled_back`).
-⚠ There is currently **no CSV import** and **no real link to the Asset inventory** for this register — asset name/IP are free text, described in the code as a "conceptual link" only. If you need bulk scanner ingestion today, add findings one at a time or via the API directly.
+A finding can be linked to the affected IT asset, picked from the asset register, and shows on that asset.
+⚠ There is currently **no CSV import** for this register (the *Vulnerabilities* import on Import / Export is the Threat Library's catalogue, not scanner findings). If you need bulk scanner ingestion today, add findings one at a time or via the API directly.
 
 ### Evidence (`/evidence`)
 **Purpose:** Attach audit-readiness artifacts to a Control — see [§3.4](#34-evidence-vs-attachments--two-different-things).
@@ -927,7 +936,8 @@ Everything the assurance function has to turn up for, in one window: planned fie
 ### Delegation of Authority (`/delegation-of-authority`)
 **Purpose:** Registers who may approve what (by role, amount band) and the maker-checker rules that should apply per module action.
 **How to use it:** **Authority Matrix tab** — add an entry (activity, category, role title, approval level, amount range, effective date). **Maker-Checker Rules tab** — add a rule (module, action, maker role, checker role, threshold amount) and toggle it **Enabled**.
-⚠ **This module is a documented registry only.** Defining an approval limit or a dual-control rule here does **not** currently force approval routing anywhere else in the system — see [§14](#14-known-gaps--things-that-look-automatic-but-arent-yet). For actually-enforced four-eyes today, use the Approvals module ([§10](#10-operations)).
+**What is enforced:** four-eyes is checked on about seventeen decisions — accepting a risk, approving an exception, testing and reviewing control tests, publishing a policy, filing an STR/SAR, Shariah disbursements, amending an authority-matrix line, validating and closing issues and approving their extensions, deleting core records, approving any record submitted for review, and bulk-archiving risks. With segregation of duties on, all of them are four-eyes without any rule; a rule relaxes one decision or makes it depend on an amount. **Attesting is the exception**: it is the owner's own certification, so it is four-eyes only where an administrator has added a rule for it — independence comes from the record's approval and from the second signature. The exact module/action keys and how rules are resolved are in the [Administrator Manual, §19.1](admin-guide.md#191-maker-checker-four-eyes).
+⚠ A rule's **Maker role** and **Checker role** only document it — who may check is decided by permissions. The **Authority Matrix**'s amount bands are a registry: they don't block anything in other modules.
 
 ### Board & Committees (`/governance`)
 **Purpose:** Committee register, meeting lifecycle, and enterprise-wide decision/action tracking.
@@ -958,7 +968,7 @@ Everything the assurance function has to turn up for, in one window: planned fie
 
 ### Users & Roles (`/organization`)
 **Purpose:** Admin screen for user accounts, roles, and the platform's permission catalog — see [§13](#13-roles--permissions-reference) for the full role list.
-**How to use it:** **Users tab** — create a user (name, email, initial password, one or more roles); use **Activate/Deactivate** to suspend access (you can't deactivate your own account) and **Reset password** as needed. **Roles tab** — create a custom role by picking permissions from the catalog (grouped by module, with bulk select/clear); built-in roles can have their permissions edited but not be renamed or deleted, and can't be deleted while still assigned to a user.
+**How to use it:** **Users tab** — create a user (name, email, initial password, one or more roles); use **Activate/Deactivate** to suspend access (you can't deactivate your own account) and **Reset password** as needed (a reset also unlocks a locked account). **Roles tab** — create a custom role by picking permissions from the catalog (grouped by module, with bulk select/clear); built-in roles can have their permissions edited but not be renamed or deleted, and a custom role can't be deleted while still assigned to a user. How to design roles for a bank, and which permissions are privileged: [Administrator Manual, §10](admin-guide.md#10-users-and-roles).
 
 ---
 
@@ -988,7 +998,8 @@ Everything the assurance function has to turn up for, in one window: planned fie
 **Purpose:** The unified CAPA register meant to hold every finding/gap from every other module in one place, through to closure.
 **How to use it:** Create an issue and pick a **source type** — internal_audit, compliance, rcsa, shariah, assessment, incident, external_inspection, risk_assessment, self_identified, or other — plus a free-text **source reference** (e.g. "AUD-004 finding 3") pointing back at where it came from. Add **CAPA Actions** underneath (corrective/preventive, owner, due date) and log **Progress Updates** as remediation proceeds.
 **Status flow:** `open → in_progress → remediated / closed / risk_accepted`. The last three are reached only through **Validate** and **Close** in the drawer — see *3f. Record depth → Issues*.
-⚠ **Mostly manual today** — risks and controls have a **Raise issue** button (which links the issue to them); the other modules don't. When you close a compliance finding, an ICFR deficiency, an internal-audit finding, an incident, or a Shariah SNC finding, you need to separately come here and create the Issue yourself if you want it tracked in the unified register.
+**Where issues come from automatically:** risks, controls, third parties, IT assets and information assets have a **Raise issue…** action that links the issue to them, and approving a failed (or passed-with-exceptions) control test opens an issue on its own.
+⚠ Other modules don't. When you close a compliance finding, an ICFR deficiency, an internal-audit finding, an incident, or a Shariah SNC finding, you need to separately come here and create the Issue yourself if you want it tracked in the unified register.
 
 ### Whistleblowing (`/whistleblowing`)
 **Purpose:** Confidential-disclosure intake and investigation case management.
@@ -1004,7 +1015,7 @@ Everything the assurance function has to turn up for, in one window: planned fie
 **Purpose:** A generic, genuinely-enforced maker-checker inbox for any request needing independent sign-off.
 **How to use it:** Create a request (title, approver, description, and how many independent checkers are required — 1 for four-eyes, 2 for six-eyes, etc.) → checkers **Approve** or **Reject** (a reject requires a written reason) → it auto-resolves to approved once enough checkers have signed off, or rejected on a single reject.
 **Enforcement that's real:** the requester can never approve their own request, and each checker can vote only once — this is checked server-side, not just a UI suggestion.
-⚠ Unlike Delegation of Authority, this module's four-eyes logic is actually enforced — but only for requests you create *here*. No other module automatically routes anything through Approvals; you create the request yourself and, if relevant, note in the description which record it concerns.
+**What lands here automatically:** the stages of an approval route when a record whose type has a live route is submitted for review ([Approval Workflows](#approval-workflows-workflows)), and an internal audit annual plan submitted for board approval. You can also create a request by hand and note in the description which record it concerns.
 
 ### Exceptions (`/exceptions`)
 **Purpose:** Formal, time-boxed acceptance of a risk/policy/compliance gap.
@@ -1026,21 +1037,23 @@ Everything the assurance function has to turn up for, in one window: planned fie
 
 ### Integrations & CCM (`/integrations`)
 **Purpose:** Register connections to your bank's systems (AD, O365, SIEM, EDR, CMDB, core banking, cloud) and define automated control tests against them for Continuous Controls Monitoring.
-**How to use it:** **Connectors tab** — register a connector (type, endpoint, auth method note, sync frequency) — flagged **stale** automatically if it hasn't synced in 35+ days. **CCM tab** — define an automated control test (which control it verifies, the pass condition in plain language, optionally which connector it uses) → **Record** a run's result (passed/failed/error, pass rate %, findings, evidence reference) each time it's executed.
-⚠ Execution is **manual today** — there's no live "test connection" or scheduled auto-run; you record each run's outcome yourself. A run does **not** automatically update the linked Control's effectiveness rating or create an Issue.
+**How to use it:** **Connectors tab** — register a connector (type, endpoint, auth method note, sync frequency) — flagged **stale** automatically if it hasn't synced in 35+ days. **CCM tab** — define an automated control test (which control it verifies, the pass condition in plain language, optionally which connector it uses) → **Record** a run's result (passed/failed/error, pass rate %, findings, evidence reference) by hand, or let the monitoring tool send results through the connector's **Monitoring feed** token (see [Continuous monitoring feeds](#continuous-monitoring-feeds)). A fed result becomes evidence on the control, a run of the matching test and, when it failed, an alert to the control owner.
+⚠ NexusLine doesn't reach out to the other system: there's no "test connection" and no scheduled pull — results arrive only when the other system posts them or someone records them. A result never changes the control's effectiveness rating and never opens an Issue; that still takes a person-recorded, second-person-approved test.
 
 ### Custom Fields (`/custom-fields`)
 **Purpose:** Add tenant-specific fields to a record type without code changes.
-**How to use it:** Pick a module (all ~32 record types are supported — risk, control, asset, vendor, policy, incident, shariah_review, rcsa_assessment, audit_engagement, and so on), name the field, pick its type (text/textarea/number/date/select/checkbox), mark required if needed.
+**How to use it:** Pick a module (48 record types are supported — risk, control, IT asset, information asset, vendor, policy, incident, issue, requirement, KRI, loss event, shariah_review, rcsa_assessment, audit_engagement, and so on), name the field, pick its type (text/textarea/number/date/select/checkbox), mark required if needed. Needs `customfield:manage`.
 **Where the field appears:**
-- **Risk Register** — as a **Custom fields tab directly inside the Add/Edit risk form**; values save together with the risk, and required custom fields block saving like any other required field.
-- **Every other record type** — in the **Custom Fields panel on the record's detail view** ([§3.2](#32-recordpanels--the-shared-toolkit-on-every-record)): create/open the record, fill the custom values in that panel, and click **Save fields** (a separate save from the main form).
+- **In the module's Add / Edit form** — as a **Custom fields** tab (the last tab). Values save together with the record, and required custom fields block saving like any other required field.
+- **On the record** — in its Details section or **Custom fields** card, with **Edit** to change values without opening the full form.
 
-Fields do not appear retroactively inside other modules' Add/Edit dialogs — the record must exist before its panel shows. If you define a field and see nothing, check you picked the model key matching the module you're testing (e.g. `shariah_review`, not `risk`).
+**IT assets and information assets are separate modules.** A field added to *IT asset* appears only on IT assets, and one added to *Information asset* only on information assets. Fields created before this split was introduced were copied to both, each keeping its values; delete the copy you don't need.
+
+If you define a field and see nothing, check you picked the module you're testing (e.g. `shariah_review`, not `risk`) and that the field is enabled.
 
 ### Status Rules (`/status-rules`)
 **Purpose:** Auto-label records with a colored badge when a field meets a condition (e.g. "Above Tolerance" when a score exceeds a threshold).
-**How to use it:** Pick a module (risk, control, incident, vendor, project, policy, asset, goal, or exception), pick a field and operator (equals/greater-than/contains/overdue/is-true/not-empty, etc.), a comparison value, and a label + color.
+**How to use it:** Pick a module (risk, control, incident, vendor, project, policy, asset, goal, exception, requirement, continuity plan, processing activity, KRI, RCSA or evidence), pick a field and operator (equals/greater-than/contains/overdue/is-true/not-empty, etc.), a comparison value, and a label + color. Needs `automation:manage`.
 **Note:** this is a labeling engine, not a time-based escalation engine — for time-based chasing see Turnaround Time below.
 
 ### Turnaround Time — TAT (`/sla-policies`)
@@ -1066,9 +1079,11 @@ Editing a target recalculates every open record's window immediately, so a polic
 
 **How to use it:** Create a route for a record type, add its stages in order, then switch it on. Each stage sets:
 
-- **Decided by** — anyone holding a role, a named person, the record's own owner, or the owner's line manager. The last two resolve per record, so one route serves every record of that type instead of needing a copy per department.
+- **Decided by** — anyone holding a role, a named person, the record's own owner, or the owner's line manager. It names who the stage is for on the approval request and in its alerts.
 - **Approvals** — how many distinct people must approve *that stage*; 2 gives six-eyes on that step alone.
 - **Deadline** and what happens if it lapses (escalate and keep waiting, approve automatically, or block).
+
+⚠ Today **Decided by** is a label, not an access check: anyone with `workflow:approve` who isn't the submitter can decide any stage. *The owner's line manager* isn't looked up (users have no manager field), and the lapse choice is recorded but not acted on — an overdue stage simply keeps alerting. See the [Administrator Manual, §19.2](admin-guide.md#192-approval-workflows).
 
 On a record with a live route, a progress strip shows which stage it is on, who it is waiting for, and what each decided stage concluded. **Send for approval** starts the route; **Cancel route** abandons it.
 
@@ -1084,7 +1099,7 @@ On a record with a live route, a progress strip shows which stage it is on, who 
 ### Import / Export (`/data-io`)
 **Purpose:** Bulk import/export for every supported register (Policies, Risks, Controls, IT & Information Assets, Vendors, Incidents, Exceptions, Legal, Business Units, Processes, Threats, Vulnerabilities catalog, Goals, RoPA, Continuity Plans, Projects, Compliance Requirements, Evidence, Awareness Programs, Access Reviews, Issues, RCSA, KRIs, Loss Events, Obligations, Regulatory Changes, Audit Engagements, ICFR Processes, Models, Outsourcing Arrangements, BIAs).
 
-**Export / Template:** **Export** downloads every record as CSV; **Template** downloads a header row plus one example row if you'd rather start from our layout.
+**Export / Template:** **Export Excel** (or **CSV**) downloads every record with every column — **your organisation's custom fields included**, after the built-in columns. **Template** downloads an Excel workbook to fill in: the same columns (custom fields included), a dropdown on every choice column (status, yes/no, a custom field's select options), required headings shaded, and a **Guide** sheet listing each column's type, allowed values and an example. A custom field whose name repeats a built-in column is headed "Name (custom)". Uploading a filled template or an edited export maps the custom-field columns back to their fields automatically, and checks their values (a select must be one of its options, a date must be YYYY-MM-DD, a yes/no must be yes or no) — a bad value fails just that row, with the column named.
 
 **Import — you do not have to rewrite your spreadsheet.** Upload the file your organisation already keeps, with its own column names, and the wizard matches them to our fields. It runs in four steps:
 
@@ -1102,12 +1117,18 @@ On a record with a live route, a progress strip shows which stage it is on, who 
 
 ### SSO (`/sso-settings`)
 **Purpose:** Configure OIDC/OAuth2 sign-in with your bank's identity provider.
-**How to use it:** Toggle **SSO enabled**, enter your IdP's Client ID/Secret and authorize/token/userinfo URLs, set the email/name claim names, toggle **JIT provisioning** and pick the default role new SSO users get, and optionally restrict to specific email domains.
-**Note:** LDAP/Active Directory is configured separately, on the `/settings` page.
+**How to use it:** Toggle **SSO enabled**, enter your IdP's Client ID/Secret and authorize/token/userinfo URLs, set the email/name claim names, toggle **JIT provisioning** and pick the default role new SSO users get, and optionally restrict to specific email domains. Register `https://<your address>/sso/callback` as the redirect URL at the identity provider. Step by step: [Administrator Manual, §11.4](admin-guide.md#114-single-sign-on-sso).
+**Note:** LDAP/Active Directory is configured separately, on the `/settings` page ([§11.5](admin-guide.md#115-ldap--active-directory)).
 
 ### Settings (`/settings`)
-**Purpose:** General admin hub — organization info, system health, personal security, and LDAP.
-**What's here:** organization/role summary, a **Send test email** button (to verify SMTP), read-only system health/version/license info, the per-installation **module entitlement matrix** (which modules are on, hidden by config, or unlicensed), personal **MFA enable/change password**, the **LDAP/Active Directory** configuration card (host, bind DN, base DN, user filter, default role for JIT users), and an Administration hub linking out to Users & Roles, SSO, Webhooks, Custom Fields, Status Rules, Saved Filters, Import/Export, and the Activity Log.
+**Purpose:** General admin hub — organization info, system health, personal security, and LDAP. It appears in the sidebar as **General Settings**, for everyone.
+**What's here:** an organisation and role summary; **Email & automation** with **Send test email** (to verify SMTP); **System** — version, health, licence, the **module matrix** (on, hidden, or unlicensed), **Back up database now** and **Download support bundle**; **Account security** — your own two-factor authentication and password; the **LDAP / Active Directory** card; and an **Administration** hub linking to Organisation Settings, Users & Roles, Single Sign-On, Webhooks, Custom Fields, Lookups & Dropdowns, Status Rules, Saved Filters, Import / Export and the Activity Log. What each administrator setting does: [Administrator Manual](admin-guide.md).
+
+### Organisation Settings (`/organisation-settings`)
+**Purpose:** currency, timezone, date format, phone country, fiscal year and how long archived records are kept, plus the **Organisation setup & modules** button that reopens the setup wizard to change which modules are on. Changing them needs `settings:manage`. See [3e](#3e-picked-not-typed-owners-lists-and-the-approval-lifecycle) and the [Administrator Manual, §9](admin-guide.md#9-organisation-settings).
+
+### Lookups & Dropdowns (`/lookups`)
+**Purpose:** the organisation's governed lists — risk category, incident type, regulator, country, impact dimension and ten more — plus asset, vendor and tag lists and the C/I/A classification schemes. Values can be added, renamed, reordered, re-parented and deactivated; a value in use can't be deleted. See the [Administrator Manual, §13](admin-guide.md#13-lookups-the-organisations-governed-lists).
 
 ### Organisations (`/organizations`) — platform administrators only
 
@@ -1166,26 +1187,26 @@ Operational Risk (log a loss event with its Basel event type) → over time, Sce
 Whistleblowing (intake — toggle Anonymous if needed, note the generated WBX tracking code as an internal reference) → triage → investigate, logging Case Log entries → resolve to substantiated/unsubstantiated/closed. (No public follow-up portal exists yet for the reporter — see [§14](#14-known-gaps--things-that-look-automatic-but-arent-yet).)
 
 **J. Maker-checker today**
-Delegation of Authority documents *who should* approve *what* (a reference matrix — not enforced). For an approval you actually need enforced today, create the request directly in Approvals, set the required number of independent checkers, and reference the record it concerns in the description.
+Four-eyes is enforced on the record itself for the decisions listed under [Delegation of Authority](#delegation-of-authority-delegation-of-authority): submit a record for review and someone else approves it; request a risk acceptance and someone else approves it; record a control test and someone else reviews it. For multi-stage sign-off, an administrator switches on an approval route for that record type, and each stage arrives in Approvals. For a decision that has no record of its own, create the request directly in Approvals, set the required number of independent checkers, and reference what it concerns in the description.
 
 ---
 
 ## 13. Roles & permissions reference
 
-Every permission is a `resource:action` code (93 total across every module). Most modules follow simple read/write; a few sensitive actions get their own verb (e.g. `risk:accept`, `exception:approve`, `workflow:approve`) so "can edit" and "can approve" can be different people.
+Every permission is a `resource:action` code (96 total across every module). Most modules follow simple read/write; a few sensitive actions get their own verb (e.g. `risk:accept`, `control:test`, `exception:approve`, `workflow:approve`) so "can edit" and "can approve" can be different people, and six `:manage` codes cover administration (settings, SSO, custom fields, automation, TAT, integrations).
 
-| Built-in role | Typical use |
-|---|---|
-| **Admin** | Full access, including user/role management. |
-| **Risk Manager** | Manage risk, controls, assets, incidents, vendors, BCP, projects, operational risk, fraud, scenario analysis, vulnerabilities, model risk, outsourcing, quantitative risk, AI Assist. |
-| **Risk Approver** | Read-only across risk/controls/assets, plus the *approve* actions only (risk acceptance, exceptions, approvals) — a pure "checker" role. |
-| **Compliance Manager** | Frameworks, policies, privacy, awareness, Shariah, AML, issues, regulatory change, ICFR, declarations, whistleblowing, governance, ESG, DoA, data protection. |
-| **Auditor** | Read-only across the entire platform, plus full read/write on Internal Audit — an independence-preserving role. |
-| **Viewer** | Read-only everywhere. |
+| Built-in role | Permissions | Typical use |
+|---|---|---|
+| **Admin** | 96 | Full access, including user/role management. |
+| **Risk Manager** | 53 | Manage risk, controls (including recording tests), assets, incidents, vendors, BCP, projects, operational risk, issues, fraud, scenario analysis, vulnerabilities, model risk, outsourcing, quantitative risk, CCM, AI Assist. Can't accept risks or approve. |
+| **Risk Approver** | 9 | Read-only across risk/controls/assets, plus the *approve* actions only (risk acceptance, exceptions, approvals) — a pure "checker" role. |
+| **Compliance Manager** | 45 | Frameworks, controls (including tests), policies, privacy, awareness, Shariah, AML, issues, regulatory change, ICFR, declarations, whistleblowing, governance, ESG, DoA, data protection. |
+| **Auditor** | 44 | Read-only across the entire platform, plus full read/write on Internal Audit — an independence-preserving role. |
+| **Viewer** | 43 | Read-only everywhere, including the user list, roles and activity log. |
 
-Admins can also build **custom roles** by hand-picking any combination of the 93 permissions from Users & Roles ([§9.4](#94-users--roles-organization)). Assignment is per-user (pick one or more roles) — there's no per-record or per-business-unit scoping.
+Admins can also build **custom roles** by hand-picking any combination of the 96 permissions from [Users & Roles](#users--roles-organization). Assignment is per-user (pick one or more roles) — there's no per-record or per-business-unit scoping. The full catalogue and a suggested role set for a bank are in the [Administrator Manual, §10 and Appendix B](admin-guide.md#105-designing-roles-for-a-bank).
 
-When the platform is upgraded with new modules (and therefore new permission codes), every built-in role is automatically topped up with the new codes it's entitled to the next time the backend restarts — this is additive only, never removes a grant, and never touches custom roles or a user's individual assignments. In practice this means you won't hit an unexpected 403 on a newly-added module after an upgrade without having to manually re-grant anything.
+When the platform is upgraded with new modules (and therefore new permission codes), every built-in role is automatically topped up with the new codes it's entitled to the next time the backend restarts. This never touches a user's assignments, but note two consequences: a default permission you *removed* from a built-in role comes back at the next restart (use a custom role to give less), and **custom roles are not topped up** — add new module permissions to them yourself after an upgrade.
 
 ---
 
@@ -1193,19 +1214,20 @@ When the platform is upgraded with new modules (and therefore new permission cod
 
 Documented here so you plan your bank's process around what's actually enforced, not what's merely configured. (These are also tracked as deliberate follow-up work — see `GAP-ANALYSIS.md`.)
 
-- **Delegation of Authority gates eight decisions, not every write.** Four-eyes is genuinely enforced on: accepting a risk, approving a risk exception, recording a control audit, publishing a policy, filing an STR/SAR, approving and releasing a charity disbursement, and amending an authority-matrix line. On those, the person who created the record cannot be the one who signs it off. Approval *limits* elsewhere in the matrix are still a registry — they document the rule, they don't gate other modules' writes.
-- **Approvals is not auto-triggered by other modules.** You must go create the request yourself and reference the source record manually; the four-eyes logic *inside* Approvals (once a request exists) is genuinely enforced.
-- **Issues & Actions is entirely manually populated.** No other module has a "raise an Issue" button — you decide what's worth tracking there and create it yourself.
+Checked against the code again on 13 September 2026. Gaps that only an administrator meets (sign-in, backups, approval routes, imports) are listed in the [Administrator Manual, §27](admin-guide.md#27-known-limitations-for-administrators).
+
+- **The Authority Matrix doesn't gate other modules.** Four-eyes itself *is* enforced on about seventeen decisions (see [Delegation of Authority](#delegation-of-authority-delegation-of-authority)); the matrix's approval *limits* by amount are still a registry — they document the rule, they don't block anything elsewhere. A maker-checker rule's maker and checker roles are documentation too.
+- **Approval routes don't restrict who decides a stage.** Anyone with `workflow:approve` who isn't the submitter can decide any stage, whatever the stage's *Decided by* says.
+- **Issues are raised automatically only from risks, controls, third parties, assets and failed control tests.** Incidents, compliance findings, ICFR deficiencies, internal-audit findings and Shariah SNC findings still need an Issue created by hand if you want them in the unified register.
 - **Business Units are not a security boundary.** Only whole-organization (tenant) isolation is enforced at the database level; anyone with a module's read permission sees every business unit's records in it.
 - **Whistleblowing's tracking code is internal-only.** There's no public page yet for an anonymous reporter to self-serve a status check or add a follow-up.
 - **Fraud Cases and Operational Risk Loss Events are separate, unlinked registers** — log a shared event in both if it applies to both.
-- **Integrations/CCM connectors and test runs are manually recorded**, not live/automatic; a recorded run doesn't update a Control's effectiveness rating or auto-create an Issue.
+- **Continuous monitoring is push-only.** Monitoring tools can post results through a connector's feed token, but NexusLine doesn't poll other systems, and a result never changes a control's effectiveness rating or opens an Issue.
 - **Webhook delivery has no retry** — a single failed POST is logged, not retried.
-- **Saved Filters run from their own page**, not as a live filter dropdown on each module's table.
-- **Reporting is on-demand, not scheduled.** Four PDF exports exist (Risk Register, Executive Summary, Audit Engagement Report, Shariah Review Report) — there's no "email me this every Monday."
-- **Record-level immutability** for loss events, SAR, and breach records (a regulator expectation) is not yet built.
-- **New organization/tenant self-service creation** has no frontend page — it's an operator-run backend step today.
-- **Twelve modules are not yet wired into the cross-module graph.** AML/CFT, Fraud Risk, Shariah Governance, Integrations/CCM, Model Risk, Scenario & Capital, ESG, Declarations, Whistleblowing, Board & Committees, Awareness, and DPIA/DSAR/Consent record their links as free text rather than as references to the risk, control or RoPA register. They work standalone; they just don't appear on a linked record's "related" panel.
+- **Saved Filters run from their own page.** Each register has its own saved views, but those live in your browser and aren't shared.
+- **Reports aren't e-mailed on a schedule.** The Report Builder saves and shares report definitions, board packs are generated automatically before committee meetings, and the Statement of Applicability exports on demand — but there's no "email me this every Monday."
+- **Record-level immutability** for loss events, SAR, and breach records (a regulator expectation) is not yet built; version history is kept but records stay editable.
+- **Several modules are not yet wired into the cross-module graph.** AML/CFT, Fraud Risk, Model Risk, Scenario & Capital, ESG, Declarations, Whistleblowing, Awareness and DPIA/DSAR/Consent have no links to the risk, control or RoPA registers; Shariah Governance and Board & Committees link only within themselves. Awareness participants are typed names, not user accounts. They work standalone; they just don't appear on a linked record's "related" panel. (Regulatory-change obligations, vulnerability findings and data breaches now do link.)
 
 ### What changed on 11 Aug 2026
 

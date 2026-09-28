@@ -618,6 +618,19 @@ class RiskListFilters:
         return {k: getattr(self, k) for k in self.LABELS if getattr(self, k) not in (None, "")}
 
 
+async def _asset_counts(db, risk_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+    """Live linked assets per risk, one grouped query for the page."""
+    if not risk_ids:
+        return {}
+    rows = await db.execute(
+        select(risk_assets.c.risk_id, func.count())
+        .join(Asset, Asset.id == risk_assets.c.asset_id)
+        .where(risk_assets.c.risk_id.in_(risk_ids), Asset.deleted.is_(False))
+        .group_by(risk_assets.c.risk_id)
+    )
+    return {rid: int(n) for rid, n in rows.all()}
+
+
 @router.get("", response_model=Page[RiskRead], dependencies=[Depends(require("risk:read"))])
 async def list_risks(
     db: DbSession,
@@ -638,9 +651,11 @@ async def list_risks(
     else:
         stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
     # Load what the register serialises, plus the controls' findings ``_control_health``
-    # reads after validation — not every link of every linked record.
-    loads = options_for(Risk, RiskRead, ("controls.audit_findings",))
+    # reads after validation — not every link of every linked record. Linked assets are
+    # not loaded at all: the row reports ``asset_count`` and the record carries them.
+    loads = options_for(Risk, RiskRead, ("controls.audit_findings",), skip=("assets",))
     rows = (await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all()
+    context = {**context, "asset_counts": await _asset_counts(db, [r.id for r in rows])}
     items = await serialize_all(db, rows, lambda r: RiskRead.model_validate(r, context=context))
     await ref_fields.fill_refs(db, list(zip(rows, items)), RISK_REFS)
     await _fill_hierarchy(db, list(zip(rows, items)))

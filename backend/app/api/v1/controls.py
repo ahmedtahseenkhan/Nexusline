@@ -13,12 +13,14 @@ from sqlalchemy.orm import selectinload
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
 from app.core.schema_loading import options_for, serialize_all
+from app.models.asset import Asset
 from app.models.audit import AuditLog
 from app.models.compliance import Framework, Requirement, requirement_controls
 from app.models.control import (
     Control,
     ControlAudit,
     ControlMaintenance,
+    control_assets,
     control_business_units,
     control_processes,
 )
@@ -134,8 +136,24 @@ def fill_frameworks(items, frameworks: dict) -> None:
                 req.framework_id, req.framework = found
 
 
-async def _reads(db, controls) -> list[ControlRead]:
-    items = await serialize_all(db, controls, ControlRead.model_validate)
+async def _asset_counts(db, control_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+    """Live protected assets per control, one grouped query for the page."""
+    if not control_ids:
+        return {}
+    rows = await db.execute(
+        select(control_assets.c.control_id, func.count())
+        .join(Asset, Asset.id == control_assets.c.asset_id)
+        .where(control_assets.c.control_id.in_(control_ids), Asset.deleted.is_(False))
+        .group_by(control_assets.c.control_id)
+    )
+    return {cid: int(n) for cid, n in rows.all()}
+
+
+async def _reads(db, controls, asset_counts: dict | None = None) -> list[ControlRead]:
+    # The register passes counts and leaves ``assets`` unloaded; a record read carries
+    # the links and counts them itself.
+    context = {"asset_counts": asset_counts} if asset_counts is not None else None
+    items = await serialize_all(db, controls, lambda c: ControlRead.model_validate(c, context=context))
     await ref_fields.fill_refs(db, list(zip(controls, items)), CONTROL_REFS)
     fill_frameworks(
         items, await _frameworks_by_requirement(db, [r.id for item in items for r in item.requirements])
@@ -407,10 +425,12 @@ async def list_controls(
         stmt = stmt.order_by(Control.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     # Load what the list serialises (``schema_loading``), not every link of every link.
-    loads = (*_loads(), *options_for(Control, ControlRead))
+    # Protected assets are not loaded at all: the row reports ``asset_count``.
+    loads = (*_loads(), *options_for(Control, ControlRead, skip=("assets",)))
     rows = (await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all()
     await _attach_risks_bulk(db, rows)
-    return Page(items=await _reads(db, rows), total=total, limit=limit, offset=offset)
+    counts = await _asset_counts(db, [c.id for c in rows])
+    return Page(items=await _reads(db, rows, counts), total=total, limit=limit, offset=offset)
 
 
 def _clause_label(requirement) -> str:

@@ -46,6 +46,8 @@ class MyWorkSection(BaseModel):
     #: Items shown (overdue first); ``count`` is the full number.
     items: list[MyWorkItem] = Field(default_factory=list)
     truncated: bool = False
+    #: True when ``count`` is only what one capped read returned (show it as "500+").
+    count_is_floor: bool = False
 
 
 class MyWorkRead(BaseModel):

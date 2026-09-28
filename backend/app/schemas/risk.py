@@ -391,6 +391,10 @@ class RiskRead(BaseModel):
     business_units: list[NamedRef] = []
     processes: list[NamedRef] = []
     assets: list[AssetRef] = []
+    #: How many live assets the risk links. The register reports this and leaves
+    #: ``assets`` empty — a risk on the whole estate links thousands, and a list page
+    #: carrying each one for every row was a megabyte a page; the record carries them.
+    asset_count: int | None = None
     # Each control's rating, its basis and its test record (B2): filled on the
     # single-record read and write responses; null on the list.
     controls: list[ControlAssuranceRef] = []
@@ -478,6 +482,9 @@ class RiskRead(BaseModel):
         appetite fields, which stay None without it.
         """
         ctx = info.context or {}
+        if self.asset_count is None:
+            counts = ctx.get("asset_counts")
+            self.asset_count = counts.get(self.id, 0) if counts is not None else len(self.assets)
         scale = ctx.get("scale") or SeverityScale(max_score=ctx.get("max_score", DEFAULT_MAX_SCORE))
         # An unscored draft is never banded or judged against appetite, on either pass:
         # the stored 1x1 would otherwise read as a "low, within appetite" assessment.

@@ -468,5 +468,11 @@ class AssetReview(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     )
     outcome: Mapped[str] = mapped_column(String(120), default="")
     comments: Mapped[str] = mapped_column(Text, default="")
+    # Who completed it (``reviewer`` is who was planned): the name as it was then, and
+    # the account.
+    completed_by: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    completed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
     asset: Mapped["Asset"] = relationship(back_populates="reviews")
