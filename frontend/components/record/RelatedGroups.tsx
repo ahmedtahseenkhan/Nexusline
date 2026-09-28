@@ -19,9 +19,13 @@
    ("EXC-001 Accept ransomware…", truncated at 48ch with the full text in `title`), each
    item's muted `meta`, the group `action` and `footer`. Every empty group folds into one
    sentence: "Not linked to business units, processes or policies." (labels in the order
-   given). When every group is empty: "No linked records yet." plus a "Link records" link. */
+   given). When every group is empty: "No linked records yet." plus a "Link records" link.
 
-import { Fragment } from "react";
+   A group shows its first PREVIEW chips and a "Show all N" toggle: a control on every
+   endpoint links thousands of assets, and rendering each one buried the rest of the
+   record under a wall of chips. */
+
+import { Fragment, useState } from "react";
 import Link from "next/link";
 import type { GraphRef } from "@/components/RelatedChips";
 import type { RelatedGroup } from "@/components/record/types";
@@ -56,6 +60,33 @@ function Chip({ g, x }: { g: RelatedGroup; x: GraphRef }) {
   );
 }
 
+/** Chips a group shows before "Show all". */
+const PREVIEW = 25;
+
+function GroupItems({ g }: { g: RelatedGroup }) {
+  const [all, setAll] = useState(false);
+  const items = g.items ?? [];
+  const shown = all ? items : items.slice(0, PREVIEW);
+  return (
+    <>
+      {shown.map((x) => {
+        const meta = g.meta?.(x);
+        return (
+          <Fragment key={x.id}>
+            <Chip g={g} x={x} />
+            {meta !== undefined && meta !== null && meta !== "" && <span className="meta">{meta}</span>}
+          </Fragment>
+        );
+      })}
+      {items.length > PREVIEW && (
+        <button type="button" className="rec-link" onClick={() => setAll((v) => !v)} aria-expanded={all}>
+          {all ? "Show fewer" : `Show all ${items.length.toLocaleString()}`}
+        </button>
+      )}
+    </>
+  );
+}
+
 export default function RelatedGroups({ groups, onLink, noun = "records" }: RelatedGroupsProps) {
   const filled = groups.filter((g) => (g.items?.length ?? 0) > 0);
   const empty = groups.filter((g) => (g.items?.length ?? 0) === 0);
@@ -84,15 +115,7 @@ export default function RelatedGroups({ groups, onLink, noun = "records" }: Rela
               <span className="n">{g.items?.length ?? 0}</span>
             </dt>
             <dd>
-              {(g.items ?? []).map((x) => {
-                const meta = g.meta?.(x);
-                return (
-                  <Fragment key={x.id}>
-                    <Chip g={g} x={x} />
-                    {meta !== undefined && meta !== null && meta !== "" && <span className="meta">{meta}</span>}
-                  </Fragment>
-                );
-              })}
+              <GroupItems g={g} />
               {g.action && <span className="grp-act">{g.action}</span>}
               {g.footer && <div className="grp-foot">{g.footer}</div>}
             </dd>

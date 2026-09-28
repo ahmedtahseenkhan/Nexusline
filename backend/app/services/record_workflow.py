@@ -25,7 +25,10 @@ otherwise the generic ``workflow:approve``.
 
 Four eyes: approve and reject pass :func:`dual_control.enforce_record_maker_checker`
 for ``(<entity_type>, approve)`` — the person who entered the record cannot decide it —
-and the same rule is applied to whoever submitted it for review.
+and the same rule is applied to whoever submitted it for review. Approving a record that
+carries an amount (loss event, outsourcing arrangement, exception) also needs the
+approver's delegation-of-authority mandate (``services.authority_limits``), here and on
+the approval that finishes a route (:func:`write_back`).
 
 Routing: when a :class:`~app.models.workflow.WorkflowDefinition` is enabled for the
 record type, ``submit`` starts that route (whose first stage raises the
@@ -288,13 +291,32 @@ def _coerce(record: Any, value: str) -> Any:
 def synced_business_status(table: str, current: Any, workflow_state: str) -> str | None:
     """The business status a record should take when its lifecycle moves, or None. Pure.
 
-    Only policies carry a business status that duplicates the lifecycle (draft → under
-    review → approved → published). A published policy stays published while a revision
-    is drafted — the current version is still binding — until it is retired.
+    Two registers carry a business status that records the same decision as the
+    lifecycle:
+
+    * **Policies** (draft → under review → approved → published). A published policy
+      stays published while a revision is drafted — the current version is still
+      binding — until it is retired.
+    * **Exceptions** (pending → approved). Approving an exception through its lifecycle
+      (or its approval route) is the approval decision, so the exception is approved;
+      reopening an approved one for revision puts it back to pending, since its new
+      terms have not been approved. A rejected or closed exception is left alone.
     """
+    if table not in ("exceptions", "policies"):
+        # The specialist registers whose sign-off is this lifecycle (DPIAs, Shariah
+        # rulings and products, the model inventory, FAIR quantifications).
+        from app.services.lifecycle_gates import synced_status
+
+        return synced_status(table, current, workflow_state)
+    now = getattr(current, "value", current)
+    if table == "exceptions":
+        if workflow_state == "approved" and now == "pending":
+            return "approved"
+        if workflow_state == "draft" and now == "approved":
+            return "pending"
+        return None
     if table != "policies":
         return None
-    now = getattr(current, "value", current)
     if workflow_state == "retired":
         return "retired" if now != "retired" else None
     if now == "published":
@@ -303,7 +325,10 @@ def synced_business_status(table: str, current: Any, workflow_state: str) -> str
     return target if target and target != now else None
 
 
-async def _set_state(db: AsyncSession, record: Any, value: str) -> None:
+async def _set_state(db: AsyncSession, record: Any, value: str, *, decided_by: uuid.UUID | None = None) -> None:
+    """Move the lifecycle state as the platform, with the business status that follows
+    it (:func:`synced_business_status`). ``decided_by`` is the approver an exception's
+    approval is recorded against."""
     with system_write():
         record.workflow_status = _coerce(record, value)
         business = synced_business_status(
@@ -313,7 +338,51 @@ async def _set_state(db: AsyncSession, record: Any, value: str) -> None:
             column = type(record).__table__.c.status
             enum_class = getattr(column.type, "enum_class", None)
             record.status = enum_class(business) if enum_class is not None else business
+            if type(record).__tablename__ == "exceptions":
+                # The decision fields /exceptions/{id}/decision sets, kept in step.
+                from datetime import date
+
+                approved = business == "approved"
+                record.approver_id = decided_by if approved else None
+                record.decided_at = date.today() if approved else None
         await db.flush()
+
+
+async def carry_state(db: AsyncSession, record: Any, value: str) -> None:
+    """Set a state an import carried over from the source system onto a record it has
+    just created — with the business status that follows it, as a decision here would
+    (``services.import_registry``). Nobody here decided it, so no approver is named."""
+    await _set_state(db, record, value)
+
+
+#: Why an approval is refused when nobody is recorded as the record's maker.
+UNATTRIBUTED_REFUSAL = (
+    "Nobody is recorded as having entered or submitted this {label} — it was loaded "
+    "outside the application — so an approval here can't be shown to be independent. "
+    "Return it to draft; once someone submits it, a different person can approve it."
+)
+
+
+async def unattributed_refusal(db: AsyncSession, entity_type: str, record: Any) -> str | None:
+    """Why four-eyes can't be verified for approving ``record``, or None.
+
+    Four-eyes compares the approver with the record's maker (the trail's ``create``, else
+    the record's own user reference) and its submitter. A record written straight into
+    review or approval by a script or a direct load has neither, and the comparison then
+    passed for everyone — its creator included. Under dual control that fails closed:
+    approving is refused, returning it to draft is not, and the resubmission names a
+    maker the next approval is checked against."""
+    from app.services import dual_control
+
+    required, _rule = await dual_control.dual_control_required(db, entity_type, "approve")
+    if not required:
+        return None
+    if await dual_control.maker_of(db, entity_type, record.id, record=record) is not None:
+        return None
+    if await last_submitter(db, entity_type, record.id) is not None:
+        return None
+    label = record_registry.type_label(entity_type, type(record)).lower()
+    return UNATTRIBUTED_REFUSAL.format(label=label)
 
 
 async def last_submitter(db: AsyncSession, entity_type: str, entity_id: uuid.UUID) -> uuid.UUID | None:
@@ -433,6 +502,26 @@ async def apply(
             maker_id=await last_submitter(db, entity_type, record.id),
             checker_id=user.id, subject=subject,
         )
+        if action == "approve":
+            unattributed = await unattributed_refusal(db, entity_type, record)
+            if unattributed:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=unattributed)
+            # What the record needs before its sign-off (a current simulation, a passed
+            # validation…), then the delegation of authority, where the record carries an
+            # amount (a loss event's gross loss, an outsourcing contract's value, an
+            # exception's exposure).
+            from app.services import authority_limits, lifecycle_gates
+
+            lifecycle_gates.enforce_approval_precondition(entity_type, record)
+            await authority_limits.enforce(db, entity_type, record, user)
+
+    if action == "submit":
+        from app.services import lifecycle_gates
+
+        # Nothing goes to an approver that could not be approved as it stands.
+        lifecycle_gates.enforce_approval_precondition(entity_type, record)
+        # Submitting is the maker's step: a rule's maker role, where one is named.
+        await dual_control.enforce_maker_role(db, module=entity_type, action="approve", maker_id=user.id)
 
     result = TransitionResult(state=target, previous=current, action=action)
     if action == "submit":
@@ -451,7 +540,7 @@ async def apply(
             result.routed = True
             result.instance_id = instance.id
 
-    await _set_state(db, record, target)
+    await _set_state(db, record, target, decided_by=user.id if action == "approve" else None)
     changes: dict[str, Any] = {"from": current, "to": target}
     if reason:
         changes["reason"] = reason
@@ -479,6 +568,33 @@ def write_back_target(current: Any, approved: bool) -> str | None:
     return DRAFT if value == IN_REVIEW else None
 
 
+def _decide_audit_plan(plan: Any, approved: bool) -> tuple[str, str] | None:
+    """Board / audit-committee sign-off of an annual audit plan, from the approvals inbox.
+
+    The plan has no ``workflow_status``: its own ``status`` (draft → submitted →
+    approved) *is* the sign-off lifecycle, so the decision lands there, and approval is
+    dated because "approved by the audit committee on …" is what the plan must show.
+    """
+    from datetime import date
+
+    from app.models.audit_plan import plan_decision_target
+
+    current = plan.status
+    target = plan_decision_target(current, approved)
+    if target is None:
+        return None
+    plan.status = target
+    plan.approved_on = date.today() if approved else None
+    return current.value, target.value
+
+
+#: Records whose sign-off moves a business ``status`` instead of ``workflow_status``,
+#: by table: ``(record, approved) -> (from, to)``, or None when the decision moves nothing.
+_STATUS_DECISIONS: dict[str, Any] = {
+    "audit_plans": _decide_audit_plan,
+}
+
+
 async def write_back(
     db: AsyncSession,
     *,
@@ -496,7 +612,9 @@ async def write_back(
     Called by ``approvals.decide_approval`` for a single-stage request and by
     ``workflow_engine.on_approval_decided`` when a route finishes. Returns the new state,
     or None when nothing changed (no record, no lifecycle, or not a state the decision
-    moves). Audited as the deciding user, or as the platform when there is none.
+    moves). A record whose sign-off is its own business ``status`` rather than
+    ``workflow_status`` (the annual audit plan) is moved by its :data:`_STATUS_DECISIONS`
+    entry instead. Audited as the deciding user, or as the platform when there is none.
     ``action`` overrides the audit verb (``withdraw`` when a route is cancelled).
     """
     from app.services import audit
@@ -504,17 +622,40 @@ async def write_back(
     if not entity_type or entity_id is None:
         return None
     model = record_registry.model_for(entity_type)
-    if model is None or not record_registry.has_workflow(model):
+    if model is None:
         return None
-    record = await db.get(model, entity_id)
-    if record is None or getattr(record, "deleted", False):
-        return None
-    current = state_value(record.workflow_status)
-    target = write_back_target(current, approved)
-    if target is None:
-        return None
+    if not record_registry.has_workflow(model):
+        decide = _STATUS_DECISIONS.get(getattr(model, "__tablename__", ""))
+        if decide is None:
+            return None
+        record = await db.get(model, entity_id)
+        if record is None or getattr(record, "deleted", False):
+            return None
+        moved = decide(record, approved)
+        if moved is None:
+            return None
+        current, target = moved
+        await db.flush()
+    else:
+        record = await db.get(model, entity_id)
+        if record is None or getattr(record, "deleted", False):
+            return None
+        current = state_value(record.workflow_status)
+        target = write_back_target(current, approved)
+        if target is None:
+            return None
+        if target == APPROVED:
+            from app.services import lifecycle_gates
 
-    await _set_state(db, record, target)
+            lifecycle_gates.enforce_approval_precondition(entity_type, record)
+        if target == APPROVED and actor is not None:
+            # The approval that finishes the route or request is the one the delegation
+            # of authority governs: its decider needs the mandate (earlier stages don't).
+            from app.services import authority_limits
+
+            await authority_limits.enforce(db, entity_type, record, actor)
+        await _set_state(db, record, target, decided_by=getattr(actor, "id", None) if approved else None)
+
     action = action or ("approve" if approved else "reject")
     reason = (comment or "").strip()
     summary = _summary(action, entity_type, record, reason)

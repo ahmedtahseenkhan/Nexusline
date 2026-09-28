@@ -17,10 +17,13 @@ export default function LoginPage() {
   const [code, setCode] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Arriving from forced MFA enrolment: say what happens next.
+  // Arriving from forced MFA enrolment or a lapsed session: say what happens next.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("mfa") === "enabled") {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mfa") === "enabled") {
       setNotice("Two-factor authentication is on. Sign in again and enter a code from your authenticator app.");
+    } else if (params.get("expired") === "1") {
+      setNotice("Your session has expired. Sign in again to carry on where you left off.");
     }
   }, []);
 

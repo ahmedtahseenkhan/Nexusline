@@ -144,6 +144,7 @@ class PolicyRead(PolicyBase):
     projects: list[GraphRef] = []
     goals: list[GraphRef] = []
     processing_activities: list[GraphRef] = []
+    obligations: list[GraphRef] = []
     # Phase 2: governance and applicability.
     approving_authority_ref: GraphRef | None = None
     supersedes_ref: GraphRef | None = None

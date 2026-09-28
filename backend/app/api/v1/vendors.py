@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.core.schema_loading import options_for, serialize_all
 from app.models.asset import Asset
 from app.models.assessment import Questionnaire
 from app.models.compliance import Requirement
@@ -249,7 +250,7 @@ async def _tiering_questionnaire_id(db):
 
 
 async def _reads(db, rows) -> list[VendorRead]:
-    items = [VendorRead.model_validate(r) for r in rows]
+    items = await serialize_all(db, rows, VendorRead.model_validate)
     await rf.fill_refs(db, list(zip(rows, items)), ALL_REFS)
     if not rows:
         return items
@@ -258,14 +259,30 @@ async def _reads(db, rows) -> list[VendorRead]:
     labels = await master_data.lookups_by_id(db, (a.country_id for a in arrangements))
     qid = await _tiering_questionnaire_id(db)
     book = await _rate_book_for(db, org_ccy, (c.currency for r in rows for c in (r.contracts or [])))
-    for row, item in zip(rows, items):
+
+    def fill(row, item):
         item.active_contract_totals = contract_totals(row.contracts, org_ccy)
         item.active_contract_total = MoneyTotalRead(**contract_total(row.contracts, book))
         item.outsourcing = outsourcing_facts(getattr(row, "outsourcing_arrangements", None) or [], labels)
         item.concentration = concentration_view(row)
         item.tiering = tiering_view(row, qid)
         item.due_diligence = _due_diligence_view(row)
-    return items
+        return item
+
+    # The views read the assessments' questionnaires and answers (``_VIEW_READS``); run
+    # them where anything a list did not load can still be lazy-loaded.
+    return await serialize_all(db, list(zip(rows, items)), lambda pair: fill(*pair))
+
+
+#: Relationships the tiering, due-diligence and concentration views read, beyond the
+#: ones ``VendorRead`` names — loaded with a list (``schema_loading``).
+_VIEW_READS = (
+    "assessments.questionnaire.questions.options",
+    "assessments.answers.option",
+    "assessments.findings.issue",
+    "outsourcing_arrangements",
+    "processes",
+)
 
 
 async def _read(db, vendor_id: uuid.UUID) -> VendorRead:
@@ -415,7 +432,9 @@ async def list_vendors(
     else:
         stmt = stmt.order_by(Vendor.name)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))).all()
+    # Load what the list serialises (``schema_loading``), not every link of every link.
+    loads = (*_loads(), *options_for(Vendor, VendorRead, _VIEW_READS))
+    rows = (await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all()
     return Page(items=await _reads(db, rows), total=total, limit=limit, offset=offset)
 
 
@@ -475,8 +494,9 @@ def spend_summary(vendors, book: fx.RateBook) -> VendorSpendSummary:
             dependencies=[Depends(require("vendor:read"))],
             summary="Vendor annual spend and live contract value, in the reporting currency")
 async def vendor_spend_summary(db: DbSession, user: CurrentUser) -> VendorSpendSummary:
+    # Every vendor, with its contracts and nothing else it links to.
     vendors = (await db.scalars(
-        select(Vendor).where(Vendor.deleted.is_(False)).options(selectinload(Vendor.contracts))
+        select(Vendor).where(Vendor.deleted.is_(False)).options(*options_for(Vendor, None, ("contracts",)))
     )).all()
     return spend_summary(list(vendors), await fx.load_rate_book(db, user.tenant_id))
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import random
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,15 +21,17 @@ from app.models.risk import Risk
 from app.models.risk_quant import QuantStatus, RiskQuantification
 from app.schemas.common import Page
 from app.schemas.risk_quant import (
+    SIMULATION_INPUTS,
     RiskQuantCreate,
     RiskQuantRead,
     RiskQuantUpdate,
     SimulationResult,
+    range_problem,
 )
 from app.services.refs import next_reference
 from app.schemas.fx import UnconvertedAmount
 from app.services import audit as audit_log
-from app.services import fx
+from app.services import fx, lifecycle_gates
 
 router = APIRouter(tags=["risk quantification"])
 
@@ -102,10 +104,63 @@ async def list_quantifications(
     return Page(items=[RiskQuantRead.model_validate(r) for r in rows], total=total, limit=limit, offset=offset)
 
 
+NEEDS_SIMULATION_DETAIL = (
+    "Run the simulation on the current inputs before approving this quantification."
+)
+
+#: An approved quantification is the figure the bank signed off; changing its inputs or
+#: re-running it would change that figure under the approval.
+APPROVED_LOCKED_DETAIL = (
+    "This quantification is approved, so its inputs and figures are fixed. Use Revise to "
+    "reopen it, change it, simulate again and submit it for approval."
+)
+
+
+def _signed_off(obj: RiskQuantification) -> bool:
+    """Approved through the lifecycle (a status typed in before the gate is not a
+    sign-off, and stays editable)."""
+    return obj.status == QuantStatus.approved and getattr(
+        obj.workflow_status, "value", obj.workflow_status) == "approved"
+
+
+def _status_for(requested: QuantStatus, has_result: bool) -> QuantStatus:
+    """The status a create/edit may leave, given whether a current simulation exists.
+
+    *Simulated* is set by the simulate action and means "results describe these inputs";
+    asked for without a current run it is saved as *draft*. *Approved* signs off figures,
+    so it needs a current run (422 otherwise) — and only the approval lifecycle moves a
+    record into it (``lifecycle_gates.QUANT_STATUS``); here it is only ever echoed back.
+    """
+    if has_result:
+        return requested
+    if requested == QuantStatus.approved:
+        raise HTTPException(status_code=422, detail=NEEDS_SIMULATION_DETAIL)
+    return QuantStatus.draft
+
+
+def _clear_results(obj: RiskQuantification) -> None:
+    """Drop the cached run: it was computed from inputs the record no longer has."""
+    obj.last_mean_ale = 0
+    obj.last_p90 = 0
+    obj.last_simulated = None
+
+
+def _differs(new, old) -> bool:
+    """True when an input really changed (``Numeric`` columns load as ``Decimal``)."""
+    if isinstance(new, (int, float)) and not isinstance(new, bool) and old is not None:
+        try:
+            return float(new) != float(old)
+        except (TypeError, ValueError):
+            return True
+    return new != old
+
+
 @router.post("/risk-quantification", response_model=RiskQuantRead, status_code=201, dependencies=[_WRITE])
 async def create_quantification(body: RiskQuantCreate, db: DbSession, user: CurrentUser) -> RiskQuantRead:
     await _validate_risk(db, body.risk_id)
+    lifecycle_gates.enforce_create("risk_quantification", body.model_dump())
     obj = RiskQuantification(tenant_id=user.tenant_id, **body.model_dump())
+    obj.status = _status_for(body.status, has_result=False)
     obj.reference = await _next_ref(db, RiskQuantification, "FAIR")
     db.add(obj)
     await db.flush()
@@ -123,10 +178,31 @@ async def get_quantification(qid: uuid.UUID, db: DbSession) -> RiskQuantRead:
 async def update_quantification(qid: uuid.UUID, body: RiskQuantUpdate, db: DbSession) -> RiskQuantRead:
     obj = await _load(db, qid)
     data = body.model_dump(exclude_unset=True)
+    # A null in a partial update means "not sent" (every column but the risk link is
+    # NOT NULL).
+    data = {k: v for k, v in data.items() if v is not None or k == "risk_id"}
+    lifecycle_gates.enforce_edit("risk_quantification", obj, data)
     if "risk_id" in data:
         await _validate_risk(db, data["risk_id"])
+    merged = {name: data.get(name, getattr(obj, name)) for name in SIMULATION_INPUTS}
+    problem = range_problem(merged)
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+    # Any input edit makes the cached run describe a different scenario: clear it, so
+    # the list, the summary totals and the top five never show figures for old inputs.
+    changed = [
+        name for name in SIMULATION_INPUTS
+        if name in data and _differs(data[name], getattr(obj, name))
+    ]
+    if changed and _signed_off(obj):
+        raise HTTPException(status_code=409, detail=APPROVED_LOCKED_DETAIL)
+    has_result = obj.last_simulated is not None and not changed
+    new_status = _status_for(data.pop("status", obj.status), has_result)
     for k, v in data.items():
         setattr(obj, k, v)
+    if changed:
+        _clear_results(obj)
+    obj.status = new_status
     await db.flush()
     return RiskQuantRead.model_validate(await _load(db, qid))
 
@@ -135,7 +211,7 @@ async def update_quantification(qid: uuid.UUID, body: RiskQuantUpdate, db: DbSes
 async def delete_quantification(qid: uuid.UUID, db: DbSession) -> None:
     obj = await _load(db, qid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -160,6 +236,12 @@ def _triangular_sample(low: float, mode: float, high: float) -> float:
 @router.post("/risk-quantification/{qid}/simulate", response_model=SimulationResult, dependencies=[_WRITE])
 async def simulate(qid: uuid.UUID, db: DbSession, user: CurrentUser) -> SimulationResult:
     obj = await _load(db, qid)
+    if _signed_off(obj):
+        raise HTTPException(status_code=409, detail=APPROVED_LOCKED_DETAIL)
+    # Records saved before the range rules existed may still hold an impossible range.
+    problem = range_problem({name: getattr(obj, name) for name in SIMULATION_INPUTS})
+    if problem:
+        raise HTTPException(status_code=422, detail=f"{problem} Correct the estimates, then run again.")
     iterations = max(1, int(obj.iterations or 0))
 
     tef = (float(obj.tef_min or 0), float(obj.tef_likely or 0), float(obj.tef_max or 0))
@@ -221,7 +303,11 @@ async def quant_summary(db: DbSession) -> QuantSummary:
     book = await fx.load_rate_book(db)
     total = fx.MoneyTotal(book)
     converted: list[tuple] = []
+    # Only a current run counts: a record never simulated, or whose inputs changed since
+    # (its cache is cleared), has no figure to add or rank.
     for r in rows:
+        if r.last_simulated is None:
+            continue
         mean = book.convert(r.last_mean_ale or 0, r.currency)
         p90 = book.convert(r.last_p90 or 0, r.currency)
         total.add(r.last_mean_ale or 0, r.currency)

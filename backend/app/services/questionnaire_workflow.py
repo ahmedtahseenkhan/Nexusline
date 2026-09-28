@@ -58,6 +58,10 @@ RATING_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 RCSA_RANK = {"ineffective": 0, "partially_effective": 1, "effective": 2}
 
 
+REOPENED_ONLY = ("Only the answers the reviewer returned, and the follow-up questions they show, "
+                 "can be changed now.")
+
+
 class WorkflowError(ValueError):
     def __init__(self, message: str, *, status: int = 422, problems: list[str] | None = None):
         super().__init__(message)
@@ -150,9 +154,7 @@ def upsert_answers(
         if row is not None and not _changed(row, fields):
             continue
         if only_questions is not None and item.question_id not in only_questions:
-            raise WorkflowError(
-                "Only the answers the reviewer returned can be changed now.", status=409,
-            )
+            raise WorkflowError(REOPENED_ONLY, status=409)
         if row is None:
             row = AssessmentAnswer(
                 tenant_id=tenant_id, assessment_id=assessment.id, question_id=item.question_id,
@@ -169,6 +171,77 @@ def upsert_answers(
                 row.review_state = REVIEW_PENDING
         changed += 1
     return new_rows, changed
+
+
+def dependent_questions(spec: Sequence[Mapping[str, Any]], question_ids: Iterable[Any]) -> set[Any]:
+    """Ids of the questions whose display hangs, directly or through another follow-up,
+    on the answers to ``question_ids``: their own condition or their section's refers to
+    one of those questions. Pure."""
+    keys_by_id = {q.get("id"): str(q["key"]) for s in spec for q in s.get("questions") or []}
+    keys = {keys_by_id[i] for i in question_ids if i in keys_by_id}
+    found: set[Any] = set()
+    grew = True
+    while grew:
+        grew = False
+        for s in spec:
+            section_refs = {str(r.get("question")) for r in ql._rules(s.get("conditions"))}
+            for q in s.get("questions") or []:
+                if q.get("id") in found:
+                    continue
+                refs = section_refs | {str(r.get("question")) for r in ql._rules(q.get("conditions"))}
+                if refs & keys:
+                    found.add(q.get("id"))
+                    keys.add(str(q["key"]))
+                    grew = True
+    return found
+
+
+def reopened_questions(assessment: Assessment) -> set[uuid.UUID] | None:
+    """The questions the respondent may change after the reviewer returned answers, or
+    ``None`` when the assessment is not in a returned round (nothing is restricted).
+
+    A round is open from the return until the resubmission. In it the respondent may
+    change the answers still returned, the ones already revised this round (returned
+    answers go back to pending once changed, and may be corrected again before
+    submitting) and the follow-up questions shown or hidden by those answers — a
+    returned "Do you outsource? Yes" must be answerable with the "Who to?" question it
+    reveals, in the same save. Answers the reviewer accepted stay locked. A revised
+    answer is one changed after the reviewer's last decision: every decision is taken
+    while the assessment is submitted, before the return. Pure."""
+    if not getattr(assessment, "submitted_at", None):
+        return None
+    answers = list(assessment.answers or [])
+    returned = {a.question_id for a in answers if a.review_state == REVIEW_RETURNED}
+    decided = [a.reviewed_at for a in answers if a.reviewed_at is not None]
+    since = max(decided) if decided else None
+    revised = {
+        a.question_id for a in answers
+        if a.review_state == REVIEW_PENDING and since is not None
+        and a.answered_at is not None and a.answered_at > since
+    }
+    core = returned | revised
+    if not core:
+        return None
+    accepted = {a.question_id for a in answers if a.review_state == REVIEW_ACCEPTED}
+    follow_ups = dependent_questions(ql.spec_from_version(assessment.questionnaire), core) - accepted
+    return core | follow_ups
+
+
+def returned_refusal(assessment: Assessment) -> WorkflowError | None:
+    """Why a resubmission can't go yet: an answer the reviewer returned has not been
+    changed (a new value, comment or file puts it back to pending). Submitting it as it
+    was would hand the reviewer the same answer and a final review that can't be given.
+    Pure."""
+    labels = {q.id: (q.text or "")[:90] for q in getattr(assessment.questionnaire, "questions", None) or []}
+    names = [labels.get(a.question_id, "") for a in assessment.answers if a.review_state == REVIEW_RETURNED]
+    if not names:
+        return None
+    n = len(names)
+    return WorkflowError(
+        f"{n} answer{'s' if n != 1 else ''} the reviewer returned {'have' if n != 1 else 'has'} not been updated. "
+        "Change each returned answer, its comment or its evidence as the reviewer asked, then submit again.",
+        status=409, problems=[f"Returned: {name}" for name in names],
+    )
 
 
 def evaluate(assessment: Assessment, file_counts: Mapping[Any, int] | None = None):

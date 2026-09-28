@@ -4,9 +4,29 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.audit_plan import AuditPlanStatus
+from app.models.audit_plan import AuditPlanStatus, quarter_of_month
+
+
+def _month_in_quarter(model: BaseModel) -> BaseModel:
+    """A line's month must fall in its quarter; a month alone sets the quarter.
+
+    ``planned_month=11`` with ``planned_quarter=1`` would put one audit in two places —
+    the calendar on November, the plan and its coverage in Q1.
+    """
+    month = getattr(model, "planned_month", None)
+    if month is None:
+        return model
+    quarter = quarter_of_month(month)
+    if "planned_quarter" in model.model_fields_set and model.planned_quarter is not None:
+        if model.planned_quarter != quarter:
+            raise ValueError(
+                f"Month {month} falls in Q{quarter}, not Q{model.planned_quarter}"
+            )
+    else:
+        model.planned_quarter = quarter
+    return model
 
 
 # --------------------------------------------------------------- plan items ---
@@ -22,7 +42,9 @@ class PlanItemBase(BaseModel):
 
 
 class PlanItemCreate(PlanItemBase):
-    pass
+    @model_validator(mode="after")
+    def _schedule(self):
+        return _month_in_quarter(self)
 
 
 class PlanItemUpdate(BaseModel):
@@ -33,7 +55,16 @@ class PlanItemUpdate(BaseModel):
     planned_month: int | None = Field(default=None, ge=1, le=12)
     budgeted_hours: int | None = Field(default=None, ge=0, le=100000)
     lead_auditor: str | None = None
+    #: The engagement delivering this line (null unlinks it) — what plan coverage counts.
     engagement_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _schedule(self):
+        # A month with no quarter is resolved against the stored line by the endpoint,
+        # which knows the current quarter; only a contradiction in the request is refused.
+        if self.planned_month is not None and "planned_quarter" in self.model_fields_set:
+            return _month_in_quarter(self)
+        return self
 
 
 class PlanItemRead(PlanItemBase):
@@ -41,6 +72,9 @@ class PlanItemRead(PlanItemBase):
     id: uuid.UUID
     engagement_id: uuid.UUID | None
     auditable_unit_name: str = ""
+    engagement_reference: str = ""
+    engagement_title: str = ""
+    engagement_status: str = ""
 
 
 # -------------------------------------------------------------------- plans ---
@@ -62,6 +96,8 @@ class PlanUpdate(BaseModel):
     description: str | None = None
     prepared_by: str | None = None
     budget_hours: int | None = Field(default=None, ge=0, le=1000000)
+    #: Only the post-approval moves (approved → active → closed). Submission and
+    #: sign-off go through ``/submit`` and the approvals inbox.
     status: AuditPlanStatus | None = None
 
 

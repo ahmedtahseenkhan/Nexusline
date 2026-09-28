@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 
@@ -126,7 +126,7 @@ async def update_bia(bid: uuid.UUID, body: BiaUpdate, db: DbSession) -> BiaRead:
 async def delete_bia(bid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_bia(db, bid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
     await audit_log.record(db, actor=user, action="delete", entity_type="bia_assessment",
                          entity_id=obj.id, summary=f"Archived BIA {obj.reference}")

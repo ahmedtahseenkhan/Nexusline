@@ -27,6 +27,7 @@ import LookupSelect from "@/components/LookupSelect";
 import UserPicker from "@/components/UserPicker";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import {
   FactList, OpenPoints, PrimaryAction, RecordIssuesSection, RecordSection, RelatedGroups, SectionNav, SummaryBand,
   approvalHintFor, approvalMetaItem, relatedCount, rowAction, useRecordCtx, useRecordGovernanceData, useRecordSections,
@@ -269,6 +270,7 @@ function VendorsInner() {
   const canRaiseIssue = useHasPermission("issue:write");
   const ctx = useRecordCtx(gov, canWrite);
   const sections = useRecordSections();
+  const cfForm = useCustomFieldForm("vendor");
   const cf = useCustomFieldFacts("vendor", detail?.id, { builtInLabels: VENDOR_BUILT_IN_LABELS });
   /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
   const [editTab, setEditTab] = useState<string | undefined>(undefined);
@@ -299,16 +301,18 @@ function VendorsInner() {
   // A vendor can't be its own sub-contractor, so it is left out of the choices.
   const searchSubcontractors = (q: string) => apiCall<PagedList<{ id: string; name: string; legal_name?: string }>>("GET", `/vendors?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.filter((x) => x.id !== editing?.id).map((x) => ({ value: x.id, label: x.name, sub: x.legal_name && x.legal_name !== x.name ? x.legal_name : undefined })));
 
-  function openNew() { setEditing(null); setF(BLANK); setContract(BLANK_CONTRACT); setCert(BLANK_CERT); setError(null); setEditTab(undefined); setShowForm(true); }
-  function openEdit(v: Vendor, tab?: string) { setEditing(v); setF(fromVendor(v)); setContract(BLANK_CONTRACT); setCert(BLANK_CERT); setError(null); setEditTab(tab); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); setContract(BLANK_CONTRACT); setCert(BLANK_CERT); cfForm.start(null); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(v: Vendor, tab?: string) { setEditing(v); setF(fromVendor(v)); setContract(BLANK_CONTRACT); setCert(BLANK_CERT); cfForm.start(v.id); setError(null); setEditTab(tab); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f, !!editing);
-      if (editing) await apiCall<Vendor>("PATCH", `/vendors/${editing.id}`, payload);
-      else await apiCall<Vendor>("POST", "/vendors", payload);
-      setShowForm(false); refresh(); toast(editing ? "Changes saved" : "Vendor created");
+      const saved = editing
+        ? await apiCall<Vendor>("PATCH", `/vendors/${editing.id}`, payload)
+        : await apiCall<Vendor>("POST", "/vendors", payload);
+      await cfForm.save(saved.id);
+      setShowForm(false); refresh(); void cf.reload(); toast(editing ? "Changes saved" : "Vendor created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save vendor"); }
     finally { setSaving(false); }
   }
@@ -1106,6 +1110,7 @@ function VendorsInner() {
             { id: "contracts", label: "Contracts", content: contractsTab },
             { id: "certifications", label: "Certifications", content: certsTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           initialTab={editTab}
           onClose={() => {

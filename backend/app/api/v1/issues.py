@@ -30,6 +30,7 @@ from sqlalchemy import Select, func, or_, select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.core.schema_loading import options_for, serialize_all
 from app.models.enums import Severity
 from app.models.issue import (
     ActionStatus,
@@ -112,7 +113,7 @@ async def _issue_reads(db, rows) -> list[IssueRead]:
     """Read models for a page of issues, with every person/unit/lookup resolved in one
     query per kind across the issues, their actions, progress log and due-date log, and
     every linked record in one lean query per link kind."""
-    items = [IssueRead.model_validate(r) for r in rows]
+    items = await serialize_all(db, rows, IssueRead.model_validate)
     pairs: list = []
     for row, item in zip(rows, items):
         pairs.append((row, item))
@@ -203,7 +204,7 @@ def _controls_touched(changes: dict) -> list[uuid.UUID]:
 async def _enforce_four_eyes(db, obj: Issue, user, action: str) -> None:
     """Dual control ``(issue, <action>)``: whoever raised the issue — and, for
     validation, whoever owns its remediation — cannot take the step themselves."""
-    required, _rule = await dual_control.dual_control_required(db, "issue", action)
+    required, rule = await dual_control.dual_control_required(db, "issue", action)
     if not required:
         return
     raiser = await dual_control.maker_of(db, "issue", obj.id, record=obj)
@@ -214,6 +215,8 @@ async def _enforce_four_eyes(db, obj: Issue, user, action: str) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Segregation of duties: you raised this issue, so someone else must close it.",
         )
+    await dual_control.enforce_checker_role(db, rule, module="issue", action=action,
+                                            checker_id=user.id, maker_id=raiser)
 
 
 _DUE_DATE_MOVES = (
@@ -345,8 +348,10 @@ async def list_issues(
         stmt = apply_sort(stmt, params, _ISSUE_SORTABLE, default=Issue.created_at)
     else:
         stmt = stmt.order_by(Issue.created_at.desc())
+    # Load what the list serialises (``schema_loading``), not every link of every link.
+    loads = options_for(Issue, IssueRead)
     rows = (
-        await db.scalars(stmt.limit(limit).offset(offset))
+        await db.scalars(stmt.options(*loads).limit(limit).offset(offset))
     ).all()
     return Page(items=await _issue_reads(db, rows), total=total, limit=limit, offset=offset)
 
@@ -476,6 +481,9 @@ async def update_issue(iid: uuid.UUID, body: IssueUpdatePatch, db: DbSession, us
         data.pop("status", None)
     _refuse(422, ic.edit_status_refusal(prev_status, data.get("status")))
     change = _due_date_change(obj, data, reason, user)
+    if change is not None and change.status == ic.PENDING:
+        # Asking for the later date is the maker's step (a rule's maker role).
+        await dual_control.enforce_maker_role(db, module="issue", action="extend_due_date", maker_id=user.id)
     links = await _checked_links(db, sent_links)
     await rf.apply_refs(db, Issue, data, ISSUE_REFS + ROOT_CAUSE_REFS, record=obj)
     source_moved = "source_id" in data and data["source_id"] != obj.source_id

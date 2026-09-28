@@ -17,6 +17,7 @@ from app.models.enums import (
 )
 from app.schemas.asset import AssetRef
 from app.schemas.control import ControlAssuranceRef
+from app.schemas.tenant_settings import currency_or_blank
 from app.schemas.threat import NamedRef
 from app.services.risk_scoring import (
     DEFAULT_MAX_SCORE,
@@ -236,6 +237,13 @@ class RiskAssessment(BaseModel):
 class RiskAcceptanceCreate(BaseModel):
     rationale: str = Field(min_length=1)
     expires_at: date | None = None
+    # The exposure being accepted, for a risk with no quantified exposure (a quantified
+    # one is taken from the risk; a higher figure typed here wins). Checked against the
+    # approver's delegation-of-authority mandate (services.authority_limits).
+    exposure_amount: float | None = Field(default=None, ge=0)
+    exposure_currency: str = Field(default="", max_length=8)
+
+    _ccy = field_validator("exposure_currency")(currency_or_blank)
 
 
 class RiskAcceptanceDecision(BaseModel):
@@ -253,6 +261,9 @@ class RiskAcceptanceRead(BaseModel):
     status: AcceptanceStatus
     expires_at: date | None
     decided_at: date | None
+    exposure_amount: float | None = None
+    exposure_currency: str = ""
+    exposure_basis: str = ""
     created_at: datetime
 
 
@@ -380,6 +391,10 @@ class RiskRead(BaseModel):
     business_units: list[NamedRef] = []
     processes: list[NamedRef] = []
     assets: list[AssetRef] = []
+    #: How many live assets the risk links. The register reports this and leaves
+    #: ``assets`` empty — a risk on the whole estate links thousands, and a list page
+    #: carrying each one for every row was a megabyte a page; the record carries them.
+    asset_count: int | None = None
     # Each control's rating, its basis and its test record (B2): filled on the
     # single-record read and write responses; null on the list.
     controls: list[ControlAssuranceRef] = []
@@ -403,6 +418,12 @@ class RiskRead(BaseModel):
     loss_events: list[GraphRef] = []
     # Live issues raised against this risk (issue_risks).
     issues: list[GraphRef] = []
+    # Filled on the single-record read only (``_linked_records``): RCSAs with a line that
+    # assesses this risk (one entry per RCSA; ``title`` names the lines), FAIR
+    # quantifications that size it, and continuity plans that mitigate it.
+    rcsa_assessments: list[GraphRef] = []
+    quantifications: list[GraphRef] = []
+    continuity_plans: list[GraphRef] = []
 
     # Live rollup: health of the mitigating controls (none | ok | untested | issues).
     control_health: str = "none"
@@ -461,6 +482,9 @@ class RiskRead(BaseModel):
         appetite fields, which stay None without it.
         """
         ctx = info.context or {}
+        if self.asset_count is None:
+            counts = ctx.get("asset_counts")
+            self.asset_count = counts.get(self.id, 0) if counts is not None else len(self.assets)
         scale = ctx.get("scale") or SeverityScale(max_score=ctx.get("max_score", DEFAULT_MAX_SCORE))
         # An unscored draft is never banded or judged against appetite, on either pass:
         # the stored 1x1 would otherwise read as a "low, within appetite" assessment.

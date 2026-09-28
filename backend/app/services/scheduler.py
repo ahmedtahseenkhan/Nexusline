@@ -30,13 +30,14 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Select, delete, select
+from sqlalchemy import Select, delete, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
-from app.core.database import system_session, tenant_session
+from app.core.database import engine, system_session, tenant_session
 from app.models.tenant import Tenant
 from app.services import action_tokens, audit, board_pack, email, notifications, risk_acceptance
+from app.services import modules as module_service
 
 logger = logging.getLogger("nexusline.scheduler")
 
@@ -259,10 +260,11 @@ DIGEST_ACTION = "digest"
 _DIGEST_RANK = {"critical": 0, "warning": 1, "info": 2}
 
 
-def digest_for(rows, *, user_id, role_names, since) -> list:
+def digest_for(rows, *, user_id, role_names, since, readable_types=None) -> list:
     """The notifications to e-mail one person. Pure.
 
-    Visible to them (addressed to them, to one of their roles, or to everyone), raised
+    Visible to them (addressed to them, to one of their roles, or to everyone — the last
+    only for records they may read, ``readable_types``), raised
     after ``since``, one per alert condition (the row addressed to them personally when
     they were reached twice), most urgent first."""
     roles = set(role_names)
@@ -270,7 +272,7 @@ def digest_for(rows, *, user_id, role_names, since) -> list:
     for n in rows:
         if since is not None and n.created_at <= since:
             continue
-        if not notifications.is_visible(n, user_id, roles):
+        if not notifications.is_visible(n, user_id, roles, readable_types=readable_types):
             continue
         key = notifications.base_key(n.dedup_key)
         current = picked.get(key)
@@ -359,8 +361,19 @@ async def send_digests(db, tenant_id: uuid.UUID, tenant_name: str, now: datetime
     # Approvals page, so a digest never carries a link its reader would be refused.
     gates = await notifications.load_stage_gates(db, list(approvals.values()), directory) if approvals else {}
     sent = 0
+    # The e-mail follows the feed's rule: an alert addressed to everyone goes only to
+    # those who may read its record, in a module the organisation uses.
+    # (Resolved only when the batch holds such an alert: most carry a named recipient.)
+    for_everyone = any(n.user_id is None and not (n.role_name or "") for n in rows)
+    usable = await module_service.usable_modules(tenant_id) if for_everyone else None
     for person in people:
-        mine = digest_for(rows, user_id=person.id, role_names=person.roles, since=since[person.id])
+        readable = (
+            notifications.readable_entity_types(directory.permissions_of(person.id), usable)
+            if for_everyone else None
+        )
+        mine = digest_for(
+            rows, user_id=person.id, role_names=person.roles, since=since[person.id], readable_types=readable,
+        )
         if not mine:
             continue
         pairs = []
@@ -395,13 +408,32 @@ async def send_digests(db, tenant_id: uuid.UUID, tenant_name: str, now: datetime
     return sent
 
 
+# Every API worker process runs this loop; a session-level advisory lock makes exactly
+# one of them sweep at a time, so digests and alerts are not sent once per worker.
+_SWEEP_LOCK = 0x4E58_5357  # "NXSW"
+
+
+async def _sweep_if_leader() -> dict | None:
+    async with engine.connect() as conn:
+        if not await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": _SWEEP_LOCK}):
+            return None
+        try:
+            return await run_sweep()
+        finally:
+            await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _SWEEP_LOCK})
+            await conn.commit()
+
+
 async def _loop() -> None:
     interval = max(60, settings.scheduler_interval_minutes * 60)
     logger.info("Scheduler started (every %s min)", settings.scheduler_interval_minutes)
     while True:
         try:
-            summary = await run_sweep()
-            logger.info("Scheduler sweep: %s", summary)
+            summary = await _sweep_if_leader()
+            if summary is None:
+                logger.debug("Scheduler sweep skipped: another worker holds it")
+            else:
+                logger.info("Scheduler sweep: %s", summary)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

@@ -46,7 +46,7 @@ from app.models.enums import (
 from app.models.identity import User
 from app.models.incident import Incident, incident_controls
 from app.models.organization import BusinessUnit, Process
-from app.models.risk import Risk, risk_assets, risk_controls
+from app.models.risk import Risk, risk_controls
 from app.services.risk_query import build_risk_query
 from app.services.risk_scoring import appetite_status, band_ranges, severity_for_score
 

@@ -3,7 +3,9 @@
 Returns a flat, ranked list of hits across modules with a deep-link path, powering
 the top-bar search box. RLS keeps every query scoped to the caller's tenant, and
 each entity is guarded by its module read-permission so results never leak fields a
-user could not otherwise see.
+user could not otherwise see — and by its module being usable here: a register whose
+module is unlicensed or switched off for the organisation is not searched, since its
+pages and API refuse the records the hit would link to.
 """
 from __future__ import annotations
 
@@ -46,6 +48,7 @@ from app.models.threat import Threat, Vulnerability
 from app.models.vendor import Vendor
 from app.models.vulnerability import VulnFinding
 from app.models.whistleblowing import WhistleblowingReport
+from app.services import modules
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -136,6 +139,7 @@ async def global_search(q: str, db: DbSession, user: CurrentUser, limit: int = 8
         return SearchResults(query=q, hits=[])
 
     perms = set(user.permission_codes)
+    usable = await modules.usable_modules(user.tenant_id)
     like = f"%{term}%"
     per_type = max(1, min(limit, 15))
 
@@ -146,6 +150,9 @@ async def global_search(q: str, db: DbSession, user: CurrentUser, limit: int = 8
     branches = []
     for idx, tgt in enumerate(_TARGETS):
         if tgt.read_perm not in perms:
+            continue
+        module = modules.module_for_permission(tgt.read_perm)
+        if module is not None and module not in usable:
             continue
         model = tgt.model
         title_col = getattr(model, tgt.title_attr)

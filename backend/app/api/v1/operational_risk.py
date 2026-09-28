@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import secrets
 import uuid
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Annotated

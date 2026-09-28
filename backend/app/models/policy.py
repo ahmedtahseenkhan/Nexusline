@@ -139,6 +139,10 @@ class Policy(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, So
     processing_activities: Mapped[list["ProcessingActivity"]] = relationship(  # noqa: F821
         "ProcessingActivity", secondary="ropa_policies", lazy="selectin", viewonly=True,
     )
+    # Regulatory obligations this policy satisfies (set from the obligation's side).
+    obligations: Mapped[list["Obligation"]] = relationship(  # noqa: F821
+        "Obligation", secondary="obligation_policies", lazy="selectin", viewonly=True,
+    )
     # Phase 2: who it applies to. Users are not linked to business units, so the units
     # are recorded (and reported) but acknowledgement targeting reads the roles.
     business_units: Mapped[list["BusinessUnit"]] = relationship(  # noqa: F821

@@ -26,6 +26,7 @@ import FormModal from "@/components/FormModal";
 import ImportExport from "@/components/ImportExport";
 import RichText, { RichTextView } from "@/components/RichText";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { useIsoLayoutEffect } from "@/components/record/useIsoLayoutEffect";
 import {
   Disclosure, Fact, FactGrid, FactList, LabelledSearch, OpenPoints, PrimaryAction, RecordSection, RelatedGroups, SectionNav, SummaryBand,
@@ -105,6 +106,7 @@ type PolicyDetail = Policy & {
   projects?: PolicyLink[];
   goals?: PolicyLink[];
   processing_activities?: PolicyLink[];
+  obligations?: PolicyLink[];
 };
 
 type FormState = {
@@ -280,6 +282,7 @@ function PoliciesInner() {
   const canWrite = useHasPermission("policy:write");
   const ctx = useRecordCtx(gov, canWrite);
   const sections = useRecordSections();
+  const cfForm = useCustomFieldForm("policy");
   const cf = useCustomFieldFacts("policy", detail?.id, { builtInLabels: POLICY_BUILT_IN_LABELS });
   /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
   const [editTab, setEditTab] = useState<string | undefined>(undefined);
@@ -311,16 +314,18 @@ function PoliciesInner() {
     committeeOptions.push({ value: c.id, label: c.name || c.reference || c.id });
   }
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setEditTab(undefined); setShowForm(true); }
-  function openEdit(p: Policy, tab?: string) { setEditing(p); setF(fromPolicy(p)); setError(null); setEditTab(tab); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(p: Policy, tab?: string) { setEditing(p); setF(fromPolicy(p)); cfForm.start(p.id); setError(null); setEditTab(tab); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Policy>("PATCH", `/policies/${editing.id}`, payload);
-      else await apiCall<Policy>("POST", "/policies", payload);
-      setShowForm(false); refresh(); toast(editing ? "Changes saved" : "Policy created");
+      const saved = editing
+        ? await apiCall<Policy>("PATCH", `/policies/${editing.id}`, payload)
+        : await apiCall<Policy>("POST", "/policies", payload);
+      await cfForm.save(saved.id);
+      setShowForm(false); refresh(); void cf.reload(); toast(editing ? "Changes saved" : "Policy created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save policy"); }
     finally { setSaving(false); }
   }
@@ -665,6 +670,7 @@ function PoliciesInner() {
     { key: "projects", label: "Projects", items: detail.projects, href: "/projects" },
     { key: "goals", label: "Goals", items: detail.goals, href: "/goals" },
     { key: "processing", label: "Processing activities", items: detail.processing_activities, href: "/privacy" },
+    { key: "obligations", label: "Regulatory obligations", items: detail.obligations, href: (x) => `/regulatory-change?obligation=${x.id}` },
   ] : [];
 
   return (
@@ -977,6 +983,7 @@ function PoliciesInner() {
             { id: "content", label: "Policy Content", content: contentTab },
             { id: "governance", label: "Governance & Applicability", content: governanceTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           initialTab={editTab}
           onClose={() => setShowForm(false)}

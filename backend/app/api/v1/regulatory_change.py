@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -170,7 +170,7 @@ async def update_change(cid: uuid.UUID, body: RegulatoryChangeUpdate, db: DbSess
 async def delete_change(cid: uuid.UUID, db: DbSession) -> None:
     obj = await _load_change(db, cid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
@@ -178,13 +178,20 @@ async def delete_change(cid: uuid.UUID, db: DbSession) -> None:
 @router.post("/regulatory-change/{cid}/obligations", response_model=RegulatoryChangeRead,
              status_code=201, dependencies=[_WRITE])
 async def add_obligation(cid: uuid.UUID, body: ObligationCreate, db: DbSession, user: CurrentUser) -> RegulatoryChangeRead:
-    await _load_change(db, cid)
-    data = body.model_dump()
+    change = await _load_change(db, cid)
+    # The id lists are graph edges, not columns — resolve them onto the relationships
+    # exactly as the standalone create does.
+    data = body.model_dump(exclude={"requirement_ids", "policy_ids", "control_ids"})
     data["regulatory_change_id"] = cid  # nested add always links to the parent change
     obj = Obligation(tenant_id=user.tenant_id, **data)
+    obj.requirements = await _resolve(db, Requirement, body.requirement_ids)
+    obj.policies = await _resolve(db, Policy, body.policy_ids)
+    obj.controls = await _resolve(db, Control, body.control_ids)
     obj.reference = await _next_ref(db, Obligation, "OBL")
     db.add(obj)
     await db.flush()
+    await audit_log.record(db, actor=user, action="create", entity_type="obligation", entity_id=obj.id,
+                           summary=f"Added obligation {obj.reference} to {change.reference}: {obj.title}")
     return RegulatoryChangeRead.model_validate(await _load_change(db, cid))
 
 
@@ -235,6 +242,12 @@ async def create_obligation(body: ObligationCreate, db: DbSession, user: Current
     db.add(obj)
     await db.flush()
     return ObligationRead.model_validate(await _get(db, Obligation, obj.id, "Obligation"))
+
+
+@router.get("/obligations/{oid}", response_model=ObligationRead, dependencies=[_READ])
+async def get_obligation(oid: uuid.UUID, db: DbSession) -> ObligationRead:
+    # The target of an obligation chip on a policy or control ("Linked records").
+    return ObligationRead.model_validate(await _get(db, Obligation, oid, "Obligation"))
 
 
 @router.patch("/obligations/{oid}", response_model=ObligationRead, dependencies=[_WRITE])
@@ -324,7 +337,7 @@ async def update_return(rid: uuid.UUID, body: RegulatoryReturnUpdate, db: DbSess
 async def delete_return(rid: uuid.UUID, db: DbSession) -> None:
     obj = await _load_return(db, rid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 

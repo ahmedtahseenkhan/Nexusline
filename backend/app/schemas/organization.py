@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.base import WorkflowState
 from app.models.enums import Criticality
-from app.schemas.common import LookupRef, UserRef
+from app.schemas.common import GraphRef, LookupRef, UserRef
 
 _LEGACY = "Legacy free text, accepted for one release; send the *_id instead. "
 
@@ -58,6 +58,10 @@ class BusinessUnitRead(BusinessUnitBase):
     workflow_owner_ref: UserRef | None = None
     parent_name: str | None = None
     legals: list[Ref] = []
+    # Read-only reverse links: the risk register and the control register own these
+    # edges (a risk or control is scoped to the unit on its own form).
+    risks: list[GraphRef] = []
+    controls: list[GraphRef] = []
 
 
 # ----------------------------------------------------------------------- Process
@@ -101,6 +105,9 @@ class ProcessRead(ProcessBase):
     workflow_owner_ref: UserRef | None = None
     business_unit: Ref | None = None
     assets: list[Ref] = []
+    # Read-only reverse links, as on the business unit.
+    risks: list[GraphRef] = []
+    controls: list[GraphRef] = []
 
 
 # ------------------------------------------------------------------------- Legal

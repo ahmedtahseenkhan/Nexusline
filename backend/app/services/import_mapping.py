@@ -422,8 +422,10 @@ def _score(source: str, column: "Column", drop: frozenset[str]) -> tuple[float, 
     if not source_norm:
         return None
 
-    # Tier 2 — same name once punctuation and case are ignored.
-    if source_norm in (header_norm, field_norm):
+    # Tier 2 — same name once punctuation and case are ignored. A column that opts out
+    # of field matching (``match_on_field``) answers to its header only: a register's
+    # "Consequence" is a score, not our risk statement's consequence.
+    if source_norm == header_norm or (getattr(column, "match_on_field", True) and source_norm == field_norm):
         return 0.97, "matches after normalising case and punctuation"
 
     # Tier 3 — a known phrasing for this field. Link columns carry a friendly header
@@ -441,6 +443,11 @@ def _score(source: str, column: "Column", drop: frozenset[str]) -> tuple[float, 
     source_tokens = _tokens(source_norm)
     if identity_tokens and identity_tokens <= source_tokens:
         return 0.85, f"contains every word of '{target_header}'"
+
+    # A guarded column (``match_on_field`` False) is not guessed at on partial overlap:
+    # "Level" sharing a word with "hierarchy_level" is exactly the wrong guess.
+    if not getattr(column, "match_on_field", True):
+        return None
 
     # Tier 4 — token overlap once the register's own noun is discounted, so
     # "Risk Category" and "Category" agree in a risk import.
@@ -553,14 +560,25 @@ _MODEL_KEY_OVERRIDES: dict[str, str] = {
 }
 
 
-def custom_field_model_key(model: type) -> str:
+# Import resources that share a model class but not a field set: IT and information
+# assets are both ``Asset`` rows, each register with its own custom fields.
+_RESOURCE_KEY_OVERRIDES: dict[str, str] = {
+    "it-assets": "it_asset",
+    "information-assets": "information_asset",
+}
+
+
+def custom_field_model_key(model: type, resource: str | None = None) -> str:
     """The ``CUSTOM_FIELD_MODELS`` key for a SQLAlchemy model class.
 
     Custom fields are addressed by a snake_case model name (``risk``,
     ``audit_engagement``) while the import registry holds the class itself. The two
     agree by convention for all but the handful of names in ``_MODEL_KEY_OVERRIDES``,
-    so a resource never has to declare the key twice.
+    so a resource never has to declare the key twice. ``resource`` resolves registers
+    that share a class (``_RESOURCE_KEY_OVERRIDES``).
     """
+    if resource in _RESOURCE_KEY_OVERRIDES:
+        return _RESOURCE_KEY_OVERRIDES[resource]
     name = model.__name__
     if name in _MODEL_KEY_OVERRIDES:
         return _MODEL_KEY_OVERRIDES[name]

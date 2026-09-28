@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.models.enums import Severity
@@ -15,7 +15,14 @@ class WhistleUpdateCreate(BaseModel):
     note: str = ""
     author: str = ""
     update_date: date | None = None
-    status_change: str = ""
+    # The status this entry moves the case to; none for a plain note. It transitions the
+    # report itself (validated against the case lifecycle), not just the log line.
+    status_change: WhistleStatus | None = None
+
+    @field_validator("status_change", mode="before")
+    @classmethod
+    def _blank_is_none(cls, v):
+        return None if v == "" else v
 
 
 class WhistleUpdateRead(BaseModel):

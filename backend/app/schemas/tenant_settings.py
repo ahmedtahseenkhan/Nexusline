@@ -95,6 +95,24 @@ def validate_currency(code: str) -> str:
     return value
 
 
+def currency_or_default(value: str | None) -> str | None:
+    """Field validator for a record's money currency: an ISO 4217 code, upper-cased, with a
+    blank value falling back to the PKR default (``None`` passes through for partial updates).
+    Used on create/update schemas only, so a legacy row never breaks a read."""
+    if value is None:
+        return None
+    return validate_currency(value) if value.strip() else "PKR"
+
+
+def currency_or_blank(value: str | None) -> str | None:
+    """Like :func:`currency_or_default`, for a currency whose blank means "the
+    organisation's reporting currency" (resolved by the server, not fixed to PKR): an
+    ISO 4217 code upper-cased, blank kept blank, ``None`` passed through."""
+    if value is None:
+        return None
+    return validate_currency(value) if value.strip() else ""
+
+
 def validate_timezone(name: str) -> str:
     value = (name or "").strip()
     if value in timezone_names():

@@ -1,4 +1,12 @@
-"""Saved Filters API — CRUD named condition-sets and run them against a model."""
+"""Saved Filters API — CRUD named condition-sets and run them against a model.
+
+Conditions are validated against the model's filterable fields and the operator list
+when a filter is saved (``status_rules.condition_problem``): a condition on a field the
+model doesn't have never matches, so storing one would save a filter that quietly
+returns nothing. Running a filter needs the model's read permission (the entity-type
+registry), and filters over a module the organisation can't use are left out of the
+list and refused when run.
+"""
 from __future__ import annotations
 
 import uuid
@@ -18,6 +26,8 @@ from app.schemas.saved_filter import (
     SavedFilterRead,
     SavedFilterUpdate,
 )
+from app.services import entity_types
+from app.services import modules as module_service
 from app.services import status_rules as engine
 
 router = APIRouter(prefix="/filters", tags=["filters"])
@@ -29,18 +39,13 @@ _FILTER_SORTABLE = {
 }
 
 
-# Read permission required to run a filter over each model (mirrors the module RBAC).
-_MODEL_READ_PERM: dict[str, str] = {
-    "risk": "risk:read",
-    "control": "control:read",
-    "incident": "incident:read",
-    "vendor": "vendor:read",
-    "project": "project:read",
-    "policy": "policy:read",
-    "asset": "asset:read",
-    "goal": "goal:read",
-    "exception": "exception:read",
-}
+def _check_conditions(model: str, conditions) -> None:
+    for c in conditions or []:
+        field = c.get("field") if isinstance(c, dict) else c.field
+        operator = c.get("operator") if isinstance(c, dict) else c.operator
+        problem = engine.condition_problem(model, field, operator)
+        if problem:
+            raise HTTPException(status_code=422, detail=problem)
 
 
 def _is_admin(user) -> bool:
@@ -93,6 +98,9 @@ async def list_filters(
     stmt = select(SavedFilter).where(
         or_(SavedFilter.shared.is_(True), SavedFilter.owner_id == user.id)
     )
+    if not model:
+        usable = [m for m in engine.MODEL_MAP if await module_service.entity_type_usable(m, user.tenant_id)]
+        stmt = stmt.where(SavedFilter.model.in_(usable))
     if model:
         stmt = stmt.where(SavedFilter.model == model)
     if search:
@@ -111,6 +119,7 @@ async def list_filters(
 async def create_filter(body: SavedFilterCreate, db: DbSession, user: CurrentUser) -> SavedFilterRead:
     if body.model not in engine.MODEL_MAP:
         raise HTTPException(status_code=422, detail=f"Unsupported model '{body.model}'")
+    _check_conditions(body.model, body.conditions)
     obj = SavedFilter(
         tenant_id=user.tenant_id,
         owner_id=user.id,
@@ -136,6 +145,9 @@ async def update_filter(filter_id: uuid.UUID, body: SavedFilterUpdate, db: DbSes
     data = body.model_dump(exclude_unset=True)
     if "conditions" in data and data["conditions"] is not None:
         data["conditions"] = [c if isinstance(c, dict) else c.model_dump() for c in data["conditions"]]
+        _check_conditions(obj.model, data["conditions"])
+    if data.get("match_mode") is not None and data["match_mode"] not in ("all", "any"):
+        raise HTTPException(status_code=422, detail="match_mode must be 'all' or 'any'")
     for k, v in data.items():
         setattr(obj, k, v)
     await db.flush()
@@ -159,15 +171,13 @@ async def run_filter(filter_id: uuid.UUID, db: DbSession, user: CurrentUser) -> 
     # can't become a data oracle for a user who lacks read access to that module.
     if not (flt.shared or _is_admin(user) or flt.owner_id == user.id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your filter")
-    read_perm = _MODEL_READ_PERM.get(flt.model)
-    if read_perm and read_perm not in user.permission_codes:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Requires permission: {read_perm}",
-        )
     cls = engine.MODEL_MAP.get(flt.model)
     if cls is None:
         raise HTTPException(status_code=422, detail="Unsupported model")
+    # Every filterable model is a registered entity type, so its read permission comes
+    # from the one registry (a local map here had missed six of them).
+    entity_types.require_read(user, flt.model)
+    await module_service.require_entity_module(flt.model, user.tenant_id)
     stmt = select(cls)
     if hasattr(cls, "deleted"):
         stmt = stmt.where(cls.deleted.is_(False))

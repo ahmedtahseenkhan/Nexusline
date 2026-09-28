@@ -32,6 +32,9 @@ class MyWorkItem(BaseModel):
     #: Quick actions the page may offer on the row: ``acknowledge`` (a policy),
     #: ``mark_done`` (a treatment action). Anything else opens the record.
     actions: list[str] = Field(default_factory=list)
+    #: What limits this user's decision, when it is limited but not blocked: "you can
+    #: return it; approving it is above your delegation-of-authority mandate …".
+    note: str = ""
 
 
 class MyWorkSection(BaseModel):
@@ -43,6 +46,8 @@ class MyWorkSection(BaseModel):
     #: Items shown (overdue first); ``count`` is the full number.
     items: list[MyWorkItem] = Field(default_factory=list)
     truncated: bool = False
+    #: True when ``count`` is only what one capped read returned (show it as "500+").
+    count_is_floor: bool = False
 
 
 class MyWorkRead(BaseModel):
@@ -92,6 +97,9 @@ class EmailActionPreview(BaseModel):
     user_name: str = ""
     expires_at: datetime | None = None
     approval: EmailActionApproval | None = None
+    #: Why this person's Approve would be refused (not ready, or above their delegated
+    #: authority) — they can still reject. Empty when approving is open to them.
+    approve_blocked_reason: str = ""
     #: The organisation's date format and timezone, so the page shows dates its way.
     date_format: str = "DD/MM/YYYY"
     timezone: str = "Asia/Karachi"

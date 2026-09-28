@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
+from app.core.database import shallow_loads
 from app.core.deps import CurrentUser, DbSession
 from app.schemas.bulk import BulkEditBody, BulkFieldsRead, BulkResult
 from app.schemas.common import UserRef
@@ -36,6 +37,7 @@ from app.services import (
     bulk_edit,
     dual_control,
     entity_types,
+    lifecycle_gates,
     master_data,
     record_impact,
     record_registry,
@@ -162,8 +164,14 @@ async def _load(
     *, archived: bool | None = False,
 ) -> Any:
     """The record, or 404. ``archived``: False = live only, True = archived only,
-    None = either."""
-    record = await db.get(model, record_id)
+    None = either.
+
+    Loaded with its own links but not theirs (``shallow_loads``): a transition, archive
+    or restore reads the record and its direct links. At the default depth approving an
+    asset loaded its risks, their thousands of assets and those assets' links — a
+    four-eyes refusal took twenty seconds to say no."""
+    with shallow_loads(1):
+        record = await db.get(model, record_id)
     if record is not None and getattr(record, "tenant_id", user.tenant_id) != user.tenant_id:
         record = None
     if record is not None and archived is not None:
@@ -186,14 +194,16 @@ def _title_column(model: type):
 
 async def _self_decision_block(db: DbSession, user: Any, entity_type: str, record: Any) -> str | None:
     """Why four-eyes stops this user deciding the record, or None."""
-    required, _ = await dual_control.dual_control_required(db, entity_type, "approve")
+    required, rule = await dual_control.dual_control_required(db, entity_type, "approve")
     if not required:
         return None
     if await record_workflow.last_submitter(db, entity_type, record.id) == user.id:
         return "You submitted this record, so someone independent must approve or reject it."
-    if await dual_control.maker_of(db, entity_type, record.id, record=record) == user.id:
+    maker = await dual_control.maker_of(db, entity_type, record.id, record=record)
+    if maker == user.id:
         return "You entered this record, so someone independent must approve or reject it."
-    return None
+    return await dual_control.checker_role_refusal(db, rule, module=entity_type, action="approve",
+                                                   checker_id=user.id, maker_id=maker)
 
 
 async def _actions_for(
@@ -207,6 +217,18 @@ async def _actions_for(
         blocked = await _self_decision_block(db, user, entity_type, record)
         if blocked:
             actions = [a for a in actions if a not in record_workflow.DECISIONS]
+    if not blocked and not routing and "approve" in actions:
+        # No recorded maker (a record loaded outside the app): four-eyes can't be shown,
+        # so approving is not offered — returning it to draft still is.
+        blocked = await record_workflow.unattributed_refusal(db, entity_type, record)
+        if blocked:
+            actions = [a for a in actions if a != "approve"]
+    if not blocked and not routing and "approve" in actions:
+        # Not ready yet, or above this user's delegated authority: the server would
+        # refuse the approval, so don't offer it. Rejecting needs neither.
+        blocked = await lifecycle_gates.approve_refusal(db, entity_type, record, user)
+        if blocked:
+            actions = [a for a in actions if a != "approve"]
     return actions, blocked
 
 

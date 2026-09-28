@@ -8,6 +8,7 @@ import { useRecordParam } from "@/lib/useRecordParam";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import RecordApproval, { WorkflowBadge } from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
@@ -50,10 +51,26 @@ type CapitalCalculation = {
   notes: string;
   status: string;
   workflow_status: string;
-  bic: number;
+  /** Null when the Basel bucket edges cannot be put in this currency (no exchange rate). */
+  bucket: number | null;
+  bic: number | null;
   loss_component: number;
-  ilm: number;
-  orc: number;
+  ilm: number | null;
+  orc: number | null;
+  /** The BI bucket edges applied, in the record's currency (EUR 1bn / 30bn converted). */
+  bucket_1_threshold: number | null;
+  bucket_2_threshold: number | null;
+  threshold_basis: string;
+  /** Why the capital is not computed (the missing exchange rate). */
+  threshold_note: string;
+  /** Final: the figures, edges and rate are the snapshot taken when it was finalised. */
+  basis_frozen: boolean;
+  /** Units of the record's currency per 1 EUR behind the edges (1 for EUR). */
+  fx_factor: number | null;
+  final_at: string | null;
+  final_by: string;
+  /** Set on a calculation finalised before snapshots existed: its figures are live. */
+  frozen_note: string;
   created_at: string;
 };
 
@@ -68,11 +85,15 @@ type ScenarioSummary = {
   latest_capital: {
     reference: string;
     period: string;
-    bic: number;
+    bucket: number | null;
+    bic: number | null;
     loss_component: number;
-    ilm: number;
-    orc: number;
+    ilm: number | null;
+    orc: number | null;
     currency: string;
+    threshold_note: string;
+    basis_frozen?: boolean;
+    final_at?: string | null;
   } | null;
 };
 
@@ -223,10 +244,11 @@ const SECTIONS: { id: SectionId; label: string }[] = [
 ];
 
 function ScenarioAnalysisInner() {
-  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
+  const { formatDate, formatDateTime, formatMoney, currency, currencyOptions } = useFormat();
   const [section, setSection] = useState<SectionId>("scenarios");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const cfForm = useCustomFieldForm("scenario_analysis");
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const [summary, setSummary] = useState<ScenarioSummary | null>(null);
@@ -250,6 +272,8 @@ function ScenarioAnalysisInner() {
   const [showCapitalForm, setShowCapitalForm] = useState(false);
   const [savingCapital, setSavingCapital] = useState(false);
   const [cf, setCf] = useState<CapitalForm>(BLANK_CAPITAL);
+  const [reopenReason, setReopenReason] = useState("");
+  const [reopening, setReopening] = useState(false);
   const setC = <K extends keyof CapitalForm>(k: K, v: CapitalForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
   // ------------------------------------------------------------- fetchers
@@ -286,12 +310,14 @@ function ScenarioAnalysisInner() {
   function openNewScenario() {
     setEditingScenario(null);
     setSf({ ...BLANK_SCENARIO, currency });
+    cfForm.start(null);
     setError(null);
     setShowScenarioForm(true);
   }
   function openEditScenario(s: ScenarioAnalysis) {
     setEditingScenario(s);
     setSf(fromScenario(s));
+    cfForm.start(s.id);
     setError(null);
     setShowScenarioForm(true);
   }
@@ -300,8 +326,10 @@ function ScenarioAnalysisInner() {
     setSavingScenario(true);
     try {
       const payload = scenarioPayload(sf);
-      if (editingScenario) await apiCall("PATCH", `/scenario-analyses/${editingScenario.id}`, payload);
-      else await apiCall("POST", "/scenario-analyses", payload);
+      const saved = editingScenario
+        ? await apiCall<ScenarioAnalysis>("PATCH", `/scenario-analyses/${editingScenario.id}`, payload)
+        : await apiCall<ScenarioAnalysis>("POST", "/scenario-analyses", payload);
+      await cfForm.save(saved.id);
       setShowScenarioForm(false);
       reload();
       if (openId) loadScenarioDetail(openId);
@@ -338,6 +366,7 @@ function ScenarioAnalysisInner() {
   function openEditCapital(c: CapitalCalculation) {
     setEditingCapital(c);
     setCf(fromCapital(c));
+    setReopenReason("");
     setError(null);
     setShowCapitalForm(true);
   }
@@ -356,6 +385,35 @@ function ScenarioAnalysisInner() {
       setError(e instanceof Error ? e.message : "Failed to save calculation");
     } finally {
       setSavingCapital(false);
+    }
+  }
+  // A final calculation is a filed figure: going back to draft needs a reason, which the
+  // server keeps in the audit trail with the basis that was frozen.
+  async function reopenCapital(c: CapitalCalculation) {
+    if (reopenReason.trim().length < 10) {
+      setError("Give a reason of at least 10 characters for reopening a final calculation.");
+      return;
+    }
+    if (!(await confirmDialog({
+      title: `Reopen ${c.reference || c.period}?`,
+      message: "It goes back to draft and its figures are recomputed at today's exchange rates. The frozen basis and your reason are kept in the audit trail.",
+      confirmLabel: "Reopen",
+      danger: true,
+    }))) return;
+    setError(null);
+    setReopening(true);
+    try {
+      const updated = await apiCall<CapitalCalculation>("POST", `/capital-calculations/${c.id}/reopen`, { reason: reopenReason.trim() });
+      setEditingCapital(updated);
+      setCf(fromCapital(updated));
+      setReopenReason("");
+      reload();
+      await loadSummary();
+      toast("Reopened as draft");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to reopen");
+    } finally {
+      setReopening(false);
     }
   }
   async function removeCapital(c: CapitalCalculation) {
@@ -390,13 +448,20 @@ function ScenarioAnalysisInner() {
     { key: "period", header: "Period", sortable: true, render: (c) => <span className="cell-title">{c.period || "—"}</span> },
     { key: "business_indicator", header: "Business Indicator", sortable: true, render: (c) => <span className="muted">{formatMoney(c.business_indicator, c.currency)}</span> },
     { key: "avg_annual_loss", header: "Avg annual loss", sortable: true, render: (c) => <span className="muted">{formatMoney(c.avg_annual_loss, c.currency)}</span> },
-    { key: "bic", header: "BIC", render: (c) => <span className="muted">{formatMoney(c.bic, c.currency)}</span> },
+    { key: "bucket", header: "Bucket", render: (c) => <span className="muted" title={c.threshold_basis || c.threshold_note}>{c.bucket ?? "—"}</span> },
+    { key: "bic", header: "BIC", render: (c) => <span className="muted">{c.bic == null ? "—" : formatMoney(c.bic, c.currency)}</span> },
     { key: "loss_component", header: "Loss Component", render: (c) => <span className="muted">{formatMoney(c.loss_component, c.currency)}</span> },
-    { key: "ilm", header: "ILM", render: (c) => <span className="muted">{num(c.ilm)}</span> },
-    { key: "orc", header: "ORC", render: (c) => <Badge tone="critical">{formatMoney(c.orc, c.currency)}</Badge> },
-    { key: "status", header: "Status", sortable: true, render: (c) => <Badge tone={CAPITAL_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}</Badge> },
+    { key: "ilm", header: "ILM", render: (c) => <span className="muted">{c.ilm == null ? "—" : c.ilm.toFixed(2)}</span> },
+    { key: "orc", header: "ORC", render: (c) => c.orc == null
+      ? <span className="muted" title={c.threshold_note}>Needs {c.currency === "EUR" ? "a" : "an EUR"} rate</span>
+      : <Badge tone="critical">{formatMoney(c.orc, c.currency)}</Badge> },
+    { key: "status", header: "Status", sortable: true, render: (c) => (
+      <span title={c.basis_frozen ? `Figures frozen ${formatDateTime(c.final_at)}${c.final_by ? ` by ${c.final_by}` : ""}` : c.frozen_note || undefined}>
+        <Badge tone={CAPITAL_STATUS_TONE[c.status] || "neutral"}>{cap(c.status)}{c.basis_frozen ? " · frozen" : ""}</Badge>
+      </span>
+    ) },
     { key: "workflow_status", header: "Approval", render: (c) => <WorkflowBadge state={c.workflow_status} /> },
-    { key: "actions", header: "", render: (c) => <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCapital(c)}>Delete</button></div> },
+    { key: "actions", header: "", render: (c) => c.status === "final" ? null : <div onClick={(e) => e.stopPropagation()}><button className="btn secondary sm" onClick={() => removeCapital(c)}>Delete</button></div> },
   ];
 
   // ------------------------------------------------------------- scenario form tabs
@@ -467,6 +532,53 @@ function ScenarioAnalysisInner() {
   );
 
   // ------------------------------------------------------------- capital form tab
+  const capFinal = editingCapital?.status === "final";
+  const edgesText = (c: CapitalCalculation) => (
+    <>
+      bucket {c.bucket}, edges {formatMoney(c.bucket_1_threshold, c.currency, { compact: "auto" })}
+      {" / "}{formatMoney(c.bucket_2_threshold, c.currency, { compact: "auto" })}
+      {" — "}{c.threshold_basis}
+    </>
+  );
+  // Final: the inputs are locked (only a reasoned reopen unlocks them), and the frozen
+  // basis is shown so a reader knows the figures will not move with later rates.
+  const finalTab = editingCapital && (
+    <>
+      <div className="field-row">
+        <Field label="Period"><div>{editingCapital.period || "—"}</div></Field>
+        <Field label="Currency"><div>{editingCapital.currency}</div></Field>
+      </div>
+      <div className="field-row">
+        <Field label="Business Indicator — BI"><div>{formatMoney(editingCapital.business_indicator, editingCapital.currency)}</div></Field>
+        <Field label="Average annual loss"><div>{formatMoney(editingCapital.avg_annual_loss, editingCapital.currency)}</div></Field>
+      </div>
+      <div className="field-row">
+        <Field label="BIC"><div>{editingCapital.bic == null ? "—" : formatMoney(editingCapital.bic, editingCapital.currency)}</div></Field>
+        <Field label="ILM"><div>{editingCapital.ilm == null ? "—" : editingCapital.ilm.toFixed(4)}</div></Field>
+        <Field label="ORC"><div><strong>{editingCapital.orc == null ? "—" : formatMoney(editingCapital.orc, editingCapital.currency)}</strong></div></Field>
+      </div>
+      {editingCapital.basis_frozen ? (
+        <div className="alert" style={{ display: "block", background: "var(--primary-weak)", border: "1px solid var(--border)" }}>
+          <strong>Frozen basis.</strong> Marked final {formatDateTime(editingCapital.final_at)}
+          {editingCapital.final_by ? ` by ${editingCapital.final_by}` : ""}: {edgesText(editingCapital)}.
+          These figures stay as filed when exchange rates change.
+        </div>
+      ) : (
+        <div className="alert alert-error" style={{ display: "block" }}>{editingCapital.frozen_note}</div>
+      )}
+      <Field label="Notes" help="Notes stay editable on a final calculation; its figures do not.">
+        <TextArea value={cf.notes} onChange={(v) => setC("notes", v)} rows={3} placeholder="Basis of preparation, data sources, sign-off." />
+      </Field>
+      <Field label="Reason to reopen" help="Reopening puts it back to draft and recomputes at today's rates. Required, and kept in the audit trail.">
+        <TextArea value={reopenReason} onChange={setReopenReason} rows={2} placeholder="e.g. Restating BI after the SBP inspection comment of 12 March" />
+      </Field>
+      <div>
+        <button className="btn secondary sm" type="button" onClick={() => reopenCapital(editingCapital)} disabled={reopening || savingCapital}>
+          {reopening ? "Reopening…" : "Reopen as draft"}
+        </button>
+      </div>
+    </>
+  );
   const capitalTab = (
     <>
       <Field label="Period" required help="Reporting period, e.g. FY2026.">
@@ -482,7 +594,7 @@ function ScenarioAnalysisInner() {
         <Field label="Currency">
           <Select value={cf.currency} onChange={(v) => setC("currency", v)} options={currencyOptions} />
         </Field>
-        <Field label="Status">
+        <Field label="Status" help="Final freezes the exchange rate, bucket edges and figures used; reopening needs a reason.">
           <Select value={cf.status} onChange={(v) => setC("status", v)} options={CAPITAL_STATUS} />
         </Field>
       </div>
@@ -491,7 +603,18 @@ function ScenarioAnalysisInner() {
       </Field>
       <p className="muted" style={{ fontSize: 13 }}>
         BIC, Loss Component, ILM and ORC are computed server-side under the Basel III Standardised Approach.
+        The bucket edges are Basel&apos;s EUR 1bn and EUR 30bn, converted into the calculation&apos;s currency at
+        your latest exchange rates; a bank whose BI is in the first bucket uses an ILM of 1.
       </p>
+      {editingCapital && (editingCapital.threshold_note || editingCapital.threshold_basis) && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          {editingCapital.threshold_note ? (
+            <>{editingCapital.threshold_note} <Link href="/organisation-settings#exchange-rates">Add a rate</Link>.</>
+          ) : (
+            <>Last computed: {edgesText(editingCapital)}.</>
+          )}
+        </p>
+      )}
     </>
   );
 
@@ -536,7 +659,10 @@ function ScenarioAnalysisInner() {
           <div className="stat-top">
             <span className="n">{latestOrc != null ? formatMoney(latestOrc, summary?.latest_capital?.currency, { compact: "auto" }) : "—"}</span>
           </div>
-          <span className="l">Latest ORC</span>
+          <span className="l" title={summary?.latest_capital?.threshold_note || undefined}>
+            Latest ORC{summary?.latest_capital && latestOrc == null ? " (needs an exchange rate)" : ""}
+            {summary?.latest_capital?.basis_frozen ? " · final, frozen" : ""}
+          </span>
         </div>
         <div className="card stat">
           <div className="stat-top">
@@ -601,8 +727,9 @@ function ScenarioAnalysisInner() {
       {section === "capital" && (
         <>
           <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
-            ORC = BIC × ILM, where BIC uses the 12% / 15% / 18% marginal buckets and the ILM scales it by internal
-            loss experience (Loss Component = 15 × average annual loss).
+            ORC = BIC × ILM, where BIC uses the 12% / 15% / 18% marginal buckets (Basel edges EUR 1bn / EUR 30bn,
+            converted at your exchange rates) and the ILM scales it by internal loss experience (Loss Component =
+            15 × average annual loss); in the first bucket the ILM is 1.
           </p>
           <DataTable<CapitalCalculation>
             columns={capitalColumns}
@@ -696,6 +823,7 @@ function ScenarioAnalysisInner() {
             { id: "scenario", label: "Scenario", content: scenarioTab, required: true },
             { id: "estimates", label: "Estimates", content: estimatesTab },
             { id: "workshop", label: "Workshop", content: workshopTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowScenarioForm(false)}
           onSave={saveScenario}
@@ -722,14 +850,14 @@ function ScenarioAnalysisInner() {
         <FormModal
           title={editingCapital ? `Edit calculation — ${editingCapital.reference || editingCapital.period}` : "New capital calculation"}
           wide
-          tabs={[{ id: "inputs", label: "Inputs", content: capitalTab, required: true }]}
+          tabs={[{ id: "inputs", label: capFinal ? "Final calculation" : "Inputs", content: capFinal ? finalTab : capitalTab, required: true }]}
           onClose={() => setShowCapitalForm(false)}
           onSave={saveCapital}
           saving={savingCapital}
           error={error}
           saveLabel={editingCapital ? "Save changes" : "Create calculation"}
           footerLeft={
-            editingCapital ? (
+            editingCapital && !capFinal ? (
               <button
                 className="btn secondary sm"
                 type="button"

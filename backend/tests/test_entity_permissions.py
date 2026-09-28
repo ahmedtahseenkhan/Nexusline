@@ -9,7 +9,7 @@ invariants so the panels can never drift back to authentication-only.
 import pytest
 from fastapi import HTTPException
 
-from app.models.custom_field import CUSTOM_FIELD_MODELS
+from app.models.custom_field import CUSTOM_FIELD_MODELS, custom_field_entity_type
 from app.core.permissions import ALL_PERMISSIONS
 from app.services import entity_types
 
@@ -34,7 +34,9 @@ def test_every_permission_code_is_real():
 def test_custom_field_models_are_all_registered():
     """Any model that can carry custom fields must be resolvable to a permission,
     otherwise its custom-field panel 422s for every user."""
-    missing = [m for m in CUSTOM_FIELD_MODELS if m not in entity_types.ENTITY_TYPES]
+    missing = [
+        m for m in CUSTOM_FIELD_MODELS if custom_field_entity_type(m) not in entity_types.ENTITY_TYPES
+    ]
     assert missing == []
 
 

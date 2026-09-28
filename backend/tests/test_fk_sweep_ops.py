@@ -289,6 +289,12 @@ class FakeDB:
         self.scalar_calls.append(entity.__name__)
         return _Rows(list(self.tables.get(entity, {}).values()))
 
+    async def execute(self, stmt, *_a, **_k):
+        """A column select (the import's link index): the selected columns of each row."""
+        columns = stmt.column_descriptions
+        rows = self.tables.get(columns[0]["entity"], {}).values()
+        return _Rows([tuple(getattr(r, c["name"], None) for c in columns) for r in rows])
+
     async def scalar(self, *_a, **_k):
         return self.scalar_result
 

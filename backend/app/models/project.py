@@ -62,9 +62,10 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     expenses: Mapped[list["ProjectExpense"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", lazy="selectin"
     )
-    risks: Mapped[list["Risk"]] = relationship(secondary=project_risks, lazy="selectin",
+    risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
+        secondary=project_risks, lazy="selectin",
         secondaryjoin="and_(project_risks.c.risk_id == Risk.id, Risk.deleted == False)",
-    )  # noqa: F821
+    )
     controls: Mapped[list["Control"]] = relationship(  # noqa: F821
         secondary=project_controls, lazy="selectin",
         secondaryjoin="and_(project_controls.c.control_id == Control.id, Control.deleted == False)",
@@ -72,6 +73,12 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     policies: Mapped[list["Policy"]] = relationship(  # noqa: F821
         secondary=project_policies, lazy="selectin",
         secondaryjoin="and_(project_policies.c.policy_id == Policy.id, Policy.deleted == False)",
+    )
+    # Read-only reverse of ``Goal.projects``: the goal owns the link (it is set on the
+    # goal form), and the project page shows which strategic goals it delivers.
+    goals: Mapped[list["Goal"]] = relationship(  # noqa: F821
+        "Goal", secondary="goal_projects", lazy="selectin", viewonly=True,
+        secondaryjoin="and_(goal_projects.c.goal_id == Goal.id, Goal.deleted == False)",
     )
 
     @property

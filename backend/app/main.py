@@ -15,13 +15,41 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("nexusline")
 
 
+async def _initialise_database() -> None:
+    """Schema, row-level security, seed and data repairs — run by one worker per boot."""
+    from app.db.init_db import init_models
+    from app.db.provisioning import reconcile_permissions
+    from app.db.seed import seed_if_empty
+
+    await init_models()
+    await seed_if_empty()
+    # Grant newly-added module permissions to existing tenants' system roles
+    # (no-op on a fresh seed; fixes 403s after modules are added to an existing DB).
+    granted = await reconcile_permissions()
+    if granted:
+        logger.info("Reconciled permissions: added %s role grants", granted)
+    # Backfill baseline lookups (media types, vendor types, labels) for tenants
+    # created before reference data moved out of the demo seeder.
+    from app.db.reference_data import reconcile_reference_data
+
+    lookups = await reconcile_reference_data()
+    if lookups:
+        logger.info("Reconciled reference data: added %s lookup rows", lookups)
+    # Bring data written before the product-review rules into line with them
+    # (duplicate frameworks and tiles, test clocks on planned controls, residual
+    # above inherent), then add the unique indexes those rules rely on.
+    from app.db.data_repairs import repair_data
+
+    repaired = await repair_data()
+    if repaired.any():
+        logger.info("Data repairs: %s", repaired)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Dev convenience: ensure schema + RLS + seed exist on boot. In production,
     # disable by setting SEED_DATA=false and manage schema with Alembic.
-    from app.db.init_db import init_models
-    from app.db.provisioning import reconcile_permissions
-    from app.db.seed import seed_if_empty
+    from app.db.init_db import startup_lock
     from app.services import license as lic
     from app.services import scheduler
 
@@ -29,28 +57,11 @@ async def lifespan(app: FastAPI):
     lic.enforce_on_startup()
 
     try:
-        await init_models()
-        await seed_if_empty()
-        # Grant newly-added module permissions to existing tenants' system roles
-        # (no-op on a fresh seed; fixes 403s after modules are added to an existing DB).
-        granted = await reconcile_permissions()
-        if granted:
-            logger.info("Reconciled permissions: added %s role grants", granted)
-        # Backfill baseline lookups (media types, vendor types, labels) for tenants
-        # created before reference data moved out of the demo seeder.
-        from app.db.reference_data import reconcile_reference_data
-
-        lookups = await reconcile_reference_data()
-        if lookups:
-            logger.info("Reconciled reference data: added %s lookup rows", lookups)
-        # Bring data written before the product-review rules into line with them
-        # (duplicate frameworks and tiles, test clocks on planned controls, residual
-        # above inherent), then add the unique indexes those rules rely on.
-        from app.db.data_repairs import repair_data
-
-        repaired = await repair_data()
-        if repaired.any():
-            logger.info("Data repairs: %s", repaired)
+        async with startup_lock() as initialise:
+            if initialise:
+                await _initialise_database()
+            else:
+                logger.info("Start-up initialisation done by another worker")
     except Exception:  # noqa: BLE001
         logger.exception("Startup DB initialization failed")
         raise
@@ -69,6 +80,15 @@ app = FastAPI(
     description="Modern multi-tenant Governance, Risk & Compliance platform.",
     lifespan=lifespan,
 )
+
+# Constraint violations are refused input (duplicate, missing, dangling link), not 500s.
+from sqlalchemy.exc import IntegrityError  # noqa: E402
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError  # noqa: E402
+
+from app.core.db_errors import integrity_error_handler, pool_timeout_handler  # noqa: E402
+
+app.add_exception_handler(IntegrityError, integrity_error_handler)
+app.add_exception_handler(PoolTimeoutError, pool_timeout_handler)
 
 # Read-only mode after the licence grace period (decision 1). Added before CORS so CORS
 # stays the outer layer and a refused write still carries the CORS headers the browser

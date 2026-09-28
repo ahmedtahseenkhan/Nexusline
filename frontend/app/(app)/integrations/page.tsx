@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
@@ -400,6 +401,7 @@ function IntegrationsInner() {
   const [showConnectorForm, setShowConnectorForm] = useState(false);
   const [savingConnector, setSavingConnector] = useState(false);
   const [cf, setCf] = useState<ConnectorForm>(BLANK_CONNECTOR);
+  const connectorCfForm = useCustomFieldForm("connector");
   const setC = <K extends keyof ConnectorForm>(k: K, v: ConnectorForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
   // ---- ccm test dialog ----
@@ -407,6 +409,7 @@ function IntegrationsInner() {
   const [showCctForm, setShowCctForm] = useState(false);
   const [savingCct, setSavingCct] = useState(false);
   const [tf, setTf] = useState<CctForm>(BLANK_CCT);
+  const cctCfForm = useCustomFieldForm("automated_control_test");
   const setT = <K extends keyof CctForm>(k: K, v: CctForm[K]) => setTf((p) => ({ ...p, [k]: v }));
 
   // ---- expanded test detail + inline run add-form ----
@@ -479,11 +482,13 @@ function IntegrationsInner() {
   function openNewConnector() {
     setEditingConnector(null);
     setCf(BLANK_CONNECTOR);
+    connectorCfForm.start(null);
     setShowConnectorForm(true);
   }
   function openEditConnector(c: Connector) {
     setEditingConnector(c);
     setCf(fromConnector(c));
+    connectorCfForm.start(c.id);
     setShowConnectorForm(true);
   }
   async function saveConnector() {
@@ -491,8 +496,10 @@ function IntegrationsInner() {
     setSavingConnector(true);
     try {
       const payload = connectorPayload(cf, kindOf(cf.connector_type));
-      if (editingConnector) await apiCall<Connector>("PATCH", `/connectors/${editingConnector.id}`, payload);
-      else await apiCall<Connector>("POST", "/connectors", payload);
+      const saved = editingConnector
+        ? await apiCall<Connector>("PATCH", `/connectors/${editingConnector.id}`, payload)
+        : await apiCall<Connector>("POST", "/connectors", payload);
+      await connectorCfForm.save(saved.id);
       setShowConnectorForm(false);
       await loadConnectors();
       reloadConnectors();
@@ -525,11 +532,13 @@ function IntegrationsInner() {
   function openNewCct() {
     setEditingCct(null);
     setTf(BLANK_CCT);
+    cctCfForm.start(null);
     setShowCctForm(true);
   }
   function openEditCct(t: AutomatedControlTest) {
     setEditingCct(t);
     setTf(fromCct(t));
+    cctCfForm.start(t.id);
     setShowCctForm(true);
   }
   async function saveCct() {
@@ -537,8 +546,10 @@ function IntegrationsInner() {
     setSavingCct(true);
     try {
       const payload = cctPayload(tf, checkOf(tf.check_type));
-      if (editingCct) await apiCall<AutomatedControlTest>("PATCH", `/automated-control-tests/${editingCct.id}`, payload);
-      else await apiCall<AutomatedControlTest>("POST", "/automated-control-tests", payload);
+      const saved = editingCct
+        ? await apiCall<AutomatedControlTest>("PATCH", `/automated-control-tests/${editingCct.id}`, payload)
+        : await apiCall<AutomatedControlTest>("POST", "/automated-control-tests", payload);
+      await cctCfForm.save(saved.id);
       setShowCctForm(false);
       reloadTests();
       if (openTest) await refreshTest(openTest.id);
@@ -1166,6 +1177,7 @@ function IntegrationsInner() {
           tabs={[
             { id: "general", label: "General", content: connectorGeneral, required: true },
             { id: "connection", label: "Connection", content: connectorConnection },
+            ...connectorCfForm.tabs,
           ]}
           onClose={() => setShowConnectorForm(false)}
           onSave={saveConnector}
@@ -1196,6 +1208,7 @@ function IntegrationsInner() {
             { id: "general", label: "General", content: cctGeneral, required: true },
             { id: "check", label: "Check", content: cctCheck },
             { id: "config", label: "Schedule & KRI", content: cctConfig },
+            ...cctCfForm.tabs,
           ]}
           onClose={() => setShowCctForm(false)}
           onSave={saveCct}

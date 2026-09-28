@@ -32,6 +32,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.core.schema_loading import options_for, serialize_all
 from app.models.audit import AuditLog
 from app.models.compliance import Requirement, requirement_policies
 from app.models.control import Control, control_policies
@@ -57,6 +58,7 @@ from app.schemas.policy import (
 from app.services.refs import next_reference
 from app.services import audit
 from app.services import delete_guard
+from app.services import lifecycle_gates
 from app.services import drill_through
 from app.services import dual_control
 from app.services import ref_fields
@@ -90,7 +92,7 @@ REVIEW_REFS: tuple[ref_fields.RefField, ...] = (ref_fields.user("reviewer_id", "
 async def _reads(db, policies) -> list[PolicyRead]:
     """Serialise a page of policies with every pick resolved — one query per kind for
     the policies and one for all their reviewers, whatever the page size."""
-    items = [PolicyRead.model_validate(p) for p in policies]
+    items = await serialize_all(db, policies, PolicyRead.model_validate)
     await ref_fields.fill_refs(db, list(zip(policies, items)), POLICY_REFS)
     reviews = [pair for p, rd in zip(policies, items) for pair in zip(p.reviews, rd.reviews)]
     await ref_fields.fill_refs(db, reviews, REVIEW_REFS)
@@ -439,8 +441,10 @@ async def list_policies(
     else:
         stmt = stmt.order_by(Policy.reference)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    # Load what the list serialises (``schema_loading``), not every link of every link.
+    loads = options_for(Policy, PolicyRead)
     rows = (
-        await db.scalars(stmt.options(*_loads()).limit(limit).offset(offset))
+        await db.scalars(stmt.options(*loads).limit(limit).offset(offset))
     ).all()
     return Page(items=await _reads(db, list(rows)), total=total, limit=limit, offset=offset)
 
@@ -469,7 +473,9 @@ async def policy_options(db: DbSession) -> PolicyOptions:
 )
 async def create_policy(body: PolicyCreate, db: DbSession, user: CurrentUser) -> PolicyRead:
     data = body.model_dump()
-    _check_initial_status(user, data.get("status"))
+    # A policy is approved and published through its workflow, never on creation (an
+    # import the gate let through is the one exception — services.lifecycle_gates).
+    lifecycle_gates.enforce_create("policy", data)
     await _check_governance(db, data)
     await ref_fields.apply_refs(db, Policy, data, POLICY_REFS)
     obj = Policy(tenant_id=user.tenant_id)
@@ -478,6 +484,10 @@ async def create_policy(body: PolicyCreate, db: DbSession, user: CurrentUser) ->
         setattr(obj, field, value)
     obj.reference = await _next_ref(db)
     obj.next_review_date = next_review_date(obj.review_frequency)
+    if obj.status == PolicyStatus.published:
+        # Carried in by an import: dated as Publish would date it.
+        obj.published_at = obj.published_at or date.today()
+        obj.effective_date = obj.effective_date or obj.published_at
     db.add(obj)
     await db.flush()
     await _flush_assoc(db, obj.id, stash)
@@ -525,17 +535,12 @@ async def update_policy(
     return await _read(db, await _load(db, obj.id))
 
 
-#: Business statuses a policy reaches only through the approval lifecycle (Submit for
-#: review → Approve, then Publish), never by editing the field.
-LIFECYCLE_STATUSES = (PolicyStatus.under_review, PolicyStatus.approved, PolicyStatus.published)
-
-
 def status_edit_refusal(current, wanted) -> str | None:
-    """Why an edit may not set this policy status, or None. Pure."""
-    if wanted is None or wanted == current or wanted not in LIFECYCLE_STATUSES:
+    """Why an edit may not set this policy status, or None. Pure. The rule is
+    ``lifecycle_gates.POLICY_STATUS``, shared with create and import."""
+    if wanted is None:
         return None
-    step = "Publish" if wanted == PolicyStatus.published else "Submit for review and Approve"
-    return f"A policy becomes {wanted.value.replace('_', ' ')} through {step}, not by editing its status."
+    return lifecycle_gates.edit_refusal("policy", {"status": current}, {"status": wanted})
 
 
 def publish_refusal(workflow_status, business_status) -> str | None:
@@ -547,24 +552,6 @@ def publish_refusal(workflow_status, business_status) -> str | None:
         "Approve this policy before publishing it: submit it for review, and an "
         "independent approver approves it."
     )
-
-
-def _check_initial_status(user, wanted) -> None:
-    """A new policy starts as a draft unless the creator could approve it (a migration
-    bringing already-approved policies in, say)."""
-    if wanted is None or wanted not in LIFECYCLE_STATUSES:
-        return
-    from app.services.record_workflow import required_permissions
-
-    needed = required_permissions("policy", "approve")
-    if not set(needed).issubset(set(user.permission_codes or [])):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"A new policy starts as a draft. Creating one as {wanted.value.replace('_', ' ')} "
-                f"needs approval rights ({', '.join(needed)})."
-            ),
-        )
 
 
 @router.post(

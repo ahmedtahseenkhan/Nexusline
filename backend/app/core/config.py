@@ -179,6 +179,15 @@ class Settings(BaseSettings):
     seed_bootstrap: bool = True
     seed_org_name: str = "Acme Corp"
     seed_org_slug: str = "acme"
+    # Runtime connection pool. Every request holds one connection for its whole
+    # transaction, so size it for concurrent requests, not users; keep
+    # (pool_size + max_overflow) x workers under Postgres max_connections (default 100).
+    db_pool_size: int = 10
+    db_max_overflow: int = 10
+    db_pool_timeout: int = 30
+    # How many relationship hops a query eagerly loads (see core/database.py).
+    orm_eager_depth: int = 3
+
     seed_admin_email: str = "admin@acme.com"
     seed_admin_password: str = "ChangeMe123!"
     # A second, deliberately empty organisation created alongside the demo one. Its

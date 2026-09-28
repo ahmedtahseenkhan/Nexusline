@@ -23,17 +23,27 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.core.deps import CurrentUser, DbSession, require
-from app.models.approval import ApprovalRequest
+from app.models.approval import ApprovalRequest, ApprovalStatus
+from app.api.v1.internal_audit import field_changes, snapshot
 from app.models.audit_plan import (
     AuditPlan,
     AuditPlanItem,
     AuditPlanStatus,
     AuditProgram,
     AuditProgramStep,
+    content_edit_refusal,
+    manual_status_refusal,
+    quarter_of_month,
 )
 from app.models.compliance import Framework, Requirement
-from app.models.enums import AuditEngagementStatus, AuditFindingStatus, Criticality
-from app.models.internal_audit import AuditableUnit, AuditEngagement, AuditFinding, AuditProcedure
+from app.models.enums import AuditEngagementStatus, Criticality
+from app.models.internal_audit import (
+    RESOLVED_FINDING_STATES,
+    AuditableUnit,
+    AuditEngagement,
+    AuditFinding,
+    AuditProcedure,
+)
 from app.schemas.audit_plan import (
     ApplyProgramResult,
     AuditCalendar,
@@ -67,7 +77,7 @@ _WRITE = Depends(require("internal_audit:write"))
 _CRIT_RANK = {
     Criticality.low: 1, Criticality.medium: 2, Criticality.high: 3, Criticality.critical: 4,
 }
-_OPEN_FINDING = (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)
+_OPEN_FINDING = RESOLVED_FINDING_STATES  # i.e. *not* open: excluded from the calendar
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +105,102 @@ async def _load_program(db: DbSession, program_id: uuid.UUID) -> AuditProgram:
     return obj
 
 
-def _plan_read(plan: AuditPlan) -> PlanRead:
+def _item_read(item: AuditPlanItem, engagements: dict | None = None) -> PlanItemRead:
+    linked = (engagements or {}).get(item.engagement_id)
+    return PlanItemRead(
+        id=item.id, title=item.title, auditable_unit_id=item.auditable_unit_id,
+        rationale=item.rationale, planned_quarter=item.planned_quarter,
+        planned_month=item.planned_month,
+        budgeted_hours=item.budgeted_hours, lead_auditor=item.lead_auditor,
+        engagement_id=item.engagement_id,
+        auditable_unit_name=(item.auditable_unit.name if item.auditable_unit else ""),
+        engagement_reference=(linked.reference if linked else ""),
+        engagement_title=(linked.title if linked else ""),
+        engagement_status=(linked.status.value if linked else ""),
+    )
+
+
+async def _engagement_labels(db: DbSession, ids) -> dict:
+    """Reference, title and status of the engagements plan lines point at — loaded as
+    columns, not as engagements (whose working papers and findings would ride along)."""
+    ids = {i for i in ids if i is not None}
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(AuditEngagement.id, AuditEngagement.reference, AuditEngagement.title,
+                   AuditEngagement.status)
+            .where(AuditEngagement.id.in_(ids))
+        )
+    ).all()
+    return {r.id: r for r in rows}
+
+
+async def _plan_out(db: DbSession, plan_id: uuid.UUID) -> PlanRead:
+    plan = await _load_plan(db, plan_id)
+    return _plan_read(plan, await _engagement_labels(db, (i.engagement_id for i in plan.items)))
+
+
+def _refuse_content_edit(plan: AuditPlan) -> None:
+    refusal = content_edit_refusal(plan.status)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
+
+
+def _schedule(current_quarter: int, current_month: int | None, data: dict) -> dict:
+    """Keep a line's quarter and month in agreement. Pure.
+
+    The month is the finer commitment, so when one is set the quarter follows it. Moving
+    a line to another quarter without naming a month drops a month that no longer fits.
+    (Both supplied and contradicting is refused by the schema.)
+    """
+    out = dict(data)
+    month = out.get("planned_month", current_month)
+    if "planned_month" in out and month is not None:
+        out["planned_quarter"] = quarter_of_month(month)
+    elif "planned_quarter" in out and month is not None and quarter_of_month(month) != out["planned_quarter"]:
+        out["planned_month"] = None
+    return out
+
+
+async def _check_unit(db: DbSession, unit_id: uuid.UUID | None, current: uuid.UUID | None = None) -> None:
+    # An existing link to a since-archived unit may stay; a new one must be live.
+    if unit_id is None or unit_id == current:
+        return
+    found = await db.scalar(
+        select(AuditableUnit.id).where(AuditableUnit.id == unit_id, AuditableUnit.deleted.is_(False))
+    )
+    if found is None:
+        raise HTTPException(status_code=404, detail="Auditable unit not found")
+
+
+async def _check_engagement(db: DbSession, item: AuditPlanItem, engagement_id: uuid.UUID | None) -> None:
+    """A line is delivered by a live engagement, and one engagement delivers one line of
+    a plan — counting it twice would overstate coverage to the audit committee."""
+    if engagement_id is None or engagement_id == item.engagement_id:
+        return
+    found = await db.scalar(
+        select(AuditEngagement.id).where(
+            AuditEngagement.id == engagement_id, AuditEngagement.deleted.is_(False)
+        )
+    )
+    if found is None:
+        raise HTTPException(status_code=404, detail="Audit engagement not found")
+    taken = await db.scalar(
+        select(AuditPlanItem.title).where(
+            AuditPlanItem.plan_id == item.plan_id,
+            AuditPlanItem.engagement_id == engagement_id,
+            AuditPlanItem.id != item.id,
+        )
+    )
+    if taken is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"That engagement already delivers the plan line '{taken}'.",
+        )
+
+
+def _plan_read(plan: AuditPlan, engagements: dict | None = None) -> PlanRead:
     return PlanRead(
         id=plan.id, reference=plan.reference, year=plan.year, title=plan.title,
         description=plan.description, prepared_by=plan.prepared_by,
@@ -104,18 +209,16 @@ def _plan_read(plan: AuditPlan) -> PlanRead:
         planned_count=plan.planned_count, started_count=plan.started_count,
         coverage_pct=plan.coverage_pct, planned_hours=plan.planned_hours,
         created_at=plan.created_at,
-        items=[
-            PlanItemRead(
-                id=i.id, title=i.title, auditable_unit_id=i.auditable_unit_id,
-                rationale=i.rationale, planned_quarter=i.planned_quarter,
-                planned_month=i.planned_month,
-                budgeted_hours=i.budgeted_hours, lead_auditor=i.lead_auditor,
-                engagement_id=i.engagement_id,
-                auditable_unit_name=(i.auditable_unit.name if i.auditable_unit else ""),
-            )
-            for i in plan.items
-        ],
+        items=[_item_read(i, engagements) for i in plan.items],
     )
+
+
+async def _program_out(db: DbSession, program_id: uuid.UUID) -> ProgramRead:
+    program = await _load_program(db, program_id)
+    name = ""
+    if program.framework_id is not None:
+        name = await db.scalar(select(Framework.name).where(Framework.id == program.framework_id)) or ""
+    return _program_read(program, name)
 
 
 def _program_read(program: AuditProgram, framework_name: str = "") -> ProgramRead:
@@ -145,7 +248,8 @@ async def list_plans(
     rows = (
         await db.scalars(stmt.order_by(AuditPlan.year.desc()).limit(limit).offset(offset))
     ).all()
-    return Page(items=[_plan_read(p) for p in rows], total=total, limit=limit, offset=offset)
+    labels = await _engagement_labels(db, (i.engagement_id for p in rows for i in p.items))
+    return Page(items=[_plan_read(p, labels) for p in rows], total=total, limit=limit, offset=offset)
 
 
 @router.post("/audit-plans", response_model=PlanRead, status_code=201, dependencies=[_WRITE])
@@ -158,12 +262,12 @@ async def create_plan(body: PlanCreate, db: DbSession, user: CurrentUser) -> Pla
         db, actor=user, action="create", entity_type="audit_plan", entity_id=plan.id,
         summary=f"Created audit plan {plan.reference}: {plan.title} ({plan.year})",
     )
-    return _plan_read(await _load_plan(db, plan.id))
+    return await _plan_out(db, plan.id)
 
 
 @router.get("/audit-plans/{plan_id}", response_model=PlanRead, dependencies=[_READ])
 async def get_plan(plan_id: uuid.UUID, db: DbSession) -> PlanRead:
-    return _plan_read(await _load_plan(db, plan_id))
+    return await _plan_out(db, plan_id)
 
 
 @router.patch("/audit-plans/{plan_id}", response_model=PlanRead, dependencies=[_WRITE])
@@ -172,15 +276,27 @@ async def update_plan(
 ) -> PlanRead:
     plan = await _load_plan(db, plan_id)
     data = body.model_dump(exclude_unset=True)
+    target = data.pop("status", None)
+    if target is not None:
+        refusal = manual_status_refusal(plan.status, target)
+        if refusal:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
+    content = {k: v for k, v in data.items() if getattr(plan, k) != v}
+    if content:
+        _refuse_content_edit(plan)
+    if target is not None:
+        data["status"] = target
+    changes = field_changes(plan, data)
     for name, value in data.items():
         setattr(plan, name, value)
     await db.flush()
-    await audit_log.record(
-        db, actor=user, action="update", entity_type="audit_plan", entity_id=plan.id,
-        summary=f"Updated audit plan {plan.reference}",
-        changes={k: str(v) for k, v in data.items()},
-    )
-    return _plan_read(await _load_plan(db, plan_id))
+    if changes:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="audit_plan", entity_id=plan.id,
+            summary=f"Updated audit plan {plan.reference}: {', '.join(sorted(changes))}"[:500],
+            changes=changes,
+        )
+    return await _plan_out(db, plan_id)
 
 
 @router.delete("/audit-plans/{plan_id}", status_code=204, dependencies=[_WRITE])
@@ -190,6 +306,7 @@ async def delete_plan(plan_id: uuid.UUID, db: DbSession, user: CurrentUser) -> N
     await audit_log.record(
         db, actor=user, action="delete", entity_type="audit_plan", entity_id=plan_id,
         summary=f"Archived audit plan {plan.reference}",
+        changes={**snapshot(plan, ("year", "title", "status")), "lines": len(plan.items)},
     )
 
 
@@ -209,6 +326,7 @@ async def generate_from_universe(
     skipped, so this can be re-run after the universe grows.
     """
     plan = await _load_plan(db, plan_id)
+    _refuse_content_edit(plan)
     units = (
         await db.scalars(select(AuditableUnit).where(AuditableUnit.deleted.is_(False)))
     ).all()
@@ -293,6 +411,23 @@ async def submit_plan(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="This plan is already approved"
         )
+    if plan.status == AuditPlanStatus.closed:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This plan is closed")
+    if plan.status == AuditPlanStatus.submitted and plan.approval_request_id is not None:
+        # One sign-off request per submission. A second click (or a retry) must not put
+        # a duplicate in front of the board; a request that was rejected or withdrawn
+        # may be replaced by a fresh one.
+        pending = await db.scalar(
+            select(ApprovalRequest.reference).where(
+                ApprovalRequest.id == plan.approval_request_id,
+                ApprovalRequest.status == ApprovalStatus.pending,
+            )
+        )
+        if pending is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"This plan is already awaiting approval ({pending}) in the Approvals inbox.",
+            )
 
     approval = ApprovalRequest(
         tenant_id=user.tenant_id,
@@ -318,8 +453,9 @@ async def submit_plan(
     await audit_log.record(
         db, actor=user, action="submit", entity_type="audit_plan", entity_id=plan.id,
         summary=f"Submitted audit plan {plan.reference} for approval",
+        changes={"approval": approval.reference},
     )
-    return _plan_read(await _load_plan(db, plan_id))
+    return await _plan_out(db, plan_id)
 
 
 @router.get(
@@ -355,37 +491,135 @@ async def plan_coverage(plan_id: uuid.UUID, db: DbSession) -> PlanCoverage:
 async def add_plan_item(
     plan_id: uuid.UUID, body: PlanItemCreate, db: DbSession, user: CurrentUser
 ) -> PlanRead:
-    await _load_plan(db, plan_id)
-    db.add(AuditPlanItem(tenant_id=user.tenant_id, plan_id=plan_id, **body.model_dump()))
+    plan = await _load_plan(db, plan_id)
+    _refuse_content_edit(plan)
+    data = body.model_dump()
+    await _check_unit(db, data.get("auditable_unit_id"))
+    item = AuditPlanItem(tenant_id=user.tenant_id, plan_id=plan_id, **data)
+    db.add(item)
     await db.flush()
-    return _plan_read(await _load_plan(db, plan_id))
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="audit_plan", entity_id=plan_id,
+        summary=f"Added plan line to {plan.reference}: {item.title}"[:500],
+        changes={"line_added": snapshot(item, ("title", "planned_quarter", "planned_month", "budgeted_hours"))},
+    )
+    return await _plan_out(db, plan_id)
+
+
+async def _load_item(db: DbSession, item_id: uuid.UUID) -> tuple[AuditPlanItem, AuditPlan]:
+    item = await db.scalar(select(AuditPlanItem).where(AuditPlanItem.id == item_id))
+    if item is None:
+        raise HTTPException(status_code=404, detail="Plan line not found")
+    return item, await _load_plan(db, item.plan_id)
 
 
 @router.patch("/audit-plan-items/{item_id}", response_model=PlanItemRead, dependencies=[_WRITE])
 async def update_plan_item(
-    item_id: uuid.UUID, body: PlanItemUpdate, db: DbSession
+    item_id: uuid.UUID, body: PlanItemUpdate, db: DbSession, user: CurrentUser
 ) -> PlanItemRead:
-    item = await db.scalar(select(AuditPlanItem).where(AuditPlanItem.id == item_id))
-    if item is None:
-        raise HTTPException(status_code=404, detail="Plan line not found")
-    for name, value in body.model_dump(exclude_unset=True).items():
+    """Edit a line, or link it to the engagement that delivers it (``engagement_id``).
+
+    Linking is delivery, not a change to the commitment, so it stays open while the
+    plan awaits sign-off; editing what the plan commits to does not.
+    """
+    item, plan = await _load_item(db, item_id)
+    data = _schedule(item.planned_quarter, item.planned_month, body.model_dump(exclude_unset=True))
+    content = {k: v for k, v in data.items() if k != "engagement_id" and getattr(item, k) != v}
+    if content:
+        _refuse_content_edit(plan)
+    elif plan.status == AuditPlanStatus.closed and data.get("engagement_id", item.engagement_id) != item.engagement_id:
+        _refuse_content_edit(plan)
+    if "auditable_unit_id" in data:
+        await _check_unit(db, data["auditable_unit_id"], item.auditable_unit_id)
+    if "engagement_id" in data:
+        await _check_engagement(db, item, data["engagement_id"])
+    changes = field_changes(item, data)
+    for name, value in data.items():
         setattr(item, name, value)
     await db.flush()
-    return PlanItemRead(
-        id=item.id, title=item.title, auditable_unit_id=item.auditable_unit_id,
-        rationale=item.rationale, planned_quarter=item.planned_quarter,
-        planned_month=item.planned_month,
-        budgeted_hours=item.budgeted_hours, lead_auditor=item.lead_auditor,
-        engagement_id=item.engagement_id,
-        auditable_unit_name=(item.auditable_unit.name if item.auditable_unit else ""),
+    if changes:
+        linked = "engagement_id" in changes
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="audit_plan", entity_id=plan.id,
+            summary=(
+                f"{'Linked delivery for' if linked and item.engagement_id else 'Updated'} "
+                f"plan line of {plan.reference}: {item.title}"
+            )[:500],
+            changes={"line": str(item.id), **changes},
+        )
+    item = await db.scalar(
+        select(AuditPlanItem).where(AuditPlanItem.id == item_id).execution_options(populate_existing=True)
     )
+    return _item_read(item, await _engagement_labels(db, [item.engagement_id]))
+
+
+@router.post(
+    "/audit-plan-items/{item_id}/start-engagement",
+    response_model=PlanItemRead, status_code=201, dependencies=[_WRITE],
+    summary="Open the engagement that delivers a plan line, and link it",
+)
+async def start_engagement(item_id: uuid.UUID, db: DbSession, user: CurrentUser) -> PlanItemRead:
+    """The usual way a commitment becomes delivery: the engagement is created from the
+    line (title, unit, lead auditor, fieldwork window from its month or quarter) and the
+    line is linked to it in one step, so coverage moves without re-keying anything."""
+    from app.models.internal_audit import AuditEngagement as Engagement
+    from app.services.refs import next_reference as next_ref
+
+    item, plan = await _load_item(db, item_id)
+    if item.engagement_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="This plan line has already started"
+        )
+    if plan.status == AuditPlanStatus.closed:
+        _refuse_content_edit(plan)
+    start, end = line_window(plan.year, item.planned_quarter, item.planned_month)
+    unit_id = item.auditable_unit_id
+    if unit_id is not None:
+        live = await db.scalar(
+            select(AuditableUnit.id).where(AuditableUnit.id == unit_id, AuditableUnit.deleted.is_(False))
+        )
+        unit_id = live
+    engagement = Engagement(
+        tenant_id=user.tenant_id, title=item.title, auditable_unit_id=unit_id,
+        lead_auditor=item.lead_auditor, scope=item.rationale,
+        planned_start=start, planned_end=end,
+    )
+    engagement.reference = await next_ref(db, Engagement, "IA")
+    db.add(engagement)
+    await db.flush()
+    item.engagement_id = engagement.id
+    await db.flush()
+    await audit_log.record(
+        db, actor=user, action="create", entity_type="audit_engagement", entity_id=engagement.id,
+        summary=f"Opened audit {engagement.reference} from plan {plan.reference}: {engagement.title}"[:500],
+    )
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="audit_plan", entity_id=plan.id,
+        summary=f"Linked delivery for plan line of {plan.reference}: {item.title}"[:500],
+        changes={"line": str(item.id), "engagement_id": {"from": None, "to": str(engagement.id)}},
+    )
+    return _item_read(item, await _engagement_labels(db, [engagement.id]))
+
+
+def line_window(year: int, quarter: int, month: int | None) -> tuple[date, date]:
+    """Planned fieldwork window for a line: its month when set, else its quarter. Pure."""
+    first = month or (quarter - 1) * 3 + 1
+    last = month or first + 2
+    end = date(year, 12, 31) if last == 12 else date(year, last + 1, 1) - timedelta(days=1)
+    return date(year, first, 1), end
 
 
 @router.delete("/audit-plan-items/{item_id}", status_code=204, dependencies=[_WRITE])
-async def delete_plan_item(item_id: uuid.UUID, db: DbSession) -> None:
-    item = await db.scalar(select(AuditPlanItem).where(AuditPlanItem.id == item_id))
-    if item is None:
-        raise HTTPException(status_code=404, detail="Plan line not found")
+async def delete_plan_item(item_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    item, plan = await _load_item(db, item_id)
+    _refuse_content_edit(plan)
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="audit_plan", entity_id=plan.id,
+        summary=f"Removed plan line from {plan.reference}: {item.title}"[:500],
+        changes={"line_removed": snapshot(
+            item, ("title", "planned_quarter", "planned_month", "budgeted_hours", "engagement_id")
+        )},
+    )
     await db.delete(item)
 
 
@@ -423,18 +657,26 @@ async def create_program(body: ProgramCreate, db: DbSession, user: CurrentUser) 
         db, actor=user, action="create", entity_type="audit_program", entity_id=program.id,
         summary=f"Created audit programme {program.reference}: {program.name}",
     )
-    return _program_read(await _load_program(db, program.id))
+    return await _program_out(db, program.id)
 
 
 @router.patch("/audit-programs/{program_id}", response_model=ProgramRead, dependencies=[_WRITE])
 async def update_program(
-    program_id: uuid.UUID, body: ProgramUpdate, db: DbSession
+    program_id: uuid.UUID, body: ProgramUpdate, db: DbSession, user: CurrentUser
 ) -> ProgramRead:
     program = await _load_program(db, program_id)
-    for name, value in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    changes = field_changes(program, data)
+    for name, value in data.items():
         setattr(program, name, value)
     await db.flush()
-    return _program_read(await _load_program(db, program_id))
+    if changes:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="audit_program", entity_id=program.id,
+            summary=f"Updated audit programme {program.reference}: {', '.join(sorted(changes))}"[:500],
+            changes=changes,
+        )
+    return await _program_out(db, program_id)
 
 
 @router.delete("/audit-programs/{program_id}", status_code=204, dependencies=[_WRITE])
@@ -444,6 +686,7 @@ async def delete_program(program_id: uuid.UUID, db: DbSession, user: CurrentUser
     await audit_log.record(
         db, actor=user, action="delete", entity_type="audit_program", entity_id=program_id,
         summary=f"Archived audit programme {program.reference}",
+        changes={**snapshot(program, ("name", "category")), "steps": program.step_count},
     )
 
 
@@ -456,32 +699,78 @@ async def add_step(
 ) -> ProgramRead:
     program = await _load_program(db, program_id)
     payload = body.model_dump()
-    if not payload.get("order_index"):
-        payload["order_index"] = len(program.steps) + 1
-    db.add(AuditProgramStep(tenant_id=user.tenant_id, program_id=program_id, **payload))
+    position = payload.pop("order_index", None) or len(program.steps) + 1
+    step = AuditProgramStep(tenant_id=user.tenant_id, program_id=program_id, order_index=0, **payload)
+    db.add(step)
+    _place_step(program, step, position)
     await db.flush()
-    return _program_read(await _load_program(db, program_id))
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="audit_program", entity_id=program_id,
+        summary=f"Added step {step.order_index} to {program.reference}: {step.title}"[:500],
+        changes={"step_added": snapshot(step, ("order_index", "title"))},
+    )
+    return await _program_out(db, program_id)
+
+
+def _place_step(program: AuditProgram, step: AuditProgramStep, position: int | None) -> None:
+    """Keep the checklist numbered 1..n with no gaps or ties.
+
+    ``position`` is where ``step`` goes (1-based; out of range clamps to the ends,
+    ``None`` leaves it where it is); every other step shifts to make room, so "Order 1"
+    on the last step moves it to the top rather than creating a second step 1."""
+    others = [s for s in sorted(program.steps, key=lambda s: s.order_index) if s is not step and s.id != step.id]
+    if position is None:
+        ordered = others
+    else:
+        at = min(max(position, 1), len(others) + 1) - 1
+        ordered = [*others[:at], step, *others[at:]]
+    for index, s in enumerate(ordered, start=1):
+        s.order_index = index
+
+
+async def _load_step(db: DbSession, step_id: uuid.UUID) -> AuditProgramStep:
+    step = await db.scalar(select(AuditProgramStep).where(AuditProgramStep.id == step_id))
+    if step is None:
+        raise HTTPException(status_code=404, detail="Programme step not found")
+    await _load_program(db, step.program_id)  # a step of an archived programme is gone too
+    return step
 
 
 @router.patch("/audit-program-steps/{step_id}", response_model=ProgramStepRead, dependencies=[_WRITE])
 async def update_step(
-    step_id: uuid.UUID, body: ProgramStepUpdate, db: DbSession
+    step_id: uuid.UUID, body: ProgramStepUpdate, db: DbSession, user: CurrentUser
 ) -> ProgramStepRead:
-    step = await db.scalar(select(AuditProgramStep).where(AuditProgramStep.id == step_id))
-    if step is None:
-        raise HTTPException(status_code=404, detail="Programme step not found")
-    for name, value in body.model_dump(exclude_unset=True).items():
+    step = await _load_step(db, step_id)
+    data = body.model_dump(exclude_unset=True)
+    changes = field_changes(step, data)
+    position = data.pop("order_index", None)
+    # Loaded before the edits: the reload would otherwise overwrite them.
+    program = await _load_program(db, step.program_id) if position is not None else None
+    for name, value in data.items():
         setattr(step, name, value)
+    if program is not None:
+        _place_step(program, step, position)
     await db.flush()
+    if changes:
+        await audit_log.record(
+            db, actor=user, action="update", entity_type="audit_program", entity_id=step.program_id,
+            summary=f"Updated programme step {step.order_index}: {', '.join(sorted(changes))}"[:500],
+            changes={"step": str(step.id), **changes},
+        )
     return ProgramStepRead.model_validate(step)
 
 
 @router.delete("/audit-program-steps/{step_id}", status_code=204, dependencies=[_WRITE])
-async def delete_step(step_id: uuid.UUID, db: DbSession) -> None:
-    step = await db.scalar(select(AuditProgramStep).where(AuditProgramStep.id == step_id))
-    if step is None:
-        raise HTTPException(status_code=404, detail="Programme step not found")
+async def delete_step(step_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    step = await _load_step(db, step_id)
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="audit_program", entity_id=step.program_id,
+        summary=f"Removed programme step {step.order_index}: {step.title}"[:500],
+        changes={"step_removed": snapshot(step, ("order_index", "title", "procedure"))},
+    )
+    program = await _load_program(db, step.program_id)
     await db.delete(step)
+    _place_step(program, step, None)  # close the gap it leaves
 
 
 @router.post(
@@ -670,7 +959,10 @@ async def calendar(
 
     findings = (
         await db.scalars(
-            select(AuditFinding).where(
+            select(AuditFinding)
+            .join(AuditEngagement, AuditEngagement.id == AuditFinding.engagement_id)
+            .where(
+                AuditEngagement.deleted.is_(False),
                 AuditFinding.due_date.is_not(None),
                 AuditFinding.due_date.between(start, end),
                 AuditFinding.status.not_in(_OPEN_FINDING),

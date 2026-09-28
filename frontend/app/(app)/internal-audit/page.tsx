@@ -20,6 +20,7 @@ import AuditPlanTab from "@/components/AuditPlanTab";
 import AuditProgramTab from "@/components/AuditProgramTab";
 import AuditCalendarTab from "@/components/AuditCalendarTab";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import RichText from "@/components/RichText";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import RelatedChips from "@/components/RelatedChips";
@@ -41,12 +42,16 @@ const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: c
 // AuditFinding (lib/api) doesn't carry these yet, so we describe them locally.
 type Ref = { id: string; reference?: string; title?: string; name?: string };
 type FindingLinks = { controls?: Ref[]; risks?: Ref[]; requirements?: Ref[] };
-type Named = { id: string; name?: string; reference?: string; title?: string };
+type Named = { id: string; name?: string; reference?: string; title?: string; framework?: string };
+// The engagement's link to its universe entry survives the unit being archived.
+type EngagementUnit = { auditable_unit_name?: string; auditable_unit_archived?: boolean };
 const refToOpt = (x: Ref): AsyncOption => ({ value: x.id, label: x.reference || x.title || x.name || x.id });
 
 // ------------------------------------------------------------------ enum lists
 const INHERENT_RISK = opts(["low", "medium", "high", "critical"]);
-const AUDIT_FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
+// Every value of the backend's ReviewFrequency — a missing one shows as a blank select
+// for units that carry it (imported, or set through the API).
+const AUDIT_FREQ = opts(["none", "daily", "weekly", "fortnightly", "monthly", "quarterly", "semiannual", "annual"]);
 const ENG_STATUS = opts(["planned", "fieldwork", "reporting", "closed", "cancelled"]);
 /* Every audit the bank is subject to lives in this one register. Provenance is what
    makes "how many SBP inspection findings are still open?" answerable without keeping a
@@ -338,6 +343,7 @@ function InternalAuditInner() {
   const [showEngForm, setShowEngForm] = useState(false);
   const [savingEng, setSavingEng] = useState(false);
   const [ef, setEf] = useState<EngForm>(BLANK_ENG);
+  const engCfForm = useCustomFieldForm("audit_engagement");
   const setE = <K extends keyof EngForm>(k: K, v: EngForm[K]) => setEf((p) => ({ ...p, [k]: v }));
 
   // ---- engagement detail drawer (URL-driven) ----
@@ -356,11 +362,21 @@ function InternalAuditInner() {
   const [fd, setFd] = useState<FindingDraft>(BLANK_FINDING);
   const setFD = <K extends keyof FindingDraft>(k: K, v: FindingDraft[K]) => setFd((p) => ({ ...p, [k]: v }));
   const [editingFinding, setEditingFinding] = useState<AuditFinding | null>(null);
+  // Findings are raised inline in the drawer, so their custom fields sit in that form
+  // for a new finding as well as an existing one.
+  const findingCfForm = useCustomFieldForm("audit_finding");
+  const unitCfForm = useCustomFieldForm("auditable_unit");
 
   // Server typeahead sources for the finding's control/risk/requirement pickers.
+  // Controls and risks answer with a page; the requirements picker endpoint answers
+  // with a bare list (it spans every framework), so both shapes are read.
   const linkSearch = (path: string) => (q: string) =>
-    apiCall<PagedList<Named>>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
-      r.items.map((x) => ({ value: x.id, label: x.name || x.title || x.reference || x.id, sub: x.reference })),
+    apiCall<PagedList<Named> | Named[]>("GET", `/${path}?search=${encodeURIComponent(q)}&limit=20`).then((r) =>
+      (Array.isArray(r) ? r : r.items).map((x) => ({
+        value: x.id,
+        label: x.name || x.title || x.reference || x.id,
+        sub: [x.reference, x.framework].filter(Boolean).join(" · ") || undefined,
+      })),
     );
 
   // ---- findings follow-up ----
@@ -381,14 +397,16 @@ function InternalAuditInner() {
   const fetchFindings = useCallback((qs: string) => apiCall<PagedList<AuditFinding>>("GET", `/audit-findings?${qs}`), []);
 
   // ------------------------------------------------------------- unit CRUD
-  function openNewUnit() { setEditingUnit(null); setUf(BLANK_UNIT); setError(null); setShowUnitForm(true); }
-  function openEditUnit(u: AuditableUnit) { setEditingUnit(u); setUf(fromUnit(u)); setError(null); setShowUnitForm(true); }
+  function openNewUnit() { setEditingUnit(null); setUf(BLANK_UNIT); unitCfForm.start(null); setError(null); setShowUnitForm(true); }
+  function openEditUnit(u: AuditableUnit) { setEditingUnit(u); setUf(fromUnit(u)); unitCfForm.start(u.id); setError(null); setShowUnitForm(true); }
   async function saveUnit() {
     setError(null); setSavingUnit(true);
     try {
       const payload = unitPayload(uf);
-      if (editingUnit) await api.updateAuditUnit(editingUnit.id, payload);
-      else await api.createAuditUnit(payload);
+      const saved = editingUnit
+        ? await api.updateAuditUnit(editingUnit.id, payload)
+        : await api.createAuditUnit(payload);
+      await unitCfForm.save((saved as { id: string }).id);
       setShowUnitForm(false); reload(); toast(editingUnit ? "Changes saved" : "Auditable unit created");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save auditable unit");
@@ -408,14 +426,16 @@ function InternalAuditInner() {
   }
 
   // ------------------------------------------------------------- engagement CRUD
-  function openNewEng() { setEditingEng(null); setEf(BLANK_ENG); setError(null); setShowEngForm(true); }
-  function openEditEng(e: AuditEngagement) { setEditingEng(e); setEf(fromEng(e)); setError(null); setShowEngForm(true); }
+  function openNewEng() { setEditingEng(null); setEf(BLANK_ENG); engCfForm.start(null); setError(null); setShowEngForm(true); }
+  function openEditEng(e: AuditEngagement) { setEditingEng(e); setEf(fromEng(e)); engCfForm.start(e.id); setError(null); setShowEngForm(true); }
   async function saveEng() {
     setError(null); setSavingEng(true);
     try {
       const payload = engPayload(ef);
-      if (editingEng) await api.updateAuditEngagement(editingEng.id, payload);
-      else await api.createAuditEngagement(payload);
+      const saved = editingEng
+        ? await api.updateAuditEngagement(editingEng.id, payload)
+        : await api.createAuditEngagement(payload);
+      await engCfForm.save(saved.id);
       setShowEngForm(false); reload();
       if (openId) loadDetail(openId);
       toast(editingEng ? "Changes saved" : "Engagement created");
@@ -441,6 +461,7 @@ function InternalAuditInner() {
     setPd(BLANK_PROC);
     setFd(BLANK_FINDING);
     setEditingFinding(null);
+    findingCfForm.start(null);
     setOpenId(e.id);
   }
 
@@ -488,11 +509,13 @@ function InternalAuditInner() {
   function openEditFinding(fi: AuditFinding) {
     setEditingFinding(fi);
     setFd(fromFinding(fi as AuditFinding & FindingLinks));
+    findingCfForm.start(fi.id);
     setError(null);
   }
   function cancelEditFinding() {
     setEditingFinding(null);
     setFd(BLANK_FINDING);
+    findingCfForm.start(null);
   }
   async function saveFinding() {
     if (!detail) return;
@@ -512,9 +535,13 @@ function InternalAuditInner() {
       requirement_ids: fd.requirement_ids.map((o) => o.value),
     };
     try {
-      if (editingFinding) await api.updateAuditFinding(editingFinding.id, payload);
-      else await api.addAuditFinding(detail.id, payload);
-      setEditingFinding(null); setFd(BLANK_FINDING);
+      // A new finding is created through the endpoint that answers with the finding
+      // itself, so its custom fields can be saved on its id straight away.
+      const saved = editingFinding
+        ? await api.updateAuditFinding(editingFinding.id, payload)
+        : await apiCall<AuditFinding>("POST", "/audit-findings", { ...payload, engagement_id: detail.id });
+      await findingCfForm.save((saved as { id: string }).id);
+      setEditingFinding(null); setFd(BLANK_FINDING); findingCfForm.start(null);
       loadDetail(detail.id); reload();
       toast(editingFinding ? "Finding updated" : "Finding raised");
     } catch (e) {
@@ -545,6 +572,13 @@ function InternalAuditInner() {
   }
 
   const unitOpts: Option[] = unitList.map((u) => ({ value: u.id, label: u.name, sub: u.reference }));
+  // An engagement whose unit was archived since keeps that link; show it for what it is
+  // instead of an empty picker (and the save keeps it).
+  const engUnit = editingEng as (AuditEngagement & EngagementUnit) | null;
+  const engUnitOpts: Option[] =
+    engUnit?.auditable_unit_id && !unitOpts.some((o) => o.value === engUnit.auditable_unit_id)
+      ? [...unitOpts, { value: engUnit.auditable_unit_id, label: `${engUnit.auditable_unit_name || "Unit"} (archived)` }]
+      : unitOpts;
 
   // ------------------------------------------------------------- columns
   const unitColumns: Column<AuditableUnit>[] = [
@@ -619,7 +653,7 @@ function InternalAuditInner() {
         <Field label="Last Audited">
           <TextInput type="date" value={uf.last_audited_date} onChange={(v) => setU("last_audited_date", v)} />
         </Field>
-        <Field label="Next Audit Due" help="Leave blank to derive from the frequency.">
+        <Field label="Next Audit Due" help="Leave blank to derive it from Last Audited and the frequency. Closing an engagement on this unit moves both on.">
           <TextInput type="date" value={uf.next_audit_due} onChange={(v) => setU("next_audit_due", v)} />
         </Field>
       </div>
@@ -635,7 +669,7 @@ function InternalAuditInner() {
       </Field>
       <div className="field-row">
         <Field label="Auditable Unit" help="The universe entry this engagement covers.">
-          <Select value={ef.auditable_unit_id} onChange={(v) => setE("auditable_unit_id", v)} options={unitOpts} placeholder="—" />
+          <Select value={ef.auditable_unit_id} onChange={(v) => setE("auditable_unit_id", v)} options={engUnitOpts} placeholder="—" />
         </Field>
         <Field label="Status">
           <Select value={ef.status} onChange={(v) => setE("status", v)} options={ENG_STATUS} />
@@ -746,10 +780,10 @@ function InternalAuditInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       {/* ============================================= ANNUAL PLAN */}
-      {tab === "plan" && <AuditPlanTab />}
+      {tab === "plan" && <AuditPlanTab units={unitOpts} engagements={engagementOptions} onChanged={reload} />}
 
       {/* ============================================= PROGRAMMES (CHECKLISTS) */}
-      {tab === "programs" && <AuditProgramTab engagements={engagementOptions} />}
+      {tab === "programs" && <AuditProgramTab engagements={engagementOptions} onChanged={reload} />}
 
       {/* ============================================= CALENDAR */}
       {tab === "calendar" && <AuditCalendarTab />}
@@ -954,6 +988,12 @@ function InternalAuditInner() {
                   <div style={{ flex: "1 1 100%" }}><label className="label">Related controls</label><AsyncMultiSelect search={linkSearch("controls")} value={fd.control_ids} onChange={(v) => setFD("control_ids", v)} placeholder="Search controls to link…" /></div>
                   <div style={{ flex: "1 1 100%" }}><label className="label">Related risks</label><AsyncMultiSelect search={linkSearch("risks")} value={fd.risk_ids} onChange={(v) => setFD("risk_ids", v)} placeholder="Search risks to link…" /></div>
                   <div style={{ flex: "1 1 100%" }}><label className="label">Related requirements</label><AsyncMultiSelect search={linkSearch("requirements")} value={fd.requirement_ids} onChange={(v) => setFD("requirement_ids", v)} placeholder="Search requirements to link…" /></div>
+                  {findingCfForm.tabs.map((t) => (
+                    <div key={t.id} style={{ flex: "1 1 100%" }}>
+                      <label className="label">{t.label}</label>
+                      {t.content}
+                    </div>
+                  ))}
                   <button className="btn">{editingFinding ? "Save finding" : "Add"}</button>
                   {editingFinding && <button type="button" className="btn secondary" onClick={cancelEditFinding}>Cancel</button>}
                 </form>
@@ -1017,7 +1057,7 @@ function InternalAuditInner() {
       {showUnitForm && (
         <FormModal
           title={editingUnit ? `Edit auditable unit — ${editingUnit.reference || editingUnit.name}` : "New auditable unit"}
-          tabs={[{ id: "general", label: "General", content: unitTab, required: true }]}
+          tabs={[{ id: "general", label: "General", content: unitTab, required: true }, ...unitCfForm.tabs]}
           onClose={() => setShowUnitForm(false)}
           onSave={saveUnit}
           saving={savingUnit}
@@ -1041,6 +1081,7 @@ function InternalAuditInner() {
             { id: "general", label: "General", content: engGeneral, required: true },
             { id: "planning", label: "Planning", content: engPlanning },
             { id: "conclusion", label: "Conclusion", content: engConclusion },
+            ...engCfForm.tabs,
           ]}
           onClose={() => setShowEngForm(false)}
           onSave={saveEng}

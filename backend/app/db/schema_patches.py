@@ -574,7 +574,35 @@ def recheck_ddl_statements() -> list[str]:
         "CREATE INDEX IF NOT EXISTS ix_requirements_reference_sort_key "
         "ON requirements (framework_id, reference_sort_key)"
     )
+    statements.extend(tag_name_unique_statements())
+    statements.extend(capital_snapshot_ddl_statements())
+    statements.extend(vuln_acceptance_ddl_statements())
+    statements.extend(asset_review_completion_ddl_statements())
     return statements
+
+
+# Tags that differ only by case or spacing ("KYC", " kyc ") are one tag: the oldest keeps
+# its id and the others' assignments move onto it, then the index keeps it that way.
+# Merge before trimming — trimming first would collide on the exact-name constraint.
+_TAG_KEY = "lower(btrim(regexp_replace(name, '\\s+', ' ', 'g')))"
+_TAG_DUPLICATES = (
+    "SELECT id, first_value(id) OVER ("
+    f"PARTITION BY tenant_id, {_TAG_KEY} ORDER BY created_at, id) AS keep FROM tags"
+)
+
+
+def tag_name_unique_statements() -> list[str]:
+    """Idempotent: merge case/spacing duplicates, normalise names, add the unique index."""
+    return [
+        "UPDATE entity_tags et SET tag_id = d.keep "
+        f"FROM ({_TAG_DUPLICATES}) d WHERE et.tag_id = d.id AND d.id <> d.keep "
+        "AND NOT EXISTS (SELECT 1 FROM entity_tags x WHERE x.tag_id = d.keep "
+        "AND x.entity_type = et.entity_type AND x.entity_id = et.entity_id)",
+        f"DELETE FROM tags t USING ({_TAG_DUPLICATES}) d WHERE t.id = d.id AND d.id <> d.keep",
+        "UPDATE tags SET name = btrim(regexp_replace(name, '\\s+', ' ', 'g')) "
+        "WHERE name <> btrim(regexp_replace(name, '\\s+', ' ', 'g'))",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_tag_tenant_lower_name ON tags (tenant_id, lower(name))",
+    ]
 
 
 def asset_split_ddl_statements() -> list[str]:
@@ -598,3 +626,111 @@ def asset_split_ddl_statements() -> list[str]:
             f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {col} {ddl_type}{default_clause}{not_null}"
         )
     return statements
+
+
+# A final SMA capital calculation freezes the exchange rate, bucket edges and figures it
+# used (models.scenario.CapitalCalculation, migration 0041_capital_snapshot).
+CAPITAL_SNAPSHOT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("final_at", "TIMESTAMP WITH TIME ZONE"),
+    ("final_by", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    ("final_fx_factor", "NUMERIC(24, 10)"),
+    ("final_bucket_1", "NUMERIC(24, 2)"),
+    ("final_bucket_2", "NUMERIC(24, 2)"),
+    ("final_basis", "TEXT NOT NULL DEFAULT ''"),
+    ("final_bucket", "INTEGER"),
+    ("final_bic", "NUMERIC(24, 2)"),
+    ("final_loss_component", "NUMERIC(24, 2)"),
+    ("final_ilm", "NUMERIC(12, 6)"),
+    ("final_orc", "NUMERIC(24, 2)"),
+)
+
+
+def capital_snapshot_ddl_statements() -> list[str]:
+    """Idempotent DDL: the frozen-basis columns on ``capital_calculations``."""
+    return [
+        f"ALTER TABLE capital_calculations ADD COLUMN IF NOT EXISTS {col} {ddl}"
+        for col, ddl in CAPITAL_SNAPSHOT_COLUMNS
+    ]
+
+
+# --- delegation-of-authority limits on decisions that carry an amount (0040) ----------
+#: Categories of the authority matrix the GRC decisions are checked against
+#: (services.authority_limits), added to the pre-existing ``authority_category`` type.
+AUTHORITY_CATEGORY_VALUES: tuple[str, ...] = ("exception", "operational_loss", "outsourcing")
+
+AUTHORITY_AMOUNT_COLUMNS: list[tuple[str, str, str]] = [
+    # The exposure a risk acceptance accepts, fixed when it is requested.
+    ("risk_acceptances", "exposure_amount", "NUMERIC(18,2)"),
+    ("risk_acceptances", "exposure_currency", "VARCHAR(8) DEFAULT '' NOT NULL"),
+    ("risk_acceptances", "exposure_basis", "VARCHAR(40) DEFAULT '' NOT NULL"),
+    # The exposure an exception leaves uncovered.
+    ("exceptions", "exposure_amount", "NUMERIC(18,2)"),
+    ("exceptions", "exposure_currency", "VARCHAR(8) DEFAULT '' NOT NULL"),
+]
+
+
+def authority_amount_ddl_statements() -> list[str]:
+    """Idempotent DDL for authority-matrix limits: the new categories and the amounts.
+
+    ``ALTER TYPE ... ADD VALUE IF NOT EXISTS`` is legal inside a transaction on
+    PostgreSQL 12+ as long as the new value is not used in the same transaction."""
+    statements = [
+        f"ALTER TYPE authority_category ADD VALUE IF NOT EXISTS '{value}'"
+        for value in AUTHORITY_CATEGORY_VALUES
+    ]
+    statements.extend(
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}"
+        for table, col, ddl in AUTHORITY_AMOUNT_COLUMNS
+    )
+    return statements
+
+
+# --- risk acceptance of a vulnerability finding (0042) ---------------------------------
+#: The request and decision that move a finding to ``risk_accepted``
+#: (models.vulnerability.VulnFinding, api.v1.vulnerability, migration 0042).
+VULN_ACCEPTANCE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("acceptance_status", "VARCHAR(16) NOT NULL DEFAULT ''"),
+    ("acceptance_reason", "TEXT NOT NULL DEFAULT ''"),
+    ("acceptance_until", "DATE"),
+    ("acceptance_requested_at", "TIMESTAMP WITH TIME ZONE"),
+    ("acceptance_decided_at", "TIMESTAMP WITH TIME ZONE"),
+    ("acceptance_decision_note", "TEXT NOT NULL DEFAULT ''"),
+)
+VULN_ACCEPTANCE_USER_COLUMNS: tuple[str, ...] = ("acceptance_requested_by_id", "acceptance_decided_by_id")
+
+
+def vuln_acceptance_ddl_statements() -> list[str]:
+    """Idempotent DDL: the risk-acceptance columns on ``vuln_findings``."""
+    statements = [
+        f"ALTER TABLE vuln_findings ADD COLUMN IF NOT EXISTS {col} {ddl}"
+        for col, ddl in VULN_ACCEPTANCE_COLUMNS
+    ]
+    for col in VULN_ACCEPTANCE_USER_COLUMNS:
+        name = f"fk_vuln_findings_{col}"[:63]
+        statements.append(f"ALTER TABLE vuln_findings ADD COLUMN IF NOT EXISTS {col} UUID")
+        statements.append(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            f"WHERE conname = '{name}') THEN ALTER TABLE vuln_findings ADD CONSTRAINT {name} "
+            f"FOREIGN KEY ({col}) REFERENCES users(id) ON DELETE SET NULL NOT VALID; "
+            "END IF; END $$;"
+        )
+    statements.append(
+        "CREATE INDEX IF NOT EXISTS ix_vuln_findings_acceptance_status ON vuln_findings (acceptance_status)"
+    )
+    return statements
+
+
+def asset_review_completion_ddl_statements() -> list[str]:
+    """Idempotent DDL: who actually completed an asset review. ``reviewer`` is the name
+    planned when the review was scheduled; the person who completed it was recorded only
+    in the activity trail, so the review record itself — the evidence an auditor samples
+    — did not say who did the work."""
+    name = "fk_asset_reviews_completed_by_id"
+    return [
+        "ALTER TABLE asset_reviews ADD COLUMN IF NOT EXISTS completed_by VARCHAR(200) NOT NULL DEFAULT ''",
+        "ALTER TABLE asset_reviews ADD COLUMN IF NOT EXISTS completed_by_id UUID",
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+        f"WHERE conname = '{name}') THEN ALTER TABLE asset_reviews ADD CONSTRAINT {name} "
+        "FOREIGN KEY (completed_by_id) REFERENCES users(id) ON DELETE SET NULL NOT VALID; "
+        "END IF; END $$;",
+    ]

@@ -14,11 +14,14 @@ import RecordApproval from "@/components/RecordApproval";
 import RelatedChips from "@/components/RelatedChips";
 import AsyncSelect from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import ImportExport from "@/components/ImportExport";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ types
 type Ref = { id: string; reference?: string; title?: string; name?: string };
@@ -416,18 +419,21 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [df, setDf] = useState<DpiaForm>(BLANK_DPIA);
   const setD = <K extends keyof DpiaForm>(k: K, v: DpiaForm[K]) => setDf((p) => ({ ...p, [k]: v }));
+  const cfForm = useCustomFieldForm("dpia");
 
   const fetcher = useCallback((qs: string) => apiCall<PagedList<Dpia>>("GET", `/dpias?${qs}`), []);
 
   function openNew() {
     setEditing(null);
     setDf(BLANK_DPIA);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(d: Dpia) {
     setEditing(d);
     setDf(fromDpia(d));
+    cfForm.start(d.id);
     setError(null);
     setShowForm(true);
   }
@@ -436,8 +442,10 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
     setSaving(true);
     try {
       const payload = dpiaPayload(df);
-      if (editing) await apiCall("PATCH", `/dpias/${editing.id}`, payload);
-      else await apiCall("POST", "/dpias", payload);
+      const saved = editing
+        ? await apiCall<Dpia>("PATCH", `/dpias/${editing.id}`, payload)
+        : await apiCall<Dpia>("POST", "/dpias", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       onChanged();
@@ -481,8 +489,9 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
         <Field label="Processing activity" help="The RoPA activity this assessment covers.">
           <TextInput value={df.processing_activity} onChange={(v) => setD("processing_activity", v)} placeholder="Customer onboarding" />
         </Field>
-        <Field label="Status">
-          <Select value={df.status} onChange={(v) => setD("status", v)} options={DPIA_STATUS} />
+        <Field label="Status" help={DECISION_HELP.dpia}>
+          <Select value={df.status} onChange={(v) => setD("status", v)}
+            options={statusOptions("dpia", DPIA_STATUS, editing?.status, editing?.workflow_status)} />
         </Field>
       </div>
       <Field label="Description">
@@ -535,7 +544,12 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
         searchPlaceholder="Search DPIAs by title, reference, owner…"
         emptyMessage="No DPIAs yet. Assess the data-protection impact of high-risk processing activities."
         refreshKey={refreshKey}
-        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DPIA</button>}
+        toolbarRight={
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <ImportExport resource="dpias" label="DPIAs" onDone={() => { reload(); onChanged(); }} />
+            <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DPIA</button>
+          </div>
+        }
       />
       {showForm && (
         <FormModal
@@ -545,6 +559,7 @@ function DpiaSection({ onChanged }: { onChanged: () => void }) {
             { id: "general", label: "General", content: general, required: true },
             { id: "assessment", label: "Assessment", content: assessment },
             { id: "review", label: "Review", content: review },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}
@@ -573,18 +588,21 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [sf, setSf] = useState<DsarForm>(BLANK_DSAR);
   const setS = <K extends keyof DsarForm>(k: K, v: DsarForm[K]) => setSf((p) => ({ ...p, [k]: v }));
+  const cfForm = useCustomFieldForm("dsar");
 
   const fetcher = useCallback((qs: string) => apiCall<PagedList<Dsar>>("GET", `/dsars?${qs}`), []);
 
   function openNew() {
     setEditing(null);
     setSf(BLANK_DSAR);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(d: Dsar) {
     setEditing(d);
     setSf(fromDsar(d));
+    cfForm.start(d.id);
     setError(null);
     setShowForm(true);
   }
@@ -593,8 +611,10 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
     setSaving(true);
     try {
       const payload = dsarPayload(sf);
-      if (editing) await apiCall("PATCH", `/dsars/${editing.id}`, payload);
-      else await apiCall("POST", "/dsars", payload);
+      const saved = editing
+        ? await apiCall<Dsar>("PATCH", `/dsars/${editing.id}`, payload)
+        : await apiCall<Dsar>("POST", "/dsars", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       onChanged();
@@ -682,7 +702,12 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
         searchPlaceholder="Search DSARs by subject, reference, handler…"
         emptyMessage="No subject requests yet. Log access, erasure and portability requests to track the SLA."
         refreshKey={refreshKey}
-        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DSAR</button>}
+        toolbarRight={
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <ImportExport resource="dsars" label="Data Subject Requests" onDone={() => { reload(); onChanged(); }} />
+            <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New DSAR</button>
+          </div>
+        }
       />
       {showForm && (
         <FormModal
@@ -691,6 +716,7 @@ function DsarSection({ onChanged }: { onChanged: () => void }) {
           tabs={[
             { id: "general", label: "General", content: general },
             { id: "timing", label: "Timing & notes", content: timing },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}
@@ -720,6 +746,7 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bf, setBf] = useState<BreachForm>(BLANK_BREACH);
+  const cfForm = useCustomFieldForm("data_breach");
   const setB = <K extends keyof BreachForm>(k: K, v: BreachForm[K]) => setBf((p) => ({ ...p, [k]: v }));
 
   // server typeahead over the incident register for the breach's incident FK
@@ -740,12 +767,14 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
   function openNew() {
     setEditing(null);
     setBf(BLANK_BREACH);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(b: DataBreach) {
     setEditing(b);
     setBf(fromBreach(b));
+    cfForm.start(b.id);
     setError(null);
     setShowForm(true);
   }
@@ -754,8 +783,10 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
     setSaving(true);
     try {
       const payload = breachPayload(bf);
-      if (editing) await apiCall("PATCH", `/data-breaches/${editing.id}`, payload);
-      else await apiCall("POST", "/data-breaches", payload);
+      const saved = editing
+        ? await apiCall<DataBreach>("PATCH", `/data-breaches/${editing.id}`, payload)
+        : await apiCall<DataBreach>("POST", "/data-breaches", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       onChanged();
@@ -973,6 +1004,7 @@ function BreachSection({ onChanged }: { onChanged: () => void }) {
             { id: "general", label: "General", content: general, required: true },
             { id: "timing", label: "Timing & notification", content: timing },
             { id: "response", label: "Response", content: response },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}
@@ -1001,18 +1033,21 @@ function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary
   const [error, setError] = useState<string | null>(null);
   const [cf, setCf] = useState<ConsentForm>(BLANK_CONSENT);
   const setC = <K extends keyof ConsentForm>(k: K, v: ConsentForm[K]) => setCf((p) => ({ ...p, [k]: v }));
+  const cfForm = useCustomFieldForm("consent_record");
 
   const fetcher = useCallback((qs: string) => apiCall<PagedList<ConsentRecord>>("GET", `/consent-records?${qs}`), []);
 
   function openNew() {
     setEditing(null);
     setCf(BLANK_CONSENT);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(c: ConsentRecord) {
     setEditing(c);
     setCf(fromConsent(c));
+    cfForm.start(c.id);
     setError(null);
     setShowForm(true);
   }
@@ -1021,8 +1056,10 @@ function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary
     setSaving(true);
     try {
       const payload = consentPayload(cf);
-      if (editing) await apiCall("PATCH", `/consent-records/${editing.id}`, payload);
-      else await apiCall("POST", "/consent-records", payload);
+      const saved = editing
+        ? await apiCall<ConsentRecord>("PATCH", `/consent-records/${editing.id}`, payload)
+        : await apiCall<ConsentRecord>("POST", "/consent-records", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       reload();
       onChanged();
@@ -1113,14 +1150,19 @@ function ConsentSection({ onChanged, summary }: { onChanged: () => void; summary
         searchPlaceholder="Search consents by subject, purpose, reference…"
         emptyMessage="No consent records yet. Record subject consents, their lawful basis, and withdrawals."
         refreshKey={refreshKey}
-        toolbarRight={<button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New consent</button>}
+        toolbarRight={
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <ImportExport resource="consent-records" label="Consent Records" onDone={() => { reload(); onChanged(); }} />
+            <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> New consent</button>
+          </div>
+        }
       />
 
       {showForm && (
         <FormModal
           title={editing ? `Edit consent — ${editing.reference || editing.subject_name}` : "New consent"}
           wide
-          tabs={[{ id: "general", label: "General", content: general }]}
+          tabs={[{ id: "general", label: "General", content: general }, ...cfForm.tabs]}
           onClose={() => setShowForm(false)}
           onSave={save}
           saving={saving}

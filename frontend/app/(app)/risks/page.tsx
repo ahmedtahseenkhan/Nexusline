@@ -207,7 +207,10 @@ type RiskRow = {
 
   business_units: Ref[];
   processes: Ref[];
+  /** The register leaves ``assets`` empty and reports the count: a risk on a bank's
+   *  whole estate links thousands, and a list row is not the place to carry them. */
   assets: Ref[];
+  asset_count?: number;
   /** B2: each control's rating, basis and test record on the single-record read. */
   controls: RiskControlRef[];
   threats: Ref[];
@@ -231,6 +234,10 @@ type RiskRow = {
   kris?: Ref[];
   loss_events?: Ref[];
   issues?: Ref[];
+  /** RCSAs with a line assessing this risk, FAIR quantifications and continuity plans. */
+  rcsa_assessments?: Ref[];
+  quantifications?: Ref[];
+  continuity_plans?: Ref[];
 };
 
 type Named = { id: string; name?: string; reference?: string; title?: string };
@@ -455,9 +462,19 @@ const BLANK: FormState = {
   level: "", parent: null,
 };
 
-function fromRisk(r: RiskRow): FormState {
+function fromRisk(r: RiskRow, impactMode?: string): FormState {
   // A draft never scored (no assessment stamp) shows blank scores, not the stored 1x1.
   const unscored = r.status === "draft" && !r.last_assessed_at;
+  // A residual signed off through accept-residual before it cleared the residual
+  // dimension scores can hold an impact its dimensions no longer derive. The signed-off
+  // impact is the record; the stale residual dimension scores are left out of the form
+  // (saving then removes them), otherwise every save is refused.
+  let dimRows = r.impact_dimensions ?? [];
+  const residualDims = dimRows.filter((d) => d.basis === "residual").map((d) => d.score);
+  const residualDerived = combineImpact(residualDims, impactMode);
+  if (residualDerived != null && r.residual_impact != null && residualDerived !== r.residual_impact) {
+    dimRows = dimRows.filter((d) => d.basis !== "residual");
+  }
   return {
     title: r.title,
     description: r.description || "",
@@ -479,7 +496,7 @@ function fromRisk(r: RiskRow): FormState {
     target_likelihood: r.target_likelihood ? String(r.target_likelihood) : "",
     target_impact: r.target_impact ? String(r.target_impact) : "",
     assessment_rationale: r.assessment_rationale || "",
-    dims: Object.fromEntries((r.impact_dimensions ?? []).map((d) => [`${d.basis}:${d.dimension_id}`, String(d.score)])),
+    dims: Object.fromEntries(dimRows.map((d) => [`${d.basis}:${d.dimension_id}`, String(d.score)])),
     residual_override_reason: r.residual_override_reason || "",
     annual_loss_frequency: r.annual_loss_frequency ?? "",
     single_loss_expectancy: r.single_loss_expectancy ?? "",
@@ -791,7 +808,7 @@ function RisksPage() {
   function openEdit(r: RiskRow, tab?: string) {
     setEditTab(tab);
     setEditing(r);
-    setF(fromRisk(r));
+    setF(fromRisk(r, settings?.impact_mode));
     setCfValues({});
     if (cfDefs.length) {
       api
@@ -1146,8 +1163,8 @@ function RisksPage() {
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Status" help="Where the risk is in assessment and treatment. A draft may be saved unscored; any other status needs the inherent scores and an assessment rationale. Approval is separate: submit it for review from the risk's detail view.">
-          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS} />
+        <Field label="Status" help="Where the risk is in assessment and treatment. A draft may be saved unscored; any other status needs the inherent scores and an assessment rationale. Approval is separate: submit it for review from the risk's detail view. Accepted is a decision: request acceptance from the risk, and a holder of risk:accept decides it.">
+          <Select value={f.status} onChange={(v) => set("status", v)} options={STATUS.filter((o) => o.value !== "accepted" || editing?.status === "accepted")} />
         </Field>
       </div>
       {/* Phase 3 hierarchy: enterprise → category → scenario. The server checks the parent
@@ -1507,14 +1524,22 @@ function RisksPage() {
   /* Inline relation chips. Each links to the record's own page, the same way the
      drawer's related-record chips do — the list is the workbench, so the graph has to
      be walkable from it. */
+  // A row shows at most a dozen links; the rest is a count. A control on every endpoint
+  // once rendered thousands of chips per row and pushed the row's text off the screen.
+  const MAX_CHIPS = 12;
   const linkChips = (items: Ref[] | undefined, href: string) =>
     items && items.length ? (
       <div className="chips" onClick={(e) => e.stopPropagation()}>
-        {items.map((x) => (
+        {items.slice(0, MAX_CHIPS).map((x) => (
           <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{x.name || x.title || x.reference || x.id}</Link>
         ))}
+        {items.length > MAX_CHIPS && <span className="chip">+{(items.length - MAX_CHIPS).toLocaleString()} more</span>}
       </div>
     ) : <span className="muted">—</span>;
+  const assetCell = (r: RiskRow) =>
+    r.assets?.length ? linkChips(r.assets, "/information-assets")
+      : r.asset_count ? <span className="muted">{r.asset_count.toLocaleString()} {r.asset_count === 1 ? "asset" : "assets"}</span>
+      : <span className="muted">—</span>;
   const names = (items: Ref[] | undefined) => (items ?? []).map((x) => x.name || x.title || x.reference || "").join(", ");
   const rungLabel = (axis: "likelihood" | "impact", n: number | null) => {
     if (!n) return "—";
@@ -1549,7 +1574,7 @@ function RisksPage() {
     { key: "owner", header: "Owner", render: (r) => <span className="muted"><UserName user={r.owner_ref} /></span>, text: (r) => personText(r.owner_ref) },
     { key: "business_units", header: "Business units", render: (r) => linkChips(r.business_units, "/business-units"), text: (r) => names(r.business_units) },
     { key: "processes", header: "Processes", hidden: true, render: (r) => linkChips(r.processes, "/processes"), text: (r) => names(r.processes) },
-    { key: "assets", header: "Assets", render: (r) => linkChips(r.assets, "/information-assets"), text: (r) => names(r.assets) },
+    { key: "assets", header: "Assets", render: assetCell, text: (r) => r.assets?.length ? names(r.assets) : r.asset_count ? `${r.asset_count} assets` : "" },
     { key: "controls", header: "Controls", render: (r) => linkChips(r.controls, "/controls"), text: (r) => names(r.controls) },
     { key: "policies", header: "Policies", hidden: true, render: (r) => linkChips(r.policies, "/policies"), text: (r) => names(r.policies) },
     { key: "threats", header: "Threats", hidden: true, render: (r) => linkChips(r.threats, "/threat-library"), text: (r) => names(r.threats) },
@@ -1809,6 +1834,11 @@ function RisksPage() {
       // The operational-risk page cannot open a KRI or loss event by id yet (follow-up F12).
       { key: "kris", label: "KRIs", items: r.kris, href: () => "/operational-risk" },
       { key: "loss_events", label: "Loss events", items: r.loss_events, href: () => "/operational-risk" },
+      // RCSA opens in the operational-risk drawer (its default section); each entry names
+      // the RCSA lines that assess this risk.
+      { key: "rcsa_assessments", label: "RCSA assessments", items: r.rcsa_assessments, href: "/operational-risk" },
+      { key: "quantifications", label: "Risk quantifications", items: r.quantifications, href: "/risk-quantification" },
+      { key: "continuity_plans", label: "Continuity plans", items: r.continuity_plans, href: "/continuity" },
       // B3: each exception's state and expiry; nothing extra on an older API.
       { key: "exceptions", label: "Exceptions", items: r.exceptions, href: "/exceptions", meta: (x: RiskExceptionRef) => exceptionMeta(x, ctx.fmt) },
       { key: "policies", label: "Policies", items: r.policies, href: "/policies" },
@@ -2238,14 +2268,15 @@ function RisksPage() {
                 onClick: () =>
                   api.pdfRiskRegister(exportFilters, scopeLabel === "Whole register" ? undefined : scopeLabel).catch(() => {}),
               },
-              { label: "Export CSV", hint: "All risks, every column", onClick: () => io.current?.exportCsv() },
+              { label: "Export Excel", hint: "All risks, every column incl. custom fields", onClick: () => io.current?.exportExcel() },
+              { label: "Export CSV", hint: "All risks, every column incl. custom fields", onClick: () => io.current?.exportCsv() },
             ]}
           />
           <Menu
             label="More"
             items={[
               { label: "Import risks…", hint: "From your existing register — CSV or Excel", onClick: () => io.current?.openImport() },
-              { label: "Download import template", onClick: () => io.current?.template() },
+              { label: "Download import template", hint: "Excel, with dropdowns and a guide", onClick: () => io.current?.template() },
               "divider",
               /* The answer to "one control applies to four assets — shouldn't each get its
                  own rating?": one proposed risk per asset, impact from that asset's own

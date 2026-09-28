@@ -15,7 +15,9 @@ from app.models.enums import CustomFieldType
 # match the `model` string a frontend page passes to RecordPanels / the custom
 # fields editor — keep the two in sync when adding a module.
 CUSTOM_FIELD_MODELS = [
-    "risk", "control", "asset", "vendor", "policy", "incident", "project",
+    # IT and information assets share the ``assets`` table but are separate registers
+    # with different owners and attributes, so each carries its own field set.
+    "risk", "control", "it_asset", "information_asset", "vendor", "policy", "incident", "project",
     "goal", "exception", "processing_activity", "continuity_plan", "framework",
     # Banking-productionization modules
     "audit_engagement", "authority_matrix", "automated_control_test",
@@ -29,7 +31,23 @@ CUSTOM_FIELD_MODELS = [
     "assessment", "access_review", "awareness_program", "business_unit",
     "audit_plan", "audit_program",
     "process", "legal",
+    "evidence", "connector",
+    # Registers verification found without custom fields.
+    "aml_risk_assessment", "suspicious_activity_report", "screening_case",
+    "fraud_risk", "fraud_case", "dpia", "dsar", "consent_record", "auditable_unit",
 ]
+
+# Custom-field keys that are not themselves entity types: the record's permissions,
+# comments and attestations belong to the entity type named here.
+CUSTOM_FIELD_ENTITY_TYPES: dict[str, str] = {
+    "it_asset": "asset",
+    "information_asset": "asset",
+}
+
+
+def custom_field_entity_type(model: str) -> str:
+    """The polymorphic entity type (and so the permissions) behind a custom-field key."""
+    return CUSTOM_FIELD_ENTITY_TYPES.get(model, model)
 
 
 class CustomField(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):

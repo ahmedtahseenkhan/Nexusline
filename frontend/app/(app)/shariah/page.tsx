@@ -17,6 +17,7 @@ import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import RecordPanels from "@/components/RecordPanels";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import RecordApproval, { WorkflowBadge } from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
 import RichText from "@/components/RichText";
@@ -25,6 +26,7 @@ import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
 import { getFormatSettings, useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ helpers
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
@@ -334,12 +336,43 @@ const searchProducts = (q: string) =>
     r.items.map((x) => ({ value: x.id, label: x.name, sub: x.reference })),
   );
 
+// ------------------------------------------------------------------ linked records
+/** A linked record as the API's GraphRef sends it (reference + title or name). */
+type LinkRef = { id: string; reference: string; title: string; name: string };
+
+/** Read-only reverse links in an edit form — chips that open the linked record. */
+function LinkedList({ label, items, empty, onOpen }: {
+  label: string;
+  items: LinkRef[] | null;
+  empty: string;
+  onOpen: (id: string) => void;
+}) {
+  return (
+    <Field label={label}>
+      {items === null ? (
+        <span className="muted">Loading…</span>
+      ) : items.length === 0 ? (
+        <span className="muted" style={{ fontSize: 13 }}>{empty}</span>
+      ) : (
+        <div className="chips">
+          {items.map((x) => (
+            <button key={x.id} type="button" className="chip chip-link" onClick={() => onOpen(x.id)}>
+              {[x.reference, x.title || x.name].filter(Boolean).join(" — ")}
+            </button>
+          ))}
+        </div>
+      )}
+    </Field>
+  );
+}
+
 // ================================================================= page =====
 function ShariahInner() {
   const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const [section, setSection] = useState<SectionId>("fatwa");
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const reviewCfForm = useCustomFieldForm("shariah_review");
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   // ---- ruling dialog ----
@@ -355,6 +388,9 @@ function ShariahInner() {
   const [savingProduct, setSavingProduct] = useState(false);
   const [pf, setPf] = useState<ProductForm>(BLANK_PRODUCT);
   const [rulingSelLabel, setRulingSelLabel] = useState(""); // display label for the approving ruling
+  // Reverse links shown in the edit forms: a ruling's products, a product's reviews.
+  const [rulingProducts, setRulingProducts] = useState<LinkRef[] | null>(null);
+  const [productReviews, setProductReviews] = useState<LinkRef[] | null>(null);
   const setP = <K extends keyof ProductForm>(k: K, v: ProductForm[K]) => setPf((p) => ({ ...p, [k]: v }));
 
   // ---- review dialog + drawer detail ----
@@ -415,6 +451,10 @@ function ShariahInner() {
     setRf(fromRuling(r));
     setError(null);
     setShowRulingForm(true);
+    setRulingProducts(null);
+    apiCall<ShariahRuling & { products?: LinkRef[] }>("GET", `/shariah-rulings/${r.id}`)
+      .then((full) => setRulingProducts(full.products ?? []))
+      .catch(() => setRulingProducts([]));
   }
   async function saveRuling() {
     setError(null);
@@ -459,12 +499,31 @@ function ShariahInner() {
     setRulingSelLabel("");
     setError(null);
     setShowProductForm(true);
+    setProductReviews(null);
+    apiCall<IslamicProduct & { reviews?: LinkRef[] }>("GET", `/islamic-products/${p.id}`)
+      .then((full) => setProductReviews(full.reviews ?? []))
+      .catch(() => setProductReviews([]));
     if (p.approving_ruling_id) {
       apiCall<ShariahRuling>("GET", `/shariah-rulings/${p.approving_ruling_id}`)
         .then((r) => setRulingSelLabel(rulingLabel(r)))
         .catch(() => {});
     }
   }
+  /** From a ruling's "Products approved": close the ruling and open that product. */
+  function openProductById(id: string) {
+    setShowRulingForm(false);
+    setSection("products");
+    apiCall<IslamicProduct>("GET", `/islamic-products/${id}`)
+      .then(openEditProduct)
+      .catch((e) => setError(e instanceof Error ? e.message : "Product not found"));
+  }
+  /** From a product's "Shariah reviews": close the product and open that review. */
+  function openReviewFromProduct(id: string) {
+    setShowProductForm(false);
+    setSection("reviews");
+    setOpenId(id);
+  }
+
   async function saveProduct() {
     setError(null);
     setSavingProduct(true);
@@ -499,6 +558,7 @@ function ShariahInner() {
     setEditingReview(null);
     setVf(BLANK_REVIEW);
     setProductSelLabel("");
+    reviewCfForm.start(null);
     setError(null);
     setShowReviewForm(true);
   }
@@ -506,6 +566,7 @@ function ShariahInner() {
     setEditingReview(r);
     setVf(fromReview(r));
     setProductSelLabel("");
+    reviewCfForm.start(r.id);
     setError(null);
     setShowReviewForm(true);
     if (r.product_id) {
@@ -519,8 +580,10 @@ function ShariahInner() {
     setSavingReview(true);
     try {
       const payload = reviewPayload(vf);
-      if (editingReview) await api.updateShariahReview(editingReview.id, payload);
-      else await api.createShariahReview(payload);
+      const saved = editingReview
+        ? await api.updateShariahReview(editingReview.id, payload)
+        : await api.createShariahReview(payload);
+      await reviewCfForm.save(saved.id);
       setShowReviewForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -687,8 +750,9 @@ function ShariahInner() {
         <Field label="Subject" help="What the ruling concerns.">
           <TextInput value={rf.subject} onChange={(v) => setR("subject", v)} placeholder="Commodity murabaha" />
         </Field>
-        <Field label="Status">
-          <Select value={rf.status} onChange={(v) => setR("status", v)} options={RULING_STATUS} />
+        <Field label="Status" help={DECISION_HELP.shariah_ruling}>
+          <Select value={rf.status} onChange={(v) => setR("status", v)}
+            options={statusOptions("shariah_ruling", RULING_STATUS, editingRuling?.status, editingRuling?.workflow_status)} />
         </Field>
       </div>
       <div className="field-row">
@@ -713,6 +777,14 @@ function ShariahInner() {
           <TextInput type="date" value={rf.next_review_date} onChange={(v) => setR("next_review_date", v)} />
         </Field>
       </div>
+      {editingRuling && (
+        <LinkedList
+          label="Products approved by this ruling"
+          items={rulingProducts}
+          empty="No Islamic product names this ruling as its approval."
+          onOpen={openProductById}
+        />
+      )}
       <RecordApproval entityType="shariah_ruling" entityId={editingRuling?.id ?? null} onChanged={reload} />
     </>
   );
@@ -727,8 +799,9 @@ function ShariahInner() {
         <Field label="Shariah mode" help="Islamic mode of finance / contract type.">
           <Select value={pf.shariah_mode} onChange={(v) => setP("shariah_mode", v)} options={SHARIAH_MODE} />
         </Field>
-        <Field label="Status">
-          <Select value={pf.status} onChange={(v) => setP("status", v)} options={PRODUCT_STATUS} />
+        <Field label="Status" help={DECISION_HELP.islamic_product}>
+          <Select value={pf.status} onChange={(v) => setP("status", v)}
+            options={statusOptions("islamic_product", PRODUCT_STATUS, editingProduct?.status, editingProduct?.workflow_status)} />
         </Field>
       </div>
       <div className="field-row">
@@ -757,6 +830,14 @@ function ShariahInner() {
       <Field label="Structure" help="How the contract is structured and executed.">
         <TextArea value={pf.structure} onChange={(v) => setP("structure", v)} rows={3} placeholder="Contract flow and steps." />
       </Field>
+      {editingProduct && (
+        <LinkedList
+          label="Shariah reviews of this product"
+          items={productReviews}
+          empty="No Shariah review has covered this product yet."
+          onOpen={openReviewFromProduct}
+        />
+      )}
       <RecordApproval entityType="islamic_product" entityId={editingProduct?.id ?? null} onChanged={reload} />
     </>
   );
@@ -843,8 +924,11 @@ function ShariahInner() {
         <Field label="Beneficiary" help="Charity / recipient of the disbursement.">
           <TextInput value={cf.beneficiary} onChange={(v) => setC("beneficiary", v)} placeholder="Approved charity" />
         </Field>
-        <Field label="Status">
-          <Select value={cf.status} onChange={(v) => setC("status", v)} options={CHARITY_STATUS} />
+        <Field
+          label="Status"
+          help={editingCharity ? "Approving and disbursing need an independent checker — not the person who recorded it." : "New entries start pending; an independent checker approves and releases them."}
+        >
+          <Select value={cf.status} onChange={(v) => setC("status", v)} options={editingCharity ? CHARITY_STATUS : CHARITY_STATUS.filter((o) => o.value === "pending")} />
         </Field>
       </div>
       <Field label="Disbursement date">
@@ -1187,6 +1271,7 @@ function ShariahInner() {
             { id: "general", label: "General", content: reviewGeneral, required: true },
             { id: "timing", label: "Timing", content: reviewTiming },
             { id: "conclusion", label: "Conclusion", content: reviewConclusion },
+            ...reviewCfForm.tabs,
           ]}
           onClose={() => setShowReviewForm(false)}
           onSave={saveReview}

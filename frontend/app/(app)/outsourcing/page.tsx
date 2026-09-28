@@ -13,6 +13,7 @@ import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import WorkflowFields from "@/components/WorkflowFields";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
@@ -23,6 +24,7 @@ import UserPicker from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import type { LookupRef, UserRef } from "@/lib/masterData";
 import { titleCase } from "@/lib/text";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ local types
 interface OutsourcingReview {
@@ -333,6 +335,7 @@ function OutsourcingInner() {
   const [showArrForm, setShowArrForm] = useState(false);
   const [savingArr, setSavingArr] = useState(false);
   const [af, setAf] = useState<ArrForm>(BLANK_ARR);
+  const cfForm = useCustomFieldForm("outsourcing_arrangement");
   const setA = <K extends keyof ArrForm>(k: K, v: ArrForm[K]) => setAf((p) => ({ ...p, [k]: v }));
 
   // ---- inline review add-form (in drawer) ----
@@ -375,6 +378,7 @@ function OutsourcingInner() {
   function openNewArr(prefill?: Partial<ArrForm>) {
     setEditingArr(null);
     setAf({ ...BLANK_ARR, ...prefill });
+    cfForm.start(null);
     setError(null);
     setShowArrForm(true);
   }
@@ -402,6 +406,7 @@ function OutsourcingInner() {
   function openEditArr(a: OutsourcingArrangement) {
     setEditingArr(a);
     setAf(fromArr(a));
+    cfForm.start(a.id);
     setError(null);
     setShowArrForm(true);
   }
@@ -410,8 +415,10 @@ function OutsourcingInner() {
     setSavingArr(true);
     try {
       const payload = arrPayload(af);
-      if (editingArr) await apiCall<OutsourcingArrangement>("PATCH", `/outsourcing/${editingArr.id}`, payload);
-      else await apiCall<OutsourcingArrangement>("POST", "/outsourcing", payload);
+      const saved = editingArr
+        ? await apiCall<OutsourcingArrangement>("PATCH", `/outsourcing/${editingArr.id}`, payload)
+        : await apiCall<OutsourcingArrangement>("POST", "/outsourcing", payload);
+      await cfForm.save(saved.id);
       setShowArrForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -502,8 +509,9 @@ function OutsourcingInner() {
         <Field label="Category">
           <Select value={af.category} onChange={(v) => setA("category", v)} options={CATEGORY} />
         </Field>
-        <Field label="Status" help="A material arrangement can't be active or under review until its materiality rationale, exit plan and substitutability are recorded.">
-          <Select value={af.status} onChange={(v) => setA("status", v)} options={STATUS} />
+        <Field label="Status" help={`${DECISION_HELP.outsourcing_arrangement} A material arrangement also needs its materiality rationale, exit plan and substitutability, and SBP's approval where it is required.`}>
+          <Select value={af.status} onChange={(v) => setA("status", v)}
+            options={statusOptions("outsourcing_arrangement", STATUS, editingArr?.status, editingArr?.workflow_status)} />
         </Field>
       </div>
       <Field label="Owner" help="Accountable business / risk owner.">
@@ -964,6 +972,7 @@ function OutsourcingInner() {
             { id: "materiality", label: "Materiality & Cloud", content: materialityTab },
             { id: "sbp", label: "SBP & Contract", content: sbpTab },
             { id: "exit", label: "Exit Plan", content: exitTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowArrForm(false)}
           onSave={saveArr}

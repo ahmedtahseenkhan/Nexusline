@@ -104,6 +104,11 @@ class BiaAssessment(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMi
         back_populates="assessment", cascade="all, delete-orphan", lazy="selectin",
         order_by="BiaDependency.created_at",
     )
+    # The live continuity plans this BIA justifies (the link is set on the plan).
+    continuity_plans: Mapped[list["ContinuityPlan"]] = relationship(  # noqa: F821
+        "ContinuityPlan", primaryjoin="and_(ContinuityPlan.bia_id == BiaAssessment.id, ContinuityPlan.deleted == False)",
+        foreign_keys="ContinuityPlan.bia_id", lazy="selectin", viewonly=True,
+    )
 
     @property
     def dependency_count(self) -> int:

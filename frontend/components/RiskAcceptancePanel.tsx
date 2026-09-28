@@ -1,12 +1,13 @@
 "use client";
 
-import { forwardRef, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { api, type RiskAcceptance } from "@/lib/api";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { api, type RecordMandate, type RiskAcceptance } from "@/lib/api";
 import { toast } from "@/lib/feedback";
 import { useFormat } from "@/lib/format";
 import { acceptanceView, daysFrom, exceptionsLine, type RiskExceptionRef } from "@/lib/record/risk";
 import { Badge } from "@/components/badges";
-import { Field, TextInput, TextArea } from "@/components/fields";
+import { Field, Select, TextInput, TextArea } from "@/components/fields";
+import MandateNote from "@/components/MandateNote";
 import Disclosure from "@/components/record/Disclosure";
 import { useRecordFmt } from "@/components/record/ctx";
 
@@ -15,11 +16,15 @@ import { useRecordFmt } from "@/components/record/ctx";
 
    1. **A written rationale.** The sentence an auditor reads when they ask why this
       exposure was tolerated.
-   2. **Four eyes.** Whoever requested the acceptance can never approve it; the server
-      refuses, and says so. The panel does not try to guess who is allowed — it offers
-      the buttons and lets the refusal be the answer, because the rule depends on
-      dual-control thresholds the client cannot see.
-   3. **An expiry.** An open-ended acceptance is how a risk disappears for three years.
+   2. **Four eyes.** Whoever requested the acceptance can never approve it: the panel
+      tells the requester so instead of offering the decision, and the server refuses
+      anyway. Beyond that the panel does not guess who is allowed — other dual-control
+      rules depend on thresholds the client cannot see, so their refusal is the answer.
+   3. **A mandate.** The exposure being accepted is fixed on the request (the risk's
+      quantified exposure, or the amount given here when it has none) and checked against
+      the approver's delegation-of-authority mandate; MandateNote says so, and above the
+      mandate only Reject is offered.
+   4. **An expiry.** An open-ended acceptance is how a risk disappears for three years.
       Once the date passes, the scheduled sweep marks the acceptance expired and puts the
       risk back in the register awaiting a fresh decision — which is why the expiry field
       warns rather than being quietly optional.
@@ -76,11 +81,15 @@ const RiskAcceptancePanel = forwardRef<RiskAcceptancePanelHandle, Props>(functio
   const [requesting, setRequesting] = useState(false);
   const [rationale, setRationale] = useState("");
   const [expires, setExpires] = useState("");
+  const [exposure, setExposure] = useState("");
+  const [exposureCcy, setExposureCcy] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [meId, setMeId] = useState<string | null>(null);
+  const [mandate, setMandate] = useState<RecordMandate | null>(null);
   const requestBtn = useRef<HTMLButtonElement>(null);
-  const { formatDate } = useFormat();
+  const { formatDate, formatMoney, currency, currencyOptions } = useFormat();
   const fmt = useRecordFmt();
 
   const history = useMemo(
@@ -92,6 +101,13 @@ const RiskAcceptancePanel = forwardRef<RiskAcceptancePanelHandle, Props>(functio
   const view = acceptanceView({ acceptances }, new Date());
   const pending = view.pending ?? undefined;
   const inForce = view.inForce ?? undefined;
+  const hasPending = !!pending;
+  useEffect(() => {
+    if (!hasPending || meId) return;
+    api.me().then((m) => setMeId(m.id)).catch(() => {});
+  }, [hasPending, meId]);
+  const requestedByMe = !!pending && !!meId && pending.requested_by === meId;
+  const aboveMandate = !!mandate && mandate.governed && !mandate.allowed;
   const lapsedApproval = (a: RiskAcceptance) => a.status === "approved" && !!a.expires_at && daysFrom(a.expires_at, new Date()) < 0;
 
   useImperativeHandle(
@@ -116,12 +132,21 @@ const RiskAcceptancePanel = forwardRef<RiskAcceptancePanelHandle, Props>(functio
       setError("Write down why this risk is being accepted — that sentence is the record.");
       return;
     }
+    const amount = exposure.trim() === "" ? null : Number(exposure);
+    if (amount != null && (!Number.isFinite(amount) || amount < 0)) {
+      setError("The exposure is an amount of money, zero or more.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await api.requestAcceptance(riskId, { rationale: rationale.trim(), expires_at: expires || null });
+      await api.requestAcceptance(riskId, {
+        rationale: rationale.trim(), expires_at: expires || null,
+        exposure_amount: amount, exposure_currency: amount != null ? exposureCcy : "",
+      });
       setRationale("");
       setExpires("");
+      setExposure("");
       close();
       toast(`Acceptance requested for ${riskReference}. A second person has to approve it.`);
       onChange();
@@ -238,6 +263,17 @@ const RiskAcceptancePanel = forwardRef<RiskAcceptancePanelHandle, Props>(functio
               >
                 <TextInput value={expires} onChange={setExpires} type="date" />
               </Field>
+              <div className="field-row">
+                <Field
+                  label="Exposure being accepted"
+                  help="For a risk with no quantified exposure. A quantified risk's exposure is taken from its quantification; a higher figure here wins. The approver's delegation-of-authority mandate is checked against it."
+                >
+                  <TextInput value={exposure} onChange={setExposure} type="number" placeholder="Taken from the risk when quantified" />
+                </Field>
+                <Field label="Currency">
+                  <Select value={exposureCcy || currency} onChange={setExposureCcy} options={currencyOptions} />
+                </Field>
+              </div>
               {error && <div className="error" style={{ fontSize: 12.5 }}>{error}</div>}
               <div className="row">
                 <button type="submit" className="btn secondary sm" disabled={busy}>
@@ -256,23 +292,34 @@ const RiskAcceptancePanel = forwardRef<RiskAcceptancePanelHandle, Props>(functio
       {pending && (
         <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
           <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>{pending.rationale}</div>
-          {!canDecide ? (
+          {pending.exposure_amount != null && (
+            <div className="muted" style={{ fontSize: 12.5 }}>
+              Exposure accepted: {formatMoney(pending.exposure_amount, pending.exposure_currency || undefined)}
+              {pending.exposure_basis ? ` (${pending.exposure_basis})` : ""}
+            </div>
+          )}
+          {!canDecide || requestedByMe ? (
             <span className="muted" style={{ fontSize: 12 }}>
-              Awaiting a decision by someone who may accept risk.
+              {requestedByMe
+                ? "You requested this acceptance, so someone else who may accept risk has to decide it."
+                : "Awaiting a decision by someone who may accept risk."}
             </span>
           ) : (<>
+          <MandateNote entityType="risk_acceptance" recordId={pending.id} onMandate={setMandate} />
           <Field label="Decision note" help="Optional, and recorded on the trail either way.">
             <TextInput value={note} onChange={setNote} placeholder="Approved at the September risk committee." />
           </Field>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <button type="button" className="btn secondary sm" disabled={busy} onClick={() => decide(pending, true)}>
-              {busy ? "Recording…" : "Approve acceptance"}
-            </button>
+            {!aboveMandate && (
+              <button type="button" className="btn secondary sm" disabled={busy} onClick={() => decide(pending, true)}>
+                {busy ? "Recording…" : "Approve acceptance"}
+              </button>
+            )}
             <button type="button" className="btn secondary sm" disabled={busy} onClick={() => decide(pending, false)}>
               Reject
             </button>
             <span className="muted" style={{ fontSize: 12 }}>
-              Whoever requested this cannot approve it.
+              {aboveMandate ? "Above your mandate you can reject it, not approve it." : "Whoever requested this cannot approve it."}
             </span>
           </div>
           </>)}
@@ -288,6 +335,7 @@ const RiskAcceptancePanel = forwardRef<RiskAcceptancePanelHandle, Props>(functio
                 <th style={{ width: 150 }}>Decision</th>
                 <th style={{ width: 110 }}>Expires</th>
                 <th style={{ width: 110 }}>Decided</th>
+                <th style={{ width: 140 }}>Exposure</th>
                 <th>Rationale</th>
               </tr>
             </thead>
@@ -301,6 +349,7 @@ const RiskAcceptancePanel = forwardRef<RiskAcceptancePanelHandle, Props>(functio
                   </td>
                   <td className="muted">{a.expires_at ? formatDate(a.expires_at) : "Open-ended"}</td>
                   <td className="muted">{a.decided_at ? formatDate(a.decided_at) : "Not decided"}</td>
+                  <td className="muted">{a.exposure_amount != null ? formatMoney(a.exposure_amount, a.exposure_currency || undefined) : "Not recorded"}</td>
                   <td style={{ fontSize: 13 }}>{a.rationale || <span className="muted">No rationale</span>}</td>
                 </tr>
               ))}

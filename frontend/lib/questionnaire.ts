@@ -57,6 +57,8 @@ export type AssessmentApi = {
   scored_at: string | null; recurrence_months: number | null; next_issue_on: string | null;
   parent_assessment_id: string | null; rcsa_assessment_id: string | null; active_links: number;
   review_blocked_reason: string | null;
+  /** In a returned round, the questions that may still change; null when nothing is locked. */
+  reopened_question_ids?: string[] | null;
 };
 export type AssessmentRowApi = {
   id: string; title: string; vendor: { id: string; name: string } | null; questionnaire: { id: string; name: string; version: number; purpose: string } | null;

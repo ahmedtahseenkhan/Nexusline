@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date
+from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type hints
@@ -40,6 +41,9 @@ def export_csv(rows: list[dict], headers: list[str]) -> str:
 def _cell(value: object) -> str:
     if value is None:
         return ""
+    if isinstance(value, Enum):
+        # ``str()`` of a str-Enum is "Criticality.medium"; the importer wants "medium".
+        value = value.value
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, date):
@@ -49,13 +53,21 @@ def _cell(value: object) -> str:
 
 def make_template(columns: list["Column"]) -> str:
     """Build a CSV template: a header row of importable columns plus one example row."""
-    headers = [c.header for c in columns]
-    example = {c.header: _example_value(c) for c in columns}
-    return export_csv([example], headers)
+    return export_csv([example_row(columns)], [c.header for c in columns])
+
+
+def example_row(columns: list["Column"]) -> dict[str, str]:
+    """One realistic placeholder value per column (header -> value)."""
+    return {c.header: _example_value(c) for c in columns}
 
 
 def _example_value(column: "Column") -> str:
-    """A realistic placeholder cell for the template's single example row."""
+    """A realistic placeholder cell for the template's single example row.
+
+    The example row must itself import cleanly — it is the first thing a user checks
+    the file against — so every required cell gets a value that passes validation.
+    A required link is filled by the caller with a real record's reference (see
+    ``dataio.get_template``); left blank here."""
     if column.kind == "enum" and column.enum_values:
         return column.enum_values[0]
     if column.kind == "bool":
@@ -63,7 +75,10 @@ def _example_value(column: "Column") -> str:
     if column.kind == "int":
         return "1"
     if column.kind == "float":
-        return "0.0"
+        # A required amount is usually a positive rate or value (0 would be refused); an
+        # optional one stays blank, since 0 can break a rule between two amounts (a KRI's
+        # warning threshold must sit below its limit).
+        return "1.0" if column.required else ""
     if column.kind == "date":
         return date.today().isoformat()
     if column.kind == "link":
@@ -71,6 +86,10 @@ def _example_value(column: "Column") -> str:
     # text
     if column.field in {"title", "name"}:
         return "Example " + column.field
+    if column.field == "currency" or column.field.endswith("_currency"):
+        return "USD"
+    if column.required:
+        return "Example " + column.field.replace("_", " ")
     return ""
 
 

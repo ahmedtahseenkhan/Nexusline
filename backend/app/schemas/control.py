@@ -4,7 +4,7 @@ import uuid
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from app.schemas.common import ExceptionRef, GraphRef, LookupRef, UserRef
 
@@ -343,7 +343,23 @@ class ControlRead(ControlBase):
     projects: list[GraphRef] = []
     audit_findings: list[GraphRef] = []
     assets: list[GraphRef] = []
+    #: How many live assets the control protects. The register reports this and leaves
+    #: ``assets`` empty (an endpoint control protects every endpoint); the record carries them.
+    asset_count: int | None = None
     vendors: list[GraphRef] = []
+    obligations: list[GraphRef] = []
+    #: ICFR Risk-Control Matrix lines that rely on this control (``IcfrControl.control_id``).
+    icfr_controls: list[GraphRef] = []
+
+
+    @model_validator(mode="after")
+    def _count_assets(self, info: ValidationInfo) -> "ControlRead":
+        """``asset_count`` from the list's context (which leaves ``assets`` unloaded), else
+        the links carried. Left alone on FastAPI's second, context-less validation pass."""
+        if self.asset_count is None:
+            counts = (info.context or {}).get("asset_counts")
+            self.asset_count = counts.get(self.id, 0) if counts is not None else len(self.assets)
+        return self
 
 
 class ControlRef(BaseModel):

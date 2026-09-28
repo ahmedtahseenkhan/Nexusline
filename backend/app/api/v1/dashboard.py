@@ -7,6 +7,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 
+from app.core.database import shallow_loads
 from app.core.deps import DbSession, require
 from app.models.asset import Asset
 from app.models.control import Control
@@ -80,12 +81,18 @@ async def get_dashboard(db: DbSession, user: CurrentUser) -> DashboardStats:
         if status:
             appetite_counts[status] += 1
 
-    total_controls = await db.scalar(
-        select(func.count()).select_from(Control).where(Control.deleted.is_(False))
-    ) or 0
-    total_assets = await db.scalar(
-        select(func.count()).select_from(Asset).where(Asset.deleted.is_(False))
-    ) or 0
+    # The endpoint needs only risk:read, so the other registers' sizes are given only to
+    # a reader of those registers — None ("not yours to see"), never a misleading 0.
+    held = set(user.permission_codes)
+    total_controls = total_assets = None
+    if "control:read" in held:
+        total_controls = await db.scalar(
+            select(func.count()).select_from(Control).where(Control.deleted.is_(False))
+        ) or 0
+    if "asset:read" in held:
+        total_assets = await db.scalar(
+            select(func.count()).select_from(Asset).where(Asset.deleted.is_(False))
+        ) or 0
     pending = (
         await db.scalar(
             select(func.count())
@@ -162,6 +169,7 @@ from app.models.lookup import Lookup  # noqa: E402
 from app.models.risk import RiskTreatmentAction  # noqa: E402
 from app.schemas.dashboard import CategoryPosture, DataCompleteness  # noqa: E402
 from app.services import control_assurance, governance_health  # noqa: E402
+from app.services import modules as module_service  # noqa: E402
 from app.services import drill_through as dt  # noqa: E402
 
 # "Open" issues, incidents and in-force policies, overdue tests and reviews: every
@@ -193,6 +201,11 @@ QUEUE: tuple[tuple[str, str, str, str], ...] = (
     ("acceptances_expiring", "risk acceptance", "expiring within 30 days", "warning"),
     ("reviews_overdue", "risk review", "overdue", "warning"),
     ("policies_overdue", "policy review", "overdue", "warning"),
+    # The asset registers (the dashboard showed none of a bank's 6-10,000 assets).
+    ("it_asset_reviews_overdue", "IT asset review", "overdue", "warning"),
+    ("info_asset_reviews_overdue", "information asset review", "overdue", "warning"),
+    ("it_assets_in_review", "IT asset", "awaiting approval", "info"),
+    ("info_assets_in_review", "information asset", "awaiting approval", "info"),
     ("acceptances_pending", "risk acceptance", "awaiting a decision", "info"),
     ("not_assessed", "control", "never tested", "info"),
 )
@@ -214,6 +227,15 @@ def action_items(counts: dict[str, int]) -> list[ActionItem]:
 async def get_overview(
     db: DbSession, user: CurrentUser, days: int = Query(default=30, ge=7, le=366)
 ) -> DashboardOverview:
+    """The dashboard's single payload. Every record it loads is read for its columns and
+    its direct links (a requirement's coverage reads its controls' ratings), never
+    further: at the default depth a requirement's controls brought their protected
+    assets and each asset its twenty-eight links — 600+ statements, ten seconds."""
+    with shallow_loads(1):
+        return await _overview(db, user, days)
+
+
+async def _overview(db, user, days: int) -> DashboardOverview:
     settings = await get_or_create_settings(db, user.tenant_id)
     # Severity follows the tenant's bands and cell overrides (the heat map's colours);
     # appetite and tolerance follow each risk's level-1 category, else the organisation's.
@@ -443,7 +465,21 @@ async def get_overview(
         + await _count(db, incidents_open_stmt.where(Incident.tat_breached_at.is_not(None)))
         + await _count(db, select(AuditFinding.id).where(AuditFinding.status.in_(_OPEN_FINDING), AuditFinding.tat_breached_at.is_not(None)))
     )
+    # Asset registers — for a reader of assets: overdue reviews and records awaiting
+    # approval per register, each line opening that register filtered to them.
+    asset_counts: dict[str, int] = {}
+    if "asset:read" in set(user.permission_codes):
+        from app.models.asset import Asset
+        from app.models.enums import AssetClass
+
+        for prefix, cls in (("it", AssetClass.it_asset), ("info", AssetClass.information_asset)):
+            live_cls = (Asset.deleted.is_(False), Asset.asset_class == cls)
+            asset_counts[f"{prefix}_asset_reviews_overdue"] = await _count(
+                db, select(Asset.id).where(*live_cls, Asset.next_review_date < today))
+            asset_counts[f"{prefix}_assets_in_review"] = await _count(
+                db, select(Asset.id).where(*live_cls, Asset.workflow_status == "in_review"))
     actions = action_items({
+        **asset_counts,
         "breach": appetite_counts["breach"], "tat": tat_breached, "tests_failed": last_failed,
         "findings_overdue": findings_overdue, "issues_overdue": issues_overdue,
         "treatments_overdue": risks_treatment_overdue, "tests_overdue": tests_overdue,
@@ -472,10 +508,15 @@ async def get_overview(
     # ------------------------------------------------------------------- KRIs
     kri_counts: Counter[str] = Counter()
     red_items: list[KriItem] = []
+    # The red indicators are named records of the Operational Risk module: listed only for
+    # a reader of KRIs whose organisation uses that module (the tallies stay, as posture).
+    kri_detail = "oprisk:read" in set(user.permission_codes) and await module_service.module_refusal(
+        "operational_risk", user.tenant_id
+    ) is None
     for k in (await db.scalars(select(KeyRiskIndicator).where(KeyRiskIndicator.deleted.is_(False)))).all():
         status_val = k.status.value if hasattr(k.status, "value") else str(k.status)
         kri_counts[status_val] += 1
-        if status_val == "red" and len(red_items) < 6:
+        if kri_detail and status_val == "red" and len(red_items) < 6:
             red_items.append(KriItem(
                 id=k.id, reference=k.reference or "", name=k.name, current_value=k.current_value,
                 warning_threshold=k.warning_threshold, limit_threshold=k.limit_threshold,

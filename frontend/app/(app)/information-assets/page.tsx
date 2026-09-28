@@ -29,6 +29,7 @@ import ImportExport from "@/components/ImportExport";
 import GenerateRisks, { type GenerateRisksHandle } from "@/components/GenerateRisks";
 import { InlineLookupCreate } from "@/components/LookupManager";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import {
   AssetRiskReportButton,
   Disclosure,
@@ -91,11 +92,11 @@ import { titleCase } from "@/lib/text";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
-type LinkRef = { id: string; label: string };
-// Relation refs from GET /assets/{id} arrive as {id, label}; adapt to the
-// {id, name} shape the linked-record chips render.
+type LinkRef = { id: string; label: string; reference?: string; name?: string };
+// Relation refs from GET /assets/{id} arrive as {id, label, reference, name}; adapt to
+// the {id, reference, name} shape the linked-record chips render ("SBP-05 Outsourcing").
 const asRefs = (items?: LinkRef[]): GraphRef[] | undefined =>
-  items?.map((x) => ({ id: x.id, name: x.label }));
+  items?.map((x) => ({ id: x.id, reference: x.reference || undefined, name: x.name || x.label }));
 /** Risk refs carry their reference separately and the risk's name as the label (an older API sent the reference as the label). */
 const riskRefs = (items?: AssetRiskRef[]): (GraphRef & AssetRiskRef)[] | undefined =>
   items?.map((x) => ({ ...x, reference: x.reference || x.label, name: x.reference && x.label !== x.reference ? x.label : "" }));
@@ -153,6 +154,11 @@ type Asset = {
   controls?: GraphRef[];
   threats?: GraphRef[];
   vulnerabilities?: GraphRef[];
+  // linked from the other side: continuity plans, RoPA entries, BIAs, scanner findings
+  continuity_plans?: GraphRef[];
+  processing_activities?: GraphRef[];
+  bia_assessments?: GraphRef[];
+  vuln_findings?: GraphRef[];
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
 type LabelRow = { id: string; name: string; description: string; color: string };
@@ -165,6 +171,12 @@ const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 const CRIT = opts(["low", "medium", "high", "critical"]);
+// Register filter: approval state, beside criticality (see the IT register).
+const WORKFLOW_FILTER: Option[] = [
+  { value: "draft", label: "Draft" }, { value: "in_review", label: "In review" },
+  { value: "approved", label: "Approved" }, { value: "retired", label: "Retired" },
+];
+const REVIEW_FILTER: Option[] = [{ value: "overdue", label: "Review overdue" }];
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const RELATIONSHIP = opts(["hosts", "stores", "processes", "transmits", "backs_up"]);
 const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
@@ -253,6 +265,25 @@ function InformationAssetsInner() {
   const [detail, setDetail] = useState<Asset | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [critFilter, setCritFilter] = useState("");
+  const [wfFilter, setWfFilter] = useState("");
+  const [overdueFilter, setOverdueFilter] = useState("");
+  // What the table shows, so Export carries exactly those rows.
+  const [view, setView] = useState<{ search: string; filters: Record<string, string | number | boolean | undefined>; total: number } | null>(null);
+  const exportQuery = useMemo(() => {
+    const p = new URLSearchParams();
+    if (view?.search) p.set("search", view.search);
+    for (const [k, v] of Object.entries(view?.filters ?? {})) if (v !== undefined && v !== "" && v !== false) p.set(k, String(v));
+    return p.toString();
+  }, [view]);
+  // Filters arrive in the link too — "1,560 IT assets have reviews overdue" opens the
+  // register filtered to them (?review_overdue=true). Read once, on arrival.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("effective_criticality")) setCritFilter(p.get("effective_criticality") as string);
+    if (p.get("workflow_status")) setWfFilter(p.get("workflow_status") as string);
+    if (p.get("review_overdue") === "true") setOverdueFilter("overdue");
+  }, []);
   const [summary, setSummary] = useState<Summary | null>(null);
   const { formatDate } = useFormat();
 
@@ -290,7 +321,8 @@ function InformationAssetsInner() {
   const canGenerate = useHasPermission("risk:write");
   const ctx = useRecordCtx(gov, canWrite);
   const fmt = ctx.fmt;
-  const cf = useCustomFieldFacts("asset", detail?.id, { builtInLabels: ["Owner", "Business owner", "Guardian"] });
+  const cfForm = useCustomFieldForm("information_asset");
+  const cf = useCustomFieldFacts("information_asset", detail?.id, { builtInLabels: ["Owner", "Business owner", "Guardian"] });
 
   const loadSummary = useCallback(() => {
     apiCall<Summary>("GET", "/assets/summary?asset_class=information_asset").then(setSummary).catch(() => {});
@@ -341,21 +373,24 @@ function InformationAssetsInner() {
     [],
   );
 
-  function openNew() { setEditing(null); setEditTab(undefined); setF(BLANK); setError(null); setShowForm(true); }
-  function openEdit(a: Asset, tab?: string) { setEditing(a); setEditTab(tab); setF(fromAsset(a)); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setEditTab(undefined); setF(BLANK); cfForm.start(null); setError(null); setShowForm(true); }
+  function openEdit(a: Asset, tab?: string) { setEditing(a); setEditTab(tab); setF(fromAsset(a)); cfForm.start(a.id); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Asset>("PATCH", `/assets/${editing.id}`, payload);
-      else await apiCall<Asset>("POST", "/assets", payload);
+      const saved = editing
+        ? await apiCall<Asset>("PATCH", `/assets/${editing.id}`, payload)
+        : await apiCall<Asset>("POST", "/assets", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       setRefreshKey((k) => k + 1);
       loadSummary();
       if (openId) {
         loadDetail(openId);
         void gov.reload();
+        void cf.reload();
       }
       toast(editing ? "Changes saved" : "Created");
     } catch (e) {
@@ -457,10 +492,13 @@ function InformationAssetsInner() {
   );
 
   /* Inline relation chips. The asset list returns {id,label} refs for its links. */
+  // At most a dozen links per row; the rest is a count.
+  const MAX_CHIPS = 12;
   const linkChips = (items: LinkRef[] | undefined, href: string) =>
     items && items.length ? (
       <div className="chips" onClick={(e) => e.stopPropagation()}>
-        {items.map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{x.label}</Link>)}
+        {items.slice(0, MAX_CHIPS).map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{x.label}</Link>)}
+        {items.length > MAX_CHIPS && <span className="chip">+{(items.length - MAX_CHIPS).toLocaleString()} more</span>}
       </div>
     ) : <span className="muted">—</span>;
   const names = (items: LinkRef[] | undefined) => (items ?? []).map((x) => x.label).join(", ");
@@ -470,8 +508,9 @@ function InformationAssetsInner() {
   const columns: Column<Asset>[] = [
     { key: "name", header: "Name", sortable: true, locked: true, render: (a) => <span className="cell-title">{a.name}</span> },
     { key: "information_owner", header: "Information owner", render: (a) => <span className="muted">{a.information_owner || "—"}</span> },
-    { key: "owner", header: "Owning unit", hidden: true, render: (a) => <span className="muted">{a.owner?.label || "—"}</span>, text: (a) => a.owner?.label ?? "" },
-    { key: "business_value", header: "Business value", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
+    { key: "owner", header: "Owning unit", hidden: true, sortable: true, render: (a) => <span className="muted">{a.owner?.label || "—"}</span>, text: (a) => a.owner?.label ?? "" },
+    // Sorted server-side on the same effective criticality the badge shows.
+    { key: "effective_criticality", header: "Business value", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
     // The highest of the three quick C/I/A ratings — not the tenant's classification scheme.
     { key: "classification", header: "Highest CIA rating", render: (a) => <CritBadge value={maxCia(a)} />, text: (a) => cap(maxCia(a)) },
     { key: "cia", header: "C / I / A", hidden: true, render: (a) => <div className="chips"><span className="chip" title="Confidentiality">C {cap(a.confidentiality)}</span><span className="chip" title="Integrity">I {cap(a.integrity)}</span><span className="chip" title="Availability">A {cap(a.availability)}</span></div>, text: (a) => `${cap(a.confidentiality)} / ${cap(a.integrity)} / ${cap(a.availability)}` },
@@ -728,6 +767,9 @@ function InformationAssetsInner() {
         { key: "related", label: "Related assets", items: asRefs(a.related_assets), href: "/information-assets" },
         { key: "vendors", label: "Third parties", items: a.vendors, href: "/vendors" },
         { key: "access", label: "Access reviews", items: a.access_reviews, href: "/access-reviews" },
+        { key: "continuity", label: "Continuity plans", items: a.continuity_plans, href: "/continuity" },
+        { key: "bia", label: "Business impact analyses", items: a.bia_assessments, href: "/bia" },
+        { key: "ropa", label: "Processing activities (RoPA)", items: a.processing_activities, href: "/privacy" },
       ]
     : [];
 
@@ -746,7 +788,7 @@ function InformationAssetsInner() {
           <p>Primary assets — data and applications. Criticality is business value, set by the business owner, with CIA classification, handling labels and owner self-assessment.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <ImportExport resource="information-assets" label="Information Assets"
+          <ImportExport resource="information-assets" label="Information Assets" exportQuery={exportQuery} exportCount={view?.total}
             onDone={() => { setRefreshKey((k) => k + 1); loadSummary(); }} />
           <GenerateRisks assetClass="information_asset" label="information assets" />
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add information asset</button>
@@ -756,15 +798,25 @@ function InformationAssetsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <div className="grid stat-grid">
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.total ?? 0).toLocaleString()}</span></div><span className="l">Information assets</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.high_or_critical_value ?? 0).toLocaleString()}</span></div><span className="l">High / critical value</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{summary?.self_assessed_pct ?? 0}%</span></div><span className="l">Self-assessed</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.with_pii ?? 0).toLocaleString()}</span></div><span className="l">Assets with PII</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.total.toLocaleString() : "…"}</span></div><span className="l">Information assets</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.high_or_critical_value.toLocaleString() : "…"}</span></div><span className="l">High / critical value</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? `${summary.self_assessed_pct}%` : "…"}</span></div><span className="l">Self-assessed</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.with_pii.toLocaleString() : "…"}</span></div><span className="l">Assets with PII</span></div>
       </div>
 
       <DataTable<Asset>
         toolbarRight={<ArchivedRecords entityType="asset" noun="assets" onRestored={() => { setRefreshKey((k) => k + 1); loadSummary(); }} refreshKey={refreshKey} />}
         tableKey="information-assets"
+        filters={{ effective_criticality: critFilter || undefined, workflow_status: wfFilter || undefined, review_overdue: overdueFilter ? true : undefined }}
+        onApplyFilters={(f) => { setCritFilter(String(f.effective_criticality ?? "")); setWfFilter(String(f.workflow_status ?? "")); setOverdueFilter(f.review_overdue ? "overdue" : ""); }}
+        onViewChange={setView}
+        toolbarLeft={
+          <>
+            <Select value={critFilter} onChange={setCritFilter} options={CRIT} placeholder="Any business value" />
+            <Select value={wfFilter} onChange={setWfFilter} options={WORKFLOW_FILTER} placeholder="Any approval state" />
+            <Select value={overdueFilter} onChange={setOverdueFilter} options={REVIEW_FILTER} placeholder="Any review state" />
+          </>
+        }
         statusModel="asset"
         bulkActions={(rows, clear) => (
           <>
@@ -1036,6 +1088,7 @@ function InformationAssetsInner() {
             { id: "value", label: "Business Value & Classification", content: valueTab },
             { id: "self", label: "Self-assessment", content: selfAssessTab },
             { id: "governance", label: "Governance", content: governanceTab },
+            ...cfForm.tabs,
           ]}
           initialTab={editTab}
           onClose={() => setShowForm(false)}

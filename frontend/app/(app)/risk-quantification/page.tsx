@@ -9,6 +9,7 @@ import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import FormModal from "@/components/FormModal";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
@@ -17,6 +18,7 @@ import { IconPlus } from "@/components/icons";
 import { titleCase } from "@/lib/text";
 import Link from "next/link";
 import { getFormatSettings, unconvertedNote, useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ types
 type RiskQuant = {
@@ -42,6 +44,8 @@ type RiskQuant = {
   last_mean_ale: number;
   last_p90: number;
   last_simulated: string | null;
+  /** No simulation of the current inputs (never run, or an input edit cleared it). */
+  needs_simulation?: boolean;
   created_at: string;
 };
 
@@ -160,6 +164,32 @@ function payload(f: QuantForm): Record<string, unknown> {
   };
 }
 
+/** The inputs a simulation is computed from; editing any of them clears the last run. */
+const SIM_INPUTS = ["tef_min", "tef_likely", "tef_max", "lm_min", "lm_likely", "lm_max", "currency", "iterations"] as const;
+
+/** Why the estimates cannot be simulated (the server applies the same rules), or null. */
+function inputProblem(f: QuantForm): string | null {
+  const ranges: [string, string, string, string][] = [
+    ["Threat event frequency", f.tef_min, f.tef_likely, f.tef_max],
+    ["Loss magnitude", f.lm_min, f.lm_likely, f.lm_max],
+  ];
+  for (const [label, ...raw] of ranges) {
+    const [lo, mode, hi] = raw.map((v) => (v === "" ? 0 : Number(v)));
+    if ([lo, mode, hi].some((v) => !Number.isFinite(v))) return `${label}: enter numbers only.`;
+    if (Math.min(lo, mode, hi) < 0) return `${label} cannot be negative.`;
+    if (!(lo <= mode && mode <= hi)) return `${label} must satisfy minimum ≤ most likely ≤ maximum (got ${lo} / ${mode} / ${hi}).`;
+  }
+  const it = f.iterations === "" ? 10000 : Number(f.iterations);
+  if (!Number.isInteger(it) || it < 100 || it > 1_000_000) return "Iterations must be a whole number from 100 to 1,000,000.";
+  return null;
+}
+
+/** True when the form changes an input the last simulation was computed from. */
+function inputsChanged(f: QuantForm, q: RiskQuant): boolean {
+  const before = fromQuant(q);
+  return SIM_INPUTS.some((k) => (k === "currency" ? f[k] !== before[k] : Number(f[k] || 0) !== Number(before[k] || 0)));
+}
+
 // ------------------------------------------------------------------ loss-curve bars
 function SimBars({ p50, p90, max, currency }: { p50: number; p90: number; max: number; currency: string }) {
   const { formatMoney } = useFormat();
@@ -200,6 +230,7 @@ function RiskQuantificationInner() {
   const money = (n: number | null | undefined, ccy?: string | null) => formatMoney(n, ccy, { decimals: 0 });
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const cfForm = useCustomFieldForm("risk_quantification");
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const [summary, setSummary] = useState<QuantSummary | null>(null);
@@ -247,12 +278,14 @@ function RiskQuantificationInner() {
   function openNew() {
     setEditing(null);
     setF({ ...BLANK, currency });
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(q: RiskQuant) {
     setEditing(q);
     setF(fromQuant(q));
+    cfForm.start(q.id);
     setError(null);
     setShowForm(true);
     // Best-effort: seed the risk-picker label from the register (record only stores the id).
@@ -264,11 +297,22 @@ function RiskQuantificationInner() {
   }
   async function save() {
     setError(null);
+    const problem = inputProblem(f);
+    if (problem) {
+      setError(problem);
+      return;
+    }
     setSaving(true);
     try {
       const body = payload(f);
-      if (editing) await apiCall("PATCH", `/risk-quantification/${editing.id}`, body);
-      else await apiCall("POST", "/risk-quantification", body);
+      // An input edit clears the last run on the server; "simulated" then means nothing.
+      if (editing && inputsChanged(f, editing) && body.status === "simulated") body.status = "draft";
+      const saved = editing
+        ? await apiCall<RiskQuant>("PATCH", `/risk-quantification/${editing.id}`, body)
+        : await apiCall<RiskQuant>("POST", "/risk-quantification", body);
+      await cfForm.save(saved.id);
+      // Figures from the last run no longer describe the saved inputs.
+      if (saved.needs_simulation) setResults((prev) => { const next = { ...prev }; delete next[saved.id]; return next; });
       setShowForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -318,7 +362,7 @@ function RiskQuantificationInner() {
     { key: "title", header: "Title", sortable: true, render: (q) => <span className="cell-title">{q.title}</span> },
     { key: "asset_at_risk", header: "Asset at risk", sortable: true, render: (q) => <span className="muted">{q.asset_at_risk || "—"}</span> },
     { key: "ale_point", header: "ALE point", render: (q) => <span className="muted">{money(q.ale_point, q.currency)}</span> },
-    { key: "last_mean_ale", header: "Mean ALE", sortable: true, render: (q) => <span className="muted">{q.last_simulated ? money(q.last_mean_ale, q.currency) : "—"}</span> },
+    { key: "last_mean_ale", header: "Mean ALE", sortable: true, render: (q) => q.last_simulated ? <span className="muted">{money(q.last_mean_ale, q.currency)}</span> : <Badge tone="medium">Needs run</Badge> },
     { key: "last_p90", header: "P90", sortable: true, render: (q) => <span className="muted">{q.last_simulated ? money(q.last_p90, q.currency) : "—"}</span> },
     { key: "status", header: "Status", sortable: true, render: (q) => <Badge tone={STATUS_TONE[q.status] || "neutral"}>{cap(q.status)}</Badge> },
     { key: "actions", header: "", render: (q) => (
@@ -404,10 +448,17 @@ function RiskQuantificationInner() {
         <Field label="Iterations" help="Monte Carlo sample count (100 – 1,000,000).">
           <TextInput type="number" value={f.iterations} onChange={(v) => set("iterations", v)} placeholder="10000" />
         </Field>
-        <Field label="Status">
-          <Select value={f.status} onChange={(v) => set("status", v)} options={QUANT_STATUS} />
+        <Field label="Status" help={`Simulated is set by running the simulation. ${DECISION_HELP.risk_quantification}`}>
+          <Select value={f.status} onChange={(v) => set("status", v)}
+            options={statusOptions("risk_quantification", QUANT_STATUS, editing?.status, editing?.workflow_status)} />
         </Field>
       </div>
+      {editing?.last_simulated && inputsChanged(f, editing) && (
+        <p className="muted" style={{ fontSize: 13, margin: "0 0 12px" }}>
+          You changed the frequency, magnitude, currency or iterations. Saving clears the last
+          simulation and returns the quantification to Draft; run the simulation again before approving.
+        </p>
+      )}
       <Field label="Linked risk (optional)" help="Attach this quantification to a risk-register entry.">
         <AsyncSelect
           search={searchRisks}
@@ -420,7 +471,8 @@ function RiskQuantificationInner() {
     </>
   );
 
-  const fresh = quantDetail ? results[quantDetail.id] : undefined;
+  // A result from this session only counts while the record still has that run.
+  const fresh = quantDetail && quantDetail.last_simulated ? results[quantDetail.id] : undefined;
   const hasCurve = fresh || quantDetail?.last_simulated;
 
   // ------------------------------------------------------------- render
@@ -487,7 +539,7 @@ function RiskQuantificationInner() {
         open={!!openId && !!quantDetail}
         onClose={() => setOpenId(null)}
         title={quantDetail ? `${quantDetail.reference || ""} ${quantDetail.title}`.trim() : "…"}
-        subtitle={quantDetail ? `${cap(quantDetail.status)} · ${quantDetail.asset_at_risk || "no asset"}${quantDetail.last_simulated ? " · last simulated " + formatDate(quantDetail.last_simulated) : " · not yet simulated"}` : ""}
+        subtitle={quantDetail ? `${cap(quantDetail.status)} · ${quantDetail.asset_at_risk || "no asset"}${quantDetail.last_simulated ? " · last simulated " + formatDate(quantDetail.last_simulated) : " · needs a simulation run"}` : ""}
         width={720}
         actions={quantDetail && (
           <>
@@ -521,7 +573,9 @@ function RiskQuantificationInner() {
                 <strong>Monte Carlo loss curve</strong>
                 {!hasCurve && (
                   <p className="muted" style={{ margin: "6px 0 0", fontSize: 13 }}>
-                    No simulation yet. Run a simulation to estimate the annualised loss distribution.
+                    <Badge tone="medium">Needs re-run</Badge>{" "}
+                    No simulation of the current inputs — never run, or the inputs changed since the last run.
+                    Run the simulation to estimate the annualised loss distribution.
                   </p>
                 )}
 
@@ -547,7 +601,6 @@ function RiskQuantificationInner() {
                       <div className="card stat"><div className="stat-top"><span className="n">{money(quantDetail.last_mean_ale, quantDetail.currency)}</span></div><span className="l">Mean ALE (cached)</span></div>
                       <div className="card stat"><div className="stat-top"><span className="n">{money(quantDetail.last_p90, quantDetail.currency)}</span></div><span className="l">P90 (cached)</span></div>
                     </div>
-                    <SimBars p50={quantDetail.last_mean_ale} p90={quantDetail.last_p90} max={quantDetail.last_p90} currency={quantDetail.currency} />
                     <p className="muted" style={{ marginTop: 10, fontSize: 12 }}>
                       Cached from the run on {formatDate(quantDetail.last_simulated)}. Run again for the full P10 / P50 / max breakdown.
                     </p>
@@ -569,6 +622,7 @@ function RiskQuantificationInner() {
             { id: "frequency", label: "Frequency", content: frequencyTab },
             { id: "magnitude", label: "Magnitude", content: magnitudeTab },
             { id: "settings", label: "Settings", content: settingsTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

@@ -95,6 +95,9 @@ type Props<T> = {
   bulkActions?: (selected: T[], clear: () => void) => ReactNode;
   /** Lets a saved view restore the page's own filters. Without it, views keep columns, sort and search only. */
   onApplyFilters?: (filters: Record<string, string | number | boolean | undefined>) => void;
+  /** Told after each load what the table shows — its search, filters and row count — so
+   *  the page can export exactly those rows. */
+  onViewChange?: (view: { search: string; filters: Record<string, string | number | boolean | undefined>; total: number }) => void;
 };
 
 const STATUS_KEY = "__dynamic_status";
@@ -163,6 +166,7 @@ export default function DataTable<T>({
   statusModel,
   bulkActions,
   onApplyFilters,
+  onViewChange,
 }: Props<T>) {
   const prefsKey = `nx.table.${tableKey ?? (typeof window !== "undefined" ? window.location.pathname : "table")}`;
 
@@ -265,6 +269,8 @@ export default function DataTable<T>({
     [statusModel],
   );
 
+  const onViewRef = useRef(onViewChange);
+  onViewRef.current = onViewChange;
   const load = useCallback(async () => {
     const n = latest.next();
     setStatus("loading");
@@ -273,6 +279,7 @@ export default function DataTable<T>({
       if (!latest.isCurrent(n)) return;
       setRows(res.items);
       setTotal(res.total);
+      onViewRef.current?.({ search: query.q ?? "", filters: query.extra ?? {}, total: res.total });
       setStatus("ok");
       loadStatuses(res.items);
     } catch (e) {

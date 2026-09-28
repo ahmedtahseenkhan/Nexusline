@@ -97,9 +97,11 @@ export default function NotificationsPage() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <div className="grid stat-grid">
-        <div className="card stat danger"><div className="stat-top"><span className="n">{counts.critical ?? 0}</span></div><span className="l">Critical</span></div>
-        <div className="card stat warn"><div className="stat-top"><span className="n">{counts.warning ?? 0}</span></div><span className="l">Warning</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{counts.info ?? 0}</span></div><span className="l">Info</span></div>
+        {/* While the feed loads the tiles say so: "0 Critical" for fifteen seconds is a
+            false all-clear, and the person who glanced and left never saw the 8. */}
+        <div className="card stat danger"><div className="stat-top"><span className="n">{loading ? "…" : counts.critical ?? 0}</span></div><span className="l">Critical</span></div>
+        <div className="card stat warn"><div className="stat-top"><span className="n">{loading ? "…" : counts.warning ?? 0}</span></div><span className="l">Warning</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{loading ? "…" : counts.info ?? 0}</span></div><span className="l">Info</span></div>
       </div>
 
       <div className="card">

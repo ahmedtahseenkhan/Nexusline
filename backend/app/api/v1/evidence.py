@@ -44,6 +44,11 @@ async def _control_or_400(db, control_id: uuid.UUID) -> Control:
     control = await db.get(Control, control_id)
     if control is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown control")
+    if control.deleted:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This control is archived; restore it before collecting evidence for it.",
+        )
     return control
 
 
@@ -109,7 +114,10 @@ async def list_evidence(
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Page[EvidenceRead]:
-    stmt = select(Evidence)
+    # The evidence register follows the control register: an archived control's evidence
+    # drops out with it (and returns on restore). It stays readable by id and on the
+    # archived control itself.
+    stmt = select(Evidence).join(Control, Control.id == Evidence.control_id).where(Control.deleted.is_(False))
     if search:
         like = f"%{search}%"
         stmt = stmt.where(Evidence.title.ilike(like) | Evidence.reference.ilike(like))

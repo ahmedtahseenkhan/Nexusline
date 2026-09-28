@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import (
@@ -23,6 +24,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Table,
     Text,
@@ -314,6 +316,8 @@ class Risk(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
     )
     audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
         "AuditFinding", secondary="audit_finding_risks", lazy="selectin", viewonly=True,
+        # Findings of an archived engagement leave this record's view with the audit.
+        secondaryjoin=lambda: _live_findings("audit_finding_risks"),
     )
     kris: Mapped[list["KeyRiskIndicator"]] = relationship(  # noqa: F821
         "KeyRiskIndicator", secondary="kri_risks", lazy="selectin", viewonly=True,
@@ -373,6 +377,12 @@ class RiskAcceptance(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     )
     expires_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     decided_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # The exposure being accepted, fixed when the acceptance is requested — what the
+    # approver's delegation-of-authority mandate is checked against
+    # (services.authority_limits). ``exposure_basis`` says where the figure came from.
+    exposure_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    exposure_currency: Mapped[str] = mapped_column(String(8), default="", nullable=False)
+    exposure_basis: Mapped[str] = mapped_column(String(40), default="", nullable=False)
 
     risk: Mapped[Risk] = relationship(back_populates="acceptances")
 
@@ -499,3 +509,9 @@ class RiskTreatmentAction(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base
     status: Mapped[str] = mapped_column(String(16), default="open", nullable=False)  # open|in_progress|done|cancelled
     percent_complete: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+def _live_findings(link_table_name: str):
+    from app.models import internal_audit
+
+    return internal_audit.live_finding_secondaryjoin(getattr(internal_audit, link_table_name))

@@ -15,6 +15,7 @@ from app.core.database import tenant_session
 from app.core.security import decode_access_token
 from app.models.identity import User
 from app.services import mfa_policy
+from app.services import modules as module_service
 
 bearer_scheme = HTTPBearer(auto_error=True)
 
@@ -58,7 +59,19 @@ async def get_token_payload(
     # so the MFA enrol-only restriction cannot be skipped by an endpoint that only asks
     # for a DB session.
     check_session_scope(payload, request.url.path)
+    # Shared surfaces keyed by a record type (import/export, custom fields, status rules,
+    # filters, comments, attestations, record lifecycle, versions) refuse a module the
+    # organisation has not licensed or has switched off — its own routers already do
+    # (``require_module``), and hanging the check here covers every endpoint at once.
+    await module_service.gate_shared_request(request, _tenant_id(payload))
     return payload
+
+
+def _tenant_id(payload: dict[str, Any]) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(payload["tid"]))
+    except (KeyError, ValueError):
+        return None
 
 
 async def get_db(

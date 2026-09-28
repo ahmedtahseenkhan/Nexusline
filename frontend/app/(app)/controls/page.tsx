@@ -73,6 +73,7 @@ import RecordPanels from "@/components/RecordPanels";
 import ControlMonitoringSection from "@/components/ControlMonitoring";
 import type { ControlMonitoring } from "@/lib/record/control";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import type { MenuItem } from "@/components/Menu";
 import { BulkSuggestMappings, PendingSuggestionsHint } from "@/components/SuggestedClauses";
 import BulkEditBar from "@/components/BulkEditBar";
@@ -151,7 +152,12 @@ type Control = {
   policies: LinkRef[]; requirements: RequirementRef[]; risks: LinkRef[];
   // reverse graph links (read-only, from GET /controls/{id})
   assets?: LinkRef[]; vendors?: LinkRef[];
+  /** The register leaves ``assets`` empty and reports the count (see the risks page). */
+  asset_count?: number;
   incidents?: LinkRef[]; exceptions?: ExceptionRef[]; projects?: LinkRef[]; audit_findings?: LinkRef[];
+  obligations?: LinkRef[];
+  /** ICFR Risk-Control Matrix lines that rely on this control (read-only). */
+  icfr_controls?: LinkRef[];
 };
 /** A control test workpaper (backend: ControlAuditRead). */
 type ControlTest = {
@@ -451,6 +457,7 @@ function ControlsInner() {
   const drawerSections = useRef<RecordSectionsApi | null>(null);
   /** Scroll to a record section (focuses its heading, writes `#id`, moves the nav highlight). */
   const sections = { scrollTo: (id: string) => (drawerSections.current ?? pageSections).scrollTo(id) };
+  const cfForm = useCustomFieldForm("control");
   const cf = useCustomFieldFacts("control", detail?.id, { builtInLabels: ["Owner", "Operator", "Classification", "Status"] });
 
   const [editing, setEditing] = useState<Control | null>(null);
@@ -557,17 +564,26 @@ function ControlsInner() {
     : Promise.resolve([]);
 
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setEditTab(undefined); setShowForm(true); }
   /** Edit, optionally on the tab a fix names ("general", "attributes", "audit", "links"). */
-  function openEdit(c: Control, tab?: string) { setEditing(c); setF(fromControl(c)); setError(null); setEditTab(tab); setShowForm(true); }
+  function openEdit(c: Control, tab?: string) { setEditing(c); setF(fromControl(c)); cfForm.start(c.id); setError(null); setEditTab(tab); setShowForm(true); }
+  /** Edit from a list row: fetch the record first. A row carries link counts, not the
+   *  links, so a form built from it would save an empty list and unlink every asset. */
+  function editFromRow(c: Control) {
+    apiCall<Control>("GET", `/controls/${c.id}`)
+      .then((full) => openEdit(full))
+      .catch(() => setError("Could not load the control for editing."));
+  }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f);
-      if (editing) await apiCall<Control>("PATCH", `/controls/${editing.id}`, payload);
-      else await apiCall<Control>("POST", "/controls", payload);
-      setShowForm(false); refreshOpen(); toast(editing ? "Changes saved" : "Control created");
+      const saved = editing
+        ? await apiCall<Control>("PATCH", `/controls/${editing.id}`, payload)
+        : await apiCall<Control>("POST", "/controls", payload);
+      await cfForm.save(saved.id);
+      setShowForm(false); refreshOpen(); void cf.reload(); toast(editing ? "Changes saved" : "Control created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save control"); }
     finally { setSaving(false); }
   }
@@ -691,12 +707,20 @@ function ControlsInner() {
   /* Inline relation chips linking to each record's own page. */
   const labelOf = (x: { id: string; label?: string; name?: string; title?: string; reference?: string }) =>
     x.label || x.name || x.title || x.reference || x.id;
+  // At most a dozen links per row; the rest is a count (a control on every endpoint
+  // once rendered thousands of chips in one cell).
+  const MAX_CHIPS = 12;
   const linkChips = (items: { id: string; label?: string; name?: string; title?: string; reference?: string }[] | undefined, href: string) =>
     items && items.length ? (
       <div className="chips" onClick={(e) => e.stopPropagation()}>
-        {items.map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{labelOf(x)}</Link>)}
+        {items.slice(0, MAX_CHIPS).map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{labelOf(x)}</Link>)}
+        {items.length > MAX_CHIPS && <span className="chip">+{(items.length - MAX_CHIPS).toLocaleString()} more</span>}
       </div>
     ) : <span className="muted">—</span>;
+  const assetCell = (c: Control) =>
+    c.assets?.length ? linkChips(c.assets, "/information-assets")
+      : c.asset_count ? <span className="muted">{c.asset_count.toLocaleString()} {c.asset_count === 1 ? "asset" : "assets"}</span>
+      : <span className="muted">—</span>;
   const names = (items: { id: string; label?: string; name?: string; title?: string; reference?: string }[] | undefined) =>
     (items ?? []).map(labelOf).join(", ");
   const effText = (c: Control) => cap(c.effectiveness) + (c.effectiveness_basis === "override" ? " (override)" : "");
@@ -722,7 +746,7 @@ function ControlsInner() {
     { key: "risks", header: "Risks mitigated", render: (c) => linkChips(c.risks, "/risks"), text: (c) => names(c.risks) },
     { key: "policies", header: "Policies", hidden: true, render: (c) => linkChips(c.policies, "/policies"), text: (c) => names(c.policies) },
     { key: "requirements", header: "Requirements", hidden: true, render: (c) => linkChips(c.requirements, "/compliance"), text: (c) => names(c.requirements) },
-    { key: "assets", header: "Protected assets", hidden: true, render: (c) => linkChips(c.assets, "/information-assets"), text: (c) => names(c.assets) },
+    { key: "assets", header: "Protected assets", hidden: true, render: assetCell, text: (c) => c.assets?.length ? names(c.assets) : c.asset_count ? `${c.asset_count} assets` : "" },
     { key: "audit_frequency", header: "Test cycle", hidden: true, render: (c) => <span className="muted">{cap(c.audit_frequency)}</span>, text: (c) => cap(c.audit_frequency) },
     { key: "last_audit_date", header: "Last reviewed test", hidden: true, render: (c) => <span className="muted">{formatDate(lastTested(c).date)}</span>, text: (c) => (lastTested(c).date ? formatDate(lastTested(c).date) : "") },
     { key: "last_audit_result", header: "Last reviewed result", hidden: true, render: (c) => { const r = lastTested(c).result; return <span className="muted">{r ? RESULT_LABEL[r] ?? cap(r) : "—"}</span>; }, text: (c) => { const r = lastTested(c).result; return r ? RESULT_LABEL[r] ?? cap(r) : ""; } },
@@ -737,7 +761,7 @@ function ControlsInner() {
     {
       key: "actions", header: "", render: (c) => (
         <div onClick={(e) => e.stopPropagation()}>
-          <button className="btn secondary sm" {...rowAction("Edit", rowLabel(c.reference, c.name))} onClick={() => openEdit(c)}>Edit</button>{" "}
+          <button className="btn secondary sm" {...rowAction("Edit", rowLabel(c.reference, c.name))} onClick={() => editFromRow(c)}>Edit</button>{" "}
           <button className="btn secondary sm" {...rowAction("Delete", rowLabel(c.reference, c.name))} onClick={() => remove(c)}>Delete</button>
         </div>
       ),
@@ -1360,6 +1384,8 @@ function ControlsInner() {
       { key: "exceptions", label: "Exceptions", items: c.exceptions, href: "/exceptions", meta: (x: ExceptionRef) => exceptionMeta(x, ctx.fmt) },
       { key: "projects", label: "Projects", items: c.projects, href: "/projects" },
       { key: "findings", label: "Audit findings", items: c.audit_findings, href: "/internal-audit" },
+      { key: "obligations", label: "Regulatory obligations", items: c.obligations, href: (x) => `/regulatory-change?obligation=${x.id}` },
+      { key: "icfr", label: "ICFR (RCM lines)", items: c.icfr_controls, href: "/icfr" },
     ];
     return (
       <RecordSection
@@ -1501,6 +1527,7 @@ function ControlsInner() {
             { id: "cost", label: "Cost & Resourcing", content: costTab },
             { id: "audit", label: "Testing & Maintenance", content: auditTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowForm(false)}
           onSave={save}

@@ -11,7 +11,7 @@ from __future__ import annotations
 import secrets
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,6 +43,44 @@ _WRITE = Depends(require("whistle:write"))
 
 # Statuses that mean an investigation has concluded (drive the audit trail + is_open).
 _CLOSED_STATES = (WhistleStatus.substantiated, WhistleStatus.unsubstantiated, WhistleStatus.closed)
+
+# The case lifecycle (ISO 37002 / SBP whistleblowing guidance: intake → triage →
+# investigation → a finding → closure). A case may be closed without investigation at
+# intake or triage (out of scope, no information), closed during an investigation that
+# cannot proceed, and reopened for investigation when new information arrives. Anything
+# else — skipping from intake straight to a finding, or a finding with no investigation —
+# is refused, so the case log always tells how a conclusion was reached.
+WHISTLE_TRANSITIONS: dict[WhistleStatus, frozenset[WhistleStatus]] = {
+    WhistleStatus.received: frozenset({WhistleStatus.triage, WhistleStatus.investigating, WhistleStatus.closed}),
+    WhistleStatus.triage: frozenset({WhistleStatus.investigating, WhistleStatus.closed}),
+    WhistleStatus.investigating: frozenset(
+        {WhistleStatus.substantiated, WhistleStatus.unsubstantiated, WhistleStatus.closed}
+    ),
+    WhistleStatus.substantiated: frozenset({WhistleStatus.closed, WhistleStatus.investigating}),
+    WhistleStatus.unsubstantiated: frozenset({WhistleStatus.closed, WhistleStatus.investigating}),
+    WhistleStatus.closed: frozenset({WhistleStatus.investigating}),
+}
+
+
+def check_transition(current: WhistleStatus, new: WhistleStatus) -> None:
+    """422 unless ``current → new`` is a step of the case lifecycle."""
+    if new == current:
+        return
+    allowed = WHISTLE_TRANSITIONS.get(current, frozenset())
+    if new not in allowed:
+        options = ", ".join(sorted(s.value.replace("_", " ") for s in allowed)) or "none"
+        raise HTTPException(
+            status_code=422,
+            detail=f"A {current.value} case cannot move to {new.value}. Next steps: {options}.",
+        )
+
+
+async def _audit_status(db, user, obj: WhistleblowingReport, prev: WhistleStatus, via: str) -> None:
+    await audit_log.record(
+        db, actor=user, action="update", entity_type="whistleblowing_report", entity_id=obj.id,
+        summary=f"Whistleblowing case {obj.reference} moved from {prev.value} to {obj.status.value}{via}",
+        changes={"status": {"from": prev.value, "to": obj.status.value}},
+    )
 
 
 async def _next_ref(db, model, prefix: str) -> str:
@@ -144,6 +182,10 @@ async def update_report(rid: uuid.UUID, body: WhistleReportUpdate, db: DbSession
     obj = await _load_report(db, rid)
     prev_status = obj.status
     data = body.model_dump(exclude_unset=True)
+    if data.get("status") is None:
+        data.pop("status", None)  # "no change", not a blank status
+    else:
+        check_transition(prev_status, data["status"])
     for k, v in data.items():
         setattr(obj, k, v)
     # If the report is (or becomes) anonymous, keep identity scrubbed on every edit.
@@ -151,11 +193,9 @@ async def update_report(rid: uuid.UUID, body: WhistleReportUpdate, db: DbSession
         obj.reporter_name = ""
         obj.reporter_contact = ""
     await db.flush()
-    # Audit the case conclusion (substantiated / closed) when it first happens.
-    if obj.status != prev_status and obj.status in (WhistleStatus.substantiated, WhistleStatus.closed):
-        await audit_log.record(db, actor=user, action="update", entity_type="whistleblowing_report",
-                               entity_id=obj.id,
-                               summary=f"Whistleblowing case {obj.reference} {obj.status.value}")
+    # Every lifecycle move is on the audit trail (who concluded or reopened a case).
+    if obj.status != prev_status:
+        await _audit_status(db, user, obj, prev_status, "")
     return WhistleReportRead.model_validate(await _load_report(db, rid))
 
 
@@ -163,16 +203,31 @@ async def update_report(rid: uuid.UUID, body: WhistleReportUpdate, db: DbSession
 async def delete_report(rid: uuid.UUID, db: DbSession) -> None:
     obj = await _load_report(db, rid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 
 # ============================================================= case log ===
 @router.post("/whistleblowing/{rid}/updates", response_model=WhistleReportRead, status_code=201, dependencies=[_WRITE])
 async def add_update(rid: uuid.UUID, body: WhistleUpdateCreate, db: DbSession, user: CurrentUser) -> WhistleReportRead:
-    await _load_report(db, rid)
-    db.add(WhistleUpdate(tenant_id=user.tenant_id, report_id=rid, **body.model_dump()))
+    report = await _load_report(db, rid)
+    new_status = body.status_change
+    prev_status = report.status
+    if new_status is not None:
+        if new_status == prev_status:
+            raise HTTPException(status_code=422, detail=f"The case is already {prev_status.value}.")
+        check_transition(prev_status, new_status)
+    db.add(WhistleUpdate(
+        tenant_id=user.tenant_id, report_id=rid, note=body.note, author=body.author,
+        update_date=body.update_date or date.today(),
+        status_change=new_status.value if new_status is not None else "",
+    ))
+    if new_status is not None:
+        # The log line *is* the status change: the report moves with it.
+        report.status = new_status
     await db.flush()
+    if new_status is not None:
+        await _audit_status(db, user, report, prev_status, " (case log)")
     return WhistleReportRead.model_validate(await _load_report(db, rid))
 
 

@@ -2236,9 +2236,13 @@ async def set_commentary(db, org: OrgContext, pack, actor, commentary: Mapping[s
 async def review_pack(db, pack, actor, note: str = ""):
     from app.services import audit, dual_control
 
-    required, _rule = await dual_control.dual_control_required(db, DUAL_CONTROL_MODULE, DUAL_CONTROL_ACTION)
+    required, rule = await dual_control.dual_control_required(db, DUAL_CONTROL_MODULE, DUAL_CONTROL_ACTION)
     refusal = lifecycle_refusal(action="review", review_state=pack.review_state, status=pack.status,
                                 actor_id=actor.id, contributor_ids=pack.contributor_ids, dual_control=required)
+    if not refusal and required:
+        refusal = await dual_control.checker_role_refusal(
+            db, rule, module=DUAL_CONTROL_MODULE, action=DUAL_CONTROL_ACTION, checker_id=actor.id,
+            maker_id=getattr(pack, "generated_by_id", None))
     if refusal:
         raise PackError(refusal)
     pack.review_state, pack.reviewed_by_id, pack.reviewed_at = REVIEWED, actor.id, datetime.now(timezone.utc)
@@ -2287,9 +2291,13 @@ async def release_pack(db, org: OrgContext, pack, actor):
     from app.models.notification import EVENT_PREFIX, Notification
     from app.services import audit, dual_control, email
 
-    required, _rule = await dual_control.dual_control_required(db, DUAL_CONTROL_MODULE, DUAL_CONTROL_ACTION)
+    required, rule = await dual_control.dual_control_required(db, DUAL_CONTROL_MODULE, DUAL_CONTROL_ACTION)
     refusal = lifecycle_refusal(action="release", review_state=pack.review_state, status=pack.status,
                                 actor_id=actor.id, contributor_ids=pack.contributor_ids, dual_control=required)
+    if not refusal and required:
+        refusal = await dual_control.checker_role_refusal(
+            db, rule, module=DUAL_CONTROL_MODULE, action=DUAL_CONTROL_ACTION, checker_id=actor.id,
+            maker_id=getattr(pack, "generated_by_id", None))
     if refusal:
         raise PackError(refusal)
     pack.review_state, pack.released_by_id, pack.released_at = RELEASED, actor.id, datetime.now(timezone.utc)

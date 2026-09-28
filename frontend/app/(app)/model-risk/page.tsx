@@ -10,11 +10,13 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import ImportExport from "@/components/ImportExport";
 import { titleCase } from "@/lib/text";
 import { useFormat } from "@/lib/format";
+import { DECISION_HELP, statusOptions } from "@/lib/decisionStates";
 
 // ------------------------------------------------------------------ local types
 interface ModelValidation {
@@ -227,6 +229,7 @@ function ModelRiskInner() {
   const [showModelForm, setShowModelForm] = useState(false);
   const [savingModel, setSavingModel] = useState(false);
   const [mf, setMf] = useState<ModelForm>(BLANK_MODEL);
+  const cfForm = useCustomFieldForm("model_inventory");
   const setM = <K extends keyof ModelForm>(k: K, v: ModelForm[K]) => setMf((p) => ({ ...p, [k]: v }));
 
   // ---- inline validation add-form ----
@@ -259,12 +262,14 @@ function ModelRiskInner() {
   function openNewModel() {
     setEditingModel(null);
     setMf(BLANK_MODEL);
+    cfForm.start(null);
     setError(null);
     setShowModelForm(true);
   }
   function openEditModel(m: ModelInventory) {
     setEditingModel(m);
     setMf(fromModel(m));
+    cfForm.start(m.id);
     setError(null);
     setShowModelForm(true);
   }
@@ -273,8 +278,10 @@ function ModelRiskInner() {
     setSavingModel(true);
     try {
       const payload = modelPayload(mf);
-      if (editingModel) await apiCall<ModelInventory>("PATCH", `/model-risk/${editingModel.id}`, payload);
-      else await apiCall<ModelInventory>("POST", "/model-risk", payload);
+      const saved = editingModel
+        ? await apiCall<ModelInventory>("PATCH", `/model-risk/${editingModel.id}`, payload)
+        : await apiCall<ModelInventory>("POST", "/model-risk", payload);
+      await cfForm.save(saved.id);
       setShowModelForm(false);
       reload();
       if (openId) loadModelDetail(openId);
@@ -375,8 +382,9 @@ function ModelRiskInner() {
           <Select value={mf.materiality} onChange={(v) => setM("materiality", v)} options={MATERIALITY} />
         </Field>
       </div>
-      <Field label="Status">
-        <Select value={mf.status} onChange={(v) => setM("status", v)} options={MODEL_STATUS} />
+      <Field label="Status" help={DECISION_HELP.model_inventory}>
+        <Select value={mf.status} onChange={(v) => setM("status", v)}
+          options={statusOptions("model_inventory", MODEL_STATUS, editingModel?.status, editingModel?.workflow_status)} />
       </Field>
       <div className="field-row">
         <Field label="Regulatory relevant" help="Used for regulatory reporting / capital (IFRS 9, Basel, SBP).">
@@ -412,7 +420,7 @@ function ModelRiskInner() {
         <Field label="Last validation date" help="When the model was last independently validated.">
           <TextInput type="date" value={mf.last_validation_date} onChange={(v) => setM("last_validation_date", v)} />
         </Field>
-        <Field label="Next validation date" help="Target for the next validation — drives the overdue flag.">
+        <Field label="Next validation date" help="Drives the overdue flag. A completed validation that passes sets it from the materiality tier: critical and high every 12 months, medium 24, low 36.">
           <TextInput type="date" value={mf.next_validation_date} onChange={(v) => setM("next_validation_date", v)} />
         </Field>
       </div>
@@ -523,6 +531,9 @@ function ModelRiskInner() {
                 <strong>Validation cycles</strong>
                 <p className="muted" style={{ margin: "4px 0 12px", fontSize: 13 }}>
                   Independent validation exercises (initial / periodic / targeted) with outcome, findings and recommendations.
+                  A completed validation updates the last validation date; one that passes also sets the next — 12 months
+                  on for critical and high materiality, 24 for medium, 36 for low. After a fail the next date stays until
+                  the model is revalidated.
                 </p>
                 <form
                   style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
@@ -622,6 +633,7 @@ function ModelRiskInner() {
             { id: "model", label: "Model", content: modelTab, required: true },
             { id: "ownership", label: "Ownership", content: ownershipTab },
             { id: "schedule", label: "Validation schedule", content: scheduleTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => setShowModelForm(false)}
           onSave={saveModel}

@@ -5,9 +5,13 @@ module turns one ask into rows. It owns the three things a pure registry cannot:
 tenant's methodology (matrix, appetite), the names behind ids on the cover page, and
 the caps that keep a bank-sized register from being loaded into memory by accident.
 
-Permissions are the subject's own — running a risk report needs ``risk:read``, so the
-builder can never become a way around a module's access control — plus ``report:write``
-to save a definition for others.
+Permissions: every endpoint needs ``report:read`` — the builder is a reporting feature,
+granted like the rest of reporting (and the nav entry it sits behind) — *and* the
+subject's own read permission for anything that returns rows, so running a risk report
+needs ``risk:read`` too and the builder can never become a way around a module's access
+control. ``report:write`` saves a definition for others. ``/run`` and ``/export`` used to
+ask only for the subject's permission, so a user refused the builder's catalogue could
+still run and bulk-export through it.
 """
 from __future__ import annotations
 
@@ -195,7 +199,7 @@ async def subjects(user: CurrentUser) -> list[dict]:
 
 
 # ---------------------------------------------------------------------- run ---
-@router.post("/run", response_model=RunResponse)
+@router.post("/run", response_model=RunResponse, dependencies=[Depends(require("report:read"))])
 async def run(body: RunRequest, db: DbSession, user: CurrentUser) -> RunResponse:
     """One page of the report, plus a summary over the whole matching set."""
     subject = _subject(body.subject)
@@ -300,7 +304,7 @@ def _cell(value) -> str:
     return "" if value is None else str(value)
 
 
-@router.post("/export")
+@router.post("/export", dependencies=[Depends(require("report:read"))])
 async def export(
     body: ReportDefinition,
     db: DbSession,

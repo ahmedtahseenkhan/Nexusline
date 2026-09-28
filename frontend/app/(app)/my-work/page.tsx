@@ -30,6 +30,8 @@ type MyWorkItem = {
   entity_type: string;
   entity_id: string | null;
   actions: QuickAction[];
+  /** Set when the reader can return the item but not approve it, and why. */
+  note?: string;
 };
 
 type MyWorkSection = {
@@ -37,6 +39,8 @@ type MyWorkSection = {
   label: string;
   hint: string;
   count: number;
+  /** count is only what one capped read returned — shown as "500+". */
+  count_is_floor?: boolean;
   overdue: number;
   items: MyWorkItem[];
   truncated: boolean;
@@ -53,7 +57,8 @@ type MyWork = {
 
 /** Kinds that are somebody else's work waiting on the reader's decision. */
 const DECISIONS = new Set([
-  "approval", "record_review", "test_review", "issue_validation", "due_date_change",
+  "approval", "record_review", "test_review", "issue_validation", "due_date_change", "risk_acceptance",
+  "vuln_acceptance",
   // Phase 4B: submitted vendor assessments and audit findings whose agreed date has come.
   "assessment_review", "finding_follow_up",
   // Decision 9: the second signature that completes someone else's attestation.
@@ -168,7 +173,7 @@ export default function MyWorkPage() {
         <nav aria-label="Jump to a section" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
           {sections.map((s) => (
             <a key={s.kind} href={`#${s.kind}`} className="chip" style={{ textDecoration: "none" }}>
-              {s.label} · {s.count}
+              {s.label} · {s.count}{s.count_is_floor ? "+" : ""}
               {s.overdue > 0 && <span style={{ color: "var(--red)", fontWeight: 650 }}>&nbsp;({s.overdue} overdue)</span>}
             </a>
           ))}
@@ -193,7 +198,7 @@ export default function MyWorkPage() {
         <section key={s.kind} id={s.kind} className="card" style={{ marginBottom: 16, scrollMarginTop: 80 }} aria-labelledby={`h-${s.kind}`}>
           <div className="card-head" style={{ flexWrap: "wrap", gap: 8 }}>
             <h3 id={`h-${s.kind}`}>{s.label}</h3>
-            <Badge tone="neutral">{s.count}</Badge>
+            <Badge tone="neutral">{`${s.count}${s.count_is_floor ? "+" : ""}`}</Badge>
             {s.overdue > 0 && <Badge tone="critical">{`${s.overdue} overdue`}</Badge>}
             <span className="sub" style={{ flexBasis: "100%" }}>{s.hint}</span>
           </div>
@@ -207,6 +212,9 @@ export default function MyWorkPage() {
                     {item.reference && <span className="muted" style={{ fontWeight: 500, marginLeft: 6 }}>{item.reference}</span>}
                   </div>
                   {item.subtitle && <div className="when">{item.subtitle}</div>}
+                  {item.note && (
+                    <div role="note" style={{ fontSize: 12.5, color: "var(--amber)", marginTop: 2 }}>{item.note}</div>
+                  )}
                 </div>
                 {dueText(item) && (
                   <div style={{ fontSize: 12.5, whiteSpace: "nowrap", color: item.overdue ? "var(--red)" : "var(--muted)" }}>
@@ -235,7 +243,7 @@ export default function MyWorkPage() {
             ))}
             {s.truncated && (
               <div className="muted" style={{ fontSize: 12.5, padding: "8px 0" }}>
-                Showing the first {s.items.length} of {s.count}, most urgent first.
+                Showing the first {s.items.length} of {s.count}{s.count_is_floor ? "+" : ""}, most urgent first.
               </div>
             )}
           </div>

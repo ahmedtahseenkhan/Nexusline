@@ -8,12 +8,15 @@ from datetime import date, datetime
 from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, String, Text
 from sqlalchemy import Enum as SAEnum
 
+from app.models.aml import AmlRiskAssessment, ScreeningCase, SuspiciousActivityReport
 from app.models.asset import Asset
 from app.models.compliance import Requirement
+from app.models.enums import Criticality
 from app.models.continuity import ContinuityPlan
 from app.models.evidence import Evidence
 from app.models.control import Control
 from app.models.exception import ExceptionRecord
+from app.models.fraud import FraudCase, FraudRisk
 from app.models.goal import Goal
 from app.models.incident import Incident
 from app.models.operational_risk import KeyRiskIndicator, RcsaAssessment
@@ -40,6 +43,13 @@ MODEL_MAP: dict[str, type] = {
     "processing_activity": ProcessingActivity,
     "key_risk_indicator": KeyRiskIndicator,
     "rcsa_assessment": RcsaAssessment,
+    # Financial crime: valid entity types and custom-field models, so their registers can
+    # carry status labels too.
+    "aml_risk_assessment": AmlRiskAssessment,
+    "suspicious_activity_report": SuspiciousActivityReport,
+    "screening_case": ScreeningCase,
+    "fraud_risk": FraudRisk,
+    "fraud_case": FraudCase,
 }
 
 OPERATORS = ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "overdue", "is_true", "is_false", "not_empty"]
@@ -49,6 +59,19 @@ OPERATORS = ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "overdue", "is_tr
 VALUELESS_OPERATORS: frozenset[str] = frozenset({"overdue", "is_true", "is_false", "not_empty"})
 
 _SKIP = {"id", "tenant_id", "created_at", "updated_at"}
+
+#: Computed values a rule may test beside the table's own columns — the figure the
+#: register shows rather than a stored input. An asset's stored ``criticality`` is set by
+#: no form, so a rule on it never agreed with the "Effective criticality" column; the
+#: shipped "Critical Asset" label tests this instead. Same shape as a column entry.
+EXTRA_FIELDS: dict[str, list[dict]] = {
+    "asset": [
+        {
+            "key": "effective_criticality", "type": "enum", "label": "Effective Criticality",
+            "options": [c.value for c in Criticality],
+        },
+    ],
+}
 
 
 def _field_type(col) -> str | None:
@@ -79,7 +102,41 @@ def evaluable_fields(model: str) -> list[dict]:
         if ftype == "enum" and isinstance(col.type, SAEnum):
             info["options"] = list(col.type.enums)
         out.append(info)
+    out.extend(dict(f) for f in EXTRA_FIELDS.get(model, []))
     return out
+
+
+def load_options(cls: type, rules) -> tuple:
+    """Loader options for reading ``cls`` rows only to evaluate ``rules``: every eagerly
+    mapped relationship left unloaded except what a computed field a rule tests reads
+    (``schema_loading.PROPERTY_READS``). Evaluating a page of assets otherwise loaded all
+    twenty-eight of each asset's relationships — seconds per list page at bank scale."""
+    from app.core.schema_loading import PROPERTY_READS, options_for
+
+    reads: set[str] = set()
+    for klass in cls.__mro__:
+        table = PROPERTY_READS.get(klass.__name__, {})
+        for rule in rules:
+            reads.update(table.get(rule.field, ()))
+    return options_for(cls, None, tuple(sorted(reads)))
+
+
+def field_keys(model: str) -> set[str]:
+    """The field names a rule or saved filter on ``model`` may test."""
+    return {f["key"] for f in evaluable_fields(model)}
+
+
+def condition_problem(model: str, field: str | None, operator: str | None) -> str | None:
+    """Why a condition can't be evaluated on ``model``, or None. Pure apart from the
+    model's columns. A condition on a field the model doesn't have never matches, so
+    accepting it would save a rule or filter that silently does nothing."""
+    if model not in MODEL_MAP:
+        return f"Unsupported model '{model}'"
+    if operator not in OPERATORS:
+        return f"Unsupported operator '{operator}'"
+    if field not in field_keys(model):
+        return f"'{field}' is not a field of {model}. Choose one of GET /status-rules/fields/{model}."
+    return None
 
 
 def _coerce(val):

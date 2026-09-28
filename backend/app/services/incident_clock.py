@@ -175,6 +175,19 @@ def status_stamps(
     return out
 
 
+def creation_stamps(
+    status: IncidentStatus | None, current: dict[str, datetime | None], now: datetime
+) -> dict[str, datetime]:
+    """The stamps a newly logged incident gets: :func:`status_stamps` for the status it
+    is logged in (logged contained records containment now, logged closed records
+    resolution now), and detection now when none is given — an incident being logged
+    has been detected by now at the latest, and detection starts the regulator's clock.
+    Anything given is kept."""
+    out = {} if current.get("detected_at") is not None else {"detected_at": now}
+    out.update(status_stamps(status, current, now))
+    return out
+
+
 def hours_between(start: datetime | None, end: datetime | None) -> float | None:
     """Elapsed hours from ``start`` to ``end`` (2 dp); ``None`` if either is missing or
     the order is impossible (legacy rows entered before the order rule)."""

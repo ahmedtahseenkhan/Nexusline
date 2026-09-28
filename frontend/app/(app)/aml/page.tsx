@@ -15,6 +15,8 @@ import { confirmDialog, toast } from "@/lib/feedback";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
 import RecordApproval from "@/components/RecordApproval";
+import RecordPanels from "@/components/RecordPanels";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import FormModal from "@/components/FormModal";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -36,6 +38,10 @@ const RATING = opts(["low", "medium", "high", "critical"]);
 const SCREENING_STATUS = opts(["open", "under_review", "cleared", "escalated"]);
 const SAR_PRIORITY = opts(["low", "medium", "high", "critical"]);
 const SAR_STATUS = opts(["draft", "under_review", "filed", "closed"]);
+// Four-eyes on FMU filing: a report is created as a draft (or under review) and marked
+// filed by someone other than its preparer; once filed it can only be closed.
+const SAR_STATUS_NEW = SAR_STATUS.filter((o) => o.value === "draft" || o.value === "under_review");
+const SAR_STATUS_FILED = SAR_STATUS.filter((o) => o.value === "filed" || o.value === "closed");
 const AML_SCOPE = opts(["customer", "product", "geography", "channel", "enterprise"]);
 const REVIEW_FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 
@@ -169,7 +175,10 @@ function fromSar(s: Sar): SarForm {
     fmu_reference: s.fmu_reference || "",
   };
 }
-function sarPayload(f: SarForm): Record<string, unknown> {
+/** `wasFiled`: the saved report already carries a filing date. A filing date is only
+ *  sent when the report is (being) filed — the server stamps today when it is blank. */
+function sarPayload(f: SarForm, wasFiled = false): Record<string, unknown> {
+  const filing = wasFiled || f.status === "filed";
   return {
     subject: f.subject,
     analyst: f.analyst,
@@ -181,7 +190,7 @@ function sarPayload(f: SarForm): Record<string, unknown> {
     status: f.status,
     activity_description: f.activity_description,
     suspicion_reason: f.suspicion_reason,
-    filed_date: f.filed_date || null,
+    filed_date: filing ? f.filed_date || null : null,
     fmu_reference: f.fmu_reference,
   };
 }
@@ -317,15 +326,22 @@ function AmlInner() {
   const [rf, setRf] = useState<RiskForm>(BLANK_RISK);
   const setR = <K extends keyof RiskForm>(k: K, v: RiskForm[K]) => setRf((p) => ({ ...p, [k]: v }));
 
+  // ---- custom fields (one set per register) ----
+  const caseCfForm = useCustomFieldForm("screening_case");
+  const sarCfForm = useCustomFieldForm("suspicious_activity_report");
+  const riskCfForm = useCustomFieldForm("aml_risk_assessment");
+
   // ------------------------------------------------------------- screening CRUD
   function openNewCase() {
     setEditingCase(null);
     setSf(BLANK_SCREENING);
+    caseCfForm.start(null);
     setShowCaseForm(true);
   }
   function openEditCase(c: ScreeningCase) {
     setEditingCase(c);
     setSf(fromScreening(c));
+    caseCfForm.start(c.id);
     setShowCaseForm(true);
   }
   async function saveCase() {
@@ -333,8 +349,10 @@ function AmlInner() {
     setSavingCase(true);
     try {
       const payload = screeningPayload(sf);
-      if (editingCase) await api.updateScreening(editingCase.id, payload);
-      else await api.createScreening(payload);
+      const saved = editingCase
+        ? await api.updateScreening(editingCase.id, payload)
+        : await api.createScreening(payload);
+      await caseCfForm.save(saved.id);
       setShowCaseForm(false);
       reloadCases();
       loadSummary();
@@ -365,20 +383,24 @@ function AmlInner() {
   function openNewSar() {
     setEditingSar(null);
     setAf({ ...BLANK_SAR, currency });
+    sarCfForm.start(null);
     setShowSarForm(true);
   }
   function openEditSar(s: Sar) {
     setEditingSar(s);
     setAf(fromSar(s));
+    sarCfForm.start(s.id);
     setShowSarForm(true);
   }
   async function saveSar() {
     setError(null);
     setSavingSar(true);
     try {
-      const payload = sarPayload(af);
-      if (editingSar) await api.updateSar(editingSar.id, payload);
-      else await api.createSar(payload);
+      const payload = sarPayload(af, !!editingSar?.filed_date);
+      const saved = editingSar
+        ? await api.updateSar(editingSar.id, payload)
+        : await api.createSar(payload);
+      await sarCfForm.save(saved.id);
       setShowSarForm(false);
       reloadSars();
       if (sarId) loadSar(sarId);  // refresh the open view drawer
@@ -407,11 +429,13 @@ function AmlInner() {
   function openNewRisk() {
     setEditingRisk(null);
     setRf(BLANK_RISK);
+    riskCfForm.start(null);
     setShowRiskForm(true);
   }
   function openEditRisk(r: AmlRisk) {
     setEditingRisk(r);
     setRf(fromRisk(r));
+    riskCfForm.start(r.id);
     setShowRiskForm(true);
   }
   async function saveRisk() {
@@ -419,8 +443,10 @@ function AmlInner() {
     setSavingRisk(true);
     try {
       const payload = riskPayload(rf);
-      if (editingRisk) await api.updateAmlRisk(editingRisk.id, payload);
-      else await api.createAmlRisk(payload);
+      const saved = editingRisk
+        ? await api.updateAmlRisk(editingRisk.id, payload)
+        : await api.createAmlRisk(payload);
+      await riskCfForm.save(saved.id);
       setShowRiskForm(false);
       reloadRisks();
       toast(editingRisk ? "Changes saved" : "Assessment created");
@@ -541,6 +567,9 @@ function AmlInner() {
   );
 
   // ------------------------------------------------------------- SAR form tabs
+  const sarWasFiled = !!editingSar && (editingSar.status === "filed" || !!editingSar.filed_date);
+  const sarStatusOptions = !editingSar ? SAR_STATUS_NEW : sarWasFiled ? SAR_STATUS_FILED : SAR_STATUS;
+  const sarShowFiledDate = sarWasFiled || (!!editingSar && af.status === "filed");
   const sarGeneral = (
     <>
       <Field label="Subject" required help="Party the suspicious activity relates to.">
@@ -570,8 +599,17 @@ function AmlInner() {
           <TextInput type="date" value={af.deadline} onChange={(v) => setA("deadline", v)} />
         </Field>
       </div>
-      <Field label="Status">
-        <Select value={af.status} onChange={(v) => setA("status", v)} options={SAR_STATUS} />
+      <Field
+        label="Status"
+        help={
+          !editingSar
+            ? "A new report starts as a draft or under review. Filing with the FMU is marked afterwards by an independent checker."
+            : sarWasFiled
+              ? "Filed with the FMU — the report can now only be closed."
+              : "Marking it filed needs an independent checker: not the person who prepared the report."
+        }
+      >
+        <Select value={af.status} onChange={(v) => setA("status", v)} options={sarStatusOptions} />
       </Field>
     </>
   );
@@ -584,9 +622,11 @@ function AmlInner() {
         <TextArea value={af.suspicion_reason} onChange={(v) => setA("suspicion_reason", v)} rows={3} placeholder="Why this is being reported." />
       </Field>
       <div className="field-row">
-        <Field label="Filed date" help="Date the report was filed with the FMU.">
-          <TextInput type="date" value={af.filed_date} onChange={(v) => setA("filed_date", v)} />
-        </Field>
+        {sarShowFiledDate && (
+          <Field label="Filed date" help="Date the report was submitted to the FMU — today when left blank. Set when the report is marked filed.">
+            <TextInput type="date" value={af.filed_date} onChange={(v) => setA("filed_date", v)} />
+          </Field>
+        )}
         <Field label="FMU reference" help="Reference issued by the FMU on filing.">
           <TextInput value={af.fmu_reference} onChange={(v) => setA("fmu_reference", v)} placeholder="FMU-…" />
         </Field>
@@ -761,7 +801,12 @@ function AmlInner() {
 
       {/* ============================================= SCREENING VIEW DRAWER */}
       <RecordDrawer
-        aside={caseDetail ? <RecordApproval entityType="screening_case" entityId={caseDetail.id} onChanged={() => { reloadCases(); loadSummary(); loadCase(caseDetail.id); }} /> : null}
+        aside={caseDetail ? (
+          <>
+            <RecordApproval entityType="screening_case" entityId={caseDetail.id} onChanged={() => { reloadCases(); loadSummary(); loadCase(caseDetail.id); }} />
+            <RecordPanels model="screening_case" entityId={caseDetail.id} />
+          </>
+        ) : null}
         open={!!caseId && !!caseDetail}
         onClose={() => setCaseId(null)}
         title={caseDetail ? `${caseDetail.reference || "Case"} — ${caseDetail.subject_name}` : "…"}
@@ -806,7 +851,12 @@ function AmlInner() {
 
       {/* ============================================= STR / SAR VIEW DRAWER */}
       <RecordDrawer
-        aside={sarDetail ? <RecordApproval entityType="suspicious_activity_report" entityId={sarDetail.id} onChanged={() => { reloadSars(); loadSar(sarDetail.id); }} /> : null}
+        aside={sarDetail ? (
+          <>
+            <RecordApproval entityType="suspicious_activity_report" entityId={sarDetail.id} onChanged={() => { reloadSars(); loadSar(sarDetail.id); }} />
+            <RecordPanels model="suspicious_activity_report" entityId={sarDetail.id} />
+          </>
+        ) : null}
         open={!!sarId && !!sarDetail}
         onClose={() => setSarId(null)}
         title={sarDetail ? `${sarDetail.reference || "STR/SAR"} — ${sarDetail.subject}` : "…"}
@@ -858,7 +908,7 @@ function AmlInner() {
         <FormModal
           title={editingCase ? `Edit screening case — ${editingCase.reference || editingCase.subject_name}` : "New screening case"}
           wide
-          tabs={[{ id: "general", label: "General", content: screeningGeneral, required: true }]}
+          tabs={[{ id: "general", label: "General", content: screeningGeneral, required: true }, ...caseCfForm.tabs]}
           onClose={() => setShowCaseForm(false)}
           onSave={saveCase}
           saving={savingCase}
@@ -887,6 +937,7 @@ function AmlInner() {
           tabs={[
             { id: "general", label: "General", content: sarGeneral, required: true },
             { id: "details", label: "Details", content: sarDetails },
+            ...sarCfForm.tabs,
           ]}
           onClose={() => setShowSarForm(false)}
           onSave={saveSar}
@@ -913,7 +964,7 @@ function AmlInner() {
         <FormModal
           title={editingRisk ? `Edit assessment — ${editingRisk.reference || editingRisk.title}` : "New assessment"}
           wide
-          tabs={[{ id: "general", label: "General", content: riskGeneral, required: true }]}
+          tabs={[{ id: "general", label: "General", content: riskGeneral, required: true }, ...riskCfForm.tabs]}
           onClose={() => setShowRiskForm(false)}
           onSave={saveRisk}
           saving={savingRisk}

@@ -27,10 +27,13 @@ Three rules keep the feed readable once real data is in it:
   record's drawer rather than the whole register.
 
 Who sees a row (:func:`visible_clause`): the user it names, the members of the role it
-names, or — when it names neither — everyone in the organisation. A row may name both a
+names, or — when it names neither — everyone in the organisation who may read the record
+it concerns (:func:`readable_entity_types`). A row may name both a
 person and a role (a KRI escalation to "Jane Doe and the CRO role" is one event).
 """
 from __future__ import annotations
+
+import logging
 
 import time
 import uuid
@@ -84,6 +87,8 @@ from app.services.risk_query import board_register_clause, on_board_register
 from app.services.risk_scoring import effective_score
 from app.services.risk_settings import get_or_create_settings, load_appetite_book
 
+_log = logging.getLogger(__name__)
+
 _W = NotificationCategory.warning
 _C = NotificationCategory.critical
 _I = NotificationCategory.info
@@ -122,8 +127,9 @@ GROUPABLE_FAMILIES: dict[str, tuple[str, str, str, str]] = {
     "policy-review": ("policy", "policies", "reviews overdue", "/policies"),
     "vendor-review": ("third party", "third parties", "reviews overdue", "/vendors"),
     # Assets (record-page B4): one family per register, so a grouped row links to it.
-    "asset-review": ("information asset", "information assets", "reviews overdue", "/information-assets"),
-    "itasset-review": ("IT asset", "IT assets", "reviews overdue", "/it-assets"),
+    # The grouped row opens the register filtered to the overdue reviews it counts.
+    "asset-review": ("information asset", "information assets", "reviews overdue", "/information-assets?review_overdue=true"),
+    "itasset-review": ("IT asset", "IT assets", "reviews overdue", "/it-assets?review_overdue=true"),
     # Third-party certifications (phase 2), one alert per certificate: warned
     # CERT_EXPIRY_WARNING_DAYS out, then flagged once lapsed.
     "vendor-cert-expiring": ("third-party certification", "third-party certifications", "less than 60 days left", "/vendors"),
@@ -529,10 +535,58 @@ def reconcile_plan(
 AUDIENCE_ME, AUDIENCE_ROLE, AUDIENCE_EVERYONE = "me", "role", "everyone"
 
 
-def is_visible(row: Any, user_id: Any, role_names: Iterable[str], *, mine: bool = False) -> bool:
+#: Notification entity types that are not polymorphic record types, with the permission
+#: a reader needs to see one addressed to everyone (None: anyone in the organisation).
+NOTIFICATION_READ_PERMS: dict[str, str | None] = {
+    "": None,  # an organisation-wide notice names no record
+    "licence": None,  # the licence notice concerns the whole installation
+    "approval": "workflow:read",
+    "board_pack": "board:read",
+    "sar": "aml:read",  # rows raised before the SAR alert used its registry type
+}
+
+
+def readable_entity_types(permissions: Iterable[str], modules: Iterable[str] | None = None) -> list[str]:
+    """The notification entity types a reader may see when an alert is addressed to
+    everyone: the record types whose module *read* permission they hold (and, when
+    ``modules`` is given, whose module the organisation can use), plus the non-record
+    notices of :data:`NOTIFICATION_READ_PERMS`. Pure.
+
+    "Everyone" means everyone *entitled to the record*: an alert's title and body carry
+    the record's reference and substance ("RoPA entry P-004 has an unlawful transfer"),
+    so a risk-only reader must not receive the privacy team's alerts just because the
+    scanner could not resolve a named owner.
+    """
+    from app.services import modules as module_service
+    from app.services.entity_types import ENTITY_TYPES
+
+    held = set(permissions)
+    usable = set(modules) if modules is not None else None
+
+    def module_ok(etype: str, perm: str | None) -> bool:
+        key = module_service.module_for_permission(perm)
+        return usable is None or key is None or key in usable
+
+    out = [
+        etype for etype, found in ENTITY_TYPES.items()
+        if found.read_perm in held and module_ok(etype, found.read_perm)
+    ]
+    out += [
+        etype for etype, perm in NOTIFICATION_READ_PERMS.items()
+        if (perm is None or perm in held) and module_ok(etype, perm)
+    ]
+    return sorted(set(out))
+
+
+def is_visible(
+    row: Any, user_id: Any, role_names: Iterable[str], *, mine: bool = False,
+    readable_types: Iterable[str] | None = None,
+) -> bool:
     """Whether a notification is for this user. Pure — the rule :func:`visible_clause`
     puts in SQL. ``mine`` narrows it to rows addressed to the user or one of their roles
-    (leaving out what is addressed to everyone)."""
+    (leaving out what is addressed to everyone). ``readable_types``
+    (:func:`readable_entity_types`) narrows what is addressed to everyone to the records
+    the user may read; None keeps every such row (callers that already filtered)."""
     row_user = getattr(row, "user_id", None)
     row_role = getattr(row, "role_name", "") or ""
     if row_user is not None and row_user == user_id:
@@ -541,10 +595,15 @@ def is_visible(row: Any, user_id: Any, role_names: Iterable[str], *, mine: bool 
         return True
     if mine:
         return False
-    return row_user is None and not row_role
+    if row_user is not None or row_role:
+        return False
+    return readable_types is None or (getattr(row, "entity_type", "") or "") in set(readable_types)
 
 
-def visible_clause(user_id: Any, role_names: Iterable[str], *, mine: bool = False):
+def visible_clause(
+    user_id: Any, role_names: Iterable[str], *, mine: bool = False,
+    readable_types: Iterable[str] | None = None,
+):
     """SQL filter for the notifications a user sees (see :func:`is_visible`)."""
     roles = sorted(set(role_names))
     addressed = [Notification.user_id == user_id]
@@ -552,7 +611,10 @@ def visible_clause(user_id: Any, role_names: Iterable[str], *, mine: bool = Fals
         addressed.append(Notification.role_name.in_(roles))
     if mine:
         return or_(*addressed)
-    return or_(*addressed, and_(Notification.user_id.is_(None), Notification.role_name == ""))
+    everyone = [Notification.user_id.is_(None), Notification.role_name == ""]
+    if readable_types is not None:
+        everyone.append(Notification.entity_type.in_(sorted(set(readable_types))))
+    return or_(*addressed, and_(*everyone))
 
 
 def audience_of(row: Any, user_id: Any) -> str:
@@ -1569,7 +1631,7 @@ async def scan_alerts(db: AsyncSession, tenant_id, directory: Directory | None =
     )
     for sar in (await db.scalars(_sar_stmt)).all():
         add(f"sar-overdue:{sar.id}", f"STR/SAR filing overdue: {sar.reference}",
-            f"{sar.subject} — filing was due {sar.deadline}", _C, "sar", sar.id,
+            f"{sar.subject} — filing was due {sar.deadline}", _C, "suspicious_activity_report", sar.id,
             with_id("/aml", sar.id, param="sar"),
             named(sar.analyst) or directory.first_active(sar.workflow_owner_id))
 
@@ -1669,6 +1731,27 @@ REFRESH_MIN_INTERVAL_SECONDS = 60.0
 _LAST_REFRESH: dict[str, float] = {}
 
 
+async def _scan_shallow(db: AsyncSession, tenant_id, directory: Directory) -> list[dict]:
+    """:func:`scan_alerts` with each loaded record's links loaded one deep only.
+
+    The scan reads records' columns and their direct links. At the default depth an
+    overdue control also brought every protected asset and each asset its twenty-eight
+    links — ~900 statements and 5-10 seconds a scan at bank scale, blocking the worker
+    for every page behind it; one deep it is under a second with identical alerts. The
+    scan writes nothing, so if a family ever reads further (a lazy load outside the
+    greenlet) it is rescanned at the default depth and logged, rather than failing."""
+    from sqlalchemy.exc import MissingGreenlet
+
+    from app.core.database import shallow_loads
+
+    try:
+        with shallow_loads(1):
+            return await scan_alerts(db, tenant_id, directory=directory)
+    except MissingGreenlet:
+        _log.warning("Alert scan read a link two deep; rescanning at the default depth", exc_info=True)
+        return await scan_alerts(db, tenant_id, directory=directory)
+
+
 async def refresh(db: AsyncSession, tenant_id) -> list[Notification]:
     """Reconcile current alerts into the notifications table.
 
@@ -1685,7 +1768,7 @@ async def refresh(db: AsyncSession, tenant_id) -> list[Notification]:
     event and are never swept: this reconciler runs whenever the feed is opened.
     """
     directory = await load_directory(db)
-    alerts = group_alerts(address_alerts(await scan_alerts(db, tenant_id, directory=directory), directory))
+    alerts = group_alerts(address_alerts(await _scan_shallow(db, tenant_id, directory), directory))
 
     existing: dict[str, Notification] = {}
     for n in (await db.scalars(select(Notification).order_by(Notification.created_at))).all():

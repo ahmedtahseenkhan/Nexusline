@@ -16,7 +16,9 @@ The enabled set is resolved from two layers, checked in order:
    predate the choice keep every module.
 
 API enforcement lives in ``require_module`` (attached per-router in
-``app/api/v1/router.py``); the frontend mirrors it from ``GET /system/modules``.
+``app/api/v1/router.py``) and, for the platform surfaces that reach a record by its type
+rather than by a module's URL, in :func:`gate_shared_request` (run for every
+authenticated request); the frontend mirrors it from ``GET /system/modules``.
 """
 from __future__ import annotations
 
@@ -128,6 +130,41 @@ def _tenant_of(request: Request) -> uuid.UUID | None:
         return None
 
 
+async def module_refusal(key: str, tenant_id: uuid.UUID | None) -> str | None:
+    """Why ``key`` can't be used by this organisation right now, or None when it can.
+
+    The one rule behind every module gate — the per-router ``require_module``, the shared
+    surfaces keyed by a record type (:func:`gate_shared_request`) and the listings that
+    leave a switched-off module out: licensed and not disabled on the installation, then
+    switched on by the organisation. Unknown keys are core platform and never refused.
+    """
+    if key not in MODULES:
+        return None
+    title = MODULES[key]["title"]
+    if not is_enabled(key):
+        return (
+            f"The {title} module is not enabled on this installation. "
+            "Contact your vendor to update the license."
+        )
+    if tenant_id is None:
+        return None
+    chosen = await organisation_choice(tenant_id)
+    if chosen is not None and key not in chosen:
+        return (
+            f"The {title} module is switched off for your organisation. An "
+            "administrator can switch it on under Settings → Organisation."
+        )
+    return None
+
+
+async def usable_modules(tenant_id: uuid.UUID | None) -> set[str]:
+    """Every module this organisation can use now (installation ∩ organisation choice)."""
+    allowed = enabled_modules()
+    if tenant_id is None:
+        return allowed
+    return effective_modules(allowed, await organisation_choice(tenant_id))
+
+
 def require_module(key: str):
     """Router-level dependency: reject requests to a module that this installation has
     not licensed/enabled, or that the caller's organisation has switched off. Attach in
@@ -135,29 +172,174 @@ def require_module(key: str):
 
     async def checker(request: Request = None) -> None:  # type: ignore[assignment]
         # FastAPI always injects the request; the default only lets tests call it bare.
-        title = MODULES.get(key, {}).get("title", key)
-        if not is_enabled(key):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"The {title} module is not enabled on this installation. "
-                    "Contact your vendor to update the license."
-                ),
-            )
         tenant_id = _tenant_of(request) if request is not None else None
-        if tenant_id is None or key not in MODULES:
-            return
-        chosen = await organisation_choice(tenant_id)
-        if chosen is not None and key not in chosen:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"The {title} module is switched off for your organisation. An "
-                    "administrator can switch it on under Settings → Organisation."
-                ),
-            )
+        detail = await module_refusal(key, tenant_id)
+        if detail:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
     return checker
+
+
+# ---------------------------------------------------- shared, type-keyed surfaces ---
+# ``require_module`` guards each module's own routers, but a record is also reachable
+# through platform surfaces keyed by its type rather than by URL prefix: import/export
+# (``/io/key-risk-indicators/…``), custom fields (``/custom-fields/key_risk_indicator/…``
+# and ``{"model": …}`` in a body), status rules, saved filters, comments/tags/files,
+# attestations, record lifecycle and version history. Gating only the prefixes left all
+# of those open for a module the bank never bought or switched off — a KRI could be
+# exported, imported and custom-fielded with Operational Risk off. These maps resolve a
+# type key to its module so one check covers every such surface.
+
+#: Permission namespace → the licensable module whose records it guards. Every record
+#: type's read permission (``entity_types``, the import registry) lives in exactly one
+#: namespace, so a new record type in a gated module is gated with no further change.
+PERMISSION_MODULES: dict[str, str] = {
+    "shariah": "shariah",
+    "aml": "aml",
+    "fraud": "fraud",
+    "whistle": "whistleblowing",
+    "oprisk": "operational_risk",
+    "scenario": "scenario_analysis",
+    "modelrisk": "model_risk",
+    "riskquant": "risk_quantification",
+    "icfr": "icfr",
+    "bcp": "continuity",
+    "bia": "bia",
+    "privacy": "privacy",
+    "dpo": "data_protection",
+    "internal_audit": "internal_audit",
+    "review": "access_reviews",
+    "declaration": "declarations",
+    "governance": "governance_meetings",
+    "authority": "authority",
+    "awareness": "awareness",
+    "esg": "esg",
+    "vuln": "vulnerability",
+    "ccm": "integrations_ccm",
+    "outsourcing": "outsourcing",
+    "regchange": "regulatory_change",
+}
+
+
+def module_for_permission(perm: str | None) -> str | None:
+    """``"oprisk:read"`` → ``"operational_risk"``; None for core-platform permissions."""
+    if not perm:
+        return None
+    return PERMISSION_MODULES.get(perm.split(":", 1)[0])
+
+
+def module_for_entity_type(entity_type: str | None) -> str | None:
+    """The module a polymorphic entity type (or custom-field key) belongs to, or None
+    for core records and unknown keys (the endpoint's own validation answers those)."""
+    if not entity_type:
+        return None
+    from app.models.custom_field import custom_field_entity_type
+    from app.services.entity_types import ENTITY_TYPES
+
+    found = ENTITY_TYPES.get(custom_field_entity_type(entity_type))
+    return module_for_permission(found.read_perm) if found else None
+
+
+def module_for_resource(resource: str | None) -> str | None:
+    """The module an import/export resource (``key-risk-indicators``) belongs to."""
+    if not resource:
+        return None
+    from app.services.import_registry import REGISTRY
+
+    res = REGISTRY.get(resource)
+    return module_for_permission(res.read_perm) if res is not None else None
+
+
+#: Path shapes that carry a record-type key, as (leading segments, index of the key,
+#: resolver). Segments are counted after ``/api/v1``. Non-type words in the key position
+#: (``/collab/tags``, ``/attestations/<id>/confirm``, ``/io/resources``) resolve to no
+#: module and pass through untouched.
+_KEYED_PATHS: tuple[tuple[tuple[str, ...], int, str], ...] = (
+    (("io",), 1, "resource"),
+    (("custom-fields",), 1, "entity"),
+    (("collab",), 1, "entity"),
+    (("attestations",), 1, "entity"),
+    (("records",), 1, "entity"),
+    (("versions", "record"), 2, "entity"),
+    (("status-rules", "fields"), 2, "entity"),
+    (("status-rules", "evaluate"), 2, "entity"),
+    (("filters", "fields"), 2, "entity"),
+)
+#: Collections whose create/update body (or list query) names the record type in
+#: ``model``.
+_MODEL_BODY_PATHS: frozenset[str] = frozenset({"custom-fields", "status-rules", "filters"})
+_API_PREFIX = "/api/v1/"
+
+
+def _resolve(kind: str, key: str) -> str | None:
+    try:
+        return module_for_resource(key) if kind == "resource" else module_for_entity_type(key)
+    except Exception:  # noqa: BLE001 - a registry that fails to import gates nothing
+        return None
+
+
+def modules_named_by_path(path: str) -> set[str]:
+    """Modules a request path addresses through a type key. Pure apart from the
+    registries; the router prefixes of a module are ``require_module``'s job."""
+    if not path.startswith(_API_PREFIX):
+        return set()
+    parts = [p for p in path[len(_API_PREFIX):].split("/") if p]
+    out: set[str] = set()
+    for lead, index, kind in _KEYED_PATHS:
+        if len(parts) > index and tuple(parts[: len(lead)]) == lead:
+            module = _resolve(kind, parts[index])
+            if module:
+                out.add(module)
+    return out
+
+
+async def modules_named_by_request(request: Request) -> set[str]:
+    """:func:`modules_named_by_path` plus a ``model`` named in the query string, or in
+    the JSON body of a create/update on a type-keyed collection (``POST /custom-fields
+    {"model": "key_risk_indicator"}``)."""
+    path = request.url.path
+    out = modules_named_by_path(path)
+    parts = [p for p in path[len(_API_PREFIX):].split("/") if p] if path.startswith(_API_PREFIX) else []
+    if not parts or parts[0] not in _MODEL_BODY_PATHS:
+        return out
+    model = request.query_params.get("model")
+    if model:
+        out.add(_resolve("entity", model) or "")
+    if request.method in ("POST", "PUT", "PATCH") and "json" in request.headers.get("content-type", ""):
+        try:
+            # Starlette caches the body, so the endpoint still reads it afterwards.
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - malformed JSON is the endpoint's 422 to give
+            body = None
+        if isinstance(body, dict) and isinstance(body.get("model"), str):
+            out.add(_resolve("entity", body["model"]) or "")
+    out.discard("")
+    return out
+
+
+async def gate_shared_request(request: Request, tenant_id: uuid.UUID | None) -> None:
+    """Refuse (403) a request that reaches a switched-off or unlicensed module's records
+    through a shared, type-keyed surface. Called for every authenticated request from
+    ``core.deps.get_token_payload``; a request naming no gated type costs a path split."""
+    for key in sorted(await modules_named_by_request(request)):
+        detail = await module_refusal(key, tenant_id)
+        if detail:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+async def require_entity_module(entity_type: str | None, tenant_id: uuid.UUID | None) -> None:
+    """In-code form of the gate, for endpoints that reach a record by an id alone (a file,
+    a comment, an attestation) and only learn its type after loading it."""
+    key = module_for_entity_type(entity_type)
+    detail = await module_refusal(key, tenant_id) if key else None
+    if detail:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+async def entity_type_usable(entity_type: str | None, tenant_id: uuid.UUID | None) -> bool:
+    """Whether listings should offer this record type (its module, if any, is usable)."""
+    key = module_for_entity_type(entity_type)
+    return key is None or await module_refusal(key, tenant_id) is None
 
 
 def module_states(organisation: frozenset[str] | list[str] | None = None) -> list[dict]:

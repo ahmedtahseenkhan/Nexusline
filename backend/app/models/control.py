@@ -180,12 +180,18 @@ class Control(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, S
     )
     audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
         "AuditFinding", secondary="audit_finding_controls", lazy="selectin", viewonly=True,
+        # Findings of an archived engagement leave this record's view with the audit.
+        secondaryjoin=lambda: _live_findings("audit_finding_controls"),
     )
     assets: Mapped[list["Asset"]] = relationship(  # noqa: F821
         "Asset", secondary=control_assets, lazy="selectin",
     )
     vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
         "Vendor", secondary="vendor_controls", lazy="selectin", viewonly=True,
+    )
+    # Regulatory obligations this control satisfies (set from the obligation's side).
+    obligations: Mapped[list["Obligation"]] = relationship(  # noqa: F821
+        "Obligation", secondary="obligation_controls", lazy="selectin", viewonly=True,
     )
     # Phase 2 scope: where the control operates.
     business_units: Mapped[list["BusinessUnit"]] = relationship(  # noqa: F821
@@ -341,3 +347,9 @@ class ControlMaintenance(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base)
     conclusion: Mapped[str] = mapped_column(Text, default="")
 
     control: Mapped[Control] = relationship(back_populates="maintenances")
+
+
+def _live_findings(link_table_name: str):
+    from app.models import internal_audit
+
+    return internal_audit.live_finding_secondaryjoin(getattr(internal_audit, link_table_name))

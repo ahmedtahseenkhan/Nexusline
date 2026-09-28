@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import LookupManager, { GovernedLookupManager, type LookupRegistry } from "@/components/LookupManager";
 import ClassificationSchemes from "@/components/ClassificationSchemes";
 import { listLookupLists, type LookupList } from "@/lib/masterData";
+import { useHasPermission } from "@/lib/tenantSettings";
 
 /** Where each governed list's values are picked, so an admin knows what they edit. */
 const GOVERNED_HELP: Record<string, string> = {
@@ -26,7 +27,7 @@ const GOVERNED_HELP: Record<string, string> = {
   country: "Country of a third party (ISO 3166 names; the code is the value).",
 };
 
-const REGISTRIES: LookupRegistry[] = [
+const REGISTRIES: (LookupRegistry & { permission?: string })[] = [
   {
     title: "Asset media types",
     help: "The IT/information asset taxonomy — the “Media type” dropdown on both asset forms.",
@@ -57,6 +58,10 @@ const REGISTRIES: LookupRegistry[] = [
     help: "Free-form tags attachable to any record from its side panel. Deleting one removes it from every record.",
     endpoint: "/collab/tags",
     fields: ["name", "color"],
+    // Renaming or deleting a library tag changes every record, so it is governed like
+    // the value lists (org:write); tagging a record from its panel needs only that
+    // record's write permission.
+    permission: "org:write",
   },
 ];
 
@@ -88,6 +93,7 @@ function GovernedLists() {
 }
 
 export default function LookupsPage() {
+  const canGovern = useHasPermission("org:write");
   return (
     <>
       <div className="page-head">
@@ -99,7 +105,7 @@ export default function LookupsPage() {
       </div>
       <GovernedLists />
       <h2 style={{ fontSize: 17, margin: "0 0 12px" }}>Asset, vendor and tag lists</h2>
-      {REGISTRIES.map((r) => (
+      {REGISTRIES.filter((r) => r.permission !== "org:write" || canGovern).map((r) => (
         <LookupManager key={r.endpoint} registry={r} />
       ))}
       <ClassificationSchemes />

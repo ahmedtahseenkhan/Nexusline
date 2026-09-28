@@ -13,6 +13,7 @@ import RelatedChips from "@/components/RelatedChips";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
@@ -387,6 +388,7 @@ function RegulatoryChangeInner() {
   const [showChangeForm, setShowChangeForm] = useState(false);
   const [savingChange, setSavingChange] = useState(false);
   const [cf, setCf] = useState<ChangeForm>(BLANK_CHANGE);
+  const changeCfForm = useCustomFieldForm("regulatory_change");
   const setC = <K extends keyof ChangeForm>(k: K, v: ChangeForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
   // ---- nested obligation draft (drawer) ----
@@ -430,6 +432,10 @@ function RegulatoryChangeInner() {
     loadSummary();
   }, [loadSummary]);
 
+  // Deep link from a policy's or control's linked obligations (`?obligation=<id>`):
+  // open that obligation on the Obligations tab, then drop the param.
+  const [oblParam, setOblParam] = useRecordParam("obligation");
+
   // ------------------------------------------------------------- fetchers (server-driven tables)
   const fetchChanges = useCallback((qs: string) => apiCall<PagedList<RegChange>>("GET", `/regulatory-change?${qs}`), []);
   const fetchObligations = useCallback((qs: string) => apiCall<PagedList<Obligation>>("GET", `/obligations?${qs}`), []);
@@ -451,12 +457,14 @@ function RegulatoryChangeInner() {
   function openNewChange() {
     setEditingChange(null);
     setCf(BLANK_CHANGE);
+    changeCfForm.start(null);
     setError(null);
     setShowChangeForm(true);
   }
   function openEditChange(c: RegChange) {
     setEditingChange(c);
     setCf(fromChange(c));
+    changeCfForm.start(c.id);
     setError(null);
     setShowChangeForm(true);
   }
@@ -465,8 +473,10 @@ function RegulatoryChangeInner() {
     setSavingChange(true);
     try {
       const payload = changePayload(cf);
-      if (editingChange) await apiCall<RegChange>("PATCH", `/regulatory-change/${editingChange.id}`, payload);
-      else await apiCall<RegChange>("POST", "/regulatory-change", payload);
+      const saved = editingChange
+        ? await apiCall<RegChange>("PATCH", `/regulatory-change/${editingChange.id}`, payload)
+        : await apiCall<RegChange>("POST", "/regulatory-change", payload);
+      await changeCfForm.save(saved.id);
       setShowChangeForm(false);
       reload();
       if (openId) loadDetail(openId);
@@ -551,6 +561,16 @@ function RegulatoryChangeInner() {
     }
     setShowOblForm(true);
   }
+  useEffect(() => {
+    if (!oblParam) return;
+    setSection("obligations");
+    apiCall<Obligation>("GET", `/obligations/${oblParam}`)
+      .then(openEditObl)
+      .catch((e) => setError(e instanceof Error ? e.message : "Obligation not found"))
+      .finally(() => setOblParam(null));
+    // openEditObl reads the open change for its label only; the param is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [oblParam]);
   async function saveObl() {
     setError(null);
     setSavingObl(true);
@@ -1171,6 +1191,7 @@ function RegulatoryChangeInner() {
             { id: "general", label: "General", content: changeGeneral, required: true },
             { id: "assessment", label: "Assessment", content: changeAssessment },
             { id: "timing", label: "Timing", content: changeTiming },
+            ...changeCfForm.tabs,
           ]}
           onClose={() => setShowChangeForm(false)}
           onSave={saveChange}

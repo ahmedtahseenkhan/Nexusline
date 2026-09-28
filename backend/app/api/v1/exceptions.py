@@ -26,7 +26,7 @@ from app.schemas.exception import (
 )
 from app.services.refs import next_reference
 from app.services import audit
-from app.services import dual_control
+from app.services import authority_limits, dual_control, lifecycle_gates, record_workflow, workflow_engine
 
 router = APIRouter(prefix="/exceptions", tags=["exceptions"])
 
@@ -94,6 +94,10 @@ async def _next_ref(db) -> str:
     return await next_reference(db, ExceptionRecord, "EXC")
 
 
+def _num(value) -> float | None:
+    return None if value is None else float(value)
+
+
 _EXCEPTION_SORTABLE = {
     "reference": ExceptionRecord.reference,
     "title": ExceptionRecord.title,
@@ -149,6 +153,11 @@ async def create_exception(body: ExceptionCreate, db: DbSession, user: CurrentUs
     data = body.model_dump(
         exclude={"risk_ids", "policy_ids", "requirement_ids", "control_ids", "asset_ids"}
     )
+    data["exposure_currency"] = (data.get("exposure_currency") or "").strip().upper()
+    # Raising an exception is asking for its approval: a rule's maker role applies.
+    await dual_control.enforce_maker_role(
+        db, module="exception", action="approve", maker_id=user.id, amount=data.get("exposure_amount"),
+    )
     obj = ExceptionRecord(tenant_id=user.tenant_id, requested_by=user.id, **data)
     obj.reference = await _next_ref(db)
     await _apply_links(db, obj, body)  # writable M2M, PENDING/pre-flush is fine
@@ -172,19 +181,28 @@ async def get_exception(exc_id: uuid.UUID, db: DbSession) -> ExceptionRead:
 async def update_exception(exc_id: uuid.UUID, body: ExceptionUpdate, db: DbSession) -> ExceptionRead:
     obj = await _load(db, exc_id)
     # Maker-checker: approval/rejection is a checker action and must go through
-    # /decision (which requires exception:approve). Block those target states here so a
-    # holder of only exception:write can't self-approve via a plain PATCH.
-    if body.status in (ExceptionStatus.approved, ExceptionStatus.rejected) and body.status != obj.status:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Use the approve/reject decision action; status cannot be set to "
-            f"'{body.status.value}' via edit.",
-        )
-    await _apply_links(db, obj, body)
+    # /decision (which requires exception:approve) or the approval workflow. Refuse
+    # those target states here so a holder of only exception:write can't self-approve
+    # via a plain PATCH (services.lifecycle_gates.EXCEPTION_STATUS).
+    if body.status is not None:
+        refusal = lifecycle_gates.edit_refusal("exception", obj, {"status": body.status})
+        if refusal:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
     data = body.model_dump(
         exclude_unset=True,
         exclude={"risk_ids", "policy_ids", "requirement_ids", "control_ids", "asset_ids"},
     )
+    if "exposure_currency" in data:
+        data["exposure_currency"] = (data["exposure_currency"] or "").strip().upper()
+    moved = "exposure_amount" in data and _num(data["exposure_amount"]) != _num(obj.exposure_amount)
+    if moved and obj.status != ExceptionStatus.pending:
+        # The approver's mandate was checked against the exposure as it stood.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This exception was {obj.status.value} with the exposure it had then. Raise a new "
+            "exception for a different exposure.",
+        )
+    await _apply_links(db, obj, body)
     for f, v in data.items():
         setattr(obj, f, v)
     await db.flush()
@@ -207,6 +225,13 @@ async def decide_exception(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=f"Exception already {obj.status.value}"
         )
+    # One decision, two doors: while an approval route owns it, the route decides.
+    if await workflow_engine.instance_for(db, "exception", obj.id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This exception is going through its approval route; each stage is decided "
+            "from the Approvals inbox.",
+        )
     # Maker-checker: the requester of an exception cannot approve their own request.
     await dual_control.enforce_maker_checker(
         db,
@@ -216,6 +241,15 @@ async def decide_exception(
         checker_id=user.id,
         subject="exception",
     )
+    if body.approve:
+        # Delegation of authority: the approver's mandate must cover the exposure.
+        await authority_limits.enforce(db, "exception", obj, user)
+    current = record_workflow.state_value(obj.workflow_status)
+    if body.approve and current in (record_workflow.DRAFT, record_workflow.IN_REVIEW):
+        # The lifecycle records the same approval (and the business status follows it).
+        await record_workflow._set_state(db, obj, record_workflow.APPROVED, decided_by=user.id)
+    elif not body.approve and current == record_workflow.IN_REVIEW:
+        await record_workflow._set_state(db, obj, record_workflow.DRAFT)
     obj.approver_id = user.id
     obj.decided_at = date.today()
     obj.status = ExceptionStatus.approved if body.approve else ExceptionStatus.rejected

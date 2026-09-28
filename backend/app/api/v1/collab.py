@@ -10,17 +10,29 @@ crafted request can no longer create rows pointing at a record type that does no
 Comments and attachments may additionally be removed by their author or an admin
 (``role:write``). To let read-only reviewers comment, swap ``require_write`` for
 ``require_read`` in :func:`add_comment` — the one place that decision lives.
+
+Every write also checks that the record exists, is live and belongs to the caller's
+organisation (:func:`_require_record`): a comment, file or tag on an id that names no
+record is an orphan nobody can ever see or clean up.
+
+The tag library (``/collab/tags``) is shared vocabulary: renaming or deleting a tag
+changes what every record in the organisation shows, so managing it needs
+:data:`TAG_LIBRARY_PERMISSION` — the permission that governs the other organisation-wide
+value lists on the same Lookups page (``lookups.LOOKUP_WRITE``). Putting a tag on a
+record, including a new one typed in the record's panel, stays with the record's write
+permission: it adds a word, it changes nothing anyone else sees. Names are unique per
+organisation ignoring case and surrounding spaces, so "PCI" and "pci " are one tag.
 """
 from __future__ import annotations
 
 import uuid
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from app.core.deps import CurrentUser, DbSession
+from app.core.deps import CurrentUser, DbSession, require
 from app.models.collab import Attachment, Comment, EntityTag, StoredFile, Tag
 from app.schemas.collab import (
     AttachmentCreate,
@@ -35,12 +47,54 @@ from app.schemas.collab import (
     TagUpdate,
 )
 from app.services import entity_types, storage
+from app.services import modules as module_service
+from app.services.record_registry import model_for
 
 router = APIRouter(prefix="/collab", tags=["collaboration"])
+
+#: Managing the organisation-wide tag library (create, rename, recolour, delete).
+TAG_LIBRARY_PERMISSION = "org:write"
 
 
 def _is_admin(user) -> bool:
     return "role:write" in user.permission_codes
+
+
+def normalise_tag_name(name: str | None) -> str:
+    """A tag name as stored: trimmed, inner runs of whitespace collapsed. Pure."""
+    return " ".join((name or "").split())
+
+
+def _same_name(name: str):
+    """SQL: a tag with this name, ignoring case (names are stored normalised)."""
+    return func.lower(Tag.name) == normalise_tag_name(name).lower()
+
+
+async def _tag_named(db, name: str, *, excluding: uuid.UUID | None = None) -> Tag | None:
+    stmt = select(Tag).where(_same_name(name))
+    if excluding is not None:
+        stmt = stmt.where(Tag.id != excluding)
+    return await db.scalar(stmt.limit(1))
+
+
+def _valid_name(name: str | None) -> str:
+    clean = normalise_tag_name(name)
+    if not clean:
+        raise HTTPException(status_code=422, detail="A tag needs a name")
+    return clean
+
+
+async def _require_record(db, user, entity_type: str, entity_id: uuid.UUID) -> None:
+    """404 unless ``entity_id`` is a live record of ``entity_type`` in the caller's
+    organisation. Row-level security already hides other organisations' rows; the tenant
+    comparison is belt and braces for a session that runs without it."""
+    model = model_for(entity_type)
+    record = await db.get(model, entity_id) if model is not None else None
+    if record is None or getattr(record, "deleted", False) or (
+        getattr(record, "tenant_id", user.tenant_id) != user.tenant_id
+    ):
+        label = entity_types.spec(entity_type).label
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{label} not found")
 
 
 async def _tags_for(db, entity_type: str, entity_id: uuid.UUID) -> list[Tag]:
@@ -61,31 +115,47 @@ async def tag_library(db: DbSession, _: CurrentUser) -> list[TagRead]:
     return [TagRead.model_validate(t) for t in rows]
 
 
-@router.post("/tags", response_model=TagRead, status_code=201)
+@router.post(
+    "/tags", response_model=TagRead, status_code=201, dependencies=[Depends(require(TAG_LIBRARY_PERMISSION))]
+)
 async def create_tag(body: TagCreate, db: DbSession, user: CurrentUser) -> TagRead:
-    existing = await db.scalar(select(Tag).where(Tag.name == body.name))
+    name = _valid_name(body.name)
+    existing = await _tag_named(db, name)
     if existing:
         return TagRead.model_validate(existing)
-    tag = Tag(tenant_id=user.tenant_id, name=body.name, color=body.color)
+    tag = Tag(tenant_id=user.tenant_id, name=name, color=body.color)
     db.add(tag)
     await db.flush()
     await db.refresh(tag)
     return TagRead.model_validate(tag)
 
 
-@router.patch("/tags/{tag_id}", response_model=TagRead)
+@router.patch(
+    "/tags/{tag_id}", response_model=TagRead, dependencies=[Depends(require(TAG_LIBRARY_PERMISSION))]
+)
 async def update_tag(tag_id: uuid.UUID, body: TagUpdate, db: DbSession, _: CurrentUser) -> TagRead:
     tag = await db.get(Tag, tag_id)
     if tag is None:
         raise HTTPException(status_code=404, detail="Tag not found")
-    for name, value in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if "name" in data:
+        data["name"] = _valid_name(data["name"])
+        clash = await _tag_named(db, data["name"], excluding=tag.id)
+        if clash is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A tag named '{clash.name}' already exists. Use it, or delete one of the two.",
+            )
+    for name, value in data.items():
         setattr(tag, name, value)
     await db.flush()
     await db.refresh(tag)
     return TagRead.model_validate(tag)
 
 
-@router.delete("/tags/{tag_id}", status_code=204)
+@router.delete(
+    "/tags/{tag_id}", status_code=204, dependencies=[Depends(require(TAG_LIBRARY_PERMISSION))]
+)
 async def delete_tag(tag_id: uuid.UUID, db: DbSession, _: CurrentUser) -> None:
     """Removes the tag everywhere — its record assignments cascade with it."""
     tag = await db.get(Tag, tag_id)
@@ -146,6 +216,7 @@ async def add_comment(
     entity_type: str, entity_id: uuid.UUID, body: CommentCreate, db: DbSession, user: CurrentUser
 ) -> CommentRead:
     entity_types.require_write(user, entity_type)
+    await _require_record(db, user, entity_type, entity_id)
     c = Comment(
         tenant_id=user.tenant_id,
         entity_type=entity_type,
@@ -177,6 +248,7 @@ async def add_attachment(
     entity_type: str, entity_id: uuid.UUID, body: AttachmentCreate, db: DbSession, user: CurrentUser
 ) -> AttachmentRead:
     entity_types.require_write(user, entity_type)
+    await _require_record(db, user, entity_type, entity_id)
     a = Attachment(
         tenant_id=user.tenant_id,
         entity_type=entity_type,
@@ -211,6 +283,7 @@ async def upload_file(
 ) -> StoredFileRead:
     """Upload a binary file (evidence, screenshot, PDF…) and attach it to a record."""
     entity_types.require_write(user, entity_type)
+    await _require_record(db, user, entity_type, entity_id)
     blob = await storage.save_upload(user.tenant_id, file)
     sf = StoredFile(
         tenant_id=user.tenant_id,
@@ -242,6 +315,7 @@ async def download_file(file_id: uuid.UUID, db: DbSession, user: CurrentUser) ->
     # able to fetch its files by id. Previously any signed-in user of the organisation
     # could download any file whose id they had.
     entity_types.require_read(user, sf.entity_type)
+    await module_service.require_entity_module(sf.entity_type, user.tenant_id)
     path = storage.resolve_path(user.tenant_id, sf.storage_key)
     return FileResponse(
         path,
@@ -269,16 +343,21 @@ async def assign_tag(
     entity_type: str, entity_id: uuid.UUID, body: TagAssign, db: DbSession, user: CurrentUser
 ) -> list[TagRead]:
     entity_types.require_write(user, entity_type)
+    await _require_record(db, user, entity_type, entity_id)
     tag_id = body.tag_id
     if tag_id is None:
-        if not body.name:
+        if not normalise_tag_name(body.name):
             raise HTTPException(status_code=422, detail="Provide tag_id or name")
-        tag = await db.scalar(select(Tag).where(Tag.name == body.name))
+        # An existing tag is reused whatever the case it was typed in; a new one is added
+        # to the library (additive — see the module docstring).
+        tag = await _tag_named(db, body.name)
         if tag is None:
-            tag = Tag(tenant_id=user.tenant_id, name=body.name, color=body.color)
+            tag = Tag(tenant_id=user.tenant_id, name=normalise_tag_name(body.name), color=body.color)
             db.add(tag)
             await db.flush()
         tag_id = tag.id
+    elif await db.get(Tag, tag_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tag not found")
     exists = await db.scalar(
         select(EntityTag).where(
             EntityTag.tag_id == tag_id,

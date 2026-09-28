@@ -75,7 +75,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 
 > The production compose passes through the on-prem env vars with sane defaults:
 > `FILE_STORAGE_DIR`, `BACKUP_DIR`, `LICENSE_FILE`, `DEPLOYMENT_MODE`, `SMTP_*`,
-> `LDAP_ENABLED`, `MFA_REQUIRED`, `ENFORCE_SEGREGATION_OF_DUTIES`,
+> `LDAP_ENABLED`, `MFA_ENFORCEMENT`, `MFA_ENFORCEMENT_LOCKED`, `MFA_REQUIRED`, `ENFORCE_SEGREGATION_OF_DUTIES`,
 > `SCHEDULER_ENABLED`. Override any of them in `.env`.
 >
 > Licensing is deliberately **not** in that list beyond the file location:
@@ -140,6 +140,50 @@ the `SEED_*` variables in `.env`:
 **After the first successful login, change the admin password in the UI and set
 `SEED_DATA=false`** (then `docker compose -f docker-compose.prod.yml up -d` to
 apply). Leaving seeding on in production is a hardening finding.
+
+> **`SEED_ADMIN_PASSWORD` applies only while the database is empty.** Seeding is
+> one-time (`seed_if_empty`), so once the admin exists, editing that variable and
+> restarting changes nothing — the value in `.env` is then a record of what the
+> password *was*, not what it *is*. Every later change is made through the UI or the
+> CLI below. If `.env` says one thing and sign-in fails with "Invalid credentials",
+> this is almost always why.
+
+### Recovering an account (no vendor round-trip)
+
+The UI's own reset paths all need a session, so a lost admin password, a wiped
+authenticator or a lockout can leave an on-prem install with no way in. The bank's
+server administrator has one from the API container:
+
+```bash
+docker compose -f docker-compose.prod.yml exec api python -m app.tools.account list
+docker compose -f docker-compose.prod.yml exec api python -m app.tools.account \
+  show --org <slug> --email <address>          # why this account cannot sign in
+docker compose -f docker-compose.prod.yml exec api python -m app.tools.account \
+  reset-password --org <slug> --email <address> [--clear-mfa]
+docker compose -f docker-compose.prod.yml exec api python -m app.tools.account \
+  clear-mfa --org <slug> --email <address>     # lost authenticator, password intact
+docker compose -f docker-compose.prod.yml exec api python -m app.tools.account \
+  unlock --org <slug> --email <address>        # clear a lockout
+docker compose -f docker-compose.prod.yml exec api python -m app.tools.account \
+  deactivate --org <slug> --email <address>    # a leaver; refuses the last active Admin
+```
+
+Notes for the runbook, and for the IT security review that will ask:
+
+- The new password is **prompted for**, so it stays out of shell history and the
+  process list. It must satisfy the configured password policy.
+- `reset-password` also clears the failed-attempt counter and any lockout, and
+  reactivates a deactivated account — a lost password and a lockout usually arrive
+  together. `--clear-mfa` additionally drops the TOTP enrolment; **without it, an
+  account with MFA on still needs its authenticator code**, so the reset alone will
+  look like it did not work.
+- Every action writes an `admin_*` event to the organisation's audit trail naming
+  `cli:<os user>` as the actor, so an out-of-band reset is visible rather than silent.
+- There is **no delete**: a user is an actor in the audit trail, so accounts are
+  deactivated, never removed.
+- The tool needs shell access to the application server, which already implies
+  database access — it grants no privilege a host administrator lacked. Treat server
+  shell access as the control, and review these audit events accordingly.
 
 ---
 
@@ -274,6 +318,20 @@ python -m app.tools.license sign --key vendor-keys/license_signing_key.pem \
 python -m app.tools.license verify deploy/license.key
 ```
 
+A client licence allows **one organisation** (the default `--organisations 1`):
+the bank's IT team can run its own organisation from Settings → Organisations
+but cannot add a second, so the same build never becomes a hosting platform on
+a client's server. Only our own multi-tenant host gets a larger count:
+
+```bash
+python -m app.tools.license sign --key vendor-keys/license_signing_key.pem \
+  --to "NexusLine Cloud" --plan saas --deployment saas --organisations 0 \
+  --seats 0 --days 365 --out deploy/license.key      # 0 = unlimited
+```
+
+Self-service sign-up (`POST /auth/register-org`) is off everywhere unless
+`ALLOW_SELF_REGISTRATION=true`; leave it off on client installations.
+
 Release images are built with the enforcement flag stamped in (the default):
 
 ```bash
@@ -356,7 +414,9 @@ For diagnostics without granting remote access (see `docs/support-model.md`):
 - [ ] Set `ENVIRONMENT=production`.
 - [ ] Set `SEED_DATA=false` after the first run.
 - [ ] Confirm Postgres is **not** published to the host (default in prod compose).
-- [ ] Enable banking controls as required: `MFA_REQUIRED=true`,
+- [ ] Enable banking controls as required: `MFA_ENFORCEMENT=everyone` (and
+      `MFA_ENFORCEMENT_LOCKED=true` where IT security policy owns the decision; an
+      evaluation or UAT server may run `MFA_ENFORCEMENT=off`, never production),
       `ENFORCE_SEGREGATION_OF_DUTIES=true`, `LDAP_ENABLED` per directory setup.
 - [ ] Provision at least **two** users with approval rights before go-live — with
       segregation of duties on, eight decisions (risk acceptance, exception approval,
@@ -366,4 +426,9 @@ For diagnostics without granting remote access (see `docs/support-model.md`):
 - [ ] Deploying a release image (not a `PRODUCTION_BUILD=false` dev build) with a
       current `deploy/license.key`; renewal date diarised before expiry.
 - [ ] Schedule off-host backups and periodically test a restore.
+- [ ] **Load-test the install with the client's own volumes before go-live.** A bank's
+      asset register is 6,000-10,000 records, not the three a demo carries, and capacity
+      depends on `WEB_CONCURRENCY`, the database pool and Postgres `max_connections`
+      together. The procedure, the tooling and the acceptance thresholds are in
+      [load-testing.md](load-testing.md).
 ```

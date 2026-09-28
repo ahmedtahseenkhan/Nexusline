@@ -18,12 +18,15 @@ overwrites the other.
 """
 from __future__ import annotations
 
+import time
+
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.schema_loading import options_for
 from app.models.enums import (
     AuditFindingStatus,
     IncidentStatus,
@@ -44,6 +47,7 @@ __all__ = [
     "reconcile",
     "state_of",
     "summary",
+    "breached_on",
 ]
 
 ON_TRACK = "on_track"
@@ -67,6 +71,17 @@ class EntitySla:
     is_open: object
     #: Human label for an alert body.
     label_of: object
+    #: The record's own "this started" dates, tried in order before ``created_at``: the
+    #: day an issue or risk was identified, an incident detected. A record imported from
+    #: a legacy tool keeps its history this way — clocked from creation it would get a
+    #: fresh window on import day and could never show as breached.
+    #: A dotted name (``engagement.report_date``) reads the date off a related record.
+    started_fields: tuple[str, ...] = ()
+    #: Loader options the sweep needs to read ``started_fields`` without lazy loads.
+    #: Relationships the clock reads, as dotted paths (``started_fields`` may step through
+    #: one). Only these are loaded: a risk's linked assets are not the clock's business,
+    #: and loading them with the risks put thousands of assets in every reconcile.
+    load_paths: tuple[str, ...] = ()
 
 
 def _risk_severity(risk: Risk, scale) -> Severity:
@@ -89,6 +104,7 @@ ENTITIES: dict[str, EntitySla] = {
         severity_of=_risk_severity,
         is_open=lambda r: r.status.value not in ("closed", "accepted"),
         label_of=lambda r: f"{r.reference}: {r.title}",
+        started_fields=("identified_date",),
     ),
     "issue": EntitySla(
         key="issue", label="Issue", model=Issue, link="/issues",
@@ -97,6 +113,7 @@ ENTITIES: dict[str, EntitySla] = {
             IssueStatus2.closed, IssueStatus2.remediated, IssueStatus2.risk_accepted
         ),
         label_of=lambda i: f"{i.reference}: {i.title}",
+        started_fields=("identified_date",),
     ),
     "audit_finding": EntitySla(
         key="audit_finding", label="Audit finding", model=AuditFinding, link="/internal-audit",
@@ -105,12 +122,24 @@ ENTITIES: dict[str, EntitySla] = {
             AuditFindingStatus.closed, AuditFindingStatus.risk_accepted
         ),
         label_of=lambda f: f"{f.reference}: {f.title}",
+        # A finding has no date of its own, and the day it was keyed in is an accident of
+        # data entry. Under IIA Standards 2440/2500 a finding is formally raised when the
+        # engagement's report communicates it to management, and management's remediation
+        # commitment runs from there — so the clock starts at the report date; before the
+        # report is issued, at the end of fieldwork (the exit meeting, where findings are
+        # agreed); only then at creation. An SBP inspection or statutory audit logged
+        # after the fact keeps its real age this way instead of a fresh window.
+        started_fields=("engagement.report_date", "engagement.actual_end"),
+        load_paths=("engagement",),
     ),
     "incident": EntitySla(
         key="incident", label="Incident", model=Incident, link="/incidents",
         severity_of=lambda i, _bands: i.severity,
         is_open=lambda i: i.status not in (IncidentStatus.closed, IncidentStatus.resolved),
         label_of=lambda i: f"{i.reference}: {i.title}",
+        # Response is measured from detection (SBP and ISO 27035 alike), not from when
+        # the incident happened — a late detection is a separate finding, not a TAT miss.
+        started_fields=("detected_at",),
     ),
 }
 
@@ -218,7 +247,15 @@ def target_for(
 # ---------------------------------------------------------------------------
 # Reconciliation
 # ---------------------------------------------------------------------------
-async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
+#: How long one organisation's reconcile result is reused. The sign-in reminder asks on
+#: every page load and the dashboard asks again, and each ask re-derived every open
+#: record's window and rewrote its due date — at bank scale the slowest call on every
+#: page of the app. A policy edit forces a fresh pass, so the grid never reads stale.
+RECONCILE_TTL_SECONDS = 60
+_recent: dict[str, tuple[float, list[TatRecord]]] = {}
+
+
+async def reconcile(db: AsyncSession, tenant_id, *, force: bool = False) -> list[TatRecord]:
     """Recompute every open record's TAT window; return those now at risk or breached.
 
     Idempotent. ``tat_breached_at`` is stamped only the first time a window lapses, so
@@ -226,8 +263,17 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
     cleared if the record's due date moves back into the future (a severity downgrade,
     or a longer policy), because a record that is no longer late should not keep
     reporting as historically late.
+
+    A pass within the last :data:`RECONCILE_TTL_SECONDS` is reused unless ``force`` —
+    per worker process, so two workers reconcile at most twice a minute between them.
     """
     from app.services.risk_settings import get_or_create_settings, scale_for
+
+    key = str(tenant_id)
+    if not force:
+        hit = _recent.get(key)
+        if hit is not None and time.monotonic() - hit[0] < RECONCILE_TTL_SECONDS:
+            return hit[1]
 
     policies = await policy_map(db)
     bands = scale_for(await get_or_create_settings(db, tenant_id))
@@ -235,7 +281,7 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
     flagged: list[TatRecord] = []
 
     for spec in ENTITIES.values():
-        stmt = select(spec.model)
+        stmt = select(spec.model).options(*options_for(spec.model, None, spec.load_paths))
         if hasattr(spec.model, "deleted"):
             stmt = stmt.where(spec.model.deleted.is_(False))
         for row in (await db.scalars(stmt)).all():
@@ -248,7 +294,7 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
 
             severity = spec.severity_of(row, bands)
             target, warn_pct, _role = target_for(policies, spec.key, severity)
-            started = _started_on(row)
+            started = _started_on(row, spec.started_fields)
             if target is None or started is None:
                 row.tat_due_date = None
                 continue
@@ -259,7 +305,7 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
 
             if state.state == BREACHED:
                 if row.tat_breached_at is None:
-                    row.tat_breached_at = today
+                    row.tat_breached_at = breached_on(due, today)
             elif row.tat_breached_at is not None:
                 row.tat_breached_at = None
 
@@ -279,15 +325,38 @@ async def reconcile(db: AsyncSession, tenant_id) -> list[TatRecord]:
 
     await db.flush()
     flagged.sort(key=lambda r: (-r.days_overdue, r.due or today))
+    _recent[key] = (time.monotonic(), flagged)
     return flagged
 
 
-def _started_on(row) -> date | None:
-    """When the clock started — the record's creation date."""
-    created = getattr(row, "created_at", None)
-    if created is None:
+def _as_day(value) -> date | None:
+    if value is None:
         return None
-    return created.date() if hasattr(created, "date") else created
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _started_on(row, fields: tuple[str, ...] = ()) -> date | None:
+    """When the clock started: the first of the record's own start dates that is set
+    (``EntitySla.started_fields``, dotted names following a relationship), else its
+    creation date. Pure.
+
+    A start date later than the record's creation (a typo, or a date entered ahead) is
+    taken as given — the window then simply runs from it."""
+    for name in fields:
+        value = row
+        for part in name.split("."):
+            value = getattr(value, part, None) if value is not None else None
+        own = _as_day(value)
+        if own is not None:
+            return own
+    return _as_day(getattr(row, "created_at", None))
+
+
+def breached_on(due: date, today: date) -> date:
+    """The first day a window lapsed: the day after it was due. A record backdated past
+    its window (an import) is stamped with when it really breached, not the day the
+    sweep noticed. Pure."""
+    return min(today, due + timedelta(days=1))
 
 
 async def summary(db: AsyncSession, tenant_id) -> dict:

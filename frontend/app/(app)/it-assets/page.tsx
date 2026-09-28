@@ -29,6 +29,7 @@ import ImportExport from "@/components/ImportExport";
 import GenerateRisks, { type GenerateRisksHandle } from "@/components/GenerateRisks";
 import { InlineLookupCreate } from "@/components/LookupManager";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import {
   AssetRiskReportButton,
   Disclosure,
@@ -87,11 +88,11 @@ import { titleCase } from "@/lib/text";
 
 /* ------------------------------------------------------------------ types */
 type Tone = "low" | "medium" | "high" | "critical" | "neutral" | "info";
-type LinkRef = { id: string; label: string };
-// Relation refs from GET /assets/{id} arrive as {id, label}; adapt to the
-// {id, name} shape the linked-record chips render.
+type LinkRef = { id: string; label: string; reference?: string; name?: string };
+// Relation refs from GET /assets/{id} arrive as {id, label, reference, name}; adapt to
+// the {id, reference, name} shape the linked-record chips render ("SBP-05 Outsourcing").
 const asRefs = (items?: LinkRef[]): GraphRef[] | undefined =>
-  items?.map((x) => ({ id: x.id, name: x.label }));
+  items?.map((x) => ({ id: x.id, reference: x.reference || undefined, name: x.name || x.label }));
 /** Risk refs carry their reference separately and the risk's name as the label (an older API sent the reference as the label). */
 const riskRefs = (items?: AssetRiskRef[]): (GraphRef & AssetRiskRef)[] | undefined =>
   items?.map((x) => ({ ...x, reference: x.reference || x.label, name: x.reference && x.label !== x.reference ? x.label : "" }));
@@ -129,6 +130,11 @@ type Asset = {
   controls?: GraphRef[];
   threats?: GraphRef[];
   vulnerabilities?: GraphRef[];
+  // linked from the other side: continuity plans, RoPA entries, BIAs, scanner findings
+  continuity_plans?: GraphRef[];
+  processing_activities?: GraphRef[];
+  bia_assessments?: GraphRef[];
+  vuln_findings?: GraphRef[];
 };
 type MediaType = { id: string; name: string; description: string; editable: boolean };
 type Summary = {
@@ -145,6 +151,14 @@ const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey]
 const CRIT = opts(["low", "medium", "high", "critical"]);
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const ENVIRONMENT = opts(["production", "dr", "uat", "staging", "development", "not_applicable"]);
+// Register filters. Six thousand rows need narrowing beyond search: where an asset
+// runs, how critical it is (the effective value the column shows) and its approval state.
+const CRIT_FILTER = opts(["low", "medium", "high", "critical"]);
+const WORKFLOW_FILTER: Option[] = [
+  { value: "draft", label: "Draft" }, { value: "in_review", label: "In review" },
+  { value: "approved", label: "Approved" }, { value: "retired", label: "Retired" },
+];
+const REVIEW_FILTER: Option[] = [{ value: "overdue", label: "Review overdue" }];
 const DISCOVERY = opts(["manual", "active_directory", "intune_mdm", "cmdb", "network_scan", "cloud_connector", "edr", "import_csv"]);
 const RELATIONSHIP = opts(["hosts", "stores", "processes", "transmits", "backs_up"]);
 const CRIT_TONE: Record<string, Tone> = { low: "low", medium: "medium", high: "high", critical: "critical" };
@@ -227,6 +241,27 @@ function ITAssetsInner() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [envFilter, setEnvFilter] = useState("");
+  const [critFilter, setCritFilter] = useState("");
+  const [wfFilter, setWfFilter] = useState("");
+  const [overdueFilter, setOverdueFilter] = useState("");
+  // What the table shows, so Export carries exactly those rows.
+  const [view, setView] = useState<{ search: string; filters: Record<string, string | number | boolean | undefined>; total: number } | null>(null);
+  const exportQuery = useMemo(() => {
+    const p = new URLSearchParams();
+    if (view?.search) p.set("search", view.search);
+    for (const [k, v] of Object.entries(view?.filters ?? {})) if (v !== undefined && v !== "" && v !== false) p.set(k, String(v));
+    return p.toString();
+  }, [view]);
+  // Filters arrive in the link too — "1,560 IT assets have reviews overdue" opens the
+  // register filtered to them (?review_overdue=true). Read once, on arrival.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("environment")) setEnvFilter(p.get("environment") as string);
+    if (p.get("effective_criticality")) setCritFilter(p.get("effective_criticality") as string);
+    if (p.get("workflow_status")) setWfFilter(p.get("workflow_status") as string);
+    if (p.get("review_overdue") === "true") setOverdueFilter("overdue");
+  }, []);
   const { currency, currencyOptions, formatDate, formatMoney } = useFormat();
 
   const [mediaTypes, setMediaTypes] = useState<MediaType[]>([]);
@@ -263,7 +298,8 @@ function ITAssetsInner() {
   const canGenerate = useHasPermission("risk:write");
   const ctx = useRecordCtx(gov, canWrite);
   const fmt = ctx.fmt;
-  const cf = useCustomFieldFacts("asset", detail?.id, { builtInLabels: ["Owner", "Owning unit", "Guardian", "Custodian"] });
+  const cfForm = useCustomFieldForm("it_asset");
+  const cf = useCustomFieldFacts("it_asset", detail?.id, { builtInLabels: ["Owner", "Owning unit", "Guardian", "Custodian"] });
 
   const loadSummary = useCallback(() => {
     apiCall<Summary>("GET", "/assets/summary?asset_class=it_asset").then(setSummary).catch(() => {});
@@ -307,19 +343,22 @@ function ITAssetsInner() {
     [],
   );
 
-  function openNew() { setEditing(null); setEditTab(undefined); setF({ ...BLANK, currency }); setError(null); setShowForm(true); }
-  function openEdit(a: Asset, tab?: string) { setEditing(a); setEditTab(tab); setF({ ...fromAsset(a), currency: a.currency || currency }); setError(null); setShowForm(true); }
+  function openNew() { setEditing(null); setEditTab(undefined); setF({ ...BLANK, currency }); cfForm.start(null); setError(null); setShowForm(true); }
+  function openEdit(a: Asset, tab?: string) { setEditing(a); setEditTab(tab); setF({ ...fromAsset(a), currency: a.currency || currency }); cfForm.start(a.id); setError(null); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f, currency);
-      if (editing) await apiCall<Asset>("PATCH", `/assets/${editing.id}`, payload);
-      else await apiCall<Asset>("POST", "/assets", payload);
+      const saved = editing
+        ? await apiCall<Asset>("PATCH", `/assets/${editing.id}`, payload)
+        : await apiCall<Asset>("POST", "/assets", payload);
+      await cfForm.save(saved.id);
       setShowForm(false); setRefreshKey((k) => k + 1); loadSummary();
       if (openId) {
         loadDetail(openId);
         void gov.reload();
+        void cf.reload();
       }
       toast(editing ? "Changes saved" : "Created");
     } catch (e) {
@@ -403,9 +442,9 @@ function ITAssetsInner() {
   const columns: Column<Asset>[] = [
     { key: "name", header: "Name", sortable: true, locked: true, render: (a) => <span className="cell-title">{a.name}</span> },
     { key: "environment", header: "Environment", sortable: true, render: (a) => <Badge tone="neutral" plain>{cap(a.environment)}</Badge>, text: (a) => cap(a.environment) },
-    { key: "availability", header: "Availability", render: (a) => <CritBadge value={a.availability} />, text: (a) => cap(a.availability) },
+    { key: "availability", header: "Availability", sortable: true, render: (a) => <CritBadge value={a.availability} />, text: (a) => cap(a.availability) },
     { key: "replacement_cost", header: "Cost band", sortable: true, render: (a) => <CritBadge value={a.cost_band} />, text: (a) => cap(a.cost_band) },
-    { key: "effective_criticality", header: "Effective criticality", render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
+    { key: "effective_criticality", header: "Effective criticality", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
     { key: "hosted", header: "Hosted data", align: "center", render: (a) => <span className="muted">{a.dependencies?.length || "—"}</span>, text: (a) => String(a.dependencies?.length ?? 0) },
     { key: "hostname", header: "Hostname", hidden: true, render: (a) => <span className="ref">{a.hostname || "—"}</span> },
     { key: "ip_address", header: "IP address", hidden: true, render: (a) => <span className="ref">{a.ip_address || "—"}</span> },
@@ -633,6 +672,9 @@ function ITAssetsInner() {
         { key: "related", label: "Related assets", items: asRefs(a.related_assets), href: "/it-assets" },
         { key: "vendors", label: "Third parties", items: a.vendors, href: "/vendors" },
         { key: "access", label: "Access reviews", items: a.access_reviews, href: "/access-reviews" },
+        { key: "continuity", label: "Continuity plans", items: a.continuity_plans, href: "/continuity" },
+        { key: "bia", label: "Business impact analyses", items: a.bia_assessments, href: "/bia" },
+        { key: "vuln_findings", label: "Vulnerability findings", items: a.vuln_findings, href: "/vulnerabilities" },
       ]
     : [];
 
@@ -651,7 +693,7 @@ function ITAssetsInner() {
           <p>Supporting assets — hardware, software and network. Judged on cost and availability, with criticality inheriting from the information assets they host.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <ImportExport resource="it-assets" label="IT Assets"
+          <ImportExport resource="it-assets" label="IT Assets" exportQuery={exportQuery} exportCount={view?.total}
             onDone={() => { setRefreshKey((k) => k + 1); loadSummary(); }} />
           <GenerateRisks assetClass="it_asset" label="IT assets" />
           <button className="btn" onClick={openNew}><IconPlus width={16} height={16} /> Add IT asset</button>
@@ -661,10 +703,10 @@ function ITAssetsInner() {
       {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
 
       <div className="grid stat-grid">
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.total ?? 0).toLocaleString()}</span></div><span className="l">IT assets</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.effective_critical ?? 0).toLocaleString()}</span></div><span className="l">Effective-critical</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{(summary?.production ?? 0).toLocaleString()}</span></div><span className="l">Production assets</span></div>
-        <div className="card stat"><div className="stat-top"><span className="n">{formatMoney(summary?.total_replacement_value ?? 0, summary?.replacement_value?.reporting_currency, { compact: "auto" })}</span></div><span className="l">Total replacement value</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.total.toLocaleString() : "…"}</span></div><span className="l">IT assets</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.effective_critical.toLocaleString() : "…"}</span></div><span className="l">Effective-critical</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? summary.production.toLocaleString() : "…"}</span></div><span className="l">Production assets</span></div>
+        <div className="card stat"><div className="stat-top"><span className="n">{summary ? formatMoney(summary.total_replacement_value ?? 0, summary.replacement_value?.reporting_currency, { compact: "auto" }) : "…"}</span></div><span className="l">Total replacement value</span></div>
       </div>
 
       {unconvertedNote(summary?.replacement_value) && (
@@ -676,6 +718,17 @@ function ITAssetsInner() {
       <DataTable<Asset>
         toolbarRight={<ArchivedRecords entityType="asset" noun="assets" onRestored={() => { setRefreshKey((k) => k + 1); loadSummary(); }} refreshKey={refreshKey} />}
         tableKey="it-assets"
+        filters={{ environment: envFilter || undefined, effective_criticality: critFilter || undefined, workflow_status: wfFilter || undefined, review_overdue: overdueFilter ? true : undefined }}
+        onApplyFilters={(f) => { setEnvFilter(String(f.environment ?? "")); setCritFilter(String(f.effective_criticality ?? "")); setWfFilter(String(f.workflow_status ?? "")); setOverdueFilter(f.review_overdue ? "overdue" : ""); }}
+        onViewChange={setView}
+        toolbarLeft={
+          <>
+            <Select value={envFilter} onChange={setEnvFilter} options={ENVIRONMENT} placeholder="All environments" />
+            <Select value={critFilter} onChange={setCritFilter} options={CRIT_FILTER} placeholder="Any criticality" />
+            <Select value={wfFilter} onChange={setWfFilter} options={WORKFLOW_FILTER} placeholder="Any approval state" />
+            <Select value={overdueFilter} onChange={setOverdueFilter} options={REVIEW_FILTER} placeholder="Any review state" />
+          </>
+        }
         statusModel="asset"
         bulkActions={(rows, clear) => (
           <>
@@ -688,7 +741,7 @@ function ITAssetsInner() {
         rowKey={(a) => a.id}
         onRowClick={(a) => setOpenId(a.id)}
         activeKey={openId}
-        searchPlaceholder="Search IT assets by name, hostname or owner…"
+        searchPlaceholder="Search IT assets by name, hostname, IP address or owner…"
         defaultSort={{ by: "name", dir: "asc" }}
         emptyMessage="No IT assets yet. Add hardware, software and network assets to build the supporting-asset inventory."
         refreshKey={refreshKey}
@@ -936,6 +989,7 @@ function ITAssetsInner() {
             { id: "cost", label: "Cost & Availability", content: costTab },
             { id: "inventory", label: "Inventory", content: inventoryTab },
             { id: "tags", label: "Tags & Discovery", content: tagsTab },
+            ...cfForm.tabs,
           ]}
           initialTab={editTab}
           onClose={() => setShowForm(false)}

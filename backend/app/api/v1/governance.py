@@ -16,7 +16,7 @@ before each scheduled meeting.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from urllib.parse import quote
@@ -84,6 +84,13 @@ def _sections_or_422(value):
 
 async def _next_ref(db, model, prefix: str) -> str:
     return await next_reference(db, model, prefix)
+
+
+#: Reference prefix for meeting decisions / actions / resolutions. They used to share
+#: "DEC" with declaration campaigns, so "DEC-004" named two different records. New
+#: decisions are numbered "MDC-…"; decisions already filed keep their DEC reference
+#: (minutes and board packs quote it), and search still finds them by it.
+DECISION_PREFIX = "MDC"
 
 
 _COMMITTEE_SORTABLE = {
@@ -206,7 +213,7 @@ async def update_committee(cid: uuid.UUID, body: CommitteeUpdate, db: DbSession,
 async def delete_committee(cid: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
     obj = await _load_committee(db, cid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
     await audit_log.record(db, actor=user, action="delete", entity_type="committee", entity_id=obj.id,
                            summary=f"Archived committee {obj.reference}: {obj.name}")
@@ -333,7 +340,7 @@ async def add_decision(mid: uuid.UUID, body: DecisionCreate, db: DbSession, user
     await _load_meeting(db, mid)
     await master_data.check_user(db, body.owner_id, "owner_id")
     decision = MeetingDecision(tenant_id=user.tenant_id, meeting_id=mid, **body.model_dump())
-    decision.reference = await _next_ref(db, MeetingDecision, "DEC")
+    decision.reference = await _next_ref(db, MeetingDecision, DECISION_PREFIX)
     if decision.status == DecisionStatus.done and decision.completed_date is None:
         decision.completed_date = date.today()
     db.add(decision)
@@ -697,6 +704,81 @@ async def release_board_pack(pack_id: uuid.UUID, db: DbSession, user: CurrentUse
     return (await _pack_reads(db, [pack], user))[0]
 
 
+def pack_delete_refusal(status: str, review_state: str) -> str | None:
+    """Why a pack may not be deleted, or None. A pack that failed to generate is noise
+    on the committee's list; a draft is work in progress its preparers may discard. A
+    reviewed pack has been signed off by a second person and a released one is what the
+    committee received — both are the record (Diligent Boards and BoardEffect likewise
+    lock a published book), so they stay."""
+    if status == board_pack.FAILED:
+        return None
+    if review_state == board_pack.RELEASED:
+        return "A released board pack is what the committee received and cannot be deleted."
+    if review_state == board_pack.REVIEWED:
+        return "This pack has been reviewed. Return it to draft before deleting it."
+    return None
+
+
+async def _remove_pack(db, pack: BoardPack) -> None:
+    """Delete the pack row and its filed PDF / XLSX (rows and bytes)."""
+    keys: list[str] = []
+    for fid in (pack.pdf_file_id, pack.xlsx_file_id):
+        sf = await db.get(StoredFile, fid) if fid else None
+        if sf is not None:
+            keys.append(sf.storage_key)
+            await db.delete(sf)
+    await db.delete(pack)
+    await db.flush()
+    for key in keys:
+        storage.delete_object(key)
+
+
+@router.delete("/board-packs/{pack_id}", status_code=204, dependencies=[_WRITE],
+               summary="Delete a failed or draft board pack (and its files)")
+async def delete_board_pack(pack_id: uuid.UUID, db: DbSession, user: CurrentUser) -> None:
+    _org, pack = await _org_and_pack(db, user, pack_id)
+    refusal = pack_delete_refusal(pack.status, getattr(pack, "review_state", board_pack.DRAFT))
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
+    label, state = pack.title, ("failed" if pack.status == board_pack.FAILED else pack.review_state)
+    entity_type, entity_id = ("committee", pack.committee_id) if pack.committee_id else ("board_pack", pack.id)
+    await _remove_pack(db, pack)
+    await audit_log.record(db, actor=user, action="delete", entity_type=entity_type, entity_id=entity_id,
+                           summary=f"Deleted {state} board pack '{label}'"[:500],
+                           changes={"board_pack_id": str(pack_id), "state": state})
+
+
+@router.post("/board-packs/{pack_id}/regenerate", response_model=BoardPackRead, status_code=201,
+             dependencies=[_WRITE],
+             summary="Generate a failed pack again with the same committee, meeting, period and sections")
+async def regenerate_board_pack(pack_id: uuid.UUID, db: DbSession, user: CurrentUser) -> BoardPackRead:
+    """Builds a new pack from the failed one's settings. When it succeeds the failed row
+    is removed (the activity trail keeps both events); when it fails again the new
+    failure replaces the old one, so the list never fills up with retries."""
+    org, pack = await _org_and_pack(db, user, pack_id)
+    if pack.status != board_pack.FAILED:
+        raise HTTPException(status_code=409, detail="Only a pack that failed to generate can be regenerated. "
+                                                    "Generate a new pack for a fresh draft.")
+    meeting = committee = None
+    if pack.meeting_id is not None:
+        meeting = await db.scalar(select(Meeting).where(Meeting.id == pack.meeting_id))
+    if pack.committee_id is not None:
+        committee = await db.scalar(select(Committee).where(Committee.id == pack.committee_id,
+                                                            Committee.deleted.is_(False)))
+        if committee is None:
+            raise HTTPException(status_code=409, detail="The pack's committee has been archived; it cannot be regenerated.")
+    try:
+        fresh = await board_pack.generate(
+            db, org, actor=user, committee=committee, meeting=meeting,
+            period_start=pack.period_start, period_end=pack.period_end,
+            sections=list(pack.sections or []) or None, title=pack.title, reason="regenerated",
+        )
+    except board_pack.PackError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _remove_pack(db, pack)
+    return (await _pack_reads(db, [fresh], user))[0]
+
+
 # ------------------------------------------------------------ pack branding ---
 async def _branding_read(db, row) -> BoardPackBrandingRead:
     if row is None:
@@ -753,18 +835,64 @@ async def update_board_pack_branding(body: BoardPackBrandingUpdate, db: DbSessio
     return await _branding_read(db, row)
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+JPEG_SIGNATURE = b"\xff\xd8\xff"
+LOGO_REFUSAL = ("The logo must be a PNG or JPEG image. This file is not one (whatever its name "
+                "says), so it could not be printed on the pack cover. Export the logo as PNG or "
+                "JPEG and upload that.")
+
+
+def logo_format(head: bytes) -> str | None:
+    """"png" or "jpeg" from a file's leading bytes (its magic number), else None."""
+    if head.startswith(PNG_SIGNATURE):
+        return "png"
+    if head.startswith(JPEG_SIGNATURE):
+        return "jpeg"
+    return None
+
+
+def logo_problem(path, kind: str) -> str | None:
+    """Why the saved file cannot be a pack logo, or None. Opens it with Pillow (the PDF
+    renderer needs it to embed images, so it is installed wherever packs are made): a
+    file with the right first bytes but a corrupt or truncated body is refused here
+    rather than dropped from every pack later."""
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - the magic-number check still applied
+        return None
+    try:
+        with Image.open(path) as img:
+            fmt = (img.format or "").lower()
+            img.verify()
+    except Exception:  # noqa: BLE001 - any failure to decode means "not a usable image"
+        return ("The logo file is damaged or incomplete and could not be read as an image. "
+                "Export it again as PNG or JPEG and upload that.")
+    if fmt != kind:
+        return LOGO_REFUSAL
+    return None
+
+
 @router.post("/board-pack-branding/logo", response_model=BoardPackBrandingRead,
              dependencies=[Depends(require("settings:manage"))],
              summary="Upload the logo printed on board pack covers (PNG or JPEG)")
 async def upload_board_pack_logo(db: DbSession, user: CurrentUser, file: UploadFile = File(...)) -> BoardPackBrandingRead:
-    kind = (file.content_type or "").lower()
-    if kind not in ("image/png", "image/jpeg", "image/jpg"):
-        raise HTTPException(status_code=422, detail="The logo must be a PNG or JPEG image.")
+    """The file's own bytes decide, not the content type the browser declared: a text or
+    PDF file named ``logo.png`` used to be accepted and then silently left off every
+    pack's cover. It must start like a PNG or JPEG and open as one."""
+    head = await file.read(len(PNG_SIGNATURE))
+    await file.seek(0)
+    kind = logo_format(head)
+    if kind is None:
+        raise HTTPException(status_code=422, detail=LOGO_REFUSAL)
     row = await _branding_row(db, user)
     await db.flush()
     blob = await storage.save_upload(user.tenant_id, file)
+    problem = logo_problem(storage.resolve_path(user.tenant_id, blob.storage_key), kind)
+    if problem:
+        storage.delete_object(blob.storage_key)
+        raise HTTPException(status_code=422, detail=problem)
     sf = StoredFile(tenant_id=user.tenant_id, entity_type="board_pack_branding", entity_id=row.id,
-                    title="Board pack logo", filename=blob.filename, content_type=blob.content_type,
+                    title="Board pack logo", filename=blob.filename, content_type=f"image/{kind}",
                     size_bytes=blob.size_bytes, sha256=blob.sha256, storage_key=blob.storage_key,
                     uploaded_by_email=(user.email or "")[:255])
     db.add(sf)

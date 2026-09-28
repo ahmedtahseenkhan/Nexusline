@@ -3,9 +3,10 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
+from app.schemas.common import GraphRef
 from app.models.enums import (
     CharityStatus,
     IslamicProductStatus,
@@ -16,6 +17,7 @@ from app.models.enums import (
     ShariahReviewStatus,
     ShariahRulingStatus,
 )
+from app.schemas.tenant_settings import currency_or_default
 
 
 # ------------------------------------------------------------------- rulings ---
@@ -55,6 +57,9 @@ class RulingRead(RulingBase):
     reference: str
     is_review_overdue: bool
     created_at: datetime
+    # Reverse of IslamicProduct.approving_ruling: the products this fatwa approves.
+    # Filled on the record endpoints (GET/POST/PATCH by id); empty in list pages.
+    products: list[GraphRef] = []
 
 
 # ------------------------------------------------------------------ products ---
@@ -91,6 +96,10 @@ class ProductRead(ProductBase):
     id: uuid.UUID
     reference: str
     created_at: datetime
+    approving_ruling: GraphRef | None = None
+    # Reverse of ShariahReview.product: the Shariah reviews that covered this product.
+    # Filled on the record endpoints (GET/POST/PATCH by id); empty in list pages.
+    reviews: list[GraphRef] = []
 
 
 # ------------------------------------------------------------------ findings ---
@@ -177,6 +186,7 @@ class ReviewRead(ReviewBase):
     snc_income_total: float
     created_at: datetime
     findings: list[ShariahFindingRead] = []
+    product: GraphRef | None = None
 
 
 # ------------------------------------------------------------------- charity ---
@@ -192,7 +202,7 @@ class CharityBase(BaseModel):
 
 
 class CharityCreate(CharityBase):
-    pass
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class CharityUpdate(BaseModel):
@@ -204,6 +214,8 @@ class CharityUpdate(BaseModel):
     status: CharityStatus | None = None
     disbursement_date: date | None = None
     notes: str | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class CharityRead(CharityBase):

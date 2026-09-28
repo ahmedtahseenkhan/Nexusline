@@ -37,6 +37,29 @@ from app.models.enums import (
 )
 
 
+#: Findings that no longer need remediation: closed, or risk-accepted by management.
+#: "Open" everywhere in the module (counts, filters, overdue, calendar) means neither.
+RESOLVED_FINDING_STATES: tuple[AuditFindingStatus, ...] = (
+    AuditFindingStatus.closed, AuditFindingStatus.risk_accepted,
+)
+
+
+def derive_next_audit_due(frequency: ReviewFrequency | str | None, last_audited: date | None) -> date | None:
+    """When a unit next falls due: one audit cycle after it was last audited. Pure.
+
+    None when it has never been audited (it is due now and is picked up by the plan
+    generator as such) or when it carries no audit cycle (``none``).
+    """
+    from app.services.risk_scoring import next_review_date
+
+    if last_audited is None or frequency is None:
+        return None
+    freq = ReviewFrequency(getattr(frequency, "value", frequency))
+    if freq == ReviewFrequency.none:
+        return None
+    return next_review_date(freq, last_audited)
+
+
 class AuditableUnit(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, SoftDeleteMixin, Base):
     """An entry in the audit universe."""
 
@@ -120,7 +143,19 @@ class AuditEngagement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Workflow
 
     @property
     def open_finding_count(self) -> int:
-        return sum(1 for f in self.findings if f.status != AuditFindingStatus.closed)
+        # Same rule as the follow-up list, its summary cards and the assurance roll-up:
+        # a risk-accepted finding is resolved (management owns the residual risk).
+        return sum(1 for f in self.findings if f.status not in RESOLVED_FINDING_STATES)
+
+    @property
+    def auditable_unit_name(self) -> str:
+        return self.auditable_unit.name if self.auditable_unit is not None else ""
+
+    @property
+    def auditable_unit_archived(self) -> bool:
+        """The linked universe entry has since been archived. The link is history and is
+        kept, but the form needs to say so rather than show an empty picker."""
+        return bool(self.auditable_unit is not None and self.auditable_unit.deleted)
 
     @property
     def is_overdue(self) -> bool:
@@ -219,7 +254,29 @@ class AuditFinding(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     @property
     def is_overdue(self) -> bool:
         return (
-            self.status not in (AuditFindingStatus.closed, AuditFindingStatus.risk_accepted)
+            self.status not in RESOLVED_FINDING_STATES
             and self.due_date is not None
             and self.due_date < date.today()
         )
+
+
+def live_finding_secondaryjoin(link_table: Table):
+    """``secondaryjoin`` for a read-only ``audit_findings`` relationship on another record.
+
+    A finding belongs to its engagement; when the engagement is archived its findings
+    leave every register view with it. Use as
+    ``secondaryjoin=lambda: live_finding_secondaryjoin(audit_finding_controls)`` so a
+    control, risk or requirement page stops listing findings of an archived audit.
+    """
+    from sqlalchemy import and_, exists
+
+    return and_(
+        link_table.c.audit_finding_id == AuditFinding.id,
+        exists()
+        .where(
+            AuditEngagement.id == AuditFinding.engagement_id,
+            AuditEngagement.deleted.is_(False),
+        )
+        # The finding is the outer row; only the engagement belongs in the subquery.
+        .correlate_except(AuditEngagement),
+    )

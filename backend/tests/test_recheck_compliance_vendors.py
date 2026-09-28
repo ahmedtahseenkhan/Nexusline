@@ -341,10 +341,12 @@ async def test_create_and_update_refuse_with_a_plain_422(monkeypatch):
     body = outsourcing_s.OutsourcingArrangementCreate(title="Card switch", status=OutsourcingStatus.active)
     with pytest.raises(HTTPException) as exc:
         await outsourcing_api.create_arrangement(body, None, None)
-    assert exc.value.status_code == 422 and "materiality rationale" in exc.value.detail
+    # A new arrangement is proposed: going live needs its approval first (APPROVED_FIRST).
+    assert exc.value.status_code == 422 and "before its approval" in exc.value.detail
 
+    # Approved through its lifecycle, it still can't go live without the SBP facts.
     arr = NS(id=uuid.uuid4(), reference="OUT-1", title="Card switch", vendor_id=None, owner_id=None, owner="",
-             country_id=None, country="", **facts(substitutability=""))
+             country_id=None, country="", workflow_status="approved", **facts(substitutability=""))
 
     async def load(db, _id):
         return arr

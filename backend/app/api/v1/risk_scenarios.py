@@ -134,10 +134,15 @@ _CRIT_RANK = {
 # Helpers
 # ---------------------------------------------------------------------------
 def _facts(asset: Asset) -> AssetFacts:
+    """The scoring facts of a loaded asset. ``criticality`` is the asset's *effective*
+    criticality (``Asset.effective_criticality``: an information asset's business value;
+    an IT asset's cost/availability band or what it inherits from the data it hosts) —
+    the rating the asset registers show. The raw ``criticality`` column is not set by
+    either asset form and stays at its default."""
     return AssetFacts(
         name=asset.name,
         asset_class=asset.asset_class.value,
-        criticality=asset.criticality,
+        criticality=asset.effective_criticality,
         business_value=asset.business_value,
         confidentiality=asset.confidentiality,
         integrity=asset.integrity,
@@ -397,7 +402,10 @@ def _enum_value(value) -> str:
 
 
 def _facts_from(row) -> AssetFacts:
-    """``AssetFacts`` from an ``Asset`` row or a column tuple with the same names."""
+    """``AssetFacts`` from an ``Asset`` row or a column tuple with the same names.
+
+    Only for titles (``title_for`` reads the name alone): a column tuple cannot carry the
+    effective criticality, so scoring always goes through :func:`_facts`."""
     return AssetFacts(
         name=row.name,
         asset_class=_enum_value(row.asset_class),
@@ -847,8 +855,10 @@ async def _select_assets(db: DbSession, body: GenerateRequest) -> list[Asset]:
         stmt = stmt.where(Asset.asset_class == body.asset_class)
     rows = list((await db.scalars(stmt.order_by(Asset.name))).all())
     if body.min_criticality:
+        # The effective criticality (see ``_facts``), computed per row: it depends on the
+        # hosted information assets, so it has no column to filter on in SQL.
         floor = _CRIT_RANK[Criticality(body.min_criticality)]
-        rows = [a for a in rows if _CRIT_RANK[a.criticality] >= floor]
+        rows = [a for a in rows if _CRIT_RANK[a.effective_criticality] >= floor]
     return rows
 
 

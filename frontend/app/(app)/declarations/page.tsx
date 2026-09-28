@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { IconPlus } from "@/components/icons";
@@ -33,6 +34,9 @@ interface Declaration {
   reviewer: string;
   review_notes: string;
   created_at: string;
+  /** Filled on the flat list (GET /declarations) from the join, so every row names its campaign. */
+  campaign_reference?: string;
+  campaign_title?: string;
 }
 interface DeclarationCampaign {
   id: string;
@@ -229,9 +233,6 @@ function DeclarationsInner() {
   const [summary, setSummary] = useState<DeclarationSummary | null>(null);
   const [disclosuresOnly, setDisclosuresOnly] = useState(false);
 
-  // campaign reference lookup for the flat declarations table (labels only)
-  const [campaignRef, setCampaignRef] = useState<Map<string, string>>(new Map());
-
   const [campaignKey, setCampaignKey] = useState(0);
   const [declKey, setDeclKey] = useState(0);
   const reloadCampaigns = useCallback(() => setCampaignKey((k) => k + 1), []);
@@ -243,12 +244,7 @@ function DeclarationsInner() {
   const loadSummary = useCallback(() => {
     apiCall<DeclarationSummary>("GET", "/declarations-summary").then(setSummary).catch((e) => setError(e instanceof Error ? e.message : "Failed to load declaration summary"));
   }, []);
-  const loadCampaignRefs = useCallback(() => {
-    apiCall<PagedList<DeclarationCampaign>>("GET", "/declaration-campaigns?limit=200")
-      .then((r) => setCampaignRef(new Map(r.items.map((c) => [c.id, c.reference || c.title]))))
-      .catch(() => {});
-  }, []);
-  useEffect(() => { loadSummary(); loadCampaignRefs(); }, [loadSummary, loadCampaignRefs]);
+  useEffect(() => { loadSummary(); }, [loadSummary]);
 
   // ---- campaign drawer (URL-driven) ----
   const [openId, setOpenId] = useRecordParam("id");
@@ -270,6 +266,7 @@ function DeclarationsInner() {
   const [showCampaignForm, setShowCampaignForm] = useState(false);
   const [savingCampaign, setSavingCampaign] = useState(false);
   const [cf, setCf] = useState<CampaignForm>(BLANK_CAMPAIGN);
+  const campaignCfForm = useCustomFieldForm("declaration_campaign");
   const setC = <K extends keyof CampaignForm>(k: K, v: CampaignForm[K]) => setCf((p) => ({ ...p, [k]: v }));
 
   // ---- declaration edit dialog ----
@@ -283,12 +280,14 @@ function DeclarationsInner() {
   function openNewCampaign() {
     setEditingCampaign(null);
     setCf(BLANK_CAMPAIGN);
+    campaignCfForm.start(null);
     setError(null);
     setShowCampaignForm(true);
   }
   function openEditCampaign(c: DeclarationCampaign) {
     setEditingCampaign(c);
     setCf(fromCampaign(c));
+    campaignCfForm.start(c.id);
     setError(null);
     setShowCampaignForm(true);
   }
@@ -297,12 +296,13 @@ function DeclarationsInner() {
     setSavingCampaign(true);
     try {
       const payload = campaignPayload(cf);
-      if (editingCampaign) await apiCall<DeclarationCampaign>("PATCH", `/declaration-campaigns/${editingCampaign.id}`, payload);
-      else await apiCall<DeclarationCampaign>("POST", "/declaration-campaigns", payload);
+      const saved = editingCampaign
+        ? await apiCall<DeclarationCampaign>("PATCH", `/declaration-campaigns/${editingCampaign.id}`, payload)
+        : await apiCall<DeclarationCampaign>("POST", "/declaration-campaigns", payload);
+      await campaignCfForm.save(saved.id);
       setShowCampaignForm(false);
       reloadCampaigns();
       loadSummary();
-      loadCampaignRefs();
       if (openId) loadDetail(openId);
       toast(editingCampaign ? "Changes saved" : "Campaign created");
     } catch (e) {
@@ -321,7 +321,6 @@ function DeclarationsInner() {
       reloadCampaigns();
       reloadDecls();
       loadSummary();
-      loadCampaignRefs();
       toast("Deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
@@ -342,6 +341,8 @@ function DeclarationsInner() {
         amount: dd.amount === "" ? null : Number(dd.amount),
         currency,
         status: dd.status,
+        // A declaration recorded as already submitted was submitted today.
+        submitted_date: dd.status === "pending" ? null : new Date().toISOString().slice(0, 10),
       });
       setDd(BLANK_DECL_DRAFT);
       loadDetail(detail.id);
@@ -409,7 +410,7 @@ function DeclarationsInner() {
 
   const declColumns: Column<Declaration>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (d) => <span className="ref">{d.reference || "—"}</span> },
-    { key: "campaign", header: "Campaign", render: (d) => <span className="muted">{campaignRef.get(d.campaign_id) || "—"}</span> },
+    { key: "campaign", header: "Campaign", render: (d) => <span className="muted" title={d.campaign_title || undefined}>{d.campaign_reference || d.campaign_title || "—"}</span> },
     { key: "declarant_name", header: "Declarant", sortable: true, render: (d) => <span className="cell-title">{d.declarant_name || "—"}{d.declarant_role ? <span className="muted"> · {d.declarant_role}</span> : null}</span> },
     { key: "business_unit", header: "Business unit", sortable: true, render: (d) => <span className="muted">{d.business_unit || "—"}</span> },
     { key: "disclosure", header: "Disclosure", render: (d) => <DisclosureBadge has={d.has_disclosure} /> },
@@ -619,7 +620,12 @@ function DeclarationsInner() {
                 <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
                   One submission per staff member. Flag a disclosure where a conflict, gift or interest is being declared.
                 </p>
-                <form
+                {detail.status === "closed" && (
+                  <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+                    This campaign is closed, so its declarations are the record for the period and cannot be added, changed or removed. Reopen the campaign (Edit → Status) to correct them.
+                  </p>
+                )}
+                {detail.status !== "closed" && <form
                   style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "flex-end", flexWrap: "wrap" }}
                   onSubmit={(ev) => { ev.preventDefault(); addDeclaration(); }}
                 >
@@ -654,7 +660,7 @@ function DeclarationsInner() {
                     </select>
                   </div>
                   <button className="btn">Add</button>
-                </form>
+                </form>}
 
                 <div className="table-wrap">
                   <table>
@@ -672,7 +678,7 @@ function DeclarationsInner() {
                     </thead>
                     <tbody>
                       {detail.declarations.map((d) => (
-                        <tr key={d.id} style={{ cursor: "pointer" }} onClick={() => openEditDecl(d)}>
+                        <tr key={d.id} style={{ cursor: detail.status === "closed" ? undefined : "pointer" }} onClick={() => { if (detail.status !== "closed") openEditDecl(d); }}>
                           <td className="ref">{d.reference || "—"}</td>
                           <td className="cell-title">{d.declarant_name || "—"}{d.declarant_role ? <span className="muted"> · {d.declarant_role}</span> : null}</td>
                           <td className="muted">{d.business_unit || "—"}</td>
@@ -681,10 +687,12 @@ function DeclarationsInner() {
                           <td><Badge tone={DECL_STATUS_TONE[d.status] || "neutral"}>{cap(d.status)}</Badge></td>
                           <td className="muted">{d.reviewer || "—"}</td>
                           <td>
-                            <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                              <button className="btn secondary sm" onClick={() => openEditDecl(d)}>Review</button>
-                              <button className="btn secondary sm" onClick={() => removeDeclaration(d.id)}>Remove</button>
-                            </div>
+                            {detail.status !== "closed" && (
+                              <div style={{ display: "flex", gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
+                                <button className="btn secondary sm" onClick={() => openEditDecl(d)}>Review</button>
+                                <button className="btn secondary sm" onClick={() => removeDeclaration(d.id)}>Remove</button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -709,6 +717,7 @@ function DeclarationsInner() {
           tabs={[
             { id: "general", label: "General", content: campaignGeneral, required: true },
             { id: "timing", label: "Timing", content: campaignTiming },
+            ...campaignCfForm.tabs,
           ]}
           onClose={() => setShowCampaignForm(false)}
           onSave={saveCampaign}

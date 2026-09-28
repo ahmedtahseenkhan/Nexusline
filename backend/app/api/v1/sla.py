@@ -89,7 +89,7 @@ async def update_policies(
     await db.flush()
     # Due dates are derived, so a policy change has to propagate to the records now —
     # otherwise the register keeps reporting yesterday's windows until the next sweep.
-    await sla.reconcile(db, user.tenant_id)
+    await sla.reconcile(db, user.tenant_id, force=True)
     await audit_log.record(
         db, actor=user, action="update", entity_type="sla_policy", entity_id=None,
         summary=f"Updated {len(body.policies)} turnaround-time target(s)",

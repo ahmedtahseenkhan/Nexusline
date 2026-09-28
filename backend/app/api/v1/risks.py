@@ -16,6 +16,7 @@ from sqlalchemy.orm import aliased
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.listing import ListParams, apply_sort
+from app.core.schema_loading import options_for, serialize_all
 from app.models.asset import Asset
 from app.models.control import Control, ControlAudit
 from app.models.incident import Incident
@@ -65,8 +66,10 @@ from app.schemas.risk import (
 from app.db.data_repairs import RESIDUAL_REVIEW_REASON
 from app.services.refs import next_reference
 from app.services import audit
+from app.services import authority_limits
 from app.services import control_assurance
 from app.services import delete_guard
+from app.services import lifecycle_gates
 from app.services import master_data
 from app.services import dual_control
 from app.services import ref_fields
@@ -78,6 +81,7 @@ from app.services.risk_scoring import (
     SeverityScale,
     current_severity,
     effective_review_frequency,
+    impact_from_dimensions,
     next_review_date,
     rescheduled_review,
 )
@@ -235,6 +239,41 @@ def _dimension_rows(risk: Risk, rows: list[dict], tenant_id) -> list[RiskImpactD
         )
         for r in rows
     ]
+
+
+DIMENSION_DERIVED_DETAIL = (
+    "The {basis} impact is derived from its dimension scores; change the dimension scores instead."
+)
+
+
+async def _dimension_basis(db, user: CurrentUser, risk: Risk, basis: str) -> tuple[list[RiskImpactDimension], int | None]:
+    """The risk's stored dimension rows for one basis and the impact they derive (None
+    when the basis is not scored by dimension)."""
+    rows = [d for d in await _stored_dimensions(db, risk.id) if d.basis == basis]
+    if not rows:
+        return [], None
+    settings = await get_or_create_settings(db, user.tenant_id)
+    return rows, impact_from_dimensions([r.score for r in rows], settings.impact_mode or "max")
+
+
+async def _release_residual_dimensions(
+    db, user: CurrentUser, risk: Risk, impact: int
+) -> list[RiskImpactDimension]:
+    """Drop the residual dimension scores a residual sign-off no longer agrees with.
+
+    Accept-residual records the control-effectiveness engine's residual (or the owner's
+    override of it): from then on *that* is the basis of the residual impact, not the
+    per-dimension residual scores. Left in place they would contradict the recorded
+    impact — the detail would show residual 5 beside dimensions of 3, and every later
+    save of the form would be refused. Rows that still derive the same impact stay; the
+    inherent (and target) dimension scores are never touched. Returns the rows removed.
+    """
+    rows, derived = await _dimension_basis(db, user, risk, "residual")
+    if not rows or derived == impact:
+        return []
+    for row in rows:
+        await db.delete(row)
+    return rows
 
 
 def _scoring_changed(risk: Risk | None, incoming: dict[str, object]) -> bool:
@@ -579,6 +618,19 @@ class RiskListFilters:
         return {k: getattr(self, k) for k in self.LABELS if getattr(self, k) not in (None, "")}
 
 
+async def _asset_counts(db, risk_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+    """Live linked assets per risk, one grouped query for the page."""
+    if not risk_ids:
+        return {}
+    rows = await db.execute(
+        select(risk_assets.c.risk_id, func.count())
+        .join(Asset, Asset.id == risk_assets.c.asset_id)
+        .where(risk_assets.c.risk_id.in_(risk_ids), Asset.deleted.is_(False))
+        .group_by(risk_assets.c.risk_id)
+    )
+    return {rid: int(n) for rid, n in rows.all()}
+
+
 @router.get("", response_model=Page[RiskRead], dependencies=[Depends(require("risk:read"))])
 async def list_risks(
     db: DbSession,
@@ -598,8 +650,13 @@ async def list_risks(
         stmt = apply_sort(stmt, params, _RISK_SORTABLE, default=Risk.inherent_score)
     else:
         stmt = stmt.order_by(Risk.inherent_score.desc(), Risk.created_at.desc())
-    rows = (await db.scalars(stmt.limit(limit).offset(offset))).all()
-    items = [RiskRead.model_validate(r, context=context) for r in rows]
+    # Load what the register serialises, plus the controls' findings ``_control_health``
+    # reads after validation — not every link of every linked record. Linked assets are
+    # not loaded at all: the row reports ``asset_count`` and the record carries them.
+    loads = options_for(Risk, RiskRead, ("controls.audit_findings",), skip=("assets",))
+    rows = (await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all()
+    context = {**context, "asset_counts": await _asset_counts(db, [r.id for r in rows])}
+    items = await serialize_all(db, rows, lambda r: RiskRead.model_validate(r, context=context))
     await ref_fields.fill_refs(db, list(zip(rows, items)), RISK_REFS)
     await _fill_hierarchy(db, list(zip(rows, items)))
     today = date.today()
@@ -625,8 +682,11 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
     Phase 2 rules (``services.risk_integrity``): a blank title is composed from the
     statement; dimension scores decide their basis' impact; target <= residual <=
     inherent; scores given on create stamp the assessment trail, and a risk created
-    beyond draft needs chosen inherent scores and an ``assessment_rationale``.
+    beyond draft needs chosen inherent scores and an ``assessment_rationale``. A risk is
+    never created accepted: acceptance is requested and decided by a holder of
+    ``risk:accept`` (``services.lifecycle_gates``).
     """
+    lifecycle_gates.enforce_create("risk", {"status": body.status})
     await _check_scale(db, user, body.model_dump())
     data = body.model_dump(
         exclude={
@@ -1072,6 +1132,9 @@ async def update_risk(
 ) -> RiskRead:
     risk = await _load_risk(db, risk_id)
     data = body.model_dump(exclude_unset=True)
+    # Accepted is a decision (request, then risk:accept decides), not an edit.
+    if data.get("status") is not None:
+        lifecycle_gates.enforce_edit("risk", risk, data)
     # A null inherent score means "not chosen": the stored value stands (NOT NULL).
     for name in ("inherent_likelihood", "inherent_impact"):
         if name in data and data[name] is None:
@@ -1094,10 +1157,7 @@ async def update_risk(
             if clash:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=(
-                        f"The {clash[0]} impact is derived from its dimension scores; "
-                        "change the dimension scores instead."
-                    ),
+                    detail=DIMENSION_DERIVED_DETAIL.format(basis=clash[0]),
                 )
     if "residual_override_reason" in data:
         data["residual_override_reason"] = (data["residual_override_reason"] or "").strip()
@@ -1285,6 +1345,15 @@ async def assess_risk(
     risk = await _load_risk(db, risk_id)
     incoming = body.model_dump(exclude_none=True)
     await _check_scale(db, user, incoming)
+    # As on the edit form: a residual impact scored by dimension moves only with its
+    # dimension scores, so an assessment cannot leave the two disagreeing.
+    if body.residual_impact != risk.residual_impact:
+        _rows, derived = await _dimension_basis(db, user, risk, "residual")
+        if derived is not None and derived != body.residual_impact:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=DIMENSION_DERIVED_DETAIL.format(basis="residual"),
+            )
     policy = await _review_policy(db, user)
     effective_before = _effective_frequency(risk, policy)
     if "residual_override_reason" in incoming:
@@ -1590,6 +1659,7 @@ async def accept_residual(
     risk.residual_override_reason = body.override_reason.strip() if is_override else ""
     risk.residual_accepted_by = user.id
     risk.residual_accepted_at = date.today()
+    released = await _release_residual_dimensions(db, user, risk, impact)
     _record_assessment(risk, decision, user)
     if advance:
         risk.status = RiskStatus.assessed
@@ -1615,6 +1685,10 @@ async def accept_residual(
             **({"note": note} if note else {}),
             **({"untested_credit": [c.reference or c.name for c in untested]} if untested else {}),
             **({"review_reason": "residual corrected; review flag cleared"} if cleared else {}),
+            **(
+                {"residual_dimensions_cleared": "; ".join(f"{r.dimension_id}={r.score}" for r in released)}
+                if released else {}
+            ),
         },
     )
     await _refresh_alerts(db, user, risk)
@@ -1637,6 +1711,42 @@ async def request_acceptance(
     )
     if refusal:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
+    # An acceptance is approved for a period; one that has already lapsed on the day it
+    # is asked for could never be in force (services.risk_acceptance: valid through the
+    # expiry date itself).
+    if body.expires_at is not None and body.expires_at < date.today():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The acceptance expiry date is in the past; give a date from today onwards.",
+        )
+    # One request at a time: two pending requests for the same risk would let two
+    # approvers decide the same exposure on different terms.
+    pending = await db.scalar(
+        select(RiskAcceptance.id).where(
+            RiskAcceptance.risk_id == risk.id, RiskAcceptance.status == AcceptanceStatus.pending
+        ).limit(1)
+    )
+    if pending is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This risk already has an acceptance request awaiting a decision.",
+        )
+    # Requesting acceptance is the maker's step (a rule's maker role, where one is named).
+    await dual_control.enforce_maker_role(db, module="risk", action="accept", maker_id=user.id)
+    # The exposure being accepted is fixed now: it is what the approver's delegation-of-
+    # authority mandate is checked against, and what the record shows was accepted.
+    exposure, currency, basis = await authority_limits.acceptance_exposure(
+        db, risk, body.exposure_amount, body.exposure_currency
+    )
+    if exposure is None and await dual_control.authority_lines(db, "risk_acceptance"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "exposure_amount: risk acceptance is under your delegation-of-authority matrix, "
+                "so the request needs the exposure being accepted. This risk has no quantified "
+                "exposure — give the amount."
+            ),
+        )
     acceptance = RiskAcceptance(
         tenant_id=user.tenant_id,
         risk_id=risk.id,
@@ -1644,6 +1754,9 @@ async def request_acceptance(
         rationale=body.rationale,
         expires_at=body.expires_at,
         status=AcceptanceStatus.pending,
+        exposure_amount=authority_limits.as_decimal(exposure),
+        exposure_currency=currency or "",
+        exposure_basis=(basis or "")[:40],
     )
     db.add(acceptance)
     await db.flush()
@@ -1654,6 +1767,10 @@ async def request_acceptance(
         entity_type="risk_acceptance",
         entity_id=acceptance.id,
         summary=f"Requested acceptance for risk {risk.reference}",
+        changes={
+            "rationale": body.rationale, "expires_at": str(body.expires_at or ""),
+            **({"exposure": f"{currency} {exposure:,.2f} ({basis})"} if exposure is not None else {}),
+        },
     )
     await db.refresh(acceptance)
     return RiskAcceptanceRead.model_validate(acceptance)
@@ -1688,16 +1805,20 @@ async def decide_acceptance(
         )
 
     # Maker-checker: accepting a risk is a four-eyes control — the person who requested
-    # the acceptance can never approve it. Gated by the risk's exposure (ALE) so a
-    # DualControlRule threshold can scope it to material risks.
+    # the acceptance can never approve it. Gated by the exposure being accepted (fixed on
+    # the request; the risk's ALE for an older request) so a DualControlRule threshold
+    # can scope it to material risks.
     risk = await _load_risk(db, risk_id)
+    exposure = getattr(acceptance, "exposure_amount", None)
+    if exposure is None:
+        exposure = risk.annual_loss_expectancy
     await dual_control.enforce_maker_checker(
         db,
         module="risk",
         action="accept",
         maker_id=acceptance.requested_by,
         checker_id=user.id,
-        amount=float(risk.annual_loss_expectancy) if risk.annual_loss_expectancy else None,
+        amount=float(exposure) if exposure else None,
         subject="risk acceptance",
     )
 
@@ -1707,6 +1828,19 @@ async def decide_acceptance(
         )
         if refusal:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
+        # Approving a request whose expiry has already passed would mark the risk
+        # accepted only for the nightly sweep to lapse it again.
+        if acceptance.expires_at is not None and acceptance.expires_at < date.today():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"This request expired on {acceptance.expires_at.isoformat()}; reject it "
+                    "and ask for a new acceptance with a current expiry date."
+                ),
+            )
+        # Delegation of authority: the approver's mandate must cover the exposure.
+        await authority_limits.enforce(db, "risk_acceptance", acceptance, user)
+    status_before = _status_value(risk.status)
     acceptance.approver_id = user.id
     acceptance.decided_at = date.today()
     if body.approve:
@@ -1725,8 +1859,11 @@ async def decide_acceptance(
         action=action,
         entity_type="risk_acceptance",
         entity_id=acceptance.id,
-        summary=f"{verb} acceptance for risk {risk_id}",
-        changes={"note": body.note} if body.note else {},
+        summary=f"{verb} acceptance for risk {risk.reference or risk_id}",
+        changes={
+            **({"note": body.note} if body.note else {}),
+            **({"risk_status": f"{status_before} -> accepted"} if body.approve else {}),
+        },
     )
     await db.refresh(acceptance)
     return RiskAcceptanceRead.model_validate(acceptance)
@@ -1857,7 +1994,58 @@ async def _read(db, risk_id: uuid.UUID, user: CurrentUser) -> RiskRead:
         )
         for d in sorted(dims, key=lambda d: (order.get(d.basis, 9), str(d.dimension_id)))
     ]
+    read.rcsa_assessments, read.quantifications, read.continuity_plans = await _linked_records(db, risk.id)
     return read
+
+
+async def _linked_records(
+    db, risk_id: uuid.UUID
+) -> tuple[list[GraphRef], list[GraphRef], list[GraphRef]]:
+    """Records elsewhere that point at the risk by their own key, so the risk has no
+    relationship for them: RCSA lines (``rcsa_risks.risk_id``), quantifications
+    (``risk_quantifications.risk_id``) and continuity plans (``continuity_plan_risks``).
+    Plain column queries — nothing is eager-loaded — and archived records are left out.
+    """
+    from app.models.continuity import ContinuityPlan, continuity_plan_risks
+    from app.models.operational_risk import RcsaAssessment, RcsaRisk
+    from app.models.risk_quant import RiskQuantification
+
+    rcsa_rows = (
+        await db.execute(
+            select(RcsaAssessment.id, RcsaAssessment.reference, RcsaAssessment.title, RcsaRisk.title)
+            .join(RcsaRisk, RcsaRisk.assessment_id == RcsaAssessment.id)
+            .where(RcsaRisk.risk_id == risk_id, RcsaAssessment.deleted.is_(False))
+            .order_by(RcsaAssessment.created_at.desc(), RcsaRisk.title)
+        )
+    ).all()
+    rcsa: dict[uuid.UUID, GraphRef] = {}
+    lines: dict[uuid.UUID, list[str]] = {}
+    for aid, ref, title, line in rcsa_rows:
+        rcsa.setdefault(aid, GraphRef(id=aid, reference=ref or "", title=title or ""))
+        lines.setdefault(aid, []).append(line)
+    for aid, ref in rcsa.items():
+        ref.title = f"{ref.title} — {', '.join(lines[aid])}" if ref.title else ", ".join(lines[aid])
+
+    quant_rows = (
+        await db.execute(
+            select(RiskQuantification.id, RiskQuantification.reference, RiskQuantification.title)
+            .where(RiskQuantification.risk_id == risk_id, RiskQuantification.deleted.is_(False))
+            .order_by(RiskQuantification.reference)
+        )
+    ).all()
+    plan_rows = (
+        await db.execute(
+            select(ContinuityPlan.id, ContinuityPlan.reference, ContinuityPlan.name)
+            .join(continuity_plan_risks, continuity_plan_risks.c.continuity_plan_id == ContinuityPlan.id)
+            .where(continuity_plan_risks.c.risk_id == risk_id, ContinuityPlan.deleted.is_(False))
+            .order_by(ContinuityPlan.reference)
+        )
+    ).all()
+    return (
+        list(rcsa.values()),
+        [GraphRef(id=i, reference=r or "", title=t or "") for i, r, t in quant_rows],
+        [GraphRef(id=i, reference=r or "", name=n or "") for i, r, n in plan_rows],
+    )
 
 
 # ------------------------------------------------------------ treatment actions

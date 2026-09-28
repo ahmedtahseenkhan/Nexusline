@@ -5,13 +5,14 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.version import RecordVersion
 from app.services import audit, versioning
+from app.services import modules as module_service
 
 router = APIRouter(prefix="/versions", tags=["versions"])
 
@@ -46,10 +47,11 @@ async def list_versions(entity_type: str, entity_id: uuid.UUID, db: DbSession) -
 
 
 @router.get("/detail/{version_id}", response_model=VersionDetail, dependencies=[Depends(require("audit:read"))])
-async def get_version(version_id: uuid.UUID, db: DbSession) -> VersionDetail:
+async def get_version(version_id: uuid.UUID, db: DbSession, user: CurrentUser) -> VersionDetail:
     ver = await db.scalar(select(RecordVersion).where(RecordVersion.id == version_id))
     if ver is None:
         raise HTTPException(status_code=404, detail="Version not found")
+    await module_service.require_entity_module(ver.entity_type, user.tenant_id)
     # diff against the immediately previous version
     prev = await db.scalar(
         select(RecordVersion)
@@ -76,6 +78,7 @@ async def restore_version(version_id: uuid.UUID, db: DbSession, user: CurrentUse
     ver = await db.scalar(select(RecordVersion).where(RecordVersion.id == version_id))
     if ver is None:
         raise HTTPException(status_code=404, detail="Version not found")
+    await module_service.require_entity_module(ver.entity_type, user.tenant_id)
     entity = await versioning.restore(db, ver)
     if entity is None:
         raise HTTPException(status_code=422, detail="Cannot restore this entity type")

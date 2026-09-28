@@ -391,6 +391,45 @@ export default function BoardPacks({ committeeId, meetings, autoDays, savedSecti
     }
   }
 
+  /** A failed pack is built again with the same meeting, period and sections; the new
+      pack replaces the failed one. */
+  async function regenerate(pack: BoardPack) {
+    setActing(pack.id);
+    try {
+      const fresh = await apiCall<BoardPack>("POST", `/board-packs/${pack.id}/regenerate`);
+      if (fresh.status === "ready") toast("Draft board pack generated.");
+      else toast(`The pack still could not be generated: ${fresh.error || "unknown error"}`, "error");
+      load();
+    } catch (e) {
+      toast(errMsg(e, "Could not generate the pack"), "error");
+    } finally {
+      setActing(null);
+    }
+  }
+
+  async function remove(pack: BoardPack) {
+    const failed = pack.status !== "ready";
+    const ok = await confirmDialog({
+      title: failed ? "Delete this failed pack?" : "Delete this draft pack?",
+      message: failed
+        ? "It has no files; only the entry is removed. The failure stays in the activity trail."
+        : "The draft's PDF, spreadsheet and commentary are deleted. The activity trail keeps a record that it existed.",
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    setActing(pack.id);
+    try {
+      await apiCall<void>("DELETE", `/board-packs/${pack.id}`);
+      setPacks((cur) => (cur ? cur.filter((x) => x.id !== pack.id) : cur));
+      toast("Board pack deleted");
+    } catch (e) {
+      toast(errMsg(e, "Could not delete the pack"), "error");
+    } finally {
+      setActing(null);
+    }
+  }
+
   async function download(pack: BoardPack, kind: "pdf" | "xlsx") {
     const file = kind === "pdf" ? pack.pdf : pack.xlsx;
     try {
@@ -546,6 +585,9 @@ export default function BoardPacks({ committeeId, meetings, autoDays, savedSecti
                           {p.review_state === "reviewed" && permissions.includes("boardpack:release") && (
                             <button type="button" className="btn secondary sm" disabled={acting === p.id} onClick={() => act(p, "return")}>Return to draft</button>
                           )}
+                          {canWrite && p.review_state === "draft" && (
+                            <button type="button" className="btn secondary sm" disabled={acting === p.id} onClick={() => remove(p)}>Delete draft</button>
+                          )}
                         </div>
                         {p.review_state !== "released" && p.blocked_reason && !p.can_review && !p.can_release && (
                           <div className="muted" style={{ fontSize: 12, marginTop: 4, maxWidth: 260 }}>{p.blocked_reason}</div>
@@ -555,6 +597,14 @@ export default function BoardPacks({ committeeId, meetings, autoDays, savedSecti
                       <div>
                         <Badge tone="critical">Failed</Badge>
                         <div className="muted" style={{ fontSize: 12, marginTop: 4, maxWidth: 260 }}>{p.error || "The pack could not be generated."}</div>
+                        {canWrite && (
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                            <button type="button" className="btn sm" disabled={acting === p.id} onClick={() => regenerate(p)}>
+                              {acting === p.id ? "Generating…" : "Try again"}
+                            </button>
+                            <button type="button" className="btn secondary sm" disabled={acting === p.id} onClick={() => remove(p)}>Delete</button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </td>

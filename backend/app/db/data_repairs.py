@@ -36,6 +36,12 @@ retried on the next start instead of stopping the start-up.
   history at all, the approval is recorded as ``approved`` with one ``system`` row
   saying it was recorded on upgrade. Never a record in review, one a reviewer sent back,
   or one at a draft-equivalent status.
+* **Maker roles (2026-09-25)** Organisations seeded before maker roles were enforced
+  have ``Risk Manager`` as the maker role of the risk-acceptance, risk-approval and
+  exception-approval rules. Where such a rule is still exactly as seeded and nobody has
+  created or edited it by hand, the maker role is cleared with one ``system`` row per
+  organisation ("maker role cleared — was never enforced; set it again to enforce")
+  (``services.default_governance.clear_legacy_maker_roles``).
 """
 from __future__ import annotations
 
@@ -110,6 +116,13 @@ class RepairReport:
     #: B10c (decision 6): records already in force before the approval lifecycle existed,
     #: whose approval was recorded on upgrade so they can be attested again.
     predated_approvals_recorded: int = 0
+    #: Maker roles on untouched legacy default rules, cleared before they became enforced.
+    legacy_maker_roles_cleared: int = 0
+    #: Asset status rules moved from the stored ``criticality`` input, which no form sets,
+    #: to the effective criticality the register shows.
+    asset_rules_retargeted: int = 0
+    #: Organisations with a live register whose first-run setup was stamped complete.
+    onboarding_stamped: int = 0
     indexes_skipped: list[str] = field(default_factory=list)
     repairs_failed: list[str] = field(default_factory=list)
 
@@ -125,6 +138,7 @@ class RepairReport:
             or self.governance_defaults_added or self.control_themes_classified
             or self.requirement_sort_keys_filled or self.crosswalks_synced
             or self.retention_defaults_upgraded or self.predated_approvals_recorded
+            or self.legacy_maker_roles_cleared
             or self.indexes_skipped or self.repairs_failed
         )
 
@@ -880,6 +894,12 @@ async def seed_default_governance(db, tenant_id) -> int:
     return len(result.routes_added) + len(result.routes_upgraded) + result.rules_added
 
 
+async def _clear_legacy_maker_roles(db, tenant_id) -> int:
+    from app.services import default_governance
+
+    return await default_governance.clear_legacy_maker_roles(db, tenant_id)
+
+
 async def _reconcile_title_flags(db) -> tuple[int, int]:
     from app.services.risk_integrity import reconcile_generated_title_flags
 
@@ -915,6 +935,12 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
         report.approvals_backfilled += await _guarded(
             db, report, "imported_approvals", lambda: backfill_imported_approvals(db, tenant_id),
         ) or 0
+        report.asset_rules_retargeted += await _guarded(
+            db, report, "asset_criticality_rules", lambda: retarget_asset_criticality_rules(db),
+        ) or 0
+        report.onboarding_stamped += await _guarded(
+            db, report, "onboarding_populated", lambda: stamp_onboarding_when_populated(db, tenant_id),
+        ) or 0
         # B10c: a record already in force before the approval lifecycle existed is
         # approved, so decision 6 does not leave it permanently un-attestable. After
         # B10b, which is about records already approved.
@@ -940,6 +966,14 @@ async def repair_tenant(db, report: RepairReport, tenant_id=None) -> None:
         # organisation (marked in the activity log). Never overwrites.
         report.governance_defaults_added += await _guarded(
             db, report, "default_governance", lambda: seed_default_governance(db, tenant_id),
+        ) or 0
+        # Maker roles became enforced (dual_control.enforce_maker_role). The old defaults
+        # named "Risk Manager" as the maker of risk acceptance, risk approval and exception
+        # approval, never enforced; on rules still exactly as seeded it is cleared (one
+        # audit row per organisation), so the upgrade blocks nobody. Rules an
+        # administrator created or edited keep what they say.
+        report.legacy_maker_roles_cleared += await _guarded(
+            db, report, "legacy_maker_roles", lambda: _clear_legacy_maker_roles(db, tenant_id),
         ) or 0
         # --- phase4c: shipped crosswalk content (idempotent; rejected rows stay out) ---
         report.crosswalks_synced += await _guarded(
@@ -1040,6 +1074,56 @@ async def create_unique_indexes(report: RepairReport) -> None:
         except Exception:  # noqa: BLE001 - a surviving duplicate must not stop the start
             logger.exception("Could not create unique index %s; duplicates remain", name)
             report.indexes_skipped.append(name)
+
+
+async def retarget_asset_criticality_rules(db) -> int:
+    """Asset status rules that tested the stored ``criticality`` input now test
+    ``effective_criticality``. No form sets the stored value — it stays at its default —
+    while the register's column, sort, filter and stat tile all show the effective one,
+    so the shipped "Critical Asset" badge landed on rows the column called Medium and
+    missed rows it called Critical. Pointing the rule at the shown value is what every
+    such rule meant."""
+    from app.models.status_rule import StatusRule
+
+    rows = (await db.scalars(
+        select(StatusRule).where(StatusRule.model == "asset", StatusRule.field == "criticality")
+    )).all()
+    for rule in rows:
+        rule.field = "effective_criticality"
+    return len(rows)
+
+
+#: Records an organisation must hold before its setup counts as done without the wizard.
+POPULATED_THRESHOLD = 25
+
+
+async def stamp_onboarding_when_populated(db, tenant_id) -> int:
+    """An organisation running a live register has been set up, whatever the first-run
+    wizard recorded: its administrators were still sent to "Set up your organisation" on
+    every sign-in when two of the wizard's steps could only be ticked by changing a
+    default. Stamp setup complete for any organisation holding a working volume of
+    records; a genuinely new one keeps the wizard."""
+    from datetime import datetime, timezone
+
+    # The organisation-settings row (``TenantSettings``), not the risk settings: the
+    # accessor that owns its defaults lives beside the onboarding endpoint.
+    from app.api.v1.tenant_settings import get_or_create_settings
+    from app.models.asset import Asset
+    from app.models.control import Control
+    from app.models.risk import Risk
+
+    row = await get_or_create_settings(db, tenant_id)
+    if row.onboarding_completed_at is not None:
+        return 0
+    held = 0
+    for model in (Asset, Risk, Control):
+        held += await db.scalar(
+            select(func.count()).select_from(model).where(model.deleted.is_(False))
+        ) or 0
+        if held >= POPULATED_THRESHOLD:
+            row.onboarding_completed_at = datetime.now(timezone.utc)
+            return 1
+    return 0
 
 
 async def repair_data() -> RepairReport:

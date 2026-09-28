@@ -10,6 +10,7 @@ import RecordDrawer from "@/components/RecordDrawer";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import { Field, TextInput, TextArea, Select, Toggle, type Option } from "@/components/fields";
 import { Badge } from "@/components/badges";
 import { titleCase } from "@/lib/text";
@@ -52,7 +53,12 @@ type DualControlRule = {
   status: string;
   workflow_status: string;
   created_at: string;
+  /** False when nothing in the system checks this module/action — the rule governs nothing. */
+  enforced?: boolean;
 };
+
+/** A decision a maker-checker rule can govern (GET /dual-control-rules/keys). */
+type EnforcedKey = { module: string; action: string; label: string; group: string };
 
 type AuthoritySummary = {
   matrix_total: number;
@@ -69,14 +75,26 @@ const cap = titleCase;
 const opts = (vals: string[]): Option[] => vals.map((v) => ({ value: v, label: cap(v) }));
 
 // ------------------------------------------------------------------ enum lists
-const CATEGORIES = opts(["credit", "expenditure", "procurement", "hr", "it_change", "risk_acceptance", "treasury", "general"]);
+const CATEGORIES = opts([
+  "credit", "expenditure", "procurement", "hr", "it_change", "risk_acceptance", "exception",
+  "operational_loss", "outsourcing", "treasury", "general",
+]);
+/** Categories the system checks at the moment of approval (services/authority_limits.py):
+ *  once a category has an active line, only a role whose band covers the amount may approve. */
+const CHECKED_CATEGORIES: Record<string, string> = {
+  risk_acceptance: "approving a risk acceptance (the exposure accepted)",
+  exception: "approving an exception (its exposure)",
+  operational_loss: "approving a loss event (its gross loss)",
+  outsourcing: "approving an outsourcing arrangement (its contract value)",
+};
 const AUTHORITY_STATUS = opts(["active", "retired"]);
 const DUAL_STATUS = opts(["active", "disabled"]);
 
 // ------------------------------------------------------------------ tones
 const CATEGORY_TONE: Record<string, Tone> = {
   credit: "info", expenditure: "info", procurement: "neutral", hr: "neutral",
-  it_change: "medium", risk_acceptance: "high", treasury: "info", general: "neutral",
+  it_change: "medium", risk_acceptance: "high", exception: "high", operational_loss: "medium",
+  outsourcing: "medium", treasury: "info", general: "neutral",
 };
 const AUTHORITY_STATUS_TONE: Record<string, Tone> = { active: "low", retired: "neutral" };
 const DUAL_STATUS_TONE: Record<string, Tone> = { active: "low", disabled: "neutral" };
@@ -165,6 +183,7 @@ function DelegationOfAuthorityInner() {
   const [showMatrixForm, setShowMatrixForm] = useState(false);
   const [savingMatrix, setSavingMatrix] = useState(false);
   const [mf, setMf] = useState<MatrixForm>(BLANK_MATRIX);
+  const matrixCfForm = useCustomFieldForm("authority_matrix");
   const setM = <K extends keyof MatrixForm>(k: K, v: MatrixForm[K]) => setMf((p) => ({ ...p, [k]: v }));
 
   // ---- rule dialog ----
@@ -173,6 +192,9 @@ function DelegationOfAuthorityInner() {
   const [savingRule, setSavingRule] = useState(false);
   const [rf, setRf] = useState<RuleForm>(BLANK_RULE);
   const setR = <K extends keyof RuleForm>(k: K, v: RuleForm[K]) => setRf((p) => ({ ...p, [k]: v }));
+  const [keys, setKeys] = useState<EnforcedKey[]>([]);
+  useEffect(() => { apiCall<EnforcedKey[]>("GET", "/dual-control-rules/keys").then(setKeys).catch(() => setKeys([])); }, []);
+  const keyLabel = useCallback((r: { module: string; action: string }) => keys.find((k) => k.module === r.module && k.action === r.action)?.label, [keys]);
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
   const fetchMatrix = useCallback((qs: string) => apiCall<PagedList<AuthorityMatrix>>("GET", `/authority-matrix?${qs}`), []);
@@ -185,14 +207,20 @@ function DelegationOfAuthorityInner() {
   useEffect(() => { if (openId) loadDetail(openId); else setDetail(null); }, [openId, loadDetail]);
 
   // ------------------------------------------------------------- matrix CRUD
-  function openNewMatrix() { setEditingMatrix(null); setMf({ ...BLANK_MATRIX, currency }); setError(null); setShowMatrixForm(true); }
-  function openEditMatrix(m: AuthorityMatrix) { setEditingMatrix(m); setMf(fromMatrix(m, currency)); setError(null); setShowMatrixForm(true); }
+  function openNewMatrix() { setEditingMatrix(null); setMf({ ...BLANK_MATRIX, currency }); matrixCfForm.start(null); setError(null); setShowMatrixForm(true); }
+  function openEditMatrix(m: AuthorityMatrix) { setEditingMatrix(m); setMf(fromMatrix(m, currency)); matrixCfForm.start(m.id); setError(null); setShowMatrixForm(true); }
   async function saveMatrix() {
+    if (mf.amount_to !== "" && Number(mf.amount_to) < Number(mf.amount_from || 0)) {
+      setError("The upper limit (Amount to) is below the lower limit. Leave it blank for no upper limit.");
+      return;
+    }
     setError(null); setSavingMatrix(true);
     try {
       const payload = matrixPayload(mf);
-      if (editingMatrix) await apiCall<AuthorityMatrix>("PATCH", `/authority-matrix/${editingMatrix.id}`, payload);
-      else await apiCall<AuthorityMatrix>("POST", "/authority-matrix", payload);
+      const saved = editingMatrix
+        ? await apiCall<AuthorityMatrix>("PATCH", `/authority-matrix/${editingMatrix.id}`, payload)
+        : await apiCall<AuthorityMatrix>("POST", "/authority-matrix", payload);
+      await matrixCfForm.save(saved.id);
       setShowMatrixForm(false); reload(); loadSummary(); if (openId) loadDetail(openId);
       toast(editingMatrix ? "Changes saved" : "Authority line created");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save authority line"); }
@@ -209,6 +237,10 @@ function DelegationOfAuthorityInner() {
 
   // ------------------------------------------------------------- rule CRUD
   function openNewRule() { setEditingRule(null); setRf({ ...BLANK_RULE, currency }); setError(null); setShowRuleForm(true); }
+  function pickKey(value: string) {
+    const [module, action] = value.split("|");
+    setRf((p) => ({ ...p, module: module || "", action: action || "" }));
+  }
   function openEditRule(r: DualControlRule) { setEditingRule(r); setRf(fromRule(r, currency)); setError(null); setShowRuleForm(true); }
   async function saveRule() {
     setError(null); setSavingRule(true);
@@ -254,8 +286,13 @@ function DelegationOfAuthorityInner() {
 
   const ruleColumns: Column<DualControlRule>[] = [
     { key: "reference", header: "Ref", sortable: true, render: (r) => <span className="ref">{r.reference || "—"}</span> },
-    { key: "module", header: "Module", sortable: true, render: (r) => <span className="cell-title">{r.module}</span> },
-    { key: "action", header: "Action", sortable: true, render: (r) => <span className="muted">{cap(r.action)}</span> },
+    { key: "module", header: "Module", sortable: true, render: (r) => (
+      <span>
+        <span className="cell-title">{r.module}</span>
+        {r.enforced === false && <> <Badge tone="high">Not enforced</Badge></>}
+      </span>
+    ) },
+    { key: "action", header: "Action", sortable: true, render: (r) => <span className="muted" title={r.enforced === false ? "Nothing in the system checks this module/action, so this rule governs nothing. Edit it to pick a listed decision, or delete it." : undefined}>{keyLabel(r) || cap(r.action)}</span> },
     { key: "makerchecker", header: "Maker → Checker", render: (r) => <span className="muted">{(r.maker_role || "—")} → {(r.checker_role || "—")}{!r.requires_dual_control && <span className="muted"> (single)</span>}</span> },
     { key: "threshold_amount", header: "Threshold", sortable: true, render: (r) => <span className="muted">{r.threshold_amount != null ? formatMoney(r.threshold_amount, r.currency) : "Always"}</span> },
     { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={DUAL_STATUS_TONE[r.status] || "neutral"}>{cap(r.status)}</Badge> },
@@ -270,7 +307,9 @@ function DelegationOfAuthorityInner() {
         <TextInput value={mf.activity} onChange={(v) => setM("activity", v)} placeholder="Approve credit facility" required />
       </Field>
       <div className="field-row">
-        <Field label="Category" help="The kind of activity this mandate governs.">
+        <Field label="Category" help={CHECKED_CATEGORIES[mf.category]
+          ? `Checked when ${CHECKED_CATEGORIES[mf.category]} is approved: with any active line in this category, only a role whose band covers the amount may approve.`
+          : "The kind of activity this mandate governs."}>
           <Select value={mf.category} onChange={(v) => setM("category", v)} options={CATEGORIES} />
         </Field>
         <Field label="Status">
@@ -317,19 +356,29 @@ function DelegationOfAuthorityInner() {
   // ------------------------------------------------------------- rule form tabs
   const ruleGeneral = (
     <>
+      <Field label="Decision" required help="The decision this rule governs. Only decisions the system checks are listed; a rule on anything else would enforce nothing.">
+        <select className="select" value={rf.module && rf.action ? `${rf.module}|${rf.action}` : ""} onChange={(e) => pickKey(e.target.value)} required>
+          <option value="">Choose a decision…</option>
+          {rf.module && rf.action && !keys.some((k) => k.module === rf.module && k.action === rf.action) && (
+            <option value={`${rf.module}|${rf.action}`}>{`${rf.module} / ${rf.action} (not enforced — pick a listed decision)`}</option>
+          )}
+          {Array.from(new Set(keys.map((k) => k.group))).map((g) => (
+            <optgroup key={g} label={g}>
+              {keys.filter((k) => k.group === g).map((k) => (
+                <option key={`${k.module}|${k.action}`} value={`${k.module}|${k.action}`}>{`${k.label} (${k.module} / ${k.action})`}</option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </Field>
+      <p className="muted" style={{ fontSize: 12, margin: "-4px 0 10px" }}>
+        Switching a rule off, exempting a decision, adding or raising a threshold, or deleting a rule needs an administrator — the people a rule binds cannot relax it. Every change is recorded in the activity trail.
+      </p>
       <div className="field-row">
-        <Field label="Module" required help='The module the control applies to, e.g. "payments", "vendor", "policy_publish".'>
-          <TextInput value={rf.module} onChange={(v) => setR("module", v)} placeholder="payments" required />
-        </Field>
-        <Field label="Action" required help='The action being controlled, e.g. "create", "approve", "disburse".'>
-          <TextInput value={rf.action} onChange={(v) => setR("action", v)} placeholder="disburse" required />
-        </Field>
-      </div>
-      <div className="field-row">
-        <Field label="Maker role" help="The role that initiates / prepares the transaction.">
+        <Field label="Maker role" help="Only this role may ask for the decision (request an acceptance, raise an exception, submit for review) — while someone else holds it. Blank = anyone.">
           <TextInput value={rf.maker_role} onChange={(v) => setR("maker_role", v)} placeholder="Payments Officer" />
         </Field>
-        <Field label="Checker role" help="The role that independently verifies / releases.">
+        <Field label="Checker role" help="Only this role may take the decision — while someone other than the maker holds it and can decide; otherwise anyone who can decide may, so a vacant role never blocks it. Blank = anyone.">
           <TextInput value={rf.checker_role} onChange={(v) => setR("checker_role", v)} placeholder="Branch Manager" />
         </Field>
       </div>
@@ -472,6 +521,7 @@ function DelegationOfAuthorityInner() {
           tabs={[
             { id: "general", label: "General", content: matrixGeneral, required: true },
             { id: "amounts", label: "Authority & amounts", content: matrixAmounts },
+            ...matrixCfForm.tabs,
           ]}
           onClose={() => setShowMatrixForm(false)}
           onSave={saveMatrix}

@@ -31,9 +31,11 @@ interface ResourceSchema {
   columns: SchemaColumn[];
 }
 
-interface CsvPayload {
+/** A downloadable file: CSV text, or an Excel workbook as base64. */
+interface FilePayload {
   filename: string;
-  csv: string;
+  csv?: string;
+  xlsx_b64?: string;
 }
 
 interface ImportError {
@@ -46,6 +48,8 @@ interface ImportResult {
   created: number;
   skipped: number;
   errors: ImportError[];
+  /** Rows that were imported, but not exactly as written (see PreviewRow.warnings). */
+  warnings?: ImportError[];
 }
 
 interface MappingSuggestion {
@@ -66,6 +70,8 @@ interface InspectResponse {
   sheet: string;
   sample_rows: string[][];
   suggestions: MappingSuggestion[];
+  /** Columns headed with a custom field's name (as our template and export write them). */
+  custom_field_suggestions: { source: string; custom_field_id: string; label: string }[];
   unmapped_source_headers: string[];
   unfilled_target_headers: string[];
   missing_required: string[];
@@ -75,6 +81,9 @@ interface PreviewRow {
   row: number;
   values: Record<string, string>;
   error: string;
+  /** What the import will say about this row without skipping it: a status brought in
+   *  at its initial state, text kept as a note, a derived value not carried over. */
+  warnings?: string[];
 }
 
 interface PreviewResponse {
@@ -114,6 +123,11 @@ type Props = {
   label: string;
   /** Optional: pages pass this to refresh their data after a successful import. */
   onDone?: () => void;
+  /** The register's current search and filters as a query string (no leading "?"):
+   *  export then carries exactly the rows on screen. Empty = every row. */
+  exportQuery?: string;
+  /** How many rows that is — shown on the buttons while a filter is active. */
+  exportCount?: number;
 };
 
 /** Where a client column goes: one of our fields, a custom field, or nowhere. */
@@ -128,11 +142,25 @@ type Step = 1 | 2 | 3 | 4;
 
 /** Trigger a browser download of CSV text via a transient object URL. */
 function downloadCsv(filename: string, csv: string) {
-  const blob = new Blob([csv], { type: "text/csv" });
+  downloadBlob(filename || "export.csv", new Blob([csv], { type: "text/csv" }));
+}
+
+function downloadFile(file: FilePayload) {
+  if (file.xlsx_b64 != null) {
+    const bytes = Uint8Array.from(atob(file.xlsx_b64), (c) => c.charCodeAt(0));
+    downloadBlob(file.filename, new Blob([bytes], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }));
+  } else {
+    downloadCsv(file.filename, file.csv ?? "");
+  }
+}
+
+function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename || "export.csv";
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -193,24 +221,31 @@ const BAND_LABEL: Record<MappingSuggestion["band"], string> = {
 /* ---------------------------------------------------------------- Export --- */
 
 /** Reusable Export / Template / Import control. */
-export type ImportExportHandle = { exportCsv: () => void; template: () => void; openImport: () => void };
+export type ImportExportHandle = {
+  exportCsv: () => void;
+  exportExcel: () => void;
+  /** The import template, as an Excel workbook (dropdowns + a Guide sheet). */
+  template: () => void;
+  openImport: () => void;
+};
 
 /** Import/export for one register. Renders its own three buttons unless `hideButtons`
  *  is set, in which case the page drives it through the ref — the buttons then live in
  *  a menu rather than crowding the page head. */
 const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: boolean }>(function ImportExport(
-  { resource, label, onDone, hideButtons }, ref,
+  { resource, label, onDone, hideButtons, exportQuery = "", exportCount }, ref,
 ) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<"export" | "template" | null>(null);
+  const [busy, setBusy] = useState<"export" | "excel" | "template" | null>(null);
   const [barError, setBarError] = useState<string | null>(null);
 
-  async function doDownload(kind: "export" | "template") {
+  // Exports and the template carry every column, the organisation's custom fields included.
+  async function doDownload(kind: "export" | "template", format: "csv" | "xlsx") {
     setBarError(null);
-    setBusy(kind);
+    setBusy(kind === "export" && format === "xlsx" ? "excel" : kind);
     try {
-      const data = await apiCall<CsvPayload>("GET", `/io/${resource}/${kind}`);
-      downloadCsv(data.filename, data.csv);
+      const scoped = kind === "export" && exportQuery ? `&${exportQuery}` : "";
+      downloadFile(await apiCall<FilePayload>("GET", `/io/${resource}/${kind}?format=${format}${scoped}`));
     } catch (e) {
       setBarError(errorText(e, `Failed to download ${kind}`));
     } finally {
@@ -219,12 +254,17 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
   }
 
   useImperativeHandle(ref, () => ({
-    exportCsv: () => doDownload("export"),
-    template: () => doDownload("template"),
+    exportCsv: () => doDownload("export", "csv"),
+    exportExcel: () => doDownload("export", "xlsx"),
+    template: () => doDownload("template", "xlsx"),
     openImport: () => setOpen(true),
   }));
   // With the buttons hidden there is nowhere to show a download error inline.
   useEffect(() => { if (hideButtons && barError) toast(barError); }, [hideButtons, barError]);
+
+  // While a filter is active the buttons say how many rows they will export.
+  const filteredCount = exportQuery && exportCount != null ? `${exportCount.toLocaleString()} ` : "";
+  const countSuffix = exportQuery && exportCount != null ? ` · ${exportCount.toLocaleString()}` : "";
 
   return (
     <>
@@ -233,17 +273,25 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
         <div style={{ display: "inline-flex", gap: 6 }}>
           <button
             className="btn secondary sm"
-            onClick={() => doDownload("export")}
+            onClick={() => doDownload("export", "xlsx")}
             disabled={busy !== null}
-            title={`Download all ${label} as CSV`}
+            title={exportQuery ? `Download the ${filteredCount}${label} shown (the current search and filters) as an Excel workbook` : `Download all ${label} as an Excel workbook`}
           >
-            {busy === "export" ? "Exporting…" : "Export CSV"}
+            {busy === "excel" ? "Exporting…" : `Export Excel${countSuffix}`}
           </button>
           <button
             className="btn secondary sm"
-            onClick={() => doDownload("template")}
+            onClick={() => doDownload("export", "csv")}
             disabled={busy !== null}
-            title="Download a demo CSV with headers and an example row"
+            title={exportQuery ? `Download the ${filteredCount}${label} shown (the current search and filters) as CSV` : `Download all ${label} as CSV`}
+          >
+            {busy === "export" ? "Exporting…" : `CSV${countSuffix}`}
+          </button>
+          <button
+            className="btn secondary sm"
+            onClick={() => doDownload("template", "xlsx")}
+            disabled={busy !== null}
+            title="Download an Excel template: every column, dropdowns for choices, and a Guide sheet"
           >
             {busy === "template" ? "…" : "Template"}
           </button>
@@ -268,7 +316,7 @@ const ImportExport = forwardRef<ImportExportHandle, Props & { hideButtons?: bool
           resource={resource}
           label={label}
           onClose={() => setOpen(false)}
-          onDownloadTemplate={() => doDownload("template")}
+          onDownloadTemplate={() => doDownload("template", "xlsx")}
           onDone={onDone}
         />
       )}
@@ -422,6 +470,9 @@ function ImportWizard({
         const next: Record<string, Destination> = {};
         for (const header of found.headers) next[header] = { kind: "ignore" };
         for (const s of found.suggestions) next[s.source] = { kind: "field", target: s.target };
+        for (const s of found.custom_field_suggestions ?? []) {
+          next[s.source] = { kind: "custom", customFieldId: s.custom_field_id };
+        }
         setDestinations(next);
       } catch (err) {
         setFileError(errorText(err, "Could not read that file"));
@@ -447,6 +498,9 @@ function ImportWizard({
       setProfileName(profile.name);
     } else {
       for (const s of inspection.suggestions) next[s.source] = { kind: "field", target: s.target };
+      for (const s of inspection.custom_field_suggestions ?? []) {
+        next[s.source] = { kind: "custom", customFieldId: s.custom_field_id };
+      }
       setProfileName("");
     }
     setDestinations(next);
@@ -532,9 +586,16 @@ function ImportWizard({
     }
   }
 
+  const previewNoted = preview ? preview.rows.filter((r) => !r.error && (r.warnings?.length ?? 0) > 0).length : 0;
+  const resultNotes = result?.warnings ?? [];
+
   function downloadErrors() {
     if (!result) return;
-    const rows = [["row", "message"], ...result.errors.map((e) => [String(e.row), e.message])];
+    const rows = [
+      ["row", "kind", "message"],
+      ...result.errors.map((e) => [String(e.row), "skipped", e.message]),
+      ...(result.warnings ?? []).map((w) => [String(w.row), "imported with a note", w.message]),
+    ];
     const csv = rows
       .map((r) => r.map((cell) => (/[",\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell)).join(","))
       .join("\n");
@@ -576,7 +637,7 @@ function ImportWizard({
                   style={{ padding: "1px 8px", fontSize: 12 }}
                   onClick={onDownloadTemplate}
                 >
-                  Download template
+                  Download Excel template
                 </button>
               </p>
 
@@ -801,12 +862,18 @@ function ImportWizard({
                 <Badge tone={preview.valid === preview.previewed ? "low" : "medium"}>
                   {preview.valid} of {preview.previewed} shown rows are valid
                 </Badge>
+                {previewNoted > 0 && (
+                  <Badge tone="medium">
+                    {previewNoted} will import with a note
+                  </Badge>
+                )}
                 <Badge tone="info">{preview.total} rows in the file</Badge>
               </div>
               <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
-                Nothing has been saved yet. This is exactly how the first {preview.previewed} row
-                {preview.previewed !== 1 ? "s" : ""} will be read — including references that
-                point at records which do not exist yet.
+                Nothing has been saved yet. The first {preview.previewed} row
+                {preview.previewed !== 1 ? "s were" : " was"} run through the same checks as the
+                real import — references, the register&apos;s own rules and its approval workflow —
+                so a problem or note here is what the import will report.
               </p>
 
               <div className="table-wrap" style={{ maxHeight: 400, overflowY: "auto" }}>
@@ -827,8 +894,14 @@ function ImportWizard({
                             {truncate(row.values[col] ?? "", 40)}
                           </td>
                         ))}
-                        <td style={{ color: row.error ? "var(--red)" : undefined, fontSize: 12.5 }}>
-                          {row.error || "—"}
+                        <td style={{ fontSize: 12.5 }}>
+                          {row.error ? (
+                            <span style={{ color: "var(--red)" }}>{row.error}</span>
+                          ) : row.warnings?.length ? (
+                            <span style={{ color: "var(--amber)" }}>{row.warnings.join(" ")}</span>
+                          ) : (
+                            "—"
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -893,6 +966,11 @@ function ImportWizard({
                 >
                   Import complete — {result.created} record{result.created !== 1 ? "s" : ""} created
                   {result.skipped ? `, ${result.skipped} skipped` : ""}.
+                  {resultNotes.length > 0 && (
+                    <button className="btn secondary sm" type="button" onClick={downloadErrors} style={{ marginLeft: 10 }}>
+                      Download notes
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div style={{ marginTop: 14 }}>
@@ -921,6 +999,40 @@ function ImportWizard({
                           <tr key={`${err.row}-${i}`}>
                             <td className="ref" style={{ color: "var(--red)" }}>{err.row}</td>
                             <td style={{ color: "var(--red)" }}>{err.message}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {resultNotes.length > 0 && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 560, marginBottom: 6 }}>
+                    Imported with a note ({resultNotes.length})
+                  </div>
+                  <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                    These rows were saved, but not exactly as written — for example an approved
+                    record comes in as a draft to be approved here, or a name that matched no user
+                    is kept as text.
+                  </p>
+                  <div
+                    className="table-wrap"
+                    style={{ maxHeight: 200, overflowY: "auto", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)" }}
+                  >
+                    <table>
+                      <thead>
+                        <tr>
+                          <th style={{ width: 80 }}>Row</th>
+                          <th>Note</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {resultNotes.map((note, i) => (
+                          <tr key={`${note.row}-${i}`}>
+                            <td className="ref" style={{ color: "var(--amber)" }}>{note.row}</td>
+                            <td style={{ color: "var(--amber)" }}>{note.message}</td>
                           </tr>
                         ))}
                       </tbody>

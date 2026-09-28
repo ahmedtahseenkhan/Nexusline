@@ -14,10 +14,12 @@ import WorkflowFields from "@/components/WorkflowFields";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import DataTable, { type Column } from "@/components/DataTable";
 import RecordDrawer from "@/components/RecordDrawer";
+import RelatedChips, { type GraphRef } from "@/components/RelatedChips";
 import RecordPanels from "@/components/RecordPanels";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import { type Option as AsyncOption } from "@/components/AsyncSelect";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import ImportExport from "@/components/ImportExport";
 import { Field, TextInput, TextArea } from "@/components/fields";
 import { Badge } from "@/components/badges";
@@ -42,6 +44,9 @@ type BusinessUnit = {
   /** Read-only: moved only through WorkflowFields. */
   workflow_status: string;
   legals: Ref[];
+  /** Read-only: risks and controls scoped to it (each owns the link on its own form). */
+  risks?: GraphRef[];
+  controls?: GraphRef[];
 };
 
 const WORKFLOW_TONE: Record<string, "low" | "medium" | "high" | "critical" | "neutral" | "info"> = {
@@ -97,6 +102,7 @@ function BusinessUnitsInner() {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<FormState>(BLANK);
+  const cfForm = useCustomFieldForm("business_unit");
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF((p) => ({ ...p, [k]: v }));
 
@@ -122,12 +128,14 @@ function BusinessUnitsInner() {
   function openNew() {
     setEditing(null);
     setF(BLANK);
+    cfForm.start(null);
     setError(null);
     setShowForm(true);
   }
   function openEdit(u: BusinessUnit) {
     setEditing(u);
     setF(fromUnit(u));
+    cfForm.start(u.id);
     setError(null);
     setShowForm(true);
   }
@@ -154,8 +162,10 @@ function BusinessUnitsInner() {
       legal_ids: f.legal_ids.map((o) => o.value),
     };
     try {
-      if (editing) await apiCall<BusinessUnit>("PATCH", `/business-units/${editing.id}`, payload);
-      else await apiCall<BusinessUnit>("POST", "/business-units", payload);
+      const saved = editing
+        ? await apiCall<BusinessUnit>("PATCH", `/business-units/${editing.id}`, payload)
+        : await apiCall<BusinessUnit>("POST", "/business-units", payload);
+      await cfForm.save(saved.id);
       setShowForm(false);
       invalidateBusinessUnits();
       reload();
@@ -361,6 +371,8 @@ function BusinessUnitsInner() {
             <strong style={{ fontSize: 13 }}>Related records</strong>
             <div style={{ display: "grid", gap: 12, marginTop: 8, marginBottom: 8 }}>
               {field("Legal & regulatory obligations", chips(detail.legals))}
+              <RelatedChips label="Risks" items={detail.risks} href="/risks" format="ref-name" />
+              <RelatedChips label="Controls" items={detail.controls} href="/controls" format="ref-name" />
             </div>
 
             <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
@@ -375,6 +387,7 @@ function BusinessUnitsInner() {
           tabs={[
             { id: "general", label: "General", content: generalTab, required: true },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           onClose={() => { setShowForm(false); setRecordId(null); }}
           onSave={save}

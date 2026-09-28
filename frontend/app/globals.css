@@ -679,7 +679,9 @@ tbody tr:hover td { background: var(--primary-weak-2); }
 /* ==================================================================== Fields */
 .field { margin-bottom: 18px; }
 .field:last-child { margin-bottom: 0; }
-.field > label {
+/* The field's caption. A toggle inside a field is also a direct <label> child
+   (label.switch) and must keep its own inline-flex layout, or its track collapses. */
+.field > label:not(.switch) {
   display: block;
   font-size: 12.5px;
   font-weight: 600;
@@ -1165,14 +1167,18 @@ td .chips .chip { padding: 1px 7px; font-size: 12px; font-weight: 500; white-spa
   .drawer-aside { border-left: none; border-top: 1px solid var(--border); }
 }
 
-/* Activity timeline in the aside */
+/* Activity timeline in the aside. Scoped to .activity-list: bare .activity-item is the
+   flex row used by feeds and lists (notifications, My work, board, projects…), which an
+   unscoped grid rule here squeezed into a 14px column. */
 .activity-list { display: grid; gap: 0; margin-top: 8px; }
-.activity-item { display: grid; grid-template-columns: 14px 1fr; gap: 10px; padding: 6px 0; position: relative; }
-.activity-item::before {
+.activity-list > .activity-item {
+  display: grid; grid-template-columns: 14px 1fr; gap: 10px; padding: 6px 0; position: relative;
+}
+.activity-list > .activity-item::before {
   content: ""; position: absolute; left: 5px; top: 0; bottom: 0; width: 2px; background: var(--border);
 }
-.activity-item:first-child::before { top: 12px; }
-.activity-item:last-child::before { bottom: calc(100% - 12px); }
+.activity-list > .activity-item:first-child::before { top: 12px; }
+.activity-list > .activity-item:last-child::before { bottom: calc(100% - 12px); }
 .activity-dot {
   width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; position: relative; z-index: 1;
   background: var(--primary-weak); border: 2px solid var(--primary);

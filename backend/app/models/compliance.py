@@ -192,6 +192,8 @@ class Requirement(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixi
     )
     audit_findings: Mapped[list["AuditFinding"]] = relationship(  # noqa: F821
         "AuditFinding", secondary="audit_finding_requirements", lazy="selectin", viewonly=True,
+        # Findings of an archived engagement leave this record's view with the audit.
+        secondaryjoin=lambda: _live_findings("audit_finding_requirements"),
     )
     vendors: Mapped[list["Vendor"]] = relationship(  # noqa: F821
         "Vendor", secondary="vendor_requirements", lazy="selectin", viewonly=True,
@@ -310,3 +312,9 @@ class CrosswalkRejection(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base)
     reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
     rejected_by: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     rejected_by_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+
+def _live_findings(link_table_name: str):
+    from app.models import internal_audit
+
+    return internal_audit.live_finding_secondaryjoin(getattr(internal_audit, link_table_name))

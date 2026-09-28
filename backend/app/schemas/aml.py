@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.base import WorkflowState
 from app.models.enums import (
@@ -15,6 +15,7 @@ from app.models.enums import (
     ScreeningMatchStatus,
     ScreeningType,
 )
+from app.schemas.tenant_settings import currency_or_default
 
 
 # ---------------------------------------------------------------- screening ---
@@ -74,7 +75,7 @@ class SarBase(BaseModel):
 
 
 class SarCreate(SarBase):
-    pass
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class SarUpdate(BaseModel):
@@ -90,6 +91,8 @@ class SarUpdate(BaseModel):
     filed_date: date | None = None
     fmu_reference: str | None = None
     status: SarStatus | None = None
+
+    _ccy = field_validator("currency")(currency_or_default)
 
 
 class SarRead(SarBase):

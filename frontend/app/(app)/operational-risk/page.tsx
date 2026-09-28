@@ -26,6 +26,7 @@ import RelatedChips from "@/components/RelatedChips";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import UserPicker, { UserName } from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import BusinessUnitSelect, { UnitName } from "@/components/BusinessUnitSelect";
@@ -480,6 +481,7 @@ function OperationalRiskInner() {
   const [showRcsaForm, setShowRcsaForm] = useState(false);
   const [savingRcsa, setSavingRcsa] = useState(false);
   const [af, setAf] = useState<RcsaForm>(BLANK_RCSA);
+  const rcsaCfForm = useCustomFieldForm("rcsa_assessment");
   const setA = <K extends keyof RcsaForm>(k: K, v: RcsaForm[K]) => setAf((p) => ({ ...p, [k]: v }));
 
   const [rcsaDetail, setRcsaDetail] = useState<RcsaExt | null>(null);
@@ -491,6 +493,7 @@ function OperationalRiskInner() {
   const [showKriForm, setShowKriForm] = useState(false);
   const [savingKri, setSavingKri] = useState(false);
   const [kf, setKf] = useState<KriForm>(BLANK_KRI);
+  const kriCfForm = useCustomFieldForm("key_risk_indicator");
   const setK = <K extends keyof KriForm>(k: K, v: KriForm[K]) => setKf((p) => ({ ...p, [k]: v }));
 
   const [kriDetail, setKriDetail] = useState<KriExt | null>(null);
@@ -503,6 +506,7 @@ function OperationalRiskInner() {
   const [showLossForm, setShowLossForm] = useState(false);
   const [savingLoss, setSavingLoss] = useState(false);
   const [lf, setLf] = useState<LossForm>(() => blankLoss(currency));
+  const lossCfForm = useCustomFieldForm("loss_event");
   const setL = <K extends keyof LossForm>(k: K, v: LossForm[K]) => setLf((p) => ({ ...p, [k]: v }));
 
   // ---- Basel II taxonomy: level 2 always belongs to the chosen level 1 -------
@@ -578,12 +582,14 @@ function OperationalRiskInner() {
   function openNewRcsa() {
     setEditingRcsa(null);
     setAf(BLANK_RCSA);
+    rcsaCfForm.start(null);
     setError(null);
     setShowRcsaForm(true);
   }
   function openEditRcsa(r: RcsaExt) {
     setEditingRcsa(r);
     setAf(fromRcsa(r));
+    rcsaCfForm.start(r.id);
     setError(null);
     setShowRcsaForm(true);
   }
@@ -592,8 +598,8 @@ function OperationalRiskInner() {
     setSavingRcsa(true);
     try {
       const payload = rcsaPayload(af);
-      if (editingRcsa) await api.updateRcsa(editingRcsa.id, payload);
-      else await api.createRcsa(payload);
+      const saved = editingRcsa ? await api.updateRcsa(editingRcsa.id, payload) : await api.createRcsa(payload);
+      await rcsaCfForm.save(saved.id);
       setShowRcsaForm(false);
       reload();
       if (openId) api.rcsaGet(openId).then(setRcsaDetail).catch(() => {});
@@ -667,6 +673,7 @@ function OperationalRiskInner() {
   function openNewKri() {
     setEditingKri(null);
     setKf(BLANK_KRI);
+    kriCfForm.start(null);
     setError(null);
     loadAppetites();
     setShowKriForm(true);
@@ -674,6 +681,7 @@ function OperationalRiskInner() {
   function openEditKri(k: KriExt) {
     setEditingKri(k);
     setKf(fromKri(k));
+    kriCfForm.start(k.id);
     setError(null);
     loadAppetites();
     setShowKriForm(true);
@@ -683,8 +691,8 @@ function OperationalRiskInner() {
     setSavingKri(true);
     try {
       const payload = kriPayload(kf);
-      if (editingKri) await api.updateKri(editingKri.id, payload);
-      else await api.createKri(payload);
+      const saved = editingKri ? await api.updateKri(editingKri.id, payload) : await api.createKri(payload);
+      await kriCfForm.save(saved.id);
       setShowKriForm(false);
       reload();
       if (openId) loadKri(openId);
@@ -734,12 +742,14 @@ function OperationalRiskInner() {
   function openNewLoss() {
     setEditingLoss(null);
     setLf(blankLoss(currency));
+    lossCfForm.start(null);
     setError(null);
     setShowLossForm(true);
   }
   function openEditLoss(l: LossEventExt) {
     setEditingLoss(l);
     setLf(fromLoss(l, currency));
+    lossCfForm.start(l.id);
     setError(null);
     setShowLossForm(true);
   }
@@ -748,8 +758,8 @@ function OperationalRiskInner() {
     setSavingLoss(true);
     try {
       const payload = lossPayload(lf);
-      if (editingLoss) await api.updateLossEvent(editingLoss.id, payload);
-      else await api.createLossEvent(payload);
+      const saved = editingLoss ? await api.updateLossEvent(editingLoss.id, payload) : await api.createLossEvent(payload);
+      await lossCfForm.save(saved.id);
       setShowLossForm(false);
       reload();
       await loadSummary();
@@ -1602,6 +1612,7 @@ function OperationalRiskInner() {
           tabs={[
             { id: "general", label: "General", content: rcsaGeneral, required: true },
             { id: "timing", label: "Timing", content: rcsaTiming },
+            ...rcsaCfForm.tabs,
           ]}
           onClose={() => setShowRcsaForm(false)}
           onSave={saveRcsa}
@@ -1632,6 +1643,7 @@ function OperationalRiskInner() {
             { id: "general", label: "General", content: kriGeneral, required: true },
             { id: "definition", label: "Definition", content: kriDefinition },
             { id: "thresholds", label: "Thresholds", content: kriThresholds },
+            ...kriCfForm.tabs,
           ]}
           onClose={() => setShowKriForm(false)}
           onSave={saveKri}
@@ -1662,6 +1674,7 @@ function OperationalRiskInner() {
             { id: "general", label: "General", content: lossGeneral, required: true },
             { id: "details", label: "Details", content: lossDetails },
             { id: "approval", label: "Approval", content: lossApproval },
+            ...lossCfForm.tabs,
           ]}
           onClose={() => setShowLossForm(false)}
           onSave={saveLoss}

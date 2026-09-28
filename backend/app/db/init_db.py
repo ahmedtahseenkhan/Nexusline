@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from app.core.config import settings
-from app.core.database import Base
+from app.core.database import Base, json_dumps
 from app.db.rls import apply_rls_policies
 from app.db.phase4 import all_ddl_statements as phase4_ddl_statements
 from app.db.phase5 import all_ddl_statements as phase5_ddl_statements
 from app.db.schema_patches import (
     asset_split_ddl_statements,
+    authority_amount_ddl_statements,
     risk_methodology_ddl_statements,
     audit_type_ddl_statements,
     fortnightly_ddl_statements,
@@ -38,7 +41,9 @@ import app.models  # noqa: F401
 logger = logging.getLogger("nexusline.init")
 
 # Owner/superuser engine for DDL + role provisioning only.
-admin_engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+admin_engine = create_async_engine(
+    settings.database_url, pool_pre_ping=True, json_serializer=json_dumps
+)
 
 
 async def wait_for_db(retries: int = 30, delay: float = 1.0) -> None:
@@ -88,6 +93,31 @@ async def ensure_app_role(conn: AsyncConnection) -> None:
     )
 
 
+# Every API worker process starts up, but exactly one may initialise: the DDL takes
+# exclusive table locks even when it changes nothing, so a second worker re-running it
+# deadlocked against the first one's live traffic. The worker that wins the lock
+# initialises; the others wait for it to finish and skip.
+_STARTUP_LOCK = 0x4E58_494E  # "NXIN"
+
+
+@asynccontextmanager
+async def startup_lock() -> AsyncIterator[bool]:
+    """Yield True in the one worker that should initialise, False in the others (only
+    once the initialising worker has finished)."""
+    await wait_for_db()
+    async with admin_engine.connect() as conn:
+        leader = await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": _STARTUP_LOCK})
+        await conn.commit()
+        if not leader:
+            # Wait for the initialising worker, then let go at once.
+            await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _STARTUP_LOCK})
+        try:
+            yield bool(leader)
+        finally:
+            await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _STARTUP_LOCK})
+            await conn.commit()
+
+
 async def init_models() -> None:
     await wait_for_db()
     async with admin_engine.begin() as conn:
@@ -108,6 +138,7 @@ async def init_models() -> None:
             *phase2_ddl_statements(),
             *phase3_ddl_statements(),
             *recheck_ddl_statements(),
+            *authority_amount_ddl_statements(),
             *phase4_ddl_statements(),
             *phase5_ddl_statements(),
         ):

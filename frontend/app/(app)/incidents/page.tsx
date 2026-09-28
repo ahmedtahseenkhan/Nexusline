@@ -25,6 +25,7 @@ import UserPicker, { UserName } from "@/components/UserPicker";
 import LookupSelect from "@/components/LookupSelect";
 import ArchivedRecords from "@/components/ArchivedRecords";
 import { useCustomFieldFacts } from "@/components/CustomFieldsPanel";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
 import {
   Fact, FactGrid, FactList, LabelledSearch, OpenPoints, PrimaryAction, RecordSection, RelatedGroups, SectionNav, SummaryBand,
   approvalHintFor, approvalMetaItem, relatedCount, rowAction, rowLabel, useRecordCtx, useRecordGovernanceData, useRecordSections,
@@ -45,6 +46,16 @@ import type { PointAction } from "@/lib/record/types";
 
 // ----------------------------------------------------------------- types (inline)
 type Ref = { id: string; reference?: string; title?: string; name?: string };
+/** Why "Create loss event" is unavailable, or null when it is. */
+function lossBlockedHint(i: { near_miss: boolean; loss_events: { reference: string }[] }): string | null {
+  if (i.near_miss) return "A near miss has no loss to record";
+  if (i.loss_events.length > 0) return `Already recorded as ${i.loss_events[0].reference} — add further amounts or recoveries there`;
+  return null;
+}
+
+/** A linked asset: IT and information assets live in different registers. */
+type AssetRef = Ref & { asset_class?: string | null };
+const assetHref = (a: AssetRef) => `${a.asset_class === "it_asset" ? "/it-assets" : "/information-assets"}?id=${a.id}`;
 
 type IncidentStageFull = {
   id: string;
@@ -137,7 +148,7 @@ type IncidentFull = {
   regulatory_reports: RegReport[];
   controls: Ref[];
   vendors: Ref[];
-  assets: Ref[];
+  assets: AssetRef[];
   risks: Ref[];
   created_at: string;
 };
@@ -415,6 +426,7 @@ function IncidentsInner() {
   const nowMs = useNow(); // the notification countdown in the band and open points stays live
   const ctx = useRecordCtx(gov, canWrite, new Date(nowMs));
   const sections = useRecordSections();
+  const cfForm = useCustomFieldForm("incident");
   const cf = useCustomFieldFacts("incident", detail?.id, { builtInLabels: INCIDENT_BUILT_IN_LABELS });
   /** FormModal tab to open on (a header gap, an open point or a "Fill in"). */
   const [editTab, setEditTab] = useState<string | undefined>(undefined);
@@ -431,16 +443,18 @@ function IncidentsInner() {
   const searchRisks = (q: string) => apiCall<PagedList<{ id: string; title: string; reference: string }>>("GET", `/risks?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.title, sub: x.reference })));
   const searchAssets = (q: string) => apiCall<PagedList<{ id: string; name: string; classification: string }>>("GET", `/assets?search=${encodeURIComponent(q)}&limit=20`).then((r) => r.items.map((x) => ({ value: x.id, label: x.name, sub: x.classification })));
 
-  function openNew() { setEditing(null); setF(BLANK); setError(null); setEditTab(undefined); setShowForm(true); }
-  function openEdit(i: IncidentFull, tab?: string) { setEditing(i); setF(fromIncident(i, tz)); setError(null); setEditTab(tab); setShowForm(true); }
+  function openNew() { setEditing(null); setF(BLANK); cfForm.start(null); setError(null); setEditTab(undefined); setShowForm(true); }
+  function openEdit(i: IncidentFull, tab?: string) { setEditing(i); setF(fromIncident(i, tz)); cfForm.start(i.id); setError(null); setEditTab(tab); setShowForm(true); }
 
   async function save() {
     setError(null); setSaving(true);
     try {
       const payload = toPayload(f, tz);
-      if (editing) await apiCall<IncidentFull>("PATCH", `/incidents/${editing.id}`, payload);
-      else await apiCall<IncidentFull>("POST", "/incidents", payload);
-      setShowForm(false); refresh();
+      const saved = editing
+        ? await apiCall<IncidentFull>("PATCH", `/incidents/${editing.id}`, payload)
+        : await apiCall<IncidentFull>("POST", "/incidents", payload);
+      await cfForm.save(saved.id);
+      setShowForm(false); refresh(); void cf.reload();
       toast(editing ? "Changes saved" : "Incident logged");
       if (f.personal_data_breach && !editing?.personal_data_breach) toast("Personal data breach: a breach record was opened in Data Protection");
     } catch (e) { setError(e instanceof Error ? e.message : "Failed to save incident"); }
@@ -517,10 +531,12 @@ function IncidentsInner() {
   /* Inline relation chips linking to each record's own page. */
   const labelOf = (x: { id: string; label?: string; name?: string; title?: string; reference?: string }) =>
     x.label || x.name || x.title || x.reference || x.id;
-  const linkChips = (items: { id: string; label?: string; name?: string; title?: string; reference?: string }[] | undefined, href: string) =>
+  const linkChips = <T extends { id: string; label?: string; name?: string; title?: string; reference?: string }>(
+    items: T[] | undefined, href: string | ((x: T) => string),
+  ) =>
     items && items.length ? (
       <div className="chips" onClick={(e) => e.stopPropagation()}>
-        {items.map((x) => <Link key={x.id} className="chip" href={`${href}?id=${x.id}`}>{labelOf(x)}</Link>)}
+        {items.map((x) => <Link key={x.id} className="chip" href={typeof href === "function" ? href(x) : `${href}?id=${x.id}`}>{labelOf(x)}</Link>)}
       </div>
     ) : <span className="muted">—</span>;
   const names = (items: { id: string; label?: string; name?: string; title?: string; reference?: string }[] | undefined) =>
@@ -544,7 +560,7 @@ function IncidentsInner() {
     { key: "flags", header: "Flags", hidden: true, render: (i) => (i.near_miss || i.personal_data_breach) ? <div className="chips">{i.near_miss && <Badge tone="info">Near miss</Badge>}{i.personal_data_breach && <Badge tone="high">Personal data</Badge>}</div> : <span className="muted">—</span>, text: (i) => [i.near_miss && "Near miss", i.personal_data_breach && "Personal data breach"].filter(Boolean).join(", ") },
     { key: "customers_affected", header: "Customers affected", hidden: true, align: "right", render: (i) => <span className="muted">{i.customers_affected != null ? i.customers_affected.toLocaleString() : "—"}</span>, text: (i) => i.customers_affected != null ? String(i.customers_affected) : "" },
     { key: "cost", header: "Cost", hidden: true, align: "right", render: (i) => <span className="muted">{i.near_miss ? "Near miss" : i.cost != null ? formatMoney(i.cost) : "—"}</span>, text: (i) => i.near_miss ? "Near miss" : i.cost != null ? formatMoney(i.cost) : "" },
-    { key: "assets", header: "Assets", render: (i) => linkChips(i.assets, "/information-assets"), text: (i) => names(i.assets) },
+    { key: "assets", header: "Assets", render: (i) => linkChips(i.assets, assetHref), text: (i) => names(i.assets) },
     { key: "controls", header: "Controls", hidden: true, render: (i) => linkChips(i.controls, "/controls"), text: (i) => names(i.controls) },
     { key: "risks", header: "Risks", hidden: true, render: (i) => linkChips(i.risks, "/risks"), text: (i) => names(i.risks) },
     { key: "vendors", header: "Third parties", hidden: true, render: (i) => linkChips(i.vendors, "/vendors"), text: (i) => names(i.vendors) },
@@ -835,7 +851,7 @@ function IncidentsInner() {
   const linkGroups: RelatedGroup[] = detail ? [
     { key: "risks", label: "Risks", items: detail.risks, href: "/risks" },
     { key: "controls", label: "Controls", items: detail.controls, href: "/controls" },
-    { key: "assets", label: "Assets", items: detail.assets, href: "/information-assets" },
+    { key: "assets", label: "Assets", items: detail.assets, href: (x) => assetHref(x as AssetRef) },
     { key: "vendors", label: "Third parties", items: detail.vendors, href: "/vendors" },
   ] : [];
 
@@ -970,8 +986,8 @@ function IncidentsInner() {
           canWrite ? [
             { label: `Generate ${regulatorName(detail) || "SBP"} reports`, onClick: generateRegReports, hint: incidentGenerateHint(detail) },
             {
-              label: "Create loss event", onClick: createLossEvent, disabled: detail.near_miss,
-              hint: detail.near_miss ? "A near miss has no loss to record" : "Adds it to the operational loss database",
+              label: "Create loss event", onClick: createLossEvent, disabled: detail.near_miss || detail.loss_events.length > 0,
+              hint: lossBlockedHint(detail) ?? "Adds it to the operational loss database",
             },
           ] : [],
           { onDelete: canWrite ? () => remove(detail) : undefined },
@@ -1041,15 +1057,22 @@ function IncidentsInner() {
               title="Impact & loss"
               count={detail.loss_events.length || null}
               actions={canWrite ? (
-                <button
-                  type="button"
-                  className="btn secondary sm"
-                  onClick={createLossEvent}
-                  disabled={detail.near_miss}
-                  title={detail.near_miss ? "A near miss has no loss to record" : undefined}
-                >
-                  Create loss event
-                </button>
+                detail.loss_events.length > 0 ? (
+                  // One incident, one loss record: further amounts go on that loss event.
+                  <Link className="btn secondary sm" href="/operational-risk" title={lossBlockedHint(detail) ?? undefined}>
+                    Open loss event {detail.loss_events[0].reference}
+                  </Link>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn secondary sm"
+                    onClick={createLossEvent}
+                    disabled={detail.near_miss}
+                    title={lossBlockedHint(detail) ?? undefined}
+                  >
+                    Create loss event
+                  </button>
+                )
               ) : undefined}
             >
               <FactList
@@ -1240,6 +1263,7 @@ function IncidentsInner() {
             { id: "regulatory", label: "Regulatory", content: regulatoryTab },
             { id: "analysis", label: "Impact & analysis", content: analysisTab },
             { id: "links", label: "Links & Relations", content: linksTab },
+            ...cfForm.tabs,
           ]}
           initialTab={editTab}
           onClose={() => setShowForm(false)}

@@ -761,6 +761,7 @@ class AssetFacts:
 
     name: str
     asset_class: str
+    #: The asset's effective criticality (``Asset.effective_criticality``), not the raw column.
     criticality: Criticality
     business_value: Criticality
     confidentiality: Criticality

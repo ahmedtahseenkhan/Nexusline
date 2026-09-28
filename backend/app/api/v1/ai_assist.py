@@ -17,7 +17,7 @@ import os
 import re
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -385,7 +385,7 @@ async def get_extraction(eid: uuid.UUID, db: DbSession) -> AiExtractionRead:
 async def delete_extraction(eid: uuid.UUID, db: DbSession) -> None:
     obj = await _get(db, eid)
     obj.deleted = True
-    obj.deleted_date = date.today()
+    obj.deleted_date = datetime.now(timezone.utc)
     await db.flush()
 
 

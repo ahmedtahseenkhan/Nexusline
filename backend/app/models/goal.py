@@ -68,9 +68,10 @@ class Goal(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, WorkflowMixin, Soft
         lazy="selectin",
         order_by="GoalAudit.created_at.desc()",
     )
-    risks: Mapped[list["Risk"]] = relationship(secondary=goal_risks, lazy="selectin",
+    risks: Mapped[list["Risk"]] = relationship(  # noqa: F821
+        secondary=goal_risks, lazy="selectin",
         secondaryjoin="and_(goal_risks.c.risk_id == Risk.id, Risk.deleted == False)",
-    )  # noqa: F821
+    )
     projects: Mapped[list["Project"]] = relationship(  # noqa: F821
         secondary=goal_projects, lazy="selectin",
         secondaryjoin="and_(goal_projects.c.project_id == Project.id, Project.deleted == False)",

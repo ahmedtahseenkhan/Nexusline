@@ -11,6 +11,8 @@ import RecordDrawer from "@/components/RecordDrawer";
 import AsyncSelect, { type Option as AsyncOption } from "@/components/AsyncSelect";
 import AsyncMultiSelect from "@/components/AsyncMultiSelect";
 import FormModal from "@/components/FormModal";
+import { useCustomFieldForm } from "@/components/useCustomFieldForm";
+import CustomFieldsPanel from "@/components/CustomFieldsPanel";
 import ImportExport from "@/components/ImportExport";
 import RecordPanels from "@/components/RecordPanels";
 import RecordApproval from "@/components/RecordApproval";
@@ -385,6 +387,7 @@ function ComplianceInner() {
   const [showFw, setShowFw] = useState(false);
   const [editingFw, setEditingFw] = useState<Framework | null>(null);
   const [fw, setFw] = useState<FwState>(FW_BLANK);
+  const fwCfForm = useCustomFieldForm("framework");
   const [savingFw, setSavingFw] = useState(false);
 
   // framework library
@@ -401,6 +404,7 @@ function ComplianceInner() {
   const [showReq, setShowReq] = useState(false);
   const [editingReq, setEditingReq] = useState<Requirement | null>(null);
   const [rq, setRq] = useState<ReqState>(REQ_BLANK);
+  const reqCfForm = useCustomFieldForm("requirement");
   const [savingReq, setSavingReq] = useState(false);
   const [crosswalkSel, setCrosswalkSel] = useState<AsyncOption[]>([]);
 
@@ -555,12 +559,14 @@ function ComplianceInner() {
   function openNewFw() {
     setEditingFw(null);
     setFw(FW_BLANK);
+    fwCfForm.start(null);
     setError(null);
     setShowFw(true);
   }
   function openEditFw(f: Framework) {
     setEditingFw(f);
     setFw(fromFramework(f));
+    fwCfForm.start(f.id);
     setError(null);
     setShowFw(true);
   }
@@ -570,9 +576,11 @@ function ComplianceInner() {
     try {
       if (editingFw) {
         const updated = await apiCall<Framework>("PATCH", `/frameworks/${editingFw.id}`, fw);
+        await fwCfForm.save(updated.id);
         await loadFrameworks(updated.id);
       } else {
         const created = await apiCall<Framework>("POST", "/frameworks", fw);
+        await fwCfForm.save(created.id);
         await loadFrameworks(created.id);
       }
       setShowFw(false);
@@ -608,12 +616,14 @@ function ComplianceInner() {
     setEditingReq(null);
     setRq(REQ_BLANK);
     setCrosswalkSel([]);
+    reqCfForm.start(null);
     setError(null);
     setShowReq(true);
   }
   async function openEditReq(r: Requirement) {
     setEditingReq(r);
     setRq(fromRequirement(r));
+    reqCfForm.start(r.id);
     setError(null);
     setShowReq(true);
     try {
@@ -636,6 +646,7 @@ function ComplianceInner() {
         const created = await apiCall<Requirement>("POST", `/frameworks/${selected}/requirements`, reqPayload(rq));
         reqId = created.id;
       }
+      await reqCfForm.save(reqId);
       // Crosswalks are managed via their own endpoint (PUT replaces the set).
       await apiCall<CrosswalkItem[]>("PUT", `/requirements/${reqId}/crosswalks`, {
         related_requirement_ids: crosswalkSel.map((o) => o.value),
@@ -1146,7 +1157,12 @@ function ComplianceInner() {
 
       {/* -------------------------------------------------- requirement detail drawer */}
       <RecordDrawer
-        aside={detail ? <RecordApproval entityType="requirement" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} /> : null}
+        aside={detail ? (
+          <>
+            <RecordApproval entityType="requirement" entityId={detail.id} onChanged={() => { reload(); loadDetail(detail.id); }} />
+            <CustomFieldsPanel model="requirement" entityId={detail.id} />
+          </>
+        ) : null}
         open={!!openId && !!detail}
         onClose={() => setOpenId(null)}
         title={detail ? detail.reference || detail.title : "…"}
@@ -1348,6 +1364,7 @@ function ComplianceInner() {
           tabs={[
             { id: "general", label: "General", content: fwGeneralTab, required: true },
             { id: "detail", label: "Scope & Description", content: fwDetailTab },
+            ...fwCfForm.tabs,
           ]}
           onClose={() => setShowFw(false)}
           onSave={saveFw}
@@ -1373,6 +1390,7 @@ function ComplianceInner() {
             { id: "implementation", label: "Implementation", content: reqImplementationTab },
             { id: "mappings", label: "Mappings & Crosswalks", content: reqMappingsTab },
             { id: "audit", label: "Audit & Findings", content: reqAuditTab },
+            ...reqCfForm.tabs,
           ]}
           onClose={() => setShowReq(false)}
           onSave={saveReq}
