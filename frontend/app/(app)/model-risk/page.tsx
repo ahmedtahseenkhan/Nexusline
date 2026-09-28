@@ -476,7 +476,7 @@ function ModelRiskInner() {
           ai_ml: fAiMl,
           validation_overdue: fOverdue,
         }}
-        toolbarRight={
+        toolbarLeft={
           <>
             <select className="select" style={{ width: 180 }} value={fType} onChange={(e) => setFType(e.target.value)}>
               <option value="">All types</option>

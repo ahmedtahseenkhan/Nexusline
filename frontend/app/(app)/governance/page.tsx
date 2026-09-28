@@ -682,7 +682,7 @@ function GovernanceInner() {
           filters={{ status: trackerFilter || undefined, overdue: trackerOverdue || undefined }}
           emptyMessage="No decisions or actions. Log decisions, actions and resolutions against committee meetings — they roll up here for enterprise-wide follow-up."
           refreshKey={refreshKey}
-          toolbarRight={
+          toolbarLeft={
             <>
               <select className="select" style={{ width: 170 }} value={trackerFilter} onChange={(e) => setTrackerFilter(e.target.value)}>
                 <option value="">All statuses</option>

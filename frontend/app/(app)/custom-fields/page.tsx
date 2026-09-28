@@ -116,7 +116,7 @@ export default function CustomFieldsPage() {
         rowKey={(f) => f.id}
         searchPlaceholder="Search fields by label…"
         filters={{ model: filterModel || undefined }}
-        toolbarRight={
+        toolbarLeft={
           <select className="input" style={{ maxWidth: 200 }} value={filterModel} onChange={(e) => setFilterModel(e.target.value)}>
             <option value="">All modules</option>
             {models.map((m) => <option key={m} value={m}>{moduleLabel(m)}</option>)}

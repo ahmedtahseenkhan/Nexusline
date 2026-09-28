@@ -744,7 +744,7 @@ function VulnerabilitiesInner() {
           }}
           emptyMessage="No vulnerabilities. Log scanner findings against assets to track remediation against severity-based SLAs."
           refreshKey={refreshKey}
-          toolbarRight={
+          toolbarLeft={
             <>
               <select className="select" style={{ width: 150 }} value={fSeverity} onChange={(e) => setFSeverity(e.target.value)}>
                 <option value="">All severities</option>
@@ -797,7 +797,7 @@ function VulnerabilitiesInner() {
             filters={{ status: pStatus || undefined, category: pCategory || undefined }}
             emptyMessage="No patches. Track the patch-deployment pipeline from pending through testing to deployed."
             refreshKey={refreshKey}
-            toolbarRight={
+            toolbarLeft={
               <>
                 <select className="select" style={{ width: 160 }} value={pStatus} onChange={(e) => setPStatus(e.target.value)}>
                   <option value="">All statuses</option>

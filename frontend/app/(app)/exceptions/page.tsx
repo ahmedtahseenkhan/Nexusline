@@ -358,7 +358,7 @@ function ExceptionsInner() {
         searchPlaceholder="Search exceptions by title or reference…"
         defaultSort={{ by: "created_at", dir: "desc" }}
         filters={filters}
-        toolbarRight={
+        toolbarLeft={
           <>
             <select className="select" style={{ maxWidth: 160 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
               <option value="">All statuses</option>

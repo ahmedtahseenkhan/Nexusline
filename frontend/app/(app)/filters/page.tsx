@@ -175,7 +175,7 @@ export default function FiltersPage() {
         rowKey={(f) => f.id}
         searchPlaceholder="Search filters by name…"
         filters={{ model: filterModel || undefined }}
-        toolbarRight={
+        toolbarLeft={
           <select className="input" style={{ maxWidth: 180 }} value={filterModel} onChange={(e) => setFilterModel(e.target.value)}>
             <option value="">All modules</option>
             {models.map((m) => <option key={m} value={m}>{m}</option>)}

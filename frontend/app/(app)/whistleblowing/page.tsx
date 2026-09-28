@@ -403,7 +403,7 @@ function WhistleblowingInner() {
         searchPlaceholder="Search title, reference, tracking code…"
         defaultSort={{ by: "received_date", dir: "desc" }}
         filters={filters}
-        toolbarRight={
+        toolbarLeft={
           <>
             <select className="select" style={{ maxWidth: 170 }} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
               <option value="">All statuses</option>

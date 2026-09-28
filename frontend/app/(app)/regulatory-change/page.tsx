@@ -986,7 +986,7 @@ function RegulatoryChangeInner() {
             searchPlaceholder="Search title / circular ref / reference…"
             defaultSort={{ by: "created_at", dir: "desc" }}
             filters={{ status: statusF || undefined, applicability: applicF || undefined }}
-            toolbarRight={
+            toolbarLeft={
               <>
                 <select className="select" style={{ width: 170 }} value={statusF} onChange={(ev) => setStatusF(ev.target.value)}>
                   <option value="">All statuses</option>

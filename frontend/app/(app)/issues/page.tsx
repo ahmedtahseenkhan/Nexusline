@@ -1024,7 +1024,7 @@ function IssuesInner() {
         bulkActions={(rows, clear) => (
           <BulkEditBar entityType="issue" rows={rows} onDone={() => { clear(); reload(); loadSummary(); }} />
         )}
-        toolbarRight={
+        toolbarLeft={
           <>
             <select className="select" style={{ maxWidth: 170 }} value={fv.status ?? ""} onChange={(e) => filterParams.set("status", (e.target.value || undefined) as typeof fv.status)}>
               <option value="">All statuses</option>
@@ -1049,8 +1049,10 @@ function IssuesInner() {
               <option value="2">Date moved 2+ times</option>
               <option value="3">Date moved 3+ times</option>
             </select>
-            <ArchivedRecords entityType="issue" noun="issues" refreshKey={refreshKey} onRestored={() => { reload(); loadSummary(); }} />
           </>
+        }
+        toolbarRight={
+          <ArchivedRecords entityType="issue" noun="issues" refreshKey={refreshKey} onRestored={() => { reload(); loadSummary(); }} />
         }
         emptyMessage="No issues. Raise an issue, or feed findings from audit, compliance, RCSA, Shariah, incidents and inspections into one register."
         refreshKey={refreshKey}
