@@ -83,7 +83,7 @@ function AuditInner() {
         searchPlaceholder="Search by summary or actor…"
         defaultSort={{ by: "created_at", dir: "desc" }}
         filters={filters}
-        toolbarRight={
+        toolbarLeft={
           <>
             <select className="select" style={{ maxWidth: 180 }} value={entityType} onChange={(e) => setEntityType(e.target.value)} title="Filter by entity type">
               <option value="">All entities</option>

@@ -706,7 +706,7 @@ function ScenarioAnalysisInner() {
           searchPlaceholder="Search scenarios by title, reference, line or owner…"
           defaultSort={{ by: "created_at", dir: "desc" }}
           filters={{ basel_event_type: filterType || undefined, status: filterStatus || undefined }}
-          toolbarRight={
+          toolbarLeft={
             <>
               <select className="select" style={{ width: 200 }} value={filterType} onChange={(e) => setFilterType(e.target.value)}>
                 <option value="">All event types</option>

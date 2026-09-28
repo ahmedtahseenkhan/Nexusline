@@ -920,7 +920,7 @@ function IncidentsInner() {
         searchPlaceholder="Search incidents by title or reference…"
         defaultSort={{ by: "created_at", dir: "desc" }}
         filters={filters}
-        toolbarRight={
+        toolbarLeft={
           <>
             <select
               className="select"
@@ -945,9 +945,9 @@ function IncidentsInner() {
             <label className="label" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
               <input type="checkbox" checked={fv.is_reportable === true} onChange={(e) => filterParams.set("is_reportable", e.target.checked || undefined)} /> Reportable
             </label>
-            <ArchivedRecords entityType="incident" noun="incidents" refreshKey={refreshKey} onRestored={reload} />
           </>
         }
+        toolbarRight={<ArchivedRecords entityType="incident" noun="incidents" refreshKey={refreshKey} onRestored={reload} />}
         emptyMessage="No incidents yet. Log your first security incident to begin tracking."
         refreshKey={refreshKey}
       />

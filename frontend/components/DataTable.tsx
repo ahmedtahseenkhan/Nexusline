@@ -59,6 +59,8 @@ type Prefs = {
   density?: Density;
   views?: SavedView[];
   activeView?: string | null;
+  /** Filter panel open. Unset = closed. */
+  filtersOpen?: boolean;
 };
 
 type StatusLabel = { label: string; color: string };
@@ -76,9 +78,13 @@ type Props<T> = {
   filters?: Record<string, string | number | boolean | undefined>;
   /** toolbar content on the right (Add button, export, …) */
   toolbarRight?: ReactNode;
-  /** Page-level filters, rendered beside the search box so they do not need a card of
-   *  their own above the table. Pair with `filters` for the values. */
+  /** Page-level filter controls. They sit in a panel under the toolbar that the Filters
+   *  button opens and closes, so a register with many filters still starts its rows near
+   *  the top of the page. Pair with `filters` for the values. */
   toolbarLeft?: ReactNode;
+  /** How many filters the person has set, for the Filters button. Defaults to the entries
+   *  of `filters` that hold a value; pass it when `filters` also carries fixed scope. */
+  filterCount?: number;
   /** Right end of the view-tabs row — a place for a one-line summary such as the
    *  organisation's appetite thresholds, next to the record count. */
   tabsRight?: ReactNode;
@@ -140,12 +146,13 @@ function csvCell(v: string): string {
 
 // A page passes its filter object even when nothing is selected; only a filter that
 // holds a value narrows the list, so only then is "no match" the right thing to say.
-function hasActiveFilter(filters: Record<string, unknown> | undefined): boolean {
-  if (!filters) return false;
-  return Object.values(filters).some(
-    (v) => v !== undefined && v !== null && v !== "" && !(Array.isArray(v) && v.length === 0),
-  );
+function activeFilterCount(filters: Record<string, unknown> | undefined): number {
+  if (!filters) return 0;
+  return Object.values(filters).filter(
+    (v) => v !== undefined && v !== null && v !== "" && v !== false && !(Array.isArray(v) && v.length === 0),
+  ).length;
 }
+const hasActiveFilter = (filters: Record<string, unknown> | undefined) => activeFilterCount(filters) > 0;
 
 export default function DataTable<T>({
   columns,
@@ -157,6 +164,7 @@ export default function DataTable<T>({
   filters,
   toolbarRight,
   toolbarLeft,
+  filterCount,
   tabsRight,
   pageSize = 25,
   defaultSort,
@@ -198,6 +206,8 @@ export default function DataTable<T>({
   );
 
   const density: Density = prefs.density ?? "comfortable";
+  const filtersOpen = prefs.filtersOpen ?? false;
+  const activeFilters = filterCount ?? activeFilterCount(filters);
   const [showColumns, setShowColumns] = useState(false);
   const [savingView, setSavingView] = useState(false);
   const [viewName, setViewName] = useState("");
@@ -425,15 +435,29 @@ export default function DataTable<T>({
       </div>
 
       {/* --------------------------------------------------------- toolbar */}
-      <div className="card-head" style={{ gap: 12, flexWrap: "wrap" }}>
+      <div className="card-head dt-toolbar">
         <input
-          className="input"
-          style={{ maxWidth: 280 }}
+          className="input dt-search"
           placeholder={searchPlaceholder}
           value={rawSearch}
           onChange={(e) => setRawSearch(e.target.value)}
         />
-        {toolbarLeft}
+        {toolbarLeft && (
+          <button
+            type="button"
+            className={`btn secondary sm dt-filter-btn${activeFilters ? " on" : ""}`}
+            aria-expanded={filtersOpen}
+            onClick={() => savePrefs({ filtersOpen: !filtersOpen })}
+          >
+            Filters{activeFilters > 0 && <span className="dt-filter-n">{activeFilters}</span>}
+            <span aria-hidden className="dt-caret">{filtersOpen ? "▴" : "▾"}</span>
+          </button>
+        )}
+        {toolbarLeft && activeFilters > 0 && onApplyFilters && (
+          <button type="button" className="linklike" style={{ fontSize: 12.5 }} onClick={() => onApplyFilters({})}>
+            Clear filters
+          </button>
+        )}
         {selected.size > 0 && bulkActions && (
           <div className="bulk-bar">
             <b>{selected.size} selected</b>
@@ -442,7 +466,7 @@ export default function DataTable<T>({
             <button className="btn secondary sm" onClick={clearSelection}>Clear</button>
           </div>
         )}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <div className="dt-toolbar-right">
           {toolbarRight}
           <button
             className="btn secondary sm"
@@ -456,6 +480,7 @@ export default function DataTable<T>({
           </button>
         </div>
       </div>
+      {toolbarLeft && filtersOpen && <div className="dt-filters">{toolbarLeft}</div>}
 
       {/* ----------------------------------------------------------- table */}
       <div className="table-wrap">

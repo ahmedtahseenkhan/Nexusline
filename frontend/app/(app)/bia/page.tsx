@@ -490,7 +490,7 @@ function BiaInner() {
         filters={filters}
         emptyMessage="No business impact analyses yet. Assess a critical process to capture RTO/RPO, impacts and dependencies."
         refreshKey={refreshKey}
-        toolbarRight={
+        toolbarLeft={
           <>
             <select className="select" style={{ maxWidth: 150 }} value={critFilter} onChange={(e) => setCritFilter(e.target.value)}>
               <option value="">All criticality</option>

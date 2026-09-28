@@ -921,7 +921,7 @@ function IntegrationsInner() {
           searchPlaceholder="Search connectors by name or reference…"
           defaultSort={{ by: "name", dir: "asc" }}
           filters={{ status: connectorStatus || undefined }}
-          toolbarRight={
+          toolbarLeft={
             <select className="input" style={{ maxWidth: 180 }} value={connectorStatus} onChange={(e) => setConnectorStatus(e.target.value)}>
               <option value="">All statuses</option>
               {CONNECTOR_STATUS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -1044,7 +1044,7 @@ function IntegrationsInner() {
             searchPlaceholder="Search tests by name, reference or control…"
             defaultSort={{ by: "name", dir: "asc" }}
             filters={{ status: testStatus || undefined }}
-            toolbarRight={
+            toolbarLeft={
               <select className="input" style={{ maxWidth: 180 }} value={testStatus} onChange={(e) => setTestStatus(e.target.value)}>
                 <option value="">All statuses</option>
                 {CCM_STATUS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
