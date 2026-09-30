@@ -9,6 +9,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+# The demo sign-in on the login page: local and demo builds only (see app/page.tsx).
+ARG NEXT_PUBLIC_DEMO_LOGIN=false
+ENV NEXT_PUBLIC_DEMO_LOGIN=$NEXT_PUBLIC_DEMO_LOGIN
 # Node sizes its heap from the container's memory, which on a small server is far
 # less than this build needs: it died with "heap out of memory" part-way through,
 # leaving no .next/standalone for the runner stage to copy. Give it a fixed heap

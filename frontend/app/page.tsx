@@ -6,11 +6,18 @@ import { api, setToken } from "@/lib/api";
 import { landingPath, markLanded, rememberNext, safeNext, takeNext } from "@/lib/landing";
 import { IconNexus } from "@/components/icons";
 
+/* The demo organisation's sign-in, filled in and printed under the form — for a local
+   or demo build only (NEXT_PUBLIC_DEMO_LOGIN=true at build time). Never on a real
+   deployment: it published a working admin password, and behind Cloudflare's email
+   obfuscation the printed addresses were rewritten in the served page, so it no longer
+   matched what React rendered and every visit logged hydration errors (#418/#423/#425). */
+const DEMO_LOGIN = process.env.NEXT_PUBLIC_DEMO_LOGIN === "true";
+
 export default function LoginPage() {
   const router = useRouter();
-  const [tenant, setTenant] = useState("acme");
-  const [email, setEmail] = useState("admin@acme.com");
-  const [password, setPassword] = useState("ChangeMe123!");
+  const [tenant, setTenant] = useState(DEMO_LOGIN ? "acme" : "");
+  const [email, setEmail] = useState(DEMO_LOGIN ? "admin@acme.com" : "");
+  const [password, setPassword] = useState(DEMO_LOGIN ? "ChangeMe123!" : "");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [challenge, setChallenge] = useState<string | null>(null);
@@ -173,10 +180,12 @@ export default function LoginPage() {
           Sign in with SSO
         </button>
 
-        <p className="hint">
-          Demo · org <strong>acme</strong> · admin@acme.com / ChangeMe123! (checker) ·
-          ayesha.siddiqui@acme.com, same password (maker)
-        </p>
+        {DEMO_LOGIN && (
+          <p className="hint">
+            Demo · org <strong>acme</strong> · admin@acme.com / ChangeMe123! (checker) ·
+            ayesha.siddiqui@acme.com, same password (maker)
+          </p>
+        )}
       </form>
     </div>
   );
