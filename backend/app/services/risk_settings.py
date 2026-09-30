@@ -13,8 +13,12 @@ from app.models.risk import ResidualPolicy, RiskAppetite, RiskMatrixLevel, RiskS
 from app.services.residual_engine import ResidualPolicySpec
 from app.services.risk_scoring import (
     DEFAULT_MATRIX_SIZE,
+    MAX_ASSET_VALUE,
     AppetiteBook,
+    AssetFacts,
+    BusinessImpactScale,
     SeverityScale,
+    asset_value_of,
     max_score_for,
     validate_bands,
     validate_cells,
@@ -78,6 +82,45 @@ def scale_for(settings: RiskSetting) -> SeverityScale:
 async def get_severity_scale(db: AsyncSession, tenant_id) -> SeverityScale:
     """:func:`scale_for` the tenant's settings row (created on first read)."""
     return scale_for(await get_or_create_settings(db, tenant_id))
+
+
+def business_scale_for(settings: RiskSetting) -> BusinessImpactScale | None:
+    """The scale business impact is rated on, or None while the tenant rates by the
+    matrix alone. Stored thresholds that no longer fit (the matrix was shrunk) are
+    ignored and the derived bands apply."""
+    if (settings.scoring_method or "matrix") != "asset_based":
+        return None
+    max_value = max_score_for(settings.matrix_size or DEFAULT_MATRIX_SIZE) * MAX_ASSET_VALUE
+    try:
+        bands = validate_bands(settings.business_impact_bands or None, max_value)
+    except ValueError:
+        bands = None
+    return BusinessImpactScale(max_value=max_value, bands=bands)
+
+
+async def load_asset_facts(db: AsyncSession, risk_ids) -> dict:
+    """``risk id -> AssetFacts`` for the given risks, in one grouped query: the highest
+    criticality among each risk's live linked assets (the value the asset register shows,
+    so an IT asset counts the data it hosts) and their most critical tier."""
+    from sqlalchemy import func
+
+    from app.api.v1.assets import effective_criticality_expr
+    from app.models.asset import Asset
+    from app.models.risk import risk_assets
+
+    ids = list(risk_ids)
+    if not ids:
+        return {}
+    rows = await db.execute(
+        select(risk_assets.c.risk_id, func.max(effective_criticality_expr()), func.min(Asset.tier))
+        .join(Asset, Asset.id == risk_assets.c.asset_id)
+        .where(risk_assets.c.risk_id.in_(ids), Asset.deleted.is_(False))
+        .group_by(risk_assets.c.risk_id)
+    )
+    return {
+        risk_id: AssetFacts(asset_value=asset_value_of(criticality), tier=tier)
+        for risk_id, criticality, tier in rows.all()
+    }
 
 
 async def load_appetite_book(

@@ -61,6 +61,10 @@ export default function RiskMethodology({ onSaved }: { onSaved?: () => void }) {
   const [bands, setBands] = useState<SeverityBands>({ low_max: 4, medium_max: 9, high_max: 14 });
   const [cells, setCells] = useState<Record<string, string>>({});
   const [impactMode, setImpactMode] = useState<"max" | "average">("max");
+  // Rating method: likelihood x impact, or that score times the value of the asset at risk.
+  const [scoringMethod, setScoringMethod] = useState<"matrix" | "asset_based">("matrix");
+  const [customImpactBands, setCustomImpactBands] = useState(false);
+  const [impactBands, setImpactBands] = useState<SeverityBands>({ low_max: 16, medium_max: 36, high_max: 56 });
   // Appetite per top-level risk category.
   const [appetites, setAppetites] = useState<RiskAppetite[]>([]);
   const [topCategories, setTopCategories] = useState<LookupValue[]>([]);
@@ -76,6 +80,10 @@ export default function RiskMethodology({ onSaved }: { onSaved?: () => void }) {
     setBands(c.severity_bands ?? { low_max: derived("low"), medium_max: derived("medium"), high_max: derived("high") });
     setCells(c.matrix_cells ?? {});
     setImpactMode(c.impact_mode ?? "max");
+    setScoringMethod(c.scoring_method ?? "matrix");
+    setCustomImpactBands(Boolean(c.business_impact_bands));
+    const derivedImpact = (sev: string) => (c.business_bands ?? []).find((b) => b.severity === sev)?.max_score ?? 1;
+    setImpactBands(c.business_impact_bands ?? { low_max: derivedImpact("low"), medium_max: derivedImpact("medium"), high_max: derivedImpact("high") });
   }, []);
 
   const loadAppetites = useCallback(() => {
@@ -131,6 +139,11 @@ export default function RiskMethodology({ onSaved }: { onSaved?: () => void }) {
         // ones that still fit.
         ...(resized ? {} : { matrix_cells: cells }),
         impact_mode: impactMode,
+        scoring_method: scoringMethod,
+        // Thresholds set against the old scale would not fit a resized one; the server
+        // drops those and the derived bands apply until they are set again.
+        // Left alone under the matrix method, so switching back keeps them.
+        ...(resized || scoringMethod !== "asset_based" ? {} : { business_impact_bands: customImpactBands ? impactBands : null }),
       });
       adopt(saved);
       setNote(`Matrix saved — scores now run 1 to ${saved.max_score}.`);
@@ -249,6 +262,8 @@ export default function RiskMethodology({ onSaved }: { onSaved?: () => void }) {
 
   const unusedCategories = topCategories.filter((c) => !appetites.some((a) => a.category_id === c.id));
   const maxScore = size * size;
+  const maxAssetValue = config.max_asset_value ?? 4;
+  const maxBusinessImpact = maxScore * maxAssetValue;
   const gridSize = config.size;
 
   const levelRows = (axis: "likelihood" | "impact") => {
@@ -341,6 +356,60 @@ export default function RiskMethodology({ onSaved }: { onSaved?: () => void }) {
               <div className="muted" style={{ fontSize: 12.5, alignSelf: "flex-end", paddingBottom: 8 }}>
                 Critical: {bands.high_max + 1}–{maxScore}
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* ------------------------------------------------ rating method */}
+        <div style={{ marginTop: 14, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8 }}>
+          <div style={{ display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ width: 300 }}>
+              <label className="label">Rating method</label>
+              <select className="input" value={scoringMethod} onChange={(e) => setScoringMethod(e.target.value as "matrix" | "asset_based")}>
+                <option value="matrix">Likelihood × impact</option>
+                <option value="asset_based">Asset-based (score × asset value)</option>
+              </select>
+            </div>
+            {scoringMethod === "asset_based" && (
+              <div className="muted" style={{ fontSize: 12.5, paddingBottom: 8 }}>
+                Business impact runs 1–{maxBusinessImpact}.
+              </div>
+            )}
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
+            {scoringMethod === "asset_based"
+              ? `Each risk also shows its business impact: the likelihood × impact score times the value of the asset at risk (1 low to ${maxAssetValue} critical — the criticality the asset register shows, the highest among the risk's linked assets). A risk that links no asset has no business impact. The heat map, appetite and tolerance stay on likelihood × impact.`
+              : "Risks are rated by likelihood × impact alone. Choose asset-based to also rate each risk by the value of the asset it threatens (the ISO/IEC 27005 asset-based method)."}
+          </p>
+          {scoringMethod === "asset_based" && (
+            <div style={{ marginTop: 10 }}>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 600 }}>
+                <input type="checkbox" checked={customImpactBands} onChange={(e) => setCustomImpactBands(e.target.checked)} />
+                Set our own business-impact thresholds
+              </label>
+              {customImpactBands ? (
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+                  {([["low_max", "Low up to"], ["medium_max", "Medium up to"], ["high_max", "High up to"]] as const).map(([key, label]) => (
+                    <div key={key} style={{ width: 130 }}>
+                      <label className="label">{label}</label>
+                      <input
+                        className="input" type="number" min={1} max={maxBusinessImpact - 1} value={impactBands[key]}
+                        onChange={(e) => setImpactBands({ ...impactBands, [key]: Number(e.target.value) })}
+                      />
+                    </div>
+                  ))}
+                  <div className="muted" style={{ fontSize: 12.5, alignSelf: "flex-end", paddingBottom: 8 }}>
+                    Critical: {impactBands.high_max + 1}–{maxBusinessImpact}
+                  </div>
+                </div>
+              ) : (
+                <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+                  Off: the bands scale with the matrix size
+                  {size === config.size && config.business_bands?.length
+                    ? ` — ${config.business_bands.map((b) => `${b.severity} ${b.min_score}–${b.max_score}`).join(" · ")}`
+                    : ""}.
+                </p>
+              )}
             </div>
           )}
         </div>

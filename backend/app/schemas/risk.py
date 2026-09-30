@@ -25,6 +25,7 @@ from app.services.risk_scoring import (
     MIN_MATRIX_SIZE,
     SeverityScale,
     effective_review_frequency,
+    business_impact,
     is_scored,
     severity_for_score,  # noqa: F401 - re-exported for callers
 )
@@ -157,6 +158,9 @@ class RiskBase(BaseModel):
 
 
 class RiskCreate(RiskBase):
+    # The organisation's own identifier for the risk, kept when a register is migrated
+    # (an import, an integration). Blank = the next R-number. Fixed once created.
+    reference: str = Field(default="", max_length=32)
     # Segment scoping: which business units and processes this risk sits in. Banks run
     # assessments a segment at a time, so these are what the register is filtered by.
     business_unit_ids: list[uuid.UUID] = Field(default_factory=list)
@@ -425,6 +429,21 @@ class RiskRead(BaseModel):
     quantifications: list[GraphRef] = []
     continuity_plans: list[GraphRef] = []
 
+    # From the assets the risk links (``risk_settings.load_asset_facts``): the highest
+    # asset value among them (1 low to 4 critical — the criticality the asset register
+    # shows) and their most critical tier. Null when no linked asset carries one.
+    asset_value: int | None = None
+    asset_tier: int | None = None
+    # Asset-based rating (``RiskSetting.scoring_method`` = asset_based): each score times
+    # ``asset_value``, and the band it falls in. Null under the matrix method, for a risk
+    # that links no asset and for a draft nobody has scored.
+    inherent_business_impact: int | None = None
+    residual_business_impact: int | None = None
+    target_business_impact: int | None = None
+    inherent_business_rating: Severity | None = None
+    residual_business_rating: Severity | None = None
+    target_business_rating: Severity | None = None
+
     # Live rollup: health of the mitigating controls (none | ok | untested | issues).
     control_health: str = "none"
 
@@ -502,6 +521,18 @@ class RiskRead(BaseModel):
                 self.target_score = self.target_likelihood * self.target_impact
             if self.target_severity is None and self.inherent_scored:
                 self.target_severity = scale.for_cell(self.target_likelihood, self.target_impact)
+        facts = (ctx.get("asset_facts") or {}).get(self.id)
+        if facts is not None:
+            self.asset_value, self.asset_tier = facts.asset_value, facts.tier
+        business = ctx.get("business_scale")
+        if business is not None and self.asset_value is not None and self.inherent_scored:
+            for basis, score in (
+                ("inherent", self.inherent_score), ("residual", self.residual_score),
+                ("target", self.target_score),
+            ):
+                value = business_impact(score, self.asset_value)
+                setattr(self, f"{basis}_business_impact", value)
+                setattr(self, f"{basis}_business_rating", business.for_value(value))
         book = ctx.get("appetite")
         if book is not None and self.tolerance_score is None:
             self.appetite_score, self.tolerance_score = book.thresholds(self.category_id)
@@ -674,6 +705,14 @@ class RiskMatrixConfig(BaseModel):
     matrix_cells: dict[str, str] = Field(default_factory=dict)
     cells: list[MatrixCellBand] = Field(default_factory=list)
     impact_mode: str = "max"
+    # Rating method: ``matrix`` (likelihood x impact) or ``asset_based`` (that score times
+    # the value of the asset at risk). The business-impact scale is described whichever
+    # is chosen, so the settings screen can show what switching would mean.
+    scoring_method: str = "matrix"
+    max_asset_value: int = 4
+    max_business_impact: int = 100
+    business_impact_bands: SeverityBands | None = None
+    business_bands: list[MatrixBand] = Field(default_factory=list)
 
 
 class RiskMatrixConfigUpdate(BaseModel):
@@ -685,6 +724,9 @@ class RiskMatrixConfigUpdate(BaseModel):
     severity_bands: SeverityBands | None = None
     matrix_cells: dict[str, str] | None = None
     impact_mode: Literal["max", "average"] | None = None
+    scoring_method: Literal["matrix", "asset_based"] | None = None
+    # Omitted = unchanged; ``null`` returns to the bands derived from the scale.
+    business_impact_bands: SeverityBands | None = None
 
 
 # ------------------------------------------------------- appetite per category ---

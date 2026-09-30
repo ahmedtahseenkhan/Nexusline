@@ -205,6 +205,18 @@ type RiskRow = {
 
   control_health?: string;
 
+  /** From the linked assets: the highest asset value (1 low – 4 critical) and the most
+   *  critical tier. The business impact (score × asset value) and its band are filled
+   *  only under the asset-based rating method. */
+  asset_value?: number | null;
+  asset_tier?: number | null;
+  inherent_business_impact?: number | null;
+  residual_business_impact?: number | null;
+  target_business_impact?: number | null;
+  inherent_business_rating?: string | null;
+  residual_business_rating?: string | null;
+  target_business_rating?: string | null;
+
   business_units: Ref[];
   processes: Ref[];
   /** The register leaves ``assets`` empty and reports the count: a risk on a bank's
@@ -363,8 +375,13 @@ const RISK_URL_FILTERS = {
   treatment_overdue: ["true"],
   // F-21: the dashboard's "N risks pending validation" opens the drafts its figures leave out.
   pending_validation: ["true"],
+  // Risks on an asset of this service tier.
+  asset_tier: ["1", "2", "3", "4", "5"],
   view: ["tree"],
 } as const satisfies FilterSpec;
+
+const TIER_FILTER: Option[] = [1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: `Tier ${n} assets` }));
+const ASSET_VALUE_LABEL: Record<number, string> = { 1: "Low", 2: "Medium", 3: "High", 4: "Critical" };
 
 const LEVEL_FILTER: Option[] = [
   { value: "1", label: "L1 · Enterprise" },
@@ -726,9 +743,9 @@ function RisksPage() {
       needs_review: scopeReview || undefined,
       level: u.level, parent_id: u.parent_id, roots_only: u.roots_only, review: u.review,
       appetite: u.appetite, has_controls: u.has_controls, treatment_overdue: u.treatment_overdue,
-      pending_validation: u.pending_validation,
+      pending_validation: u.pending_validation, asset_tier: u.asset_tier,
     }),
-    [scopeFilters, scopeReview, u.level, u.parent_id, u.roots_only, u.review, u.appetite, u.has_controls, u.treatment_overdue, u.pending_validation],
+    [scopeFilters, scopeReview, u.level, u.parent_id, u.roots_only, u.review, u.appetite, u.has_controls, u.treatment_overdue, u.pending_validation, u.asset_tier],
   );
   // The parent a "risks below" link narrowed to, by reference.
   useEffect(() => {
@@ -740,11 +757,12 @@ function RisksPage() {
   const router = useRouter();
   const setUrlFilter = (key: keyof typeof RISK_URL_FILTERS & string, value: string) =>
     urlFilters.update({ [key]: value || undefined } as FilterValues<typeof RISK_URL_FILTERS>);
-  const urlFiltered = Boolean(u.level || u.parent_id || u.roots_only || u.review || u.appetite || u.has_controls || u.treatment_overdue || u.pending_validation);
+  const urlFiltered = Boolean(u.level || u.parent_id || u.roots_only || u.review || u.appetite || u.has_controls || u.treatment_overdue || u.pending_validation || u.asset_tier);
   const clearUrlFilters = () =>
     urlFilters.update({
       level: undefined, parent_id: undefined, roots_only: undefined, review: undefined,
       appetite: undefined, has_controls: undefined, treatment_overdue: undefined, pending_validation: undefined,
+      asset_tier: undefined,
     });
   /** Close the open record and list the risks directly below it — one URL change, so
    *  the record param and the filter cannot overwrite each other. */
@@ -1563,6 +1581,7 @@ function RisksPage() {
   /* The full catalogue. What is shown by default is the working set a risk manager
      scans; everything else is one click away in the column chooser, and the layout
      is remembered per person. */
+  const assetBased = matrix?.scoring_method === "asset_based";
   const riskColumns: Column<RiskRow>[] = [
     { key: "reference", header: "Ref", sortable: true, locked: true, render: (r) => <span className="ref">{r.reference}</span> },
     { key: "title", header: "Title", sortable: true, locked: true, render: (r) => <span className="cell-title">{r.title}</span> },
@@ -1585,6 +1604,10 @@ function RisksPage() {
     { key: "residual_classification", header: "Residual classification", hidden: true, render: (r) => classification(r.residual_likelihood, r.residual_impact), text: (r) => r.residual_likelihood ? `L${r.residual_likelihood} I${r.residual_impact}` : "" },
     { key: "residual_score", header: "Residual", sortable: true, render: (r) => scoreCell(r.residual_severity, r.residual_score), text: (r) => `${r.residual_score ?? ""} ${r.residual_severity ?? ""}`.trim() },
     { key: "target_score", header: "Target", hidden: true, sortable: true, render: (r) => (r.target_score ? scoreCell(r.target_severity ?? null, r.target_score) : <span className="muted">—</span>), text: (r) => (r.target_score ? `${r.target_score} ${r.target_severity ?? ""}`.trim() : "") },
+    { key: "asset_value", header: "Asset value", hidden: !assetBased, render: (r) => (r.asset_value ? <span className="muted" title="Highest value among the linked assets">{r.asset_value} · {ASSET_VALUE_LABEL[r.asset_value]}</span> : <span className="muted">—</span>), text: (r) => (r.asset_value ? String(r.asset_value) : "") },
+    { key: "inherent_business_impact", header: "Business impact (inherent)", hidden: true, render: (r) => (r.inherent_business_impact != null ? scoreCell(r.inherent_business_rating ?? null, r.inherent_business_impact) : <span className="muted">—</span>), text: (r) => (r.inherent_business_impact != null ? `${r.inherent_business_impact} ${r.inherent_business_rating ?? ""}`.trim() : "") },
+    { key: "residual_business_impact", header: "Business impact", hidden: !assetBased, render: (r) => { const v = r.residual_business_impact ?? r.inherent_business_impact; const b = r.residual_business_impact != null ? r.residual_business_rating : r.inherent_business_rating; return v != null ? <span title={r.residual_business_impact != null ? "Residual score × asset value" : "Inherent score × asset value (no residual recorded)"}>{scoreCell(b ?? null, v)}</span> : <span className="muted" title={assetBased ? "No linked asset, or not scored" : "Shown under the asset-based rating method"}>—</span>; }, text: (r) => { const v = r.residual_business_impact ?? r.inherent_business_impact; const b = r.residual_business_impact != null ? r.residual_business_rating : r.inherent_business_rating; return v != null ? `${v} ${b ?? ""}`.trim() : ""; } },
+    { key: "asset_tier", header: "Tier", hidden: true, render: (r) => (r.asset_tier ? <span className="muted" title="Most critical tier among the linked assets">Tier {r.asset_tier}</span> : <span className="muted">—</span>), text: (r) => (r.asset_tier ? `Tier ${r.asset_tier}` : "") },
     { key: "appetite", header: "Appetite", render: (r) => { const a = isUnscored(r) ? null : appetite(r, settings); return a ? <span title={a.title}><Badge tone={a.tone}>{a.label}</Badge></span> : <span className="muted" title={isUnscored(r) ? "Not scored, so not measured" : undefined}>—</span>; }, text: (r) => (isUnscored(r) ? "" : appetite(r, settings)?.label ?? "") },
     { key: "risk_type", header: "Type", hidden: true, sortable: true, render: (r) => <span className="muted">{r.risk_type ? cap(r.risk_type) : "—"}</span>, text: (r) => (r.risk_type ? cap(r.risk_type) : "") },
     { key: "velocity", header: "Velocity", hidden: true, render: (r) => <span className="muted">{velocityLabel(r.velocity) || "—"}</span>, text: (r) => velocityLabel(r.velocity) },
@@ -2009,6 +2032,47 @@ function RisksPage() {
               </tbody>
             </table>
           </div>
+          {(r.asset_value != null || r.asset_tier != null) && (
+            <p className="muted" style={{ fontSize: 13, margin: "10px 0 0" }}>
+              {r.asset_value != null && <>Asset value <b>{r.asset_value}</b> ({ASSET_VALUE_LABEL[r.asset_value]}): the highest among the linked assets.</>}
+              {r.asset_tier != null && <> {r.asset_value != null ? "Most critical tier" : "Most critical tier among the linked assets"}: <b>Tier {r.asset_tier}</b>.</>}
+            </p>
+          )}
+          {assetBased && r.asset_value != null && !unscored && (
+            <div className="rec-table-wrap" style={{ marginTop: 10 }}>
+              <table className="compact">
+                <thead>
+                  <tr>
+                    <th><span className="sr-only">Basis</span></th>
+                    <th className="num">Score</th>
+                    <th className="num">Asset value</th>
+                    <th className="num">Business impact</th>
+                    <th>Rating</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {([
+                    ["Inherent", r.inherent_score, r.inherent_business_impact, r.inherent_business_rating],
+                    ["Residual", r.residual_score, r.residual_business_impact, r.residual_business_rating],
+                    ["Target", r.target_score, r.target_business_impact, r.target_business_rating],
+                  ] as const).map(([label, score, value, rating]) => (
+                    <tr key={label}>
+                      <td style={rowHead}>{label}</td>
+                      <td className="num">{score ?? ""}</td>
+                      <td className="num">{value != null ? r.asset_value : ""}</td>
+                      <td className="num">{value ?? ""}</td>
+                      <td>{value != null ? band(rating, "Not banded") : band(null, label === "Target" ? "Not set" : "Not recorded")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {assetBased && r.asset_value == null && (
+            <p className="muted" style={{ fontSize: 13, margin: "10px 0 0" }}>
+              No business impact: the risk links no asset. Link the asset it threatens to rate it by asset value.
+            </p>
+          )}
           {canWrite && s && (
             <Disclosure label="Accept suggestion" hideTrigger open={acceptOpen} onOpenChange={setAcceptOpen} triggerRef={acceptBtn} id="risk-accept-suggestion">
               {(close) => <AcceptSuggestionForm input={{ ...input, suggestion: s }} residual={suggestion} close={close} onRecorded={refresh} />}
@@ -2366,6 +2430,9 @@ function RisksPage() {
             </div>
             <div style={{ width: 190 }}>
               <Select value={u.pending_validation ?? ""} onChange={(v) => setUrlFilter("pending_validation", v)} options={VALIDATION_FILTER} placeholder="Any validation" />
+            </div>
+            <div style={{ width: 160 }}>
+              <Select value={u.asset_tier ?? ""} onChange={(v) => setUrlFilter("asset_tier", v)} options={TIER_FILTER} placeholder="Any asset tier" />
             </div>
             {u.parent_id && (
               <span className="chip">

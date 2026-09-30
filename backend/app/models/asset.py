@@ -37,6 +37,7 @@ from app.models.enums import (
     AssetReviewStatus,
     Criticality,
     DiscoverySource,
+    PciScope,
     ReviewFrequency,
     WorkflowStatus,
 )
@@ -265,6 +266,13 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     environment: Mapped[AssetEnvironment] = mapped_column(
         SAEnum(AssetEnvironment, name="asset_environment"),
         default=AssetEnvironment.production, nullable=False,
+    )
+    # Service tier: 1 is the most critical. Banks tier their systems to set recovery,
+    # patching and review expectations, and a risk reports the tier of the asset it sits on.
+    tier: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # PCI DSS scope; NULL until someone has scoped the asset.
+    pci_scope: Mapped[PciScope | None] = mapped_column(
+        SAEnum(PciScope, name="pci_scope", native_enum=False, length=16), nullable=True
     )
     location: Mapped[str] = mapped_column(String(200), default="")
     hostname: Mapped[str] = mapped_column(String(200), default="")

@@ -63,6 +63,20 @@ class AssetEnvironment(str, enum.Enum):
     not_applicable = "not_applicable"
 
 
+class PciScope(str, enum.Enum):
+    """Where an asset sits against the PCI DSS scope (PCI SSC scoping guidance).
+
+    ``in_scope`` — in the cardholder data environment: it stores, processes or transmits
+    cardholder data. ``connected`` — outside the CDE but connected to it or able to affect
+    its security, so the requirements still apply. ``out_of_scope`` — segmented away.
+    An asset nobody has scoped carries no value rather than a guessed one.
+    """
+
+    in_scope = "in_scope"
+    connected = "connected"
+    out_of_scope = "out_of_scope"
+
+
 class AssetDependencyType(str, enum.Enum):
     """How an information asset relates to the IT asset that carries it."""
 

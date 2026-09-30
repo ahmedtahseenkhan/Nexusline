@@ -116,7 +116,8 @@ def can_accept_risk(user) -> bool:
 # ------------------------------------------------------------ risk statement
 TITLE_NEEDS_STATEMENT_DETAIL = (
     "Give the risk a title, or describe the event — the title is then composed as "
-    "'<event>, caused by <cause>, resulting in <consequence>'."
+    "'<event>, caused by <cause>, resulting in <consequence>'. A risk that links a "
+    "threat is titled '<threat> affecting <asset>'."
 )
 _TITLE_LIMIT = 255
 
@@ -148,6 +149,33 @@ def compose_title(cause: str | None, event: str | None, consequence: str | None)
     if _clause(consequence):
         parts.append(f"resulting in {_lower_first(_clause(consequence))}")
     title = ", ".join(parts)
+    if len(title) > _TITLE_LIMIT:
+        title = title[: _TITLE_LIMIT - 1].rstrip(" ,") + "…"
+    return title
+
+
+def _names(names: Iterable[str], limit: int = 2) -> str:
+    """'Ransomware', 'Ransomware and phishing', 'A, B and 3 more'."""
+    clean = list(dict.fromkeys(n for n in (_clause(x) for x in names) if n))
+    if len(clean) <= limit:
+        return " and ".join(clean)
+    return f"{', '.join(clean[:limit])} and {len(clean) - limit} more"
+
+
+def compose_asset_title(
+    threats: Iterable[str], vulnerabilities: Iterable[str], assets: Iterable[str]
+) -> str:
+    """A title for a risk written the asset-based way (ISO/IEC 27005), which names what
+    could happen by its threat rather than in a sentence: "<Threat> affecting <asset>".
+    Such registers carry no title column, so without this every migrated row would be
+    refused. The threat is the subject, else the vulnerability; an asset alone names no
+    risk, so the result is "" and the caller asks for a title."""
+    subject = _names(threats) or _names(vulnerabilities)
+    if not subject:
+        return ""
+    target = _names(assets)
+    title = f"{subject} affecting {target}" if target else subject
+    title = title[:1].upper() + title[1:]
     if len(title) > _TITLE_LIMIT:
         title = title[: _TITLE_LIMIT - 1].rstrip(" ,") + "…"
     return title
@@ -808,6 +836,7 @@ __all__ = [
     "derive_treatment_deadline",
     "treatment_progress",
     "compose_title",
+    "compose_asset_title",
     "derive_dimension_impacts",
     "target_rule_violation",
     "ACCEPT_PERMISSION",
