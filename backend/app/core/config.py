@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # Application
     secret_key: str = "dev-only-insecure-secret-change-me"
     access_token_expire_minutes: int = 60
+    # A session is renewed while it is in use (``POST /auth/refresh``), so the expiry
+    # above is really the idle timeout. This caps the whole session: however active,
+    # a sign-in lasts at most this long before the password (and MFA) is asked again.
+    session_max_hours: int = 12
     jwt_algorithm: str = "HS256"
     environment: str = "development"
     cors_origins: str = "http://localhost:3000"

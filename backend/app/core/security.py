@@ -28,12 +28,19 @@ def create_access_token(
     permissions: list[str],
     expires_minutes: int | None = None,
     extra_claims: dict[str, Any] | None = None,
+    auth_time: datetime | None = None,
+    expires_at: datetime | None = None,
 ) -> str:
     """Issue a session token. ``extra_claims`` narrows a session (e.g. the MFA
-    enrol-only claim); it can never override the standard claims."""
-    expire = datetime.now(timezone.utc) + timedelta(
-        minutes=expires_minutes or settings.access_token_expire_minutes
-    )
+    enrol-only claim); it can never override the standard claims.
+
+    ``auth_time`` is when the person signed in (OIDC's claim of that name): a renewed
+    token keeps the original, so a session can be renewed while in use but never past
+    ``session_max_hours``. ``expires_at`` caps the expiry (the session's end)."""
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=expires_minutes or settings.access_token_expire_minutes)
+    if expires_at is not None:
+        expire = min(expire, expires_at)
     payload: dict[str, Any] = {
         **(extra_claims or {}),
         "sub": subject,
@@ -41,7 +48,8 @@ def create_access_token(
         "roles": roles,
         "perms": permissions,
         "exp": expire,
-        "iat": datetime.now(timezone.utc),
+        "iat": now,
+        "auth_time": int((auth_time or now).timestamp()),
     }
     return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
 

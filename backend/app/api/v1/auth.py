@@ -458,6 +458,46 @@ async def change_password(body: ChangePasswordRequest, db: DbSession, user: Curr
     await db.flush()
 
 
+@router.post("/refresh", response_model=TokenResponse, summary="Renew the session while it is in use")
+async def refresh_session(
+    user: CurrentUser,
+    payload: Annotated[dict[str, Any], Depends(get_token_payload)],
+) -> TokenResponse:
+    """A fresh token for a session that is still valid, so someone entering data is not
+    signed out mid-form an hour after signing in. The token's lifetime is therefore the
+    idle timeout; ``session_max_hours`` bounds the session however active it is. The
+    new token carries the user's current roles and permissions.
+
+    Refused (401, sign in again) when the session has reached its maximum length or the
+    password changed since sign-in; an MFA enrol-only session cannot be renewed."""
+    if payload.get(mfa_policy.ENROL_ONLY_CLAIM):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Finish setting up two-factor sign-in first.")
+    now = datetime.now(timezone.utc)
+    started = datetime.fromtimestamp(int(payload.get("auth_time") or payload.get("iat") or 0), timezone.utc)
+    ends = started + timedelta(hours=settings.session_max_hours)
+    if now >= ends - timedelta(minutes=1):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your session has reached its maximum length. Please sign in again.",
+        )
+    changed = user.password_changed_at
+    if changed is not None and changed.replace(tzinfo=changed.tzinfo or timezone.utc) > started:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your password was changed. Please sign in again.",
+        )
+    token = create_access_token(
+        subject=str(user.id),
+        tenant_id=str(user.tenant_id),
+        roles=user.role_names,
+        permissions=user.permission_codes,
+        auth_time=started,
+        expires_at=ends,
+    )
+    lifetime = min(settings.access_token_expire_minutes * 60, int((ends - now).total_seconds()))
+    return TokenResponse(access_token=token, expires_in=lifetime, user=UserRead.model_validate(user))
+
+
 @router.get("/me", response_model=MeRead, summary="Current authenticated user")
 async def me(
     user: CurrentUser,
