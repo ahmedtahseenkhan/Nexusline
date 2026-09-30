@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
@@ -100,10 +103,61 @@ async def ensure_app_role(conn: AsyncConnection) -> None:
 _STARTUP_LOCK = 0x4E58_494E  # "NXIN"
 
 
+# The lock covers workers starting together, not one started later. Uvicorn replaces a
+# worker that dies (on a small server, the kernel's out-of-memory killer), and the
+# replacement found the lock free, became the leader and re-ran the DDL against the
+# surviving worker's live traffic: "deadlock detected" on ALTER TABLE, start-up failed,
+# uvicorn stopped the whole API and every page answered 502. So a successful
+# initialisation leaves a marker for this server process tree — the uvicorn parent's
+# pid and start time — and a replacement worker sees it and skips. A restarted or new
+# container starts a new parent, so it initialises as before. A single-process server
+# (no worker manager above it) has nothing to replace it and keeps no marker.
+_MARKER_DIR = Path(tempfile.gettempdir())
+
+
+def _parent_identity() -> str | None:
+    """The uvicorn parent as ``<pid>-<start time>``: a pid alone could be reused by the
+    next container start, which must initialise. None when there is no such parent."""
+    ppid = os.getppid()
+    if ppid <= 1:
+        return None
+    try:
+        with open(f"/proc/{ppid}/stat", encoding="ascii") as fh:
+            started = fh.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+    return f"{ppid}-{started}"
+
+
+def _init_marker() -> Path | None:
+    parent = _parent_identity()
+    return _MARKER_DIR / f"nexusline-initialised-{parent}" if parent else None
+
+
+def already_initialised() -> bool:
+    """Whether a worker of this server process has already initialised the database."""
+    marker = _init_marker()
+    return marker is not None and marker.exists()
+
+
+def mark_initialised() -> None:
+    marker = _init_marker()
+    if marker is None:
+        return
+    try:
+        marker.touch()
+    except OSError:  # read-only /tmp: the next replacement worker initialises again
+        logger.warning("Could not record start-up initialisation at %s", marker)
+
+
 @asynccontextmanager
 async def startup_lock() -> AsyncIterator[bool]:
     """Yield True in the one worker that should initialise, False in the others (only
-    once the initialising worker has finished)."""
+    once the initialising worker has finished) and in a worker started to replace one
+    that died, once this server has initialised."""
+    if already_initialised():
+        yield False
+        return
     await wait_for_db()
     async with admin_engine.connect() as conn:
         leader = await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": _STARTUP_LOCK})
@@ -112,7 +166,7 @@ async def startup_lock() -> AsyncIterator[bool]:
             # Wait for the initialising worker, then let go at once.
             await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _STARTUP_LOCK})
         try:
-            yield bool(leader)
+            yield bool(leader) and not already_initialised()
         finally:
             await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _STARTUP_LOCK})
             await conn.commit()
@@ -121,6 +175,9 @@ async def startup_lock() -> AsyncIterator[bool]:
 async def init_models() -> None:
     await wait_for_db()
     async with admin_engine.begin() as conn:
+        # Wait a bounded time for a table lock rather than queueing behind live traffic
+        # (and everything queued behind this DDL); the caller retries.
+        await conn.execute(text("SET LOCAL lock_timeout = '15s'"))
         await conn.run_sync(Base.metadata.create_all)
         # create_all can't ALTER existing tables — apply the column additions so an
         # existing `assets` table gains asset_class/business_value/etc., and `risks` /

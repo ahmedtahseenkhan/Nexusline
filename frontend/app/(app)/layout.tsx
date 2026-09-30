@@ -13,6 +13,7 @@ import { FeedbackHost } from "@/lib/feedback";
 import { TenantSettingsProvider } from "@/lib/tenantSettings";
 import { useFormat } from "@/lib/format";
 import { landingPath, markLanded, needsLanding, rememberNext, safeNext, takeNext } from "@/lib/landing";
+import { useSessionKeepAlive } from "@/lib/sessionKeepAlive";
 import { loadGovernanceStatus, type GovernanceStatus } from "@/components/SegregationOfDutiesSettings";
 
 function ModuleLocked({ module: mod }: { module?: ModuleState }) {
@@ -154,6 +155,12 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   const [modules, setModules] = useState<ModuleState[]>([]);
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [ready, setReady] = useState(false);
+  // The server could not be reached (restarting, a proxy 502, the network): not a
+  // signed-out session, so the page waits and retries instead of dropping to sign-in.
+  const [unreachable, setUnreachable] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  // Renew the session while it is in use, so nobody is signed out mid-entry.
+  useSessionKeepAlive(ready);
   // The landing page this session is being sent to; the shell waits on "Loading…" until
   // it is there, so the page the user was redirected away from never flashes.
   const [landingTo, setLandingTo] = useState<string | null>(null);
@@ -200,13 +207,35 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         api.systemStatus().then(setStatus).catch(() => setStatus(null));
       })
       .catch(() => {
-        router.replace("/");
+        // Only a lapsed session (a 401, which clears the token) is a reason to sign in
+        // again. Anything else — the API restarting during a deploy, a 502 from the
+        // proxy — used to sign people out mid-entry; wait and try again instead.
+        if (!getToken()) {
+          router.replace("/");
+          return;
+        }
+        setUnreachable(true);
+        window.setTimeout(() => setAttempt((n) => n + 1), 5000);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [attempt]);
 
   const ctx = useMemo(() => buildModulesContext(modules), [modules]);
 
+  if (!ready && unreachable) {
+    return (
+      <div style={{ display: "grid", placeItems: "center", minHeight: "100vh", padding: 16 }}>
+        <div style={{ textAlign: "center", maxWidth: 420 }}>
+          <p style={{ fontWeight: 600, margin: "0 0 6px" }}>Can&apos;t reach the server</p>
+          <p className="muted" style={{ fontSize: 13.5, margin: "0 0 14px" }}>
+            You are still signed in. Trying again every few seconds — this usually clears once
+            the server finishes restarting.
+          </p>
+          <button type="button" className="btn secondary" onClick={() => setAttempt((n) => n + 1)}>Try now</button>
+        </div>
+      </div>
+    );
+  }
   if (!ready || (landingTo && pathname !== landingTo)) {
     return (
       <div style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>

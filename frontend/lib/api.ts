@@ -18,6 +18,40 @@ export function clearToken() {
   window.localStorage.removeItem(TOKEN_KEY);
 }
 
+/** The token's ``iat`` / ``exp`` (seconds), read from its payload; null when unreadable. */
+export function tokenTimes(token: string | null = getToken()): { iat: number; exp: number } | null {
+  if (!token) return null;
+  try {
+    const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const claims = JSON.parse(window.atob(part.padEnd(part.length + ((4 - (part.length % 4)) % 4), "=")));
+    return typeof claims.exp === "number" ? { iat: Number(claims.iat) || 0, exp: claims.exp } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Swap the session token for a fresh one (``POST /auth/refresh``). Resolves false when
+ *  the server refuses — the session reached its maximum length, or the password
+ *  changed — or cannot be reached; the current token then simply runs out. */
+export async function renewSession(): Promise<boolean> {
+  const token = getToken();
+  if (!token) return false;
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { access_token?: string };
+    // Signed out (or signed in as someone else) while the request was in flight.
+    if (!body.access_token || getToken() !== token) return false;
+    setToken(body.access_token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
 
 /** Sign-in calls answer a wrong password or code with 401 too — that is not a lapsed session. */

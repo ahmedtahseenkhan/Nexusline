@@ -35,7 +35,10 @@ class RoleRead(BaseModel):
 class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
-    email: EmailStr
+    # Read back as stored, not re-validated: a directory (LDAP / SSO) account can carry
+    # an address on a single-label domain ("user@corp"), and one such row used to fail
+    # the whole Users page. New addresses are still checked on the way in (UserCreate).
+    email: str
     full_name: str
     is_active: bool
     created_at: datetime

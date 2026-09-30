@@ -45,11 +45,31 @@ async def _initialise_database() -> None:
         logger.info("Data repairs: %s", repaired)
 
 
+async def _initialise_with_retry(attempts: int = 3) -> None:
+    """Initialise, retrying when the schema changes lose a lock race (a deadlock, or
+    the lock timeout) — traffic finishing on the old container, a scheduled sweep.
+    Each attempt is one transaction, so a failed one leaves nothing half-applied."""
+    import asyncio
+
+    from sqlalchemy.exc import DBAPIError
+
+    for attempt in range(1, attempts + 1):
+        try:
+            await _initialise_database()
+            return
+        except DBAPIError as exc:
+            text = str(exc).lower()
+            if attempt == attempts or not ("deadlock" in text or "lock timeout" in text):
+                raise
+            logger.warning("Start-up initialisation lost a lock race (attempt %s of %s); retrying", attempt, attempts)
+            await asyncio.sleep(3 * attempt)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Dev convenience: ensure schema + RLS + seed exist on boot. In production,
     # disable by setting SEED_DATA=false and manage schema with Alembic.
-    from app.db.init_db import startup_lock
+    from app.db.init_db import mark_initialised, startup_lock
     from app.services import license as lic
     from app.services import scheduler
 
@@ -59,7 +79,8 @@ async def lifespan(app: FastAPI):
     try:
         async with startup_lock() as initialise:
             if initialise:
-                await _initialise_database()
+                await _initialise_with_retry()
+                mark_initialised()
             else:
                 logger.info("Start-up initialisation done by another worker")
     except Exception:  # noqa: BLE001

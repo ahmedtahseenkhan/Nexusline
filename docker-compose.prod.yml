@@ -165,6 +165,8 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://localhost}
+        # Off on a real deployment: the login page carries no demo credentials.
+        NEXT_PUBLIC_DEMO_LOGIN: ${NEXT_PUBLIC_DEMO_LOGIN:-false}
     image: ${WEB_IMAGE:-nexusline-web:latest}
     restart: unless-stopped
     environment:
