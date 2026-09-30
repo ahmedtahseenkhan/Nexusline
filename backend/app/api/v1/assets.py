@@ -31,13 +31,14 @@ from app.models.asset import (
     AssetReview,
     AssetTag,
 )
-from app.models.enums import AssetClass, AssetEnvironment, AssetReviewStatus, WorkflowStatus
+from app.models.enums import AssetClass, AssetEnvironment, AssetReviewStatus, PciScope, WorkflowStatus
 from app.models.exception import ExceptionRecord
 from app.models.incident import Incident
 from app.models.compliance import Requirement
 from app.models.organization import BusinessUnit, Legal, Process
 from app.models.risk import risk_assets
 from app.schemas.asset import (
+    MAX_ASSET_TIER,
     AssetClassificationCreate,
     AssetClassificationRead,
     AssetClassificationTypeCreate,
@@ -245,6 +246,8 @@ def _serialize(a: Asset, exposure: Exposure = None, *, can_read_risks: bool = Fa
         rto_hours=a.rto_hours,
         rpo_hours=a.rpo_hours,
         environment=a.environment,
+        tier=a.tier,
+        pci_scope=a.pci_scope,
         location=a.location,
         hostname=a.hostname,
         ip_address=a.ip_address,
@@ -407,6 +410,7 @@ _ASSET_SORTABLE = {
     "self_assessed": Asset.self_assessed,
     "replacement_cost": Asset.replacement_cost,
     "environment": Asset.environment,
+    "tier": Asset.tier,
 }
 
 
@@ -414,7 +418,8 @@ def asset_filters(
     *, search: str | None = None, asset_class: AssetClass | None = None,
     media_type_id: uuid.UUID | None = None, review_overdue: bool | None = None,
     environment: AssetEnvironment | None = None, effective_criticality: Criticality | None = None,
-    workflow_status: WorkflowStatus | None = None,
+    workflow_status: WorkflowStatus | None = None, tier: int | None = None,
+    pci_scope: PciScope | None = None,
 ) -> list:
     """The register's filters as WHERE clauses — shared by the list and the export, so
     "export what I'm looking at" exports exactly the rows on screen."""
@@ -437,6 +442,10 @@ def asset_filters(
         where.append(effective_criticality_expr() == _crit(effective_criticality))
     if workflow_status:
         where.append(Asset.workflow_status == workflow_status)
+    if tier:
+        where.append(Asset.tier == tier)
+    if pci_scope:
+        where.append(Asset.pci_scope == pci_scope)
     return where
 
 
@@ -454,6 +463,8 @@ async def list_assets(
     environment: Annotated[AssetEnvironment | None, Query()] = None,
     effective_criticality: Annotated[Criticality | None, Query()] = None,
     workflow_status: Annotated[WorkflowStatus | None, Query()] = None,
+    tier: Annotated[int | None, Query(ge=1, le=MAX_ASSET_TIER)] = None,
+    pci_scope: Annotated[PciScope | None, Query()] = None,
     sort_by: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -463,6 +474,7 @@ async def list_assets(
         search=search, asset_class=asset_class, media_type_id=media_type_id,
         review_overdue=review_overdue, environment=environment,
         effective_criticality=effective_criticality, workflow_status=workflow_status,
+        tier=tier, pci_scope=pci_scope,
     ))
     params = ListParams(limit=limit, offset=offset, sort_by=sort_by, sort_dir=sort_dir, q=search)
     stmt = apply_sort(stmt, params, _ASSET_SORTABLE, default=Asset.name)
@@ -572,6 +584,7 @@ async def get_asset(asset_id: uuid.UUID, db: DbSession, user: CurrentUser) -> As
 MATERIAL_FIELDS: frozenset[str] = frozenset({
     "asset_class", "confidentiality", "integrity", "availability", "business_value",
     "replacement_cost", "currency", "environment", "rto_hours", "rpo_hours",
+    "tier", "pci_scope",
     "owner_id", "guardian_id", "user_id", "information_owner", "label_id",
     "data_categories", "classification_ids",
 })

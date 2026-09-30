@@ -15,10 +15,14 @@ from app.models.enums import (
     AssetReviewStatus,
     Criticality,
     DiscoverySource,
+    PciScope,
     ReviewFrequency,
     Severity,
     WorkflowStatus,
 )
+
+#: Service tiers run 1 (most critical) to this.
+MAX_ASSET_TIER = 5
 
 
 class LabelRef(BaseModel):
@@ -250,6 +254,9 @@ class AssetWrite(BaseModel):
     rto_hours: int | None = None
     rpo_hours: int | None = None
     environment: AssetEnvironment = AssetEnvironment.production
+    # Service tier (1 = most critical) and PCI DSS scope; both blank until decided.
+    tier: int | None = Field(default=None, ge=1, le=MAX_ASSET_TIER)
+    pci_scope: PciScope | None = None
     location: str = ""
     hostname: str = ""
     ip_address: str = ""
@@ -309,6 +316,8 @@ class AssetUpdate(BaseModel):
     rto_hours: int | None = None
     rpo_hours: int | None = None
     environment: AssetEnvironment | None = None
+    tier: int | None = Field(default=None, ge=1, le=MAX_ASSET_TIER)
+    pci_scope: PciScope | None = None
     location: str | None = None
     hostname: str | None = None
     ip_address: str | None = None
@@ -365,6 +374,8 @@ class AssetRead(BaseModel):
     rto_hours: int | None
     rpo_hours: int | None
     environment: AssetEnvironment
+    tier: int | None = None
+    pci_scope: PciScope | None = None
     location: str
     hostname: str
     ip_address: str

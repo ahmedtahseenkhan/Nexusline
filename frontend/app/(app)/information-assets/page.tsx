@@ -126,6 +126,9 @@ type Asset = {
   assessed_date: string | null;
   classifications?: ClassificationRef[];
   effective_criticality: string;
+  /** Service tier (1 = most critical) and PCI DSS scope; null until decided. */
+  tier: number | null;
+  pci_scope: string | null;
   rto_hours: number | null;
   rpo_hours: number | null;
   review_frequency: string;
@@ -177,6 +180,13 @@ const WORKFLOW_FILTER: Option[] = [
   { value: "approved", label: "Approved" }, { value: "retired", label: "Retired" },
 ];
 const REVIEW_FILTER: Option[] = [{ value: "overdue", label: "Review overdue" }];
+// Service tier: 1 is the most critical. PCI DSS scope follows the PCI SSC scoping categories.
+const TIER: Option[] = [1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: `Tier ${n}` }));
+const PCI_SCOPE: Option[] = [
+  { value: "in_scope", label: "In scope (cardholder data)" }, { value: "connected", label: "Connected to CDE" },
+  { value: "out_of_scope", label: "Out of scope" },
+];
+const pciLabel = (v: string | null | undefined) => PCI_SCOPE.find((o) => o.value === v)?.label ?? null;
 const FREQ = opts(["none", "monthly", "quarterly", "semiannual", "annual"]);
 const RELATIONSHIP = opts(["hosts", "stores", "processes", "transmits", "backs_up"]);
 const workflowLabel = (s: string) => WORKFLOW_STATE_LABEL[s as WorkflowStateKey] ?? cap(s);
@@ -223,13 +233,14 @@ type FormState = {
   /** Business units (RACI owner / guardian / user). */
   owner_id: string | null; guardian_id: string | null; user_id: string | null;
   review_frequency: string; classification_ids: string[];
+  tier: string; pci_scope: string;
 };
 const BLANK: FormState = {
   name: "", description: "", media_type_id: "", information_owner: "", business_value: "medium",
   confidentiality: "medium", integrity: "medium", availability: "medium", label_id: "",
   data_categories: "", records_volume: "", potential_liabilities: "", self_assessed: false, assessed_by: "",
   assessed_date: "", owner_id: null, guardian_id: null, user_id: null, review_frequency: "annual",
-  classification_ids: [],
+  classification_ids: [], tier: "", pci_scope: "",
 };
 function fromAsset(a: Asset): FormState {
   return {
@@ -243,6 +254,7 @@ function fromAsset(a: Asset): FormState {
     owner_id: a.owner?.id ?? null, guardian_id: a.guardian?.id ?? null, user_id: a.user?.id ?? null,
     review_frequency: a.review_frequency || "annual",
     classification_ids: (a.classifications || []).map((c) => c.id),
+    tier: a.tier != null ? String(a.tier) : "", pci_scope: a.pci_scope || "",
   };
 }
 function toPayload(f: FormState): Record<string, unknown> {
@@ -256,6 +268,7 @@ function toPayload(f: FormState): Record<string, unknown> {
     assessed_date: f.assessed_date || null, owner_id: f.owner_id, guardian_id: f.guardian_id,
     user_id: f.user_id, review_frequency: f.review_frequency,
     classification_ids: f.classification_ids,
+    tier: f.tier === "" ? null : Number(f.tier), pci_scope: f.pci_scope || null,
   };
 }
 
@@ -268,6 +281,8 @@ function InformationAssetsInner() {
   const [critFilter, setCritFilter] = useState("");
   const [wfFilter, setWfFilter] = useState("");
   const [overdueFilter, setOverdueFilter] = useState("");
+  const [tierFilter, setTierFilter] = useState("");
+  const [pciFilter, setPciFilter] = useState("");
   // What the table shows, so Export carries exactly those rows.
   const [view, setView] = useState<{ search: string; filters: Record<string, string | number | boolean | undefined>; total: number } | null>(null);
   const exportQuery = useMemo(() => {
@@ -283,6 +298,8 @@ function InformationAssetsInner() {
     if (p.get("effective_criticality")) setCritFilter(p.get("effective_criticality") as string);
     if (p.get("workflow_status")) setWfFilter(p.get("workflow_status") as string);
     if (p.get("review_overdue") === "true") setOverdueFilter("overdue");
+    if (p.get("tier")) setTierFilter(p.get("tier") as string);
+    if (p.get("pci_scope")) setPciFilter(p.get("pci_scope") as string);
   }, []);
   const [summary, setSummary] = useState<Summary | null>(null);
   const { formatDate } = useFormat();
@@ -508,6 +525,8 @@ function InformationAssetsInner() {
   const columns: Column<Asset>[] = [
     { key: "name", header: "Name", sortable: true, locked: true, render: (a) => <span className="cell-title">{a.name}</span> },
     { key: "information_owner", header: "Information owner", render: (a) => <span className="muted">{a.information_owner || "—"}</span> },
+    { key: "tier", header: "Tier", hidden: true, sortable: true, render: (a) => <span className="muted">{a.tier != null ? `Tier ${a.tier}` : "—"}</span>, text: (a) => (a.tier != null ? `Tier ${a.tier}` : "") },
+    { key: "pci_scope", header: "PCI DSS scope", hidden: true, render: (a) => <span className="muted">{pciLabel(a.pci_scope) ?? "—"}</span>, text: (a) => pciLabel(a.pci_scope) ?? "" },
     { key: "owner", header: "Owning unit", hidden: true, sortable: true, render: (a) => <span className="muted">{a.owner?.label || "—"}</span>, text: (a) => a.owner?.label ?? "" },
     // Sorted server-side on the same effective criticality the badge shows.
     { key: "effective_criticality", header: "Business value", sortable: true, render: (a) => <CritBadge value={a.effective_criticality} />, text: (a) => cap(a.effective_criticality) },
@@ -631,6 +650,10 @@ function InformationAssetsInner() {
         <Field label="User" help="Business unit that uses the asset day to day."><BusinessUnitSelect value={f.user_id} onChange={(id) => set("user_id", id)} placeholder="— none —" /></Field>
       </div>
       <div className="field-row">
+        <Field label="Tier" help="Service tier: Tier 1 is the most critical. Risks on this asset report its tier."><Select value={f.tier} onChange={(v) => set("tier", v)} options={TIER} placeholder="Not tiered" /></Field>
+        <Field label="PCI DSS scope" help="In scope: this is cardholder data, or an application that stores, processes or transmits it."><Select value={f.pci_scope} onChange={(v) => set("pci_scope", v)} options={PCI_SCOPE} placeholder="Not assessed" /></Field>
+      </div>
+      <div className="field-row">
         <Field label="Review frequency" help="How often this asset's value / classification is re-attested. Approval is separate: submit the asset for review from its record."><Select value={f.review_frequency} onChange={(v) => set("review_frequency", v)} options={FREQ} /></Field>
       </div>
     </>
@@ -733,6 +756,8 @@ function InformationAssetsInner() {
         { key: "owner", label: "Owning unit", value: a.owner?.label ?? null, tab: "governance" },
         { key: "guardian", label: "Guardian (custodian)", value: a.guardian?.label ?? null, tab: "governance" },
         { key: "user", label: "User unit", value: a.user?.label ?? null, tab: "governance" },
+        { key: "tier", label: "Tier", value: a.tier != null ? `Tier ${a.tier}` : null, tab: "governance" },
+        { key: "pci_scope", label: "PCI DSS scope", value: pciLabel(a.pci_scope), tab: "governance" },
         { key: "review", label: "Review cycle", value: reviewCycleText(a, fmt), tab: "governance" },
         ...(a.rto_hours != null || a.rpo_hours != null ? [{ key: "recovery", label: "Recovery objectives", value: recoveryText(a) }] : []),
         { key: "created", label: "Created", value: fmt.date(a.created_at) },
@@ -807,14 +832,16 @@ function InformationAssetsInner() {
       <DataTable<Asset>
         toolbarRight={<ArchivedRecords entityType="asset" noun="assets" onRestored={() => { setRefreshKey((k) => k + 1); loadSummary(); }} refreshKey={refreshKey} />}
         tableKey="information-assets"
-        filters={{ effective_criticality: critFilter || undefined, workflow_status: wfFilter || undefined, review_overdue: overdueFilter ? true : undefined }}
-        onApplyFilters={(f) => { setCritFilter(String(f.effective_criticality ?? "")); setWfFilter(String(f.workflow_status ?? "")); setOverdueFilter(f.review_overdue ? "overdue" : ""); }}
+        filters={{ effective_criticality: critFilter || undefined, workflow_status: wfFilter || undefined, review_overdue: overdueFilter ? true : undefined, tier: tierFilter || undefined, pci_scope: pciFilter || undefined }}
+        onApplyFilters={(f) => { setCritFilter(String(f.effective_criticality ?? "")); setWfFilter(String(f.workflow_status ?? "")); setOverdueFilter(f.review_overdue ? "overdue" : ""); setTierFilter(String(f.tier ?? "")); setPciFilter(String(f.pci_scope ?? "")); }}
         onViewChange={setView}
         toolbarLeft={
           <>
             <Select value={critFilter} onChange={setCritFilter} options={CRIT} placeholder="Any business value" />
             <Select value={wfFilter} onChange={setWfFilter} options={WORKFLOW_FILTER} placeholder="Any approval state" />
             <Select value={overdueFilter} onChange={setOverdueFilter} options={REVIEW_FILTER} placeholder="Any review state" />
+            <Select value={tierFilter} onChange={setTierFilter} options={TIER} placeholder="Any tier" />
+            <Select value={pciFilter} onChange={setPciFilter} options={PCI_SCOPE} placeholder="Any PCI DSS scope" />
           </>
         }
         statusModel="asset"

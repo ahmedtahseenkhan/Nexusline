@@ -578,6 +578,7 @@ def recheck_ddl_statements() -> list[str]:
     statements.extend(capital_snapshot_ddl_statements())
     statements.extend(vuln_acceptance_ddl_statements())
     statements.extend(asset_review_completion_ddl_statements())
+    statements.extend(asset_based_risk_ddl_statements())
     return statements
 
 
@@ -733,4 +734,17 @@ def asset_review_completion_ddl_statements() -> list[str]:
         f"WHERE conname = '{name}') THEN ALTER TABLE asset_reviews ADD CONSTRAINT {name} "
         "FOREIGN KEY (completed_by_id) REFERENCES users(id) ON DELETE SET NULL NOT VALID; "
         "END IF; END $$;",
+    ]
+
+
+def asset_based_risk_ddl_statements() -> list[str]:
+    """Idempotent DDL: an asset's service tier and PCI DSS scope, and the organisation's
+    choice of risk rating method (likelihood x impact, or that score times the value of
+    the asset at risk) with the bands its business impact is rated on."""
+    return [
+        "ALTER TABLE assets ADD COLUMN IF NOT EXISTS tier INTEGER",
+        "ALTER TABLE assets ADD COLUMN IF NOT EXISTS pci_scope VARCHAR(16)",
+        "CREATE INDEX IF NOT EXISTS ix_assets_tier ON assets (tier)",
+        "ALTER TABLE risk_settings ADD COLUMN IF NOT EXISTS scoring_method VARCHAR(16) NOT NULL DEFAULT 'matrix'",
+        "ALTER TABLE risk_settings ADD COLUMN IF NOT EXISTS business_impact_bands JSONB NOT NULL DEFAULT '{}'::jsonb",
     ]

@@ -13,6 +13,15 @@ At the default 5x5 (max 25) the fractions reproduce the original hard-coded band
 exactly — 1-4 low, 5-9 medium, 10-14 high, 15-25 critical — so an installation that
 never touches the setting sees no change.
 
+**Asset-based rating.** ISO/IEC 27005's asset-based method rates a risk by what it
+threatens as well as how likely and how severe it is: the likelihood x impact score times
+the value of the asset at risk is the *business impact*, and that is what gets banded. A
+tenant opts in with ``RiskSetting.scoring_method``; :class:`BusinessImpactScale` carries
+its maximum and thresholds. The asset's value is never typed on the risk — it is the
+criticality the asset register already shows (1 low to 4 critical), the highest among the
+assets the risk links — so the two registers cannot disagree. The matrix, its bands and
+the appetite thresholds are untouched: the heat map stays a likelihood x impact picture.
+
 **Configured bands and cells (phase 2).** A bank's methodology usually states its own
 thresholds ("15 and above is critical"), and some matrices are not symmetric — a 2x5
 (rare but catastrophic) may be rated high even though 10 falls in the medium band.
@@ -35,6 +44,8 @@ from app.models.enums import ReviewFrequency, Severity
 
 __all__ = [
     "DEFAULT_MATRIX_SIZE", "DEFAULT_MAX_SCORE", "MAX_MATRIX_SIZE", "MIN_MATRIX_SIZE",
+    "ASSET_VALUES", "MAX_ASSET_VALUE", "SCORING_METHODS", "AssetFacts", "BusinessImpactScale",
+    "asset_value_of", "business_impact",
     "AppetiteBook", "CADENCE_FREQUENCIES", "DEFAULT_REVIEW_CADENCE", "FREQUENCY_ORDER",
     "IMPACT_MODES", "SEVERITY_VALUES", "SeverityScale",
     "add_months", "appetite_status", "band_ranges", "cell_key", "current_severity",
@@ -247,6 +258,53 @@ class SeverityScale:
         if residual_likelihood and residual_impact:
             return self.for_cell(residual_likelihood, residual_impact)
         return self.for_cell(inherent_likelihood, inherent_impact)
+
+
+#: How a tenant rates its register (``RiskSetting.scoring_method``).
+SCORING_METHODS: tuple[str, ...] = ("matrix", "asset_based")
+
+#: An asset's value in the asset-based method: the criticality its register shows.
+ASSET_VALUES: dict[str, int] = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+MAX_ASSET_VALUE = max(ASSET_VALUES.values())
+
+
+def asset_value_of(criticality) -> int | None:
+    """An asset criticality (enum or its value) as an asset value, 1 to 4."""
+    return ASSET_VALUES.get(str(getattr(criticality, "value", criticality) or ""))
+
+
+def business_impact(score: int | None, asset_value: int | None) -> int | None:
+    """Likelihood x impact times the value of the asset at risk; None when either is
+    missing (an unassessed residual, a risk that links no asset)."""
+    if score is None or asset_value is None:
+        return None
+    return score * asset_value
+
+
+@dataclass(frozen=True)
+class AssetFacts:
+    """What a risk takes from the assets it links: the highest asset value among them
+    and their most critical (lowest-numbered) tier. Either is None when no linked asset
+    carries one."""
+
+    asset_value: int | None = None
+    tier: int | None = None
+
+
+@dataclass(frozen=True)
+class BusinessImpactScale:
+    """The scale business impact is rated on: 1 to ``max_value`` (the matrix maximum
+    times the highest asset value), banded by the tenant's thresholds when it set any
+    and by the same fractions as the matrix otherwise."""
+
+    max_value: int = DEFAULT_MAX_SCORE * MAX_ASSET_VALUE
+    bands: tuple[int, int, int] | None = None
+
+    def ranges(self) -> list[tuple[int, int, Severity]]:
+        return band_ranges(self.max_value, self.bands)
+
+    def for_value(self, value: int | None) -> Severity | None:
+        return severity_for_score(value, self.max_value, self.bands)
 
 
 def impact_from_dimensions(scores: Iterable[int], mode: str = "max") -> int | None:

@@ -38,6 +38,8 @@ from app.schemas.risk import (
 from app.services import audit as audit_log
 from app.services import master_data
 from app.services.risk_scoring import (
+    MAX_ASSET_VALUE,
+    BusinessImpactScale,
     SeverityScale,
     cell_key,
     current_severity,
@@ -262,6 +264,17 @@ async def _reschedule_for_cadence(db, settings, before: dict, after: dict) -> in
 # ---------------------------------------------------------------------------
 # Configurable matrix — size and the bank's own scale definitions
 # ---------------------------------------------------------------------------
+def _business_scale(settings) -> BusinessImpactScale:
+    """The business-impact scale as it is, or as it would be were the tenant to switch
+    to the asset-based method — the settings screen shows it either way."""
+    max_value = max_score_for(settings.matrix_size) * MAX_ASSET_VALUE
+    try:
+        bands = validate_bands(settings.business_impact_bands or None, max_value)
+    except ValueError:
+        bands = None
+    return BusinessImpactScale(max_value=max_value, bands=bands)
+
+
 @router.get(
     "/risk-matrix-config",
     response_model=RiskMatrixConfig,
@@ -273,6 +286,7 @@ async def get_matrix_config(db: DbSession, user: CurrentUser) -> RiskMatrixConfi
     size = settings.matrix_size
     configured = await get_levels(db, user.tenant_id)
     scale = scale_for(settings)
+    business = _business_scale(settings)
     return RiskMatrixConfig(
         size=size,
         max_score=max_score_for(size),
@@ -288,6 +302,17 @@ async def get_matrix_config(db: DbSession, user: CurrentUser) -> RiskMatrixConfi
         matrix_cells=dict(scale.cells),
         cells=_cells_for(size, scale),
         impact_mode=settings.impact_mode or "max",
+        scoring_method=settings.scoring_method or "matrix",
+        max_asset_value=MAX_ASSET_VALUE,
+        max_business_impact=business.max_value,
+        business_impact_bands=(
+            SeverityBands(low_max=business.bands[0], medium_max=business.bands[1], high_max=business.bands[2])
+            if business.bands else None
+        ),
+        business_bands=[
+            MatrixBand(severity=sev, min_score=low, max_score=high)
+            for low, high, sev in business.ranges()
+        ],
     )
 
 
@@ -376,6 +401,34 @@ async def update_matrix_config(
     if body.impact_mode is not None:
         settings.impact_mode = body.impact_mode
         changes["impact_mode"] = body.impact_mode
+    if body.scoring_method is not None and body.scoring_method != (settings.scoring_method or "matrix"):
+        settings.scoring_method = body.scoring_method
+        changes["scoring_method"] = body.scoring_method
+    # Business-impact thresholds: validated against the resized scale like the matrix
+    # bands; stored ones that no longer fit are dropped for the derived bands.
+    business_ceiling = ceiling * MAX_ASSET_VALUE
+    if "business_impact_bands" in body.model_fields_set:
+        try:
+            impact_bands = validate_bands(
+                body.business_impact_bands.model_dump() if body.business_impact_bands else None,
+                business_ceiling,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"business_impact_bands: {exc}".replace("the matrix maximum", "the business-impact maximum"),
+            ) from exc
+        settings.business_impact_bands = (
+            {"low_max": impact_bands[0], "medium_max": impact_bands[1], "high_max": impact_bands[2]}
+            if impact_bands else {}
+        )
+        changes["business_impact_bands"] = settings.business_impact_bands or "derived from the scale"
+    elif settings.business_impact_bands:
+        try:
+            validate_bands(settings.business_impact_bands, business_ceiling)
+        except ValueError:
+            settings.business_impact_bands = {}
+            changes["business_impact_bands"] = "reset: no longer fit the resized matrix"
 
     settings.matrix_size = size
     # Keep appetite/tolerance inside the new scale rather than leaving thresholds no

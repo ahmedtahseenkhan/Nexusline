@@ -37,6 +37,7 @@ from app.models.risk import (
 )
 from app.services.risk_query import UNPLACED, build_risk_query  # noqa: F401 - re-exported for callers
 from app.models.threat import Threat, Vulnerability
+from app.schemas.asset import MAX_ASSET_TIER
 from app.schemas.common import GraphRef, Page
 from app.schemas.control import ControlAssuranceRef
 from app.schemas.risk import (
@@ -89,8 +90,10 @@ from app.services.risk_settings import (
     get_matrix_size,
     get_max_score,  # noqa: F401 - kept for callers that import it from here
     get_or_create_residual_policy,
+    business_scale_for,
     get_or_create_settings,
     load_appetite_book,
+    load_asset_facts,
     policy_spec,
     scale_for,
 )
@@ -145,6 +148,27 @@ async def _resolve(db, model, ids: Sequence[uuid.UUID]) -> list:
 
 async def _next_reference(db) -> str:
     return await next_reference(db, Risk, "R")
+
+
+async def _reference_for(db, given: str) -> str:
+    """The new risk's reference: the one supplied (a migrated register keeps its own
+    identifiers), else the next R-number. A reference a live risk already carries is
+    refused — two risks answering to one identifier cannot be told apart in a report."""
+    reference = " ".join((given or "").split())
+    if not reference:
+        return await _next_reference(db)
+    taken = await db.scalar(
+        select(Risk.id).where(
+            func.lower(Risk.reference) == reference.lower(), Risk.deleted.is_(False)
+        ).limit(1)
+    )
+    if taken is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A risk with the reference {reference} already exists. "
+            "Use another reference, or leave it blank to take the next R-number.",
+        )
+    return reference
 
 
 
@@ -546,6 +570,8 @@ class RiskListFilters:
         treatment_overdue: bool | None = None,
         # F-21: drafts the dashboard's figures leave out ("N risks pending validation").
         pending_validation: bool | None = None,
+        # Risks on an asset of this service tier (1 = most critical).
+        asset_tier: Annotated[int | None, Query(ge=1, le=MAX_ASSET_TIER)] = None,
     ) -> None:
         self.status_filter = status_filter
         self.category = category
@@ -568,6 +594,7 @@ class RiskListFilters:
         self.has_controls = has_controls
         self.treatment_overdue = treatment_overdue
         self.pending_validation = pending_validation
+        self.asset_tier = asset_tier
 
     def statement(self, appetite_book) -> Select:
         """Live risks matching every set filter (``services.risk_query`` plus the
@@ -599,6 +626,12 @@ class RiskListFilters:
             stmt = stmt.where(Risk.risk_type == self.risk_type)
         if self.source:
             stmt = stmt.where(Risk.source == self.source)
+        if self.asset_tier:
+            stmt = stmt.where(Risk.id.in_(
+                select(risk_assets.c.risk_id)
+                .join(Asset, Asset.id == risk_assets.c.asset_id)
+                .where(Asset.deleted.is_(False), Asset.tier == self.asset_tier)
+            ))
         return stmt
 
     #: Filter name -> how the PDF cover labels it. Ids are resolved to names by the caller.
@@ -610,7 +643,7 @@ class RiskListFilters:
         "search": "Matching", "level": "Level", "max_level": "Level up to", "parent_id": "Below",
         "roots_only": "Top of the tree only", "review": "Review", "appetite": "Appetite",
         "has_controls": "Has controls", "treatment_overdue": "Treatment overdue",
-        "pending_validation": "Pending validation",
+        "pending_validation": "Pending validation", "asset_tier": "Asset tier",
     }
 
     def active(self) -> dict[str, object]:
@@ -655,7 +688,11 @@ async def list_risks(
     # not loaded at all: the row reports ``asset_count`` and the record carries them.
     loads = options_for(Risk, RiskRead, ("controls.audit_findings",), skip=("assets",))
     rows = (await db.scalars(stmt.options(*loads).limit(limit).offset(offset))).all()
-    context = {**context, "asset_counts": await _asset_counts(db, [r.id for r in rows])}
+    context = {
+        **context,
+        "asset_counts": await _asset_counts(db, [r.id for r in rows]),
+        "asset_facts": await load_asset_facts(db, [r.id for r in rows]),
+    }
     items = await serialize_all(db, rows, lambda r: RiskRead.model_validate(r, context=context))
     await ref_fields.fill_refs(db, list(zip(rows, items)), RISK_REFS)
     await _fill_hierarchy(db, list(zip(rows, items)))
@@ -735,6 +772,13 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
         data["cause"], data["event"], data["consequence"]
     )
     if not data["title"]:
+        # An asset-based register names the risk by its threat and asset, not a title.
+        data["title"] = risk_integrity.compose_asset_title(
+            [t.name for t in await _resolve(db, Threat, body.threat_ids)],
+            [v.name for v in await _resolve(db, Vulnerability, body.vulnerability_ids)],
+            [a.name for a in await _resolve(db, Asset, body.asset_ids)],
+        )
+    if not data["title"]:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=risk_integrity.TITLE_NEEDS_STATEMENT_DETAIL,
@@ -747,7 +791,7 @@ async def create_risk(body: RiskCreate, db: DbSession, user: CurrentUser) -> Ris
     if decision.stamp:
         risk.last_assessed_at = datetime.now(timezone.utc)
         risk.last_assessed_by_id = user.id
-    risk.reference = await _next_reference(db)
+    risk.reference = await _reference_for(db, body.reference)
     risk.business_units = await _resolve(db, BusinessUnit, body.business_unit_ids)
     risk.processes = await _resolve(db, Process, body.process_ids)
     risk.assets = await _resolve(db, Asset, body.asset_ids)
@@ -1879,6 +1923,8 @@ async def _read_context(db, user: CurrentUser) -> dict:
         "scale": scale,
         "appetite": await load_appetite_book(db, user.tenant_id, settings),
         "cadence": dict(getattr(settings, "review_cadence", None) or {}),
+        # None under the matrix method: no business impact is reported.
+        "business_scale": business_scale_for(settings),
     }
 
 
@@ -1973,6 +2019,7 @@ async def _read(db, risk_id: uuid.UUID, user: CurrentUser) -> RiskRead:
     """
     context = await _read_context(db, user)
     risk = await _load_risk(db, risk_id)
+    context["asset_facts"] = await load_asset_facts(db, [risk.id])
     read = RiskRead.model_validate(risk, context=context)
     await ref_fields.fill_refs(db, [(risk, read)], RISK_REFS)
     await _fill_hierarchy(db, [(risk, read)])

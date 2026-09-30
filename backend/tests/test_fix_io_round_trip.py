@@ -49,6 +49,16 @@ def _cols(resource: str) -> dict[str, ir.Column]:
 
 
 # ========================================================== registry shape ===
+def _computed(res: ir.ResourceIO, col: ir.Column) -> bool:
+    """A read-only column: exported as evidence, dropped from every import row by the
+    resource's ``prepare`` (an asset's effective criticality, a risk's asset value)."""
+    if res.prepare is None or col.link is not None:
+        return False
+    payload = {col.field: "x"}
+    res.prepare(payload)
+    return col.field not in payload
+
+
 def test_every_column_including_derived_feeds_a_create_schema_field():
     bad = [
         f"{key}.{col.header}"
@@ -56,6 +66,7 @@ def test_every_column_including_derived_feeds_a_create_schema_field():
         for col in res.all_columns
         if (col.link.create_field if col.link and not col.parse else col.field)
         not in res.create_schema.model_fields
+        and not _computed(res, col)
     ]
     assert bad == []
 

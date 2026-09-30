@@ -399,6 +399,12 @@ class RiskSetting(UUIDPrimaryKeyMixin, TimestampMixin, TenantMixin, Base):
     # Severity → longest review frequency allowed, e.g. {"critical": "monthly"}. Empty
     # keys fall back to the product default in ``risk_scoring``.
     review_cadence: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    # How a risk is rated. ``matrix`` — likelihood x impact. ``asset_based`` — the ISO/IEC
+    # 27005 asset-based method: that score times the value of the asset at risk gives the
+    # business impact, banded by ``business_impact_bands`` ({low_max, medium_max,
+    # high_max}; empty = derived from the scale's maximum).
+    scoring_method: Mapped[str] = mapped_column(String(16), default="matrix", server_default="matrix", nullable=False)
+    business_impact_bands: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}", nullable=False)
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_risk_settings_tenant"),)
 
     appetite_score: Mapped[int] = mapped_column(Integer, default=6, nullable=False)

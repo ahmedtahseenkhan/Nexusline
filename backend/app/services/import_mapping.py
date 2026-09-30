@@ -52,6 +52,8 @@ _STOPWORDS = frozenset({"the", "of", "a", "an", "and", "or", "for", "to", "in", 
 # Confidence floors for the looser tiers. Anything below `_MIN_CONFIDENCE` is reported
 # as unmapped rather than guessed at — a wrong silent mapping is worse than none.
 _MIN_CONFIDENCE = 0.50
+#: Synonyms too generic to be matched inside a longer heading.
+_WHOLE_HEADING_ONLY = frozenset({"id", "code"})
 _FUZZY_FLOOR = 0.82  # difflib ratio below this is noise
 
 
@@ -64,7 +66,11 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "title": ("name", "risk name", "risk title", "control name", "issue title", "subject", "particulars"),
     "name": ("title", "risk name", "asset name", "control name", "vendor name", "system name", "particulars"),
     "description": ("desc", "details", "detail", "narrative", "risk description", "explanation", "remarks", "summary"),
-    "reference": ("ref", "ref no", "id", "code", "serial", "sr no", "s no", "sno", "risk id", "control id", "unique id"),
+    # A row counter (S.No, Sr#, Serial) is deliberately absent: it is the sheet's line
+    # number, not the record's identifier, and it used to take this column ahead of the
+    # real "Risk ID" beside it.
+    "reference": ("ref", "ref no", "reference no", "id", "code", "risk id", "risk ref", "risk no",
+                  "risk number", "control id", "unique id"),
     "category": ("type", "risk category", "risk type", "classification", "class", "domain", "group", "area"),
     # --- ownership ---------------------------------------------------------
     "owner": ("risk owner", "owner name", "responsible", "responsible person", "accountable", "custodian", "assigned to"),
@@ -115,6 +121,8 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "treatment_description": (
         "mitigation plan", "action plan", "treatment plan", "remediation plan",
         "mitigation", "remediation", "corrective action", "management action",
+        # An asset-based register lists what is planned beside what exists.
+        "proposed controls", "proposed control", "recommended controls", "planned controls",
     ),
     "treatment_deadline": ("target date", "deadline", "completion date", "target completion", "due"),
     "treatment_cost": ("cost", "budget", "estimated cost", "mitigation cost"),
@@ -149,7 +157,9 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "model_number": ("model", "model no"),
     "os_version": ("os", "operating system", "platform"),
     "location": ("site", "premises", "data centre", "data center", "city"),
-    "environment": ("env", "tier", "deployment"),
+    "environment": ("env", "environment type", "deployment"),
+    "tier": ("asset tier", "service tier", "system tier", "tiering"),
+    "pci_scope": ("pci", "pci dss", "pci dss scope", "pci scope", "pci in scope", "cde"),
     "replacement_cost": ("cost", "value", "asset value", "purchase cost", "book value"),
     # --- links (multi-token reference cells) -------------------------------
     "assets": ("asset", "affected asset", "asset name", "system", "application", "systems affected"),
@@ -462,6 +472,10 @@ def _score(source: str, column: "Column", drop: frozenset[str]) -> tuple[float, 
 
     # Tier 4b — a synonym phrase overlapping on tokens (e.g. "Existing Controls (list)").
     for phrase in synonyms:
+        # "ID" and "Code" name the record only when they are the whole heading (tier 3):
+        # inside a longer one ("Zone Code XR7", "Vendor ID") they identify something else.
+        if phrase in _WHOLE_HEADING_ONLY:
+            continue
         phrase_tokens = _tokens(phrase, drop=drop)
         if phrase_tokens and phrase_tokens <= source_tokens:
             return 0.80, f"reads like '{phrase}'"

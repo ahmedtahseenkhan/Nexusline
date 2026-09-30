@@ -487,6 +487,13 @@ export interface RiskMatrixConfig {
   /** Every cell with its effective band. */
   cells?: MatrixCellBand[];
   impact_mode?: "max" | "average";
+  /** How risks are rated: likelihood x impact, or that score times the asset's value. */
+  scoring_method?: "matrix" | "asset_based";
+  max_asset_value?: number;
+  max_business_impact?: number;
+  /** Configured business-impact thresholds; null = derived from the scale. */
+  business_impact_bands?: SeverityBands | null;
+  business_bands?: MatrixBand[];
 }
 export interface ResidualPolicy {
   enabled: boolean;
@@ -2501,6 +2508,8 @@ export const api = {
     /** Omit to keep; {} removes every override. */
     matrix_cells?: Record<string, string>;
     impact_mode?: "max" | "average";
+    scoring_method?: "matrix" | "asset_based";
+    business_impact_bands?: SeverityBands | null;
   }) => request<RiskMatrixConfig>("/risk-matrix-config", { method: "PUT", body: JSON.stringify(payload) }),
   // Appetite per top-level risk category (the organisation's is the fallback).
   riskAppetites: () => request<RiskAppetite[]>("/risk-appetites"),

@@ -101,6 +101,7 @@ from app.models.enums import (
     ControlType,
     Criticality,
     DiscoverySource,
+    PciScope,
     DpiaStatus,
     EvidenceStatus,
     EvidenceType,
@@ -125,7 +126,7 @@ from app.models.enums import (
 
 # --- Create schemas --------------------------------------------------------
 from app.schemas.access_review import ReviewCreate
-from app.schemas.asset import AssetCreate, AssetDependencyCreate
+from app.schemas.asset import MAX_ASSET_TIER, AssetCreate, AssetDependencyCreate
 from app.schemas.awareness import ProgramCreate
 from app.schemas.bia import BiaCreate
 from app.schemas.compliance import RequirementCreate
@@ -496,6 +497,66 @@ def _dimension_scores_decide_impact(payload: dict[str, Any]) -> list[str]:
     return []
 
 
+#: What a risk takes from its assets and the rating computed from it: exported as
+#: evidence, never imported — the asset register holds the value and tier, and the
+#: platform multiplies.
+_RISK_ASSET_COLUMNS = (
+    "asset_value", "asset_tier", "inherent_business_impact", "inherent_business_rating",
+    "residual_business_impact", "residual_business_rating",
+)
+
+
+def _risk_import_prepare(payload: dict[str, Any]) -> list[str]:
+    for key in _RISK_ASSET_COLUMNS:
+        payload.pop(key, None)
+    return _dimension_scores_decide_impact(payload)
+
+
+async def _risk_asset_table(db: Any, risks: list[Any]) -> dict[Any, dict[str, Any]]:
+    """``risk id -> {column: cell}`` for :data:`_RISK_ASSET_COLUMNS`, computed once per
+    export (the six columns share it through the session's ``info``)."""
+    from sqlalchemy import select
+
+    from app.models.risk import RiskSetting
+    from app.services.risk_scoring import business_impact, is_scored
+    from app.services.risk_settings import business_scale_for, load_asset_facts
+
+    key = ("risk_asset_table", tuple(r.id for r in risks))
+    cached = db.info.get("risk_asset_table")
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    facts = await load_asset_facts(db, [r.id for r in risks])
+    settings = await db.scalar(select(RiskSetting))
+    scale = business_scale_for(settings) if settings is not None else None
+    table: dict[Any, dict[str, Any]] = {}
+    for risk in risks:
+        fact = facts.get(risk.id)
+        row: dict[str, Any] = {
+            "asset_value": fact.asset_value if fact else None,
+            "asset_tier": fact.tier if fact else None,
+        }
+        if scale is not None and fact is not None and is_scored(risk.status, risk.last_assessed_at):
+            for basis in ("inherent", "residual"):
+                value = business_impact(getattr(risk, f"{basis}_score"), fact.asset_value)
+                rating = scale.for_value(value)
+                row[f"{basis}_business_impact"] = value
+                row[f"{basis}_business_rating"] = rating.value if rating else None
+        table[risk.id] = row
+    db.info["risk_asset_table"] = (key, table)
+    return table
+
+
+def _risk_asset_column(name: str, help: str) -> Column:
+    async def cells(db: Any, risks: list[Any]) -> dict[Any, Any]:
+        table = await _risk_asset_table(db, risks)
+        return {rid: ("" if row.get(name) is None else row[name]) for rid, row in table.items()}
+
+    # Read-only, so it answers to its own heading only: a register's "Risk Value" is its
+    # score, not a column to guess onto "asset_value" on a shared word.
+    return Column(header=name, field=name, export_batch=cells, match_on_field=False,
+                  help=f"{help} Computed by the platform (read-only): ignored on import.")
+
+
 async def _impact_dimension_cells(db: Any, risks: list[Any]) -> dict[Any, str]:
     """``risk id -> "inherent: Financial=4, Reputational=3; residual: Financial=2"``."""
     from sqlalchemy import select
@@ -864,6 +925,9 @@ _register(ResourceIO(
     create_schema=RiskCreate, create_func=create_risk,
     read_perm="risk:read", write_perm="risk:write", importable=True,
     columns=[
+        # A migrated register keeps its own identifiers; the parent_risk column matches them.
+        text("reference", help="Your own risk ID; blank takes the next R-number. "
+             "A reference a risk already carries is refused"),
         # Blank titles are composed from event / cause / consequence.
         text("title", help="Optional when event is given: composed from event and cause"),
         text("description"),
@@ -935,8 +999,14 @@ _register(ResourceIO(
                help="Impact per dimension as 'basis: Dimension=score, …; …', e.g. "
                "inherent: Financial=4, Reputational=3; residual: Financial=2. A basis scored "
                "here takes its overall impact from these scores (the impact column is ignored)"),
+        _risk_asset_column("asset_value", "Highest value among the linked assets, 1 (low) to 4 (critical)."),
+        _risk_asset_column("asset_tier", "Most critical service tier among the linked assets."),
+        _risk_asset_column("inherent_business_impact", "Inherent score x asset value (asset-based rating)."),
+        _risk_asset_column("inherent_business_rating", "Band of the inherent business impact."),
+        _risk_asset_column("residual_business_impact", "Residual score x asset value (asset-based rating)."),
+        _risk_asset_column("residual_business_rating", "Band of the residual business impact."),
     ],
-    prepare=_dimension_scores_decide_impact,
+    prepare=_risk_import_prepare,
     # Accepting a risk is a decision (request, then a holder of risk:accept decides).
     state_rules=(RISK_STATUS,),
 ))
@@ -1033,7 +1103,41 @@ def _asset_export_filters(params: dict[str, str]) -> list[Any]:
         environment=choice("environment", AssetEnvironment),
         effective_criticality=choice("effective_criticality", Criticality),
         workflow_status=choice("workflow_status", _WS),
+        tier=_parse_tier(params["tier"]) if (params.get("tier") or "").strip() else None,
+        pci_scope=choice("pci_scope", PciScope),
     )
+
+
+def _parse_tier(text: str) -> int:
+    """A tier cell as registers write it: ``1``, ``Tier 1``, ``T1``."""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits or not 1 <= int(digits) <= MAX_ASSET_TIER:
+        raise ValueError(f"tier: '{text.strip()}' is not a tier from 1 to {MAX_ASSET_TIER}")
+    return int(digits)
+
+
+_PCI_SCOPE_WORDS: dict[str, PciScope] = {
+    "in_scope": PciScope.in_scope, "in scope": PciScope.in_scope, "yes": PciScope.in_scope,
+    "y": PciScope.in_scope, "cde": PciScope.in_scope, "true": PciScope.in_scope,
+    "connected": PciScope.connected, "connected to": PciScope.connected,
+    "connected-to": PciScope.connected, "connected system": PciScope.connected,
+    "out_of_scope": PciScope.out_of_scope, "out of scope": PciScope.out_of_scope,
+    "no": PciScope.out_of_scope, "n": PciScope.out_of_scope, "false": PciScope.out_of_scope,
+}
+
+
+def _parse_pci_scope(text: str) -> PciScope | None:
+    """A PCI scope cell: one of the three values, or the Yes / No a tracker usually holds.
+    ``N/A`` and ``not assessed`` leave the asset unscoped."""
+    word = " ".join(text.strip().lower().replace("-", " ").split())
+    if word in ("n/a", "na", "not assessed", "tbd", "unknown"):
+        return None
+    scope = _PCI_SCOPE_WORDS.get(word) or _PCI_SCOPE_WORDS.get(word.replace(" ", "_"))
+    if scope is None:
+        raise ValueError(
+            f"pci_scope: '{text.strip()}' is not one of {', '.join(_enum_vals(PciScope))} (or Yes / No)"
+        )
+    return scope
 
 
 _ASSET_SHARED_COLUMNS = [
@@ -1044,6 +1148,12 @@ _ASSET_SHARED_COLUMNS = [
     enum_col("availability", Criticality),
     text("potential_liabilities"),
     text("location"),
+    Column(header="tier", field="tier", kind="int", parse=_parse_tier,
+           help=f"Service tier, 1 (most critical) to {MAX_ASSET_TIER}; 'Tier 1' is read as 1"),
+    Column(header="pci_scope", field="pci_scope", kind="enum", enum_values=_enum_vals(PciScope),
+           parse=_parse_pci_scope,
+           help="PCI DSS scope: in_scope (in the cardholder data environment), connected or "
+           "out_of_scope; Yes / No are read as in_scope / out_of_scope; blank = not assessed"),
     integer("rto_hours", help="Recovery time objective, hours"),
     integer("rpo_hours", help="Recovery point objective, hours"),
     enum_col("review_frequency", ReviewFrequency),
